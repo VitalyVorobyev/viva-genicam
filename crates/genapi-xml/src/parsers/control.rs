@@ -3,11 +3,16 @@
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use crate::util::{attribute_value, attribute_value_required, parse_u64, read_text_start, skip_element};
+use crate::util::{
+    attribute_value, attribute_value_required, parse_u64, read_text_start, skip_element,
+};
 use crate::{NodeDecl, XmlError};
 
 /// Parse a `<Command>` element into a [`NodeDecl::Command`].
-pub fn parse_command(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeDecl, XmlError> {
+pub fn parse_command(
+    reader: &mut Reader<&[u8]>,
+    start: BytesStart<'_>,
+) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, b"Name")?;
     let mut address = None;
     let mut length = None;
@@ -75,7 +80,10 @@ pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError>
 }
 
 /// Parse a `<Category>` element into a [`NodeDecl::Category`].
-pub fn parse_category(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeDecl, XmlError> {
+pub fn parse_category(
+    reader: &mut Reader<&[u8]>,
+    start: BytesStart<'_>,
+) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, b"Name")?;
     let node_name = start.name().as_ref().to_vec();
     let mut children = Vec::new();

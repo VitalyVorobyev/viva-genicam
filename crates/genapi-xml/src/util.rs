@@ -7,7 +7,10 @@ use quick_xml::Reader;
 use crate::XmlError;
 
 /// Read text content from a start element until its closing tag.
-pub fn read_text_start(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<String, XmlError> {
+pub fn read_text_start(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart<'_>,
+) -> Result<String, XmlError> {
     let end_buf = start.name().as_ref().to_vec();
     reader
         .read_text(QName(&end_buf))

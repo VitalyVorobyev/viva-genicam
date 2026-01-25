@@ -6,9 +6,9 @@ use tracing::warn;
 
 use super::{
     handle_addressing_empty, handle_addressing_start, handle_p_selected_empty,
-    handle_p_selected_start, handle_selected_empty, handle_selected_start, SelectorState,
-    TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK,
-    TAG_MSB, TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE,
+    handle_p_selected_start, handle_selected_empty, handle_selected_start, SelectorState, TAG_BIT,
+    TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK, TAG_MSB,
+    TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE,
 };
 use crate::builders::{addressing_lengths, AddressingBuilder, BitfieldBuilder};
 use crate::util::{
@@ -113,7 +113,10 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
 }
 
 /// Parse a `<Boolean>` element into a [`NodeDecl::Boolean`].
-pub fn parse_boolean(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeDecl, XmlError> {
+pub fn parse_boolean(
+    reader: &mut Reader<&[u8]>,
+    start: BytesStart<'_>,
+) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, b"Name")?;
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, b"Address")? {

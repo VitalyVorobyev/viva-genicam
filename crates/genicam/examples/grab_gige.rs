@@ -1,23 +1,21 @@
+//! Simplified GigE Vision frame grabber using the high-level FrameStream API.
+//!
+//! Demonstrates the ergonomic streaming interface that handles packet reassembly
+//! automatically, reducing the main acquisition loop to just a few lines.
+
 use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use bytes::BytesMut;
-use genapi_xml::XmlError;
-use genicam::genapi::NodeMap;
-use genicam::gige::gvsp::{self, GvspPacket};
 use genicam::gige::nic::Iface;
 use genicam::gige::stats::StreamStats;
-use genicam::gige::GVCP_PORT;
 use genicam::pfnc::PixelFormat;
-use genicam::{Camera, Frame, GigeRegisterIo, StreamBuilder};
-use tokio::sync::Mutex;
-use tracing::{info, warn};
+use genicam::{connect_gige, Frame, FrameStream, StreamBuilder};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -92,16 +90,6 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     })
 }
 
-#[derive(Debug)]
-struct BlockState {
-    block_id: u16,
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    timestamp: u64,
-    payload: BytesMut,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
@@ -115,27 +103,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    println!("GigE Vision capture");
+    println!("GigE Vision capture (using FrameStream)");
     println!("  interface: {} (index {})", iface.name(), iface.index());
     if let Some(ip) = iface.ipv4() {
         println!("  interface IPv4: {ip}");
     }
-    println!(
-        "  auto packet negotiation: {}",
-        if args.auto { "on" } else { "off" }
-    );
-    if let Some(group) = args.multicast {
-        println!("  multicast group: {group}");
-    }
-    if let Some(port) = args.port {
-        println!("  destination port: {port}");
-    }
-    println!(
-        "  save frames: {} ({} mode)",
-        args.save,
-        if args.rgb { "RGB" } else { "native" }
-    );
 
+    // Discover and connect to camera.
     let timeout = Duration::from_millis(500);
     let mut devices = genicam::gige::discover(timeout).await?;
     if devices.is_empty() {
@@ -149,33 +123,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         device.ip
     );
 
-    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), GVCP_PORT);
-    let control = Arc::new(Mutex::new(
-        genicam::gige::GigeDevice::open(control_addr).await?,
-    ));
-    let xml = genapi_xml::fetch_and_load_xml({
-        let control = control.clone();
-        move |address, length| {
-            let control = control.clone();
-            async move {
-                let mut dev = control.lock().await;
-                dev.read_mem(address, length)
-                    .await
-                    .map_err(|err| XmlError::Transport(err.to_string()))
-            }
-        }
-    })
-    .await?;
-    let model = genapi_xml::parse(&xml)?;
-    let nodemap = NodeMap::from(model);
-    let handle = tokio::runtime::Handle::current();
-    let control_device = Arc::try_unwrap(control)
-        .map_err(|_| "control connection still in use")?
-        .into_inner();
-    let transport = GigeRegisterIo::new(handle.clone(), control_device);
-    let mut camera = Camera::new(transport, nodemap);
+    // Connect to camera (fetches XML, builds nodemap).
+    let mut camera = connect_gige(&device).await?;
 
-    let mut stream_device = genicam::gige::GigeDevice::open(control_addr).await?;
+    // Configure stream.
+    let mut stream_device = genicam::gige::GigeDevice::open(std::net::SocketAddr::new(
+        std::net::IpAddr::V4(device.ip),
+        genicam::gige::GVCP_PORT,
+    ))
+    .await?;
     let mut builder = StreamBuilder::new(&mut stream_device).iface(iface.clone());
     if let Some(group) = args.multicast {
         builder = builder.multicast(Some(group));
@@ -188,114 +144,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let stream = builder.build().await?;
 
+    // Create high-level frame stream (handles packet reassembly automatically).
+    let time_sync = camera.time_sync().clone();
+    let mut frame_stream = FrameStream::new(stream, Some(time_sync));
+
+    // Start acquisition.
     camera.acquisition_start()?;
-    let packet_budget = stream.params().packet_size as usize + 64;
-    let mut recv_buffer = vec![0u8; packet_budget.max(4096)];
-    let mut state: Option<BlockState> = None;
-    let stats = stream.stats_handle();
+
+    let stats = frame_stream.stats_handle();
     let mut last_overlay = Instant::now();
-    let mut last_pixel_format: Option<PixelFormat> = None;
     let mut frame_index = 0usize;
     let mut save_remaining = args.save;
 
-    loop {
-        let (len, _) = match stream.socket().recv_from(&mut recv_buffer).await {
-            Ok(res) => res,
-            Err(err) => {
-                warn!(error = %err, "socket receive failed; stopping capture");
-                break;
-            }
-        };
-        let packet = match gvsp::parse_packet(&recv_buffer[..len]) {
-            Ok(packet) => packet,
-            Err(err) => {
-                warn!(error = %err, "discarding malformed GVSP packet");
-                continue;
-            }
-        };
-        match packet {
-            GvspPacket::Leader {
-                block_id,
-                width,
-                height,
-                pixel_format,
-                timestamp,
-                ..
-            } => {
-                let pixel_format = PixelFormat::from_code(pixel_format);
-                if last_pixel_format != Some(pixel_format) {
-                    info!(
-                        block_id,
-                        width,
-                        height,
-                        pixel_format = %pixel_format,
-                        "detected pixel format"
-                    );
-                    last_pixel_format = Some(pixel_format);
-                }
-                state = Some(BlockState {
-                    block_id,
-                    width,
-                    height,
-                    pixel_format,
-                    timestamp,
-                    payload: BytesMut::new(),
-                });
-            }
-            GvspPacket::Payload { block_id, data, .. } => {
-                if let Some(active) = state.as_mut() {
-                    if active.block_id == block_id {
-                        active.payload.extend_from_slice(data.as_ref());
-                    }
-                }
-            }
-            GvspPacket::Trailer {
-                block_id, status, ..
-            } => {
-                let Some(active) = state.take() else { continue };
-                if active.block_id != block_id {
-                    continue;
-                }
-                if status != 0 {
-                    warn!(block_id, status, "trailer reported non-zero status");
-                }
-                let ts_dev = Some(active.timestamp);
-                let ts_host = ts_dev.map(|ticks| camera.map_dev_ts(ticks));
-                let frame = Frame {
-                    payload: active.payload.freeze(),
-                    width: active.width,
-                    height: active.height,
-                    pixel_format: active.pixel_format,
-                    chunks: None,
-                    ts_dev,
-                    ts_host,
-                };
-                let latency = frame
-                    .host_time()
-                    .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                stats.record_frame(frame.payload.len(), latency);
-                frame_index += 1;
-                print_frame_info(frame_index, &frame);
+    // Main acquisition loop - dramatically simplified!
+    while let Some(frame) = frame_stream.next_frame().await? {
+        frame_index += 1;
+        print_frame_info(frame_index, &frame);
 
-                if save_remaining > 0 {
-                    match save_frame(&frame, frame_index, args.rgb) {
-                        Ok(path) => println!("  saved {}", path.display()),
-                        Err(err) => warn!(error = %err, "failed to save frame"),
-                    }
-                    save_remaining = save_remaining.saturating_sub(1);
-                }
-
-                if last_overlay.elapsed() >= Duration::from_secs(1) {
-                    let snapshot = stats.snapshot();
-                    print_overlay(&snapshot);
-                    last_overlay = Instant::now();
-                }
+        if save_remaining > 0 {
+            match save_frame(&frame, frame_index, args.rgb) {
+                Ok(path) => println!("  saved {}", path.display()),
+                Err(err) => warn!(error = %err, "failed to save frame"),
             }
+            save_remaining = save_remaining.saturating_sub(1);
+        }
+
+        // Print stats overlay every second.
+        if last_overlay.elapsed() >= Duration::from_secs(1) {
+            print_overlay(&stats.snapshot());
+            last_overlay = Instant::now();
+        }
+
+        // Stop after saving requested number of frames.
+        if frame_index >= args.save {
+            break;
         }
     }
 
     camera.acquisition_stop()?;
-    println!("Capture stopped.");
+    println!("Capture stopped after {} frames.", frame_index);
     Ok(())
 }
 

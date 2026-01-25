@@ -101,10 +101,8 @@ pub use chunks::{parse_chunk_bytes, ChunkKind, ChunkMap, ChunkValue};
 pub use events::{Event, EventStream};
 pub use frame::Frame;
 pub use gige::action::{AckSummary, ActionParams};
-pub use stream::{Stream, StreamBuilder, StreamDest};
+pub use stream::{FrameStream, Stream, StreamBuilder, StreamDest};
 pub use time::TimeSync;
-
-use crate::time::TimeSync as TimeSyncModel;
 
 /// Error type produced by the high level GenICam facade.
 #[derive(Debug, Error)]
@@ -141,7 +139,7 @@ impl GenicamError {
 pub struct Camera<T: RegisterIo> {
     transport: T,
     nodemap: NodeMap,
-    time_sync: TimeSyncModel,
+    time_sync: TimeSync,
 }
 
 impl<T: RegisterIo> Camera<T> {
@@ -150,7 +148,7 @@ impl<T: RegisterIo> Camera<T> {
         Self {
             transport,
             nodemap,
-            time_sync: TimeSyncModel::new(64),
+            time_sync: TimeSync::with_capacity(64),
         }
     }
 
@@ -288,7 +286,7 @@ impl<T: RegisterIo> Camera<T> {
         }
 
         let cap = samples.max(self.time_sync.capacity());
-        self.time_sync = TimeSyncModel::new(cap);
+        self.time_sync = TimeSync::with_capacity(cap);
 
         let latch_cmd = self.find_alias(sfnc::TS_LATCH_CMDS);
         let value_node = self
@@ -394,7 +392,7 @@ impl<T: RegisterIo> Camera<T> {
             self.nodemap
                 .exec_command(cmd, &self.transport)
                 .map_err(GenicamError::from)?;
-            self.time_sync = TimeSyncModel::new(self.time_sync.capacity());
+            self.time_sync = TimeSync::with_capacity(self.time_sync.capacity());
             info!(command = cmd, "timestamp counter reset");
         }
         Ok(())
@@ -707,6 +705,71 @@ impl RegisterIo for GigeRegisterIo {
             .block_on(device.write_mem(addr, data))
             .map_err(|err| GenApiError::Io(err.to_string()))
     }
+}
+
+/// Connect to a GigE Vision camera and return a fully configured [`Camera`].
+///
+/// This convenience function handles all connection boilerplate:
+/// 1. Opens a GVCP control connection to the device
+/// 2. Fetches and parses the GenApi XML from the camera
+/// 3. Builds the nodemap
+/// 4. Creates the transport adapter
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::time::Duration;
+/// use genicam::{gige, connect_gige};
+///
+/// let devices = gige::discover(Duration::from_millis(500)).await?;
+/// let device = devices.into_iter().next().expect("no camera found");
+/// let mut camera = connect_gige(&device).await?;
+/// camera.set("ExposureTime", "5000")?;
+/// ```
+pub async fn connect_gige(
+    device: &gige::DeviceInfo,
+) -> Result<Camera<GigeRegisterIo>, GenicamError> {
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
+    info!(%control_addr, "connecting to GigE Vision camera");
+
+    let control = Arc::new(AsyncMutex::new(
+        gige::GigeDevice::open(control_addr)
+            .await
+            .map_err(|e| GenicamError::transport(e.to_string()))?,
+    ));
+
+    // Fetch and parse the GenApi XML.
+    let xml = genapi_xml::fetch_and_load_xml({
+        let control = control.clone();
+        move |address, length| {
+            let control = control.clone();
+            async move {
+                let mut dev = control.lock().await;
+                dev.read_mem(address, length)
+                    .await
+                    .map_err(|err| genapi_xml::XmlError::Transport(err.to_string()))
+            }
+        }
+    })
+    .await
+    .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    let model = genapi_xml::parse(&xml).map_err(|e| GenicamError::transport(e.to_string()))?;
+    let nodemap = genapi::NodeMap::from(model);
+
+    // Extract the device and create the blocking adapter.
+    let handle = tokio::runtime::Handle::current();
+    let control_device = Arc::try_unwrap(control)
+        .map_err(|_| GenicamError::transport("control connection still in use"))?
+        .into_inner();
+    let transport = GigeRegisterIo::new(handle, control_device);
+
+    info!("GigE camera connected successfully");
+    Ok(Camera::new(transport, nodemap))
 }
 
 fn parse_bool(value: &str) -> Option<bool> {

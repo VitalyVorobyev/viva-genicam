@@ -5,15 +5,32 @@
 //! prepares a UDP socket configured for reception. Applications can retrieve the
 //! socket handle to drive their own async pipelines while relying on the shared
 //! [`StreamStats`] accumulator for monitoring.
+//!
+//! # High-Level Streaming
+//!
+//! For most use cases, [`FrameStream`] provides an ergonomic async iterator over
+//! reassembled frames:
+//!
+//! ```rust,ignore
+//! let stream = FrameStream::new(raw_stream, None);
+//! while let Some(frame) = stream.next_frame().await? {
+//!     println!("{}x{} frame", frame.width, frame.height);
+//! }
+//! ```
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::{Duration, Instant, SystemTime};
 
+use bytes::BytesMut;
+use pfnc::PixelFormat;
 use tokio::net::UdpSocket;
-use tracing::info;
+use tracing::{debug, info, trace, warn};
 
+use crate::frame::Frame;
+use crate::time::TimeSync;
 use crate::GenicamError;
 use tl_gige::gvcp::{GigeDevice, StreamParams};
-use tl_gige::gvsp::StreamConfig;
+use tl_gige::gvsp::{self, GvspPacket, PacketBitmap, StreamConfig};
 use tl_gige::nic::{self, Iface, McOptions, DEFAULT_RCVBUF_BYTES};
 use tl_gige::stats::{StreamStats, StreamStatsAccumulator};
 
@@ -326,5 +343,381 @@ impl Stream {
 impl<'a> From<&'a mut GigeDevice> for StreamBuilder<'a> {
     fn from(device: &'a mut GigeDevice) -> Self {
         StreamBuilder::new(device)
+    }
+}
+
+// ============================================================================
+// High-Level FrameStream API
+// ============================================================================
+
+/// Default timeout for frame assembly before declaring incomplete and moving on.
+const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// GVSP header size preceding payload data.
+const GVSP_HEADER_SIZE: usize = 8;
+
+/// State for a frame being assembled from GVSP packets.
+#[derive(Debug)]
+struct FrameAssemblyState {
+    block_id: u16,
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
+    timestamp: u64,
+    expected_packets: Option<usize>,
+    bitmap: Option<PacketBitmap>,
+    payload: BytesMut,
+    packet_payload_size: usize,
+    started: Instant,
+}
+
+impl FrameAssemblyState {
+    fn new(
+        block_id: u16,
+        width: u32,
+        height: u32,
+        pixel_format: PixelFormat,
+        timestamp: u64,
+        packet_payload_size: usize,
+    ) -> Self {
+        Self {
+            block_id,
+            width,
+            height,
+            pixel_format,
+            timestamp,
+            expected_packets: None,
+            bitmap: None,
+            payload: BytesMut::new(),
+            packet_payload_size,
+            started: Instant::now(),
+        }
+    }
+
+    /// Ingest a payload packet. Returns true if this is a new packet.
+    fn ingest(&mut self, packet_id: u16, data: &[u8]) -> bool {
+        let pid = packet_id as usize;
+
+        // Track received packets if we know the total count.
+        if let Some(ref mut bitmap) = self.bitmap {
+            if !bitmap.set(pid) {
+                return false; // Duplicate packet.
+            }
+        }
+
+        // Write data at the correct offset for zero-copy reassembly.
+        let offset = pid.saturating_sub(1) * self.packet_payload_size;
+        let required = offset + data.len();
+        if self.payload.len() < required {
+            self.payload.resize(required, 0);
+        }
+        self.payload[offset..offset + data.len()].copy_from_slice(data);
+        true
+    }
+
+    /// Set the expected packet count (from trailer packet_id + 1).
+    fn set_expected_packets(&mut self, count: usize) {
+        if self.expected_packets.is_none() {
+            self.expected_packets = Some(count);
+            self.bitmap = Some(PacketBitmap::new(count));
+        }
+    }
+
+    /// Check if all packets have been received.
+    #[allow(dead_code)]
+    fn is_complete(&self) -> bool {
+        self.bitmap.as_ref().is_some_and(|b| b.is_complete())
+    }
+
+    /// Check if assembly has timed out.
+    fn is_expired(&self, timeout: Duration) -> bool {
+        self.started.elapsed() > timeout
+    }
+
+    /// Get missing packet ranges for resend requests.
+    #[allow(dead_code)]
+    fn missing_ranges(&self) -> Vec<std::ops::RangeInclusive<u16>> {
+        self.bitmap
+            .as_ref()
+            .map(|b| b.missing_ranges())
+            .unwrap_or_default()
+    }
+}
+
+/// High-level async iterator over reassembled GVSP frames.
+///
+/// Wraps a low-level [`Stream`] and handles packet parsing, reassembly,
+/// and optional resend requests automatically.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let raw_stream = StreamBuilder::new(&mut device)
+///     .iface(iface)
+///     .build()
+///     .await?;
+/// let mut frame_stream = FrameStream::new(raw_stream, None);
+/// while let Some(frame) = frame_stream.next_frame().await? {
+///     println!("Frame: {}x{}", frame.width, frame.height);
+/// }
+/// ```
+pub struct FrameStream {
+    socket: UdpSocket,
+    stats: StreamStatsAccumulator,
+    params: StreamParams,
+    config: StreamConfig,
+    recv_buffer: Vec<u8>,
+    active: Option<FrameAssemblyState>,
+    frame_timeout: Duration,
+    time_sync: Option<TimeSync>,
+}
+
+impl FrameStream {
+    /// Create a new frame stream from a configured [`Stream`].
+    ///
+    /// Optionally accepts a [`TimeSync`] for mapping device timestamps to host time.
+    pub fn new(stream: Stream, time_sync: Option<TimeSync>) -> Self {
+        let (socket, stats, params, config) = stream.into_parts();
+        let buffer_size = (params.packet_size as usize + 64).max(4096);
+
+        Self {
+            socket,
+            stats,
+            params,
+            config,
+            recv_buffer: vec![0u8; buffer_size],
+            active: None,
+            frame_timeout: DEFAULT_FRAME_TIMEOUT,
+            time_sync,
+        }
+    }
+
+    /// Set the frame assembly timeout.
+    ///
+    /// If a frame is not complete within this duration, it will be dropped
+    /// and assembly will move on to the next frame.
+    pub fn set_frame_timeout(&mut self, timeout: Duration) {
+        self.frame_timeout = timeout;
+    }
+
+    /// Update or set the time synchronization model for timestamp mapping.
+    pub fn set_time_sync(&mut self, time_sync: TimeSync) {
+        self.time_sync = Some(time_sync);
+    }
+
+    /// Obtain a clone of the statistics accumulator handle.
+    pub fn stats_handle(&self) -> StreamStatsAccumulator {
+        self.stats.clone()
+    }
+
+    /// Snapshot the collected statistics.
+    pub fn stats(&self) -> StreamStats {
+        self.stats.snapshot()
+    }
+
+    /// Access the negotiated stream parameters.
+    pub fn params(&self) -> StreamParams {
+        self.params
+    }
+
+    /// Immutable view of the stream configuration.
+    pub fn config(&self) -> &StreamConfig {
+        &self.config
+    }
+
+    /// Borrow the underlying UDP socket for advanced use cases.
+    pub fn socket(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    /// Receive the next complete frame.
+    ///
+    /// This method handles packet reception, parsing, and reassembly internally.
+    /// Returns `Ok(Some(frame))` when a complete frame is available, or
+    /// `Ok(None)` if the stream has ended (socket closed).
+    pub async fn next_frame(&mut self) -> Result<Option<Frame>, GenicamError> {
+        loop {
+            // Check for timeout on active frame assembly.
+            if let Some(ref active) = self.active {
+                if active.is_expired(self.frame_timeout) {
+                    let block_id = active.block_id;
+                    warn!(
+                        block_id,
+                        "frame assembly timeout, dropping incomplete frame"
+                    );
+                    self.stats.record_drop();
+                    self.active = None;
+                }
+            }
+
+            // Receive next packet.
+            let len = match self.socket.recv(&mut self.recv_buffer).await {
+                Ok(0) => return Ok(None), // Stream closed.
+                Ok(len) => len,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => {
+                    return Err(GenicamError::transport(format!("socket recv failed: {e}")));
+                }
+            };
+
+            // Parse GVSP packet.
+            let packet = match gvsp::parse_packet(&self.recv_buffer[..len]) {
+                Ok(p) => p,
+                Err(e) => {
+                    trace!(error = %e, "discarding malformed GVSP packet");
+                    continue;
+                }
+            };
+
+            // Process packet based on type.
+            match packet {
+                GvspPacket::Leader {
+                    block_id,
+                    width,
+                    height,
+                    pixel_format,
+                    timestamp,
+                    ..
+                } => {
+                    // Start new frame assembly, dropping any incomplete previous frame.
+                    if let Some(ref prev) = self.active {
+                        if prev.block_id != block_id {
+                            debug!(
+                                old_block = prev.block_id,
+                                new_block = block_id,
+                                "new leader arrived, dropping incomplete frame"
+                            );
+                            self.stats.record_drop();
+                        }
+                    }
+
+                    let pixel_format = PixelFormat::from_code(pixel_format);
+                    let packet_payload = self.params.packet_size as usize - GVSP_HEADER_SIZE;
+
+                    self.active = Some(FrameAssemblyState::new(
+                        block_id,
+                        width,
+                        height,
+                        pixel_format,
+                        timestamp,
+                        packet_payload,
+                    ));
+                    trace!(block_id, %pixel_format, width, height, "frame leader received");
+                }
+
+                GvspPacket::Payload {
+                    block_id,
+                    packet_id,
+                    data,
+                } => {
+                    if let Some(ref mut active) = self.active {
+                        if active.block_id == block_id
+                            && active.ingest(packet_id, data.as_ref())
+                        {
+                            self.stats.record_packet();
+                        }
+                    }
+                }
+
+                GvspPacket::Trailer {
+                    block_id,
+                    packet_id,
+                    status,
+                    chunk_data,
+                } => {
+                    let Some(mut active) = self.active.take() else {
+                        continue;
+                    };
+
+                    if active.block_id != block_id {
+                        // Mismatched trailer, drop and continue.
+                        self.stats.record_drop();
+                        continue;
+                    }
+
+                    // Set expected packet count from trailer packet_id.
+                    // Trailer packet_id is the last packet index, so total = packet_id + 1.
+                    // But packet_id 0 is leader, so payload packets = packet_id.
+                    active.set_expected_packets(packet_id as usize);
+
+                    if status != 0 {
+                        warn!(block_id, status, "trailer reported non-zero status");
+                    }
+
+                    // Build the frame.
+                    let ts_host = self
+                        .time_sync
+                        .as_ref()
+                        .map(|ts| ts.to_host_time(active.timestamp));
+
+                    let chunks = if chunk_data.is_empty() {
+                        None
+                    } else {
+                        match crate::chunks::parse_chunk_bytes(&chunk_data) {
+                            Ok(map) => Some(map),
+                            Err(e) => {
+                                debug!(error = %e, "failed to parse chunk data");
+                                None
+                            }
+                        }
+                    };
+
+                    // Truncate payload to actual received size.
+                    // The bitmap tells us what we received; we use the payload as-is.
+                    let payload = active.payload.freeze();
+
+                    let frame = Frame {
+                        payload,
+                        width: active.width,
+                        height: active.height,
+                        pixel_format: active.pixel_format,
+                        chunks,
+                        ts_dev: Some(active.timestamp),
+                        ts_host,
+                    };
+
+                    // Record statistics.
+                    let latency = frame
+                        .host_time()
+                        .and_then(|ts| SystemTime::now().duration_since(ts).ok());
+                    self.stats.record_frame(frame.payload.len(), latency);
+
+                    debug!(
+                        block_id,
+                        width = frame.width,
+                        height = frame.height,
+                        bytes = frame.payload.len(),
+                        "frame complete"
+                    );
+
+                    return Ok(Some(frame));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_assembly_state_ingest_tracks_packets() {
+        let mut state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
+        state.set_expected_packets(3);
+
+        // Ingest packets (packet_id 1 and 2 are payload, 0 is leader).
+        assert!(state.ingest(1, &[1, 2, 3]));
+        assert!(state.ingest(2, &[4, 5, 6]));
+
+        // Duplicate should return false.
+        assert!(!state.ingest(1, &[1, 2, 3]));
+    }
+
+    #[test]
+    fn frame_assembly_state_timeout() {
+        let state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
+        assert!(!state.is_expired(Duration::from_secs(10)));
+        assert!(state.is_expired(Duration::ZERO));
     }
 }

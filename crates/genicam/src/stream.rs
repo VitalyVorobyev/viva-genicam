@@ -611,9 +611,7 @@ impl FrameStream {
                     data,
                 } => {
                     if let Some(ref mut active) = self.active {
-                        if active.block_id == block_id
-                            && active.ingest(packet_id, data.as_ref())
-                        {
+                        if active.block_id == block_id && active.ingest(packet_id, data.as_ref()) {
                             self.stats.record_packet();
                         }
                     }

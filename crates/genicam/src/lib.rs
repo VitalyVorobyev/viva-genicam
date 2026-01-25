@@ -104,8 +104,6 @@ pub use gige::action::{AckSummary, ActionParams};
 pub use stream::{Stream, StreamBuilder, StreamDest};
 pub use time::TimeSync;
 
-use crate::time::TimeSync as TimeSyncModel;
-
 /// Error type produced by the high level GenICam facade.
 #[derive(Debug, Error)]
 pub enum GenicamError {
@@ -141,7 +139,7 @@ impl GenicamError {
 pub struct Camera<T: RegisterIo> {
     transport: T,
     nodemap: NodeMap,
-    time_sync: TimeSyncModel,
+    time_sync: TimeSync,
 }
 
 impl<T: RegisterIo> Camera<T> {
@@ -150,7 +148,7 @@ impl<T: RegisterIo> Camera<T> {
         Self {
             transport,
             nodemap,
-            time_sync: TimeSyncModel::new(64),
+            time_sync: TimeSync::with_capacity(64),
         }
     }
 
@@ -288,7 +286,7 @@ impl<T: RegisterIo> Camera<T> {
         }
 
         let cap = samples.max(self.time_sync.capacity());
-        self.time_sync = TimeSyncModel::new(cap);
+        self.time_sync = TimeSync::with_capacity(cap);
 
         let latch_cmd = self.find_alias(sfnc::TS_LATCH_CMDS);
         let value_node = self
@@ -394,7 +392,7 @@ impl<T: RegisterIo> Camera<T> {
             self.nodemap
                 .exec_command(cmd, &self.transport)
                 .map_err(GenicamError::from)?;
-            self.time_sync = TimeSyncModel::new(self.time_sync.capacity());
+            self.time_sync = TimeSync::with_capacity(self.time_sync.capacity());
             info!(command = cmd, "timestamp counter reset");
         }
         Ok(())

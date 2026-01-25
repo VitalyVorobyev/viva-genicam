@@ -542,6 +542,205 @@ impl AddressingBuilder {
     }
 }
 
+/// Tracks selector state during node parsing.
+///
+/// This struct consolidates the `selectors`, `selected_if`, and `last_selector`
+/// variables that were previously duplicated across all node parsers.
+#[derive(Debug, Default)]
+struct SelectorState {
+    /// List of selector node names referencing this feature.
+    selectors: Vec<String>,
+    /// Selector gating rules in the form (selector name, allowed values).
+    selected_if: Vec<(String, Vec<String>)>,
+    /// Index into `selected_if` for the most recent pSelected element.
+    last_selector: Option<usize>,
+}
+
+impl SelectorState {
+    /// Finalize into the component parts for NodeDecl construction.
+    fn into_parts(self) -> (Vec<String>, Vec<(String, Vec<String>)>) {
+        (self.selectors, self.selected_if)
+    }
+}
+
+/// Handle a `<pSelected>` start element.
+///
+/// Reads the text content, registers the selector with addressing, and updates selector state.
+fn handle_p_selected_start(
+    reader: &mut Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    addressing: &mut AddressingBuilder,
+    state: &mut SelectorState,
+) -> Result<(), XmlError> {
+    let text = read_text_start(reader, event)?;
+    let selector = text.trim().to_string();
+    if !selector.is_empty() {
+        state.selectors.push(selector.clone());
+        state.selected_if.push((selector.clone(), Vec::new()));
+        state.last_selector = Some(state.selected_if.len() - 1);
+        addressing.register_selector(&selector);
+    }
+    Ok(())
+}
+
+/// Handle a `<Selected>` start element.
+///
+/// Parses value from attributes or text content, updates addressing and selector state.
+fn handle_selected_start(
+    reader: &mut Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    name: &str,
+    addressing: &mut AddressingBuilder,
+    state: &mut SelectorState,
+) -> Result<(), XmlError> {
+    let mut value = attribute_value(event, b"Value")?;
+    if value.is_none() {
+        value = attribute_value(event, b"Name")?;
+    }
+    let text = read_text_start(reader, event)?;
+    let trimmed = text.trim();
+    if value.is_none() && !trimmed.is_empty() {
+        value = Some(trimmed.to_string());
+    }
+    if let Some(val) = value.clone() {
+        addressing.push_selected_value(val.clone());
+        if let Some(address_attr) = attribute_value(event, b"Address")? {
+            let len_override = attribute_value(event, b"Length")?
+                .map(|len| -> Result<u32, XmlError> {
+                    let parsed = parse_u64(&len)?;
+                    u32::try_from(parsed).map_err(|_| {
+                        XmlError::Invalid(format!("length out of range for node {name}"))
+                    })
+                })
+                .transpose()?;
+            addressing.attach_selected_address(parse_u64(&address_attr)?, len_override);
+        } else if let Some(len_attr) = attribute_value(event, b"Length")? {
+            let parsed = parse_u64(&len_attr)?;
+            let len = u32::try_from(parsed)
+                .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            addressing.apply_length(len);
+        }
+    }
+    if let Some(idx) = state.last_selector {
+        if let Some(value) = value {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                state.selected_if[idx].1.push(trimmed.to_string());
+            }
+        } else if !trimmed.is_empty() {
+            state.selected_if[idx].1.push(trimmed.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Handle a `<pSelected>` empty element.
+///
+/// Reads selector name from attributes and updates state.
+fn handle_p_selected_empty(
+    event: &BytesStart<'_>,
+    addressing: &mut AddressingBuilder,
+    state: &mut SelectorState,
+) -> Result<(), XmlError> {
+    if let Some(value) = attribute_value(event, b"Name")? {
+        addressing.register_selector(&value);
+        state.selectors.push(value.clone());
+        state.selected_if.push((value, Vec::new()));
+        state.last_selector = Some(state.selected_if.len() - 1);
+    }
+    Ok(())
+}
+
+/// Handle a `<Selected>` empty element.
+///
+/// Parses value and addressing from attributes, updates state.
+fn handle_selected_empty(
+    event: &BytesStart<'_>,
+    name: &str,
+    addressing: &mut AddressingBuilder,
+    state: &mut SelectorState,
+) -> Result<(), XmlError> {
+    if let Some(val) = attribute_value(event, b"Value")? {
+        addressing.push_selected_value(val.clone());
+        if let Some(address_attr) = attribute_value(event, b"Address")? {
+            let len_override = attribute_value(event, b"Length")?
+                .map(|len| -> Result<u32, XmlError> {
+                    let parsed = parse_u64(&len)?;
+                    u32::try_from(parsed).map_err(|_| {
+                        XmlError::Invalid(format!("length out of range for node {name}"))
+                    })
+                })
+                .transpose()?;
+            addressing.attach_selected_address(parse_u64(&address_attr)?, len_override);
+        } else if let Some(len_attr) = attribute_value(event, b"Length")? {
+            let parsed = parse_u64(&len_attr)?;
+            let len = u32::try_from(parsed)
+                .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            addressing.apply_length(len);
+        }
+        if let Some(idx) = state.last_selector {
+            state.selected_if[idx].1.push(val);
+        }
+    }
+    Ok(())
+}
+
+/// Handle common addressing elements for start events.
+///
+/// Returns `true` if the element was handled, `false` otherwise.
+fn handle_addressing_start(
+    reader: &mut Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    name: &str,
+    addressing: &mut AddressingBuilder,
+) -> Result<bool, XmlError> {
+    match event.name().as_ref() {
+        b"Address" => {
+            let text = read_text_start(reader, event)?;
+            addressing.attach_selected_address(parse_u64(&text)?, None);
+            Ok(true)
+        }
+        TAG_P_ADDRESS => {
+            let text = read_text_start(reader, event)?;
+            let target = text.trim();
+            if !target.is_empty() {
+                addressing.set_p_address_node(target);
+            }
+            Ok(true)
+        }
+        b"Length" => {
+            let text = read_text_start(reader, event)?;
+            let value = parse_u64(&text)?;
+            let len = u32::try_from(value)
+                .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            addressing.apply_length(len);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Handle common addressing elements for empty events.
+///
+/// Returns `true` if the element was handled, `false` otherwise.
+fn handle_addressing_empty(
+    event: &BytesStart<'_>,
+    addressing: &mut AddressingBuilder,
+) -> Result<bool, XmlError> {
+    match event.name().as_ref() {
+        TAG_P_ADDRESS => {
+            if let Some(value) = attribute_value(event, b"Name")? {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    addressing.set_p_address_node(trimmed);
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BitfieldSource {
     LsbMsb,
@@ -769,9 +968,7 @@ fn parse_integer(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
     let mut max = None;
     let mut inc = None;
     let mut unit = None;
-    let mut selectors = Vec::new();
-    let mut selected_if: Vec<(String, Vec<String>)> = Vec::new();
-    let mut last_selector: Option<usize> = None;
+    let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut bitfield = BitfieldBuilder::default();
@@ -874,77 +1071,19 @@ fn parse_integer(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
                     }
                 }
                 b"pSelected" => {
-                    let text = read_text_start(reader, e)?;
-                    let selector = text.trim().to_string();
-                    if !selector.is_empty() {
-                        selectors.push(selector.clone());
-                        selected_if.push((selector.clone(), Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                        addressing.register_selector(&selector);
-                    }
+                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
                 }
                 b"Selected" => {
-                    let mut value = attribute_value(e, b"Value")?;
-                    if value.is_none() {
-                        value = attribute_value(e, b"Name")?;
-                    }
-                    let text = read_text_start(reader, e)?;
-                    let trimmed = text.trim();
-                    if value.is_none() && !trimmed.is_empty() {
-                        value = Some(trimmed.to_string());
-                    }
-                    if let Some(val) = value.clone() {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                    }
-                    if let Some(idx) = last_selector {
-                        if let Some(value) = value {
-                            let trimmed = value.trim();
-                            if !trimmed.is_empty() {
-                                selected_if[idx].1.push(trimmed.to_string());
-                            }
-                        } else if !trimmed.is_empty() {
-                            selected_if[idx].1.push(trimmed.to_string());
-                        }
-                    }
+                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => skip_element(reader, e.name().as_ref())?,
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        addressing.register_selector(&value);
-                        selectors.push(value.clone());
-                        selected_if.push((value, Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                    }
+                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
                 }
                 TAG_P_ADDRESS => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            addressing.set_p_address_node(trimmed);
-                        }
-                    }
+                    handle_addressing_empty(e, &mut addressing)?;
                 }
                 TAG_LSB => {
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
@@ -989,32 +1128,7 @@ fn parse_integer(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
                     }
                 }
                 b"Selected" => {
-                    if let Some(val) = attribute_value(e, b"Value")? {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                        if let Some(idx) = last_selector {
-                            selected_if[idx].1.push(val);
-                        }
-                    }
+                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {}
             },
@@ -1042,6 +1156,7 @@ fn parse_integer(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
         .copied()
         .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
     let bitfield = bitfield.finish(&name, &lengths)?;
+    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Integer {
         name,
@@ -1077,33 +1192,17 @@ fn parse_float(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<Node
     let mut scale_num: Option<i64> = None;
     let mut scale_den: Option<i64> = None;
     let mut offset = None;
-    let mut selectors = Vec::new();
-    let mut selected_if = Vec::new();
-    let mut last_selector = None;
+    let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"Address" => {
-                    let text = read_text_start(reader, e)?;
-                    addressing.attach_selected_address(parse_u64(&text)?, None);
-                }
-                TAG_P_ADDRESS => {
-                    let text = read_text_start(reader, e)?;
-                    let target = text.trim();
-                    if !target.is_empty() {
-                        addressing.set_p_address_node(target);
+                b"Address" | TAG_P_ADDRESS | b"Length" => {
+                    if !handle_addressing_start(reader, e, &name, &mut addressing)? {
+                        skip_element(reader, e.name().as_ref())?;
                     }
-                }
-                b"Length" => {
-                    let text = read_text_start(reader, e)?;
-                    let value = parse_u64(&text)?;
-                    let len = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("length out of range for node {name}"))
-                    })?;
-                    addressing.apply_length(len);
                 }
                 b"AccessMode" => {
                     let text = read_text_start(reader, e)?;
@@ -1143,105 +1242,22 @@ fn parse_float(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<Node
                     offset = Some(parse_f64(&text)?);
                 }
                 b"pSelected" => {
-                    let text = read_text_start(reader, e)?;
-                    let selector = text.trim().to_string();
-                    if !selector.is_empty() {
-                        selectors.push(selector.clone());
-                        selected_if.push((selector.clone(), Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                        addressing.register_selector(&selector);
-                    }
+                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
                 }
                 b"Selected" => {
-                    let mut value = attribute_value(e, b"Value")?;
-                    if value.is_none() {
-                        value = attribute_value(e, b"Name")?;
-                    }
-                    let text = read_text_start(reader, e)?;
-                    let trimmed = text.trim();
-                    if value.is_none() && !trimmed.is_empty() {
-                        value = Some(trimmed.to_string());
-                    }
-                    if let Some(val) = value.clone() {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                    }
-                    if let Some(idx) = last_selector {
-                        if let Some(value) = value {
-                            let trimmed = value.trim();
-                            if !trimmed.is_empty() {
-                                selected_if[idx].1.push(trimmed.to_string());
-                            }
-                        } else if !trimmed.is_empty() {
-                            selected_if[idx].1.push(trimmed.to_string());
-                        }
-                    }
+                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => skip_element(reader, e.name().as_ref())?,
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        addressing.register_selector(&value);
-                        selectors.push(value.clone());
-                        selected_if.push((value, Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                    }
+                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
                 }
                 TAG_P_ADDRESS => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            addressing.set_p_address_node(trimmed);
-                        }
-                    }
+                    handle_addressing_empty(e, &mut addressing)?;
                 }
                 b"Selected" => {
-                    if let Some(val) = attribute_value(e, b"Value")? {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                        if let Some(idx) = last_selector {
-                            selected_if[idx].1.push(val);
-                        }
-                    }
+                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {}
             },
@@ -1267,6 +1283,7 @@ fn parse_float(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<Node
     };
 
     let addressing = addressing.finalize(&name, Some(8))?;
+    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Float {
         name,
@@ -1297,33 +1314,17 @@ fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeD
     let mut access = AccessMode::RW;
     let mut entries = Vec::new();
     let mut default = None;
-    let mut selectors = Vec::new();
-    let mut selected_if = Vec::new();
-    let mut last_selector = None;
+    let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"Address" => {
-                    let text = read_text_start(reader, e)?;
-                    addressing.attach_selected_address(parse_u64(&text)?, None);
-                }
-                TAG_P_ADDRESS => {
-                    let text = read_text_start(reader, e)?;
-                    let target = text.trim();
-                    if !target.is_empty() {
-                        addressing.set_p_address_node(target);
+                b"Address" | TAG_P_ADDRESS | b"Length" => {
+                    if !handle_addressing_start(reader, e, &name, &mut addressing)? {
+                        skip_element(reader, e.name().as_ref())?;
                     }
-                }
-                b"Length" => {
-                    let text = read_text_start(reader, e)?;
-                    let value = parse_u64(&text)?;
-                    let len = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("length out of range for node {name}"))
-                    })?;
-                    addressing.apply_length(len);
                 }
                 b"AccessMode" => {
                     let text = read_text_start(reader, e)?;
@@ -1334,58 +1335,10 @@ fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeD
                     entries.push(entry);
                 }
                 b"pSelected" => {
-                    let text = read_text_start(reader, e)?;
-                    let selector = text.trim().to_string();
-                    if !selector.is_empty() {
-                        selectors.push(selector.clone());
-                        selected_if.push((selector.clone(), Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                        addressing.register_selector(&selector);
-                    }
+                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
                 }
                 b"Selected" => {
-                    let mut value = attribute_value(e, b"Value")?;
-                    if value.is_none() {
-                        value = attribute_value(e, b"Name")?;
-                    }
-                    let text = read_text_start(reader, e)?;
-                    let trimmed = text.trim();
-                    if value.is_none() && !trimmed.is_empty() {
-                        value = Some(trimmed.to_string());
-                    }
-                    if let Some(val) = value.clone() {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                    }
-                    if let Some(idx) = last_selector {
-                        if let Some(value) = value {
-                            let trimmed = value.trim();
-                            if !trimmed.is_empty() {
-                                selected_if[idx].1.push(trimmed.to_string());
-                            }
-                        } else if !trimmed.is_empty() {
-                            selected_if[idx].1.push(trimmed.to_string());
-                        }
-                    }
+                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 b"pValueDefault" => {
                     let text = read_text_start(reader, e)?;
@@ -1402,40 +1355,10 @@ fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeD
                     entries.push(entry);
                 }
                 b"pSelected" => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        addressing.register_selector(&value);
-                        selectors.push(value.clone());
-                        selected_if.push((value, Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                    }
+                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
                 }
                 b"Selected" => {
-                    if let Some(val) = attribute_value(e, b"Value")? {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                        if let Some(idx) = last_selector {
-                            selected_if[idx].1.push(val);
-                        }
-                    }
+                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {}
             },
@@ -1458,6 +1381,7 @@ fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeD
     }
 
     let addressing = addressing.finalize(&name, Some(4))?;
+    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Enum {
         name,
@@ -1483,9 +1407,7 @@ fn parse_boolean(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
         addressing.set_length(len);
     }
     let mut access = AccessMode::RW;
-    let mut selectors = Vec::new();
-    let mut selected_if = Vec::new();
-    let mut last_selector = None;
+    let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut bitfield = BitfieldBuilder::default();
@@ -1569,77 +1491,19 @@ fn parse_boolean(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
                     }
                 }
                 b"pSelected" => {
-                    let text = read_text_start(reader, e)?;
-                    let selector = text.trim().to_string();
-                    if !selector.is_empty() {
-                        selectors.push(selector.clone());
-                        selected_if.push((selector.clone(), Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                        addressing.register_selector(&selector);
-                    }
+                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
                 }
                 b"Selected" => {
-                    let mut value = attribute_value(e, b"Value")?;
-                    if value.is_none() {
-                        value = attribute_value(e, b"Name")?;
-                    }
-                    let text = read_text_start(reader, e)?;
-                    let trimmed = text.trim();
-                    if value.is_none() && !trimmed.is_empty() {
-                        value = Some(trimmed.to_string());
-                    }
-                    if let Some(val) = value.clone() {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                    }
-                    if let Some(idx) = last_selector {
-                        if let Some(value) = value {
-                            let trimmed = value.trim();
-                            if !trimmed.is_empty() {
-                                selected_if[idx].1.push(trimmed.to_string());
-                            }
-                        } else if !trimmed.is_empty() {
-                            selected_if[idx].1.push(trimmed.to_string());
-                        }
-                    }
+                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => skip_element(reader, e.name().as_ref())?,
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        addressing.register_selector(&value);
-                        selectors.push(value.clone());
-                        selected_if.push((value, Vec::new()));
-                        last_selector = Some(selected_if.len() - 1);
-                    }
+                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
                 }
                 TAG_P_ADDRESS => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            addressing.set_p_address_node(trimmed);
-                        }
-                    }
+                    handle_addressing_empty(e, &mut addressing)?;
                 }
                 TAG_LSB => {
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
@@ -1684,32 +1548,7 @@ fn parse_boolean(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
                     }
                 }
                 b"Selected" => {
-                    if let Some(val) = attribute_value(e, b"Value")? {
-                        addressing.push_selected_value(val.clone());
-                        if let Some(address_attr) = attribute_value(e, b"Address")? {
-                            let len_override = attribute_value(e, b"Length")?
-                                .map(|len| -> Result<u32, XmlError> {
-                                    let value = parse_u64(&len)?;
-                                    u32::try_from(value).map_err(|_| {
-                                        XmlError::Invalid(format!(
-                                            "length out of range for node {name}"
-                                        ))
-                                    })
-                                })
-                                .transpose()?;
-                            addressing
-                                .attach_selected_address(parse_u64(&address_attr)?, len_override);
-                        } else if let Some(len_attr) = attribute_value(e, b"Length")? {
-                            let value = parse_u64(&len_attr)?;
-                            let len = u32::try_from(value).map_err(|_| {
-                                XmlError::Invalid(format!("length out of range for node {name}"))
-                            })?;
-                            addressing.apply_length(len);
-                        }
-                        if let Some(idx) = last_selector {
-                            selected_if[idx].1.push(val);
-                        }
-                    }
+                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {}
             },
@@ -1744,6 +1583,7 @@ fn parse_boolean(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<No
             )))
         }
     };
+    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Boolean {
         name,

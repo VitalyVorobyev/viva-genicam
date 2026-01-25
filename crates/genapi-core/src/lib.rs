@@ -567,22 +567,7 @@ impl NodeMap {
         }
         if let Some(bitfield) = node.bitfield {
             let encoded = encode_bitfield_value(name, value, bitfield.bit_length, node.min < 0)?;
-            let cached = node.raw_cache.borrow().clone();
-            let mut raw = if let Some(bytes) = cached {
-                if bytes.len() == len as usize {
-                    bytes
-                } else {
-                    io.read(address, len as usize).map_err(|err| match err {
-                        GenApiError::Io(_) => err,
-                        other => other,
-                    })?
-                }
-            } else {
-                io.read(address, len as usize).map_err(|err| match err {
-                    GenApiError::Io(_) => err,
-                    other => other,
-                })?
-            };
+            let mut raw = get_raw_or_read(&node.raw_cache, io, address, len)?;
             insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
             debug!(node = %name, raw = value, "write integer feature");
             io.write(address, &raw).map_err(|err| match err {
@@ -771,22 +756,7 @@ impl NodeMap {
         self.ensure_selectors(name, &node.selected_if, io)?;
         let (address, len) = self.resolve_address(name, &node.addressing, io)?;
         let encoded = if value { 1 } else { 0 };
-        let cached = node.raw_cache.borrow().clone();
-        let mut raw = if let Some(bytes) = cached {
-            if bytes.len() == len as usize {
-                bytes
-            } else {
-                io.read(address, len as usize).map_err(|err| match err {
-                    GenApiError::Io(_) => err,
-                    other => other,
-                })?
-            }
-        } else {
-            io.read(address, len as usize).map_err(|err| match err {
-                GenApiError::Io(_) => err,
-                other => other,
-            })?
-        };
+        let mut raw = get_raw_or_read(&node.raw_cache, io, address, len)?;
         insert(&mut raw, node.bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
         debug!(node = %name, raw = encoded, value, "write boolean feature");
         io.write(address, &raw).map_err(|err| match err {
@@ -1356,6 +1326,28 @@ fn mask_u128(bit_length: u16) -> u128 {
 fn sign_extend(value: u64, bits: u16) -> i64 {
     let shift = 64 - bits as u32;
     ((value << shift) as i64) >> shift
+}
+
+/// Get raw bytes from cache or read from device for read-modify-write operations.
+///
+/// This helper is used when writing to a bitfield requires first reading the current
+/// register value, modifying specific bits, and writing back the result.
+fn get_raw_or_read(
+    cache: &std::cell::RefCell<Option<Vec<u8>>>,
+    io: &dyn RegisterIo,
+    address: u64,
+    len: u32,
+) -> Result<Vec<u8>, GenApiError> {
+    let cached = cache.borrow().clone();
+    if let Some(bytes) = cached {
+        if bytes.len() == len as usize {
+            return Ok(bytes);
+        }
+    }
+    io.read(address, len as usize).map_err(|err| match err {
+        GenApiError::Io(_) => err,
+        other => other,
+    })
 }
 
 fn map_bitops_error(name: &str, err: BitOpsError) -> GenApiError {

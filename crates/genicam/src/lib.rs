@@ -202,6 +202,23 @@ impl<T: RegisterIo> Camera<T> {
                     Ok(self.nodemap.get_integer(name, &self.transport)?.to_string())
                 }
             },
+            Some(Node::Converter(conv)) => match conv.output {
+                SkOutput::Float => Ok(self
+                    .nodemap
+                    .get_converter(name, &self.transport)?
+                    .to_string()),
+                SkOutput::Integer => {
+                    Ok((self.nodemap.get_converter(name, &self.transport)? as i64).to_string())
+                }
+            },
+            Some(Node::IntConverter(_)) => Ok(self
+                .nodemap
+                .get_int_converter(name, &self.transport)?
+                .to_string()),
+            Some(Node::String(_)) => self
+                .nodemap
+                .get_string(name, &self.transport)
+                .map_err(Into::into),
             Some(Node::Command(_)) => {
                 Err(GenicamError::GenApi(GenApiError::Type(name.to_string())))
             }
@@ -242,6 +259,16 @@ impl<T: RegisterIo> Camera<T> {
                     .map_err(Into::into)
             }
             Some(Node::SwissKnife(_)) => Err(GenApiError::Type(name.to_string()).into()),
+            Some(Node::Converter(_)) => {
+                // Converters are read-only from the user perspective
+                // (they transform values from underlying nodes)
+                Err(GenApiError::Type(name.to_string()).into())
+            }
+            Some(Node::IntConverter(_)) => Err(GenApiError::Type(name.to_string()).into()),
+            Some(Node::String(_)) => self
+                .nodemap
+                .set_string(name, value, &self.transport)
+                .map_err(Into::into),
             Some(Node::Command(_)) => self
                 .nodemap
                 .exec_command(name, &self.transport)

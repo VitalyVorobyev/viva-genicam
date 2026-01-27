@@ -25,6 +25,12 @@ pub enum Node {
     Category(CategoryNode),
     /// SwissKnife expression producing a computed value.
     SwissKnife(SkNode),
+    /// Converter transforming raw values to/from float values via formulas.
+    Converter(ConverterNode),
+    /// IntConverter transforming raw values to/from integer values via formulas.
+    IntConverter(IntConverterNode),
+    /// StringReg for string-typed register access.
+    String(StringNode),
 }
 
 impl Node {
@@ -43,6 +49,15 @@ impl Node {
                 node.raw_cache.replace(None);
             }
             Node::SwissKnife(node) => {
+                node.cache.replace(None);
+            }
+            Node::Converter(node) => {
+                node.cache.replace(None);
+            }
+            Node::IntConverter(node) => {
+                node.cache.replace(None);
+            }
+            Node::String(node) => {
                 node.cache.replace(None);
             }
             Node::Command(_) | Node::Category(_) => {}
@@ -170,4 +185,65 @@ pub struct CommandNode {
 pub struct CategoryNode {
     pub name: String,
     pub children: Vec<String>,
+}
+
+/// Converter node transforming raw values to/from float values via formulas.
+///
+/// Converters use two formulas:
+/// - `formula_to`: converts from raw register value to user-facing float (reading)
+/// - `formula_from`: converts from user-facing float to raw register value (writing)
+#[derive(Debug)]
+pub struct ConverterNode {
+    /// Unique feature name.
+    pub name: String,
+    /// Name of the node providing the raw register value.
+    pub p_value: String,
+    /// Parsed AST for the formula converting raw → user value.
+    pub ast_to: AstNode,
+    /// Parsed AST for the formula converting user → raw value.
+    pub ast_from: AstNode,
+    /// Variable mappings for formula_to (reading).
+    pub vars_to: Vec<(String, String)>,
+    /// Variable mappings for formula_from (writing).
+    pub vars_from: Vec<(String, String)>,
+    /// Optional engineering unit.
+    pub unit: Option<String>,
+    /// Desired output type.
+    pub output: SkOutput,
+    /// Cached user-facing value alongside the generation it was computed in.
+    pub cache: RefCell<Option<(f64, u64)>>,
+}
+
+/// IntConverter node transforming raw values to/from integer values via formulas.
+#[derive(Debug)]
+pub struct IntConverterNode {
+    /// Unique feature name.
+    pub name: String,
+    /// Name of the node providing the raw register value.
+    pub p_value: String,
+    /// Parsed AST for the formula converting raw → user value.
+    pub ast_to: AstNode,
+    /// Parsed AST for the formula converting user → raw value.
+    pub ast_from: AstNode,
+    /// Variable mappings for formula_to (reading).
+    pub vars_to: Vec<(String, String)>,
+    /// Variable mappings for formula_from (writing).
+    pub vars_from: Vec<(String, String)>,
+    /// Optional engineering unit.
+    pub unit: Option<String>,
+    /// Cached user-facing value alongside the generation it was computed in.
+    pub cache: RefCell<Option<(i64, u64)>>,
+}
+
+/// StringReg node for string-typed register access.
+#[derive(Debug)]
+pub struct StringNode {
+    /// Unique feature name.
+    pub name: String,
+    /// Register addressing metadata.
+    pub addressing: Addressing,
+    /// Declared access rights.
+    pub access: AccessMode,
+    /// Cached string value alongside the generation it was computed in.
+    pub cache: RefCell<Option<(String, u64)>>,
 }

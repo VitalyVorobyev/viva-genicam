@@ -3,17 +3,19 @@
 Pure Rust building blocks for **GenICam** with an **Ethernet-first (GigE Vision)** focus.  
 Cargo workspace, modular crates (GenCP, GVCP/GVSP, GenApi core), and small examples.
 
-## Current status (Nov 2025)
+## Current status (Jan 2026)
   * ✅ Discovery (GVCP) on selected NICs; enumerate devices.
   * ✅ Control path (GenCP over GVCP): read/write device memory; fetch GenICam XML.
-  * ✅ GenApi (Tier-1): basic NodeMap (Integer/Float/Enum/Bool/Command), ranges, access modes.
-  * ✅ SwissKnife expression nodes and selector-aware NodeMap support for common patterns (subset of Tier-2 GenApi).
+  * ✅ GenApi (Tier-1): NodeMap (Integer/Float/Enum/Bool/Command/Category), ranges, access modes.
+  * ✅ GenApi (Tier-2): Converter, IntConverter, String nodes for Basler camera support.
+  * ✅ SwissKnife: full expression support (arithmetic, comparisons, ternary, logical, bitwise, math functions).
   * ✅ Selector-based address switching for common features (e.g., `GainSelector`).
-  * Streaming (GVSP): packet reassembly, resend, MTU/packet size & delay, backpressure, stats.
-  * Events & actions: message channel events; action commands (synchronization).
-  * Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
+  * ✅ High-level streaming API: `FrameStream` async iterator with auto-resend.
+  * ✅ `connect_gige()` one-liner for camera connection with auto XML fetch.
+  * ✅ Streaming (GVSP): packet reassembly, resend, MTU/packet size & delay, backpressure, stats.
+  * ✅ Events & actions: message channel events; action commands (synchronization).
+  * ✅ Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
   * USB3 Vision transport (planned).
-  * Advanced GenApi nodes (Converter, more complex expressions, wider SFNC coverage — planned).
   * GenTL producer (.cti) and PFNC/SFNC helper utilities (planned).
 
 ## Workspace layout

@@ -17,7 +17,8 @@ use thiserror::Error;
 
 use parsers::{
     parse_boolean, parse_category, parse_category_empty, parse_command, parse_command_empty,
-    parse_enum, parse_float, parse_integer, parse_swissknife,
+    parse_converter, parse_enum, parse_float, parse_int_converter, parse_integer, parse_string,
+    parse_swissknife,
 };
 use util::{attribute_value, skip_element};
 
@@ -161,6 +162,60 @@ pub struct SwissKnifeDecl {
     pub output: SkOutput,
 }
 
+/// Declaration of a Converter node for bidirectional value transformation.
+///
+/// Converters expose a floating-point value computed from an underlying
+/// register or node via a formula.
+#[derive(Debug, Clone)]
+pub struct ConverterDecl {
+    /// Feature name exposed to clients.
+    pub name: String,
+    /// Name of the node providing the raw register value.
+    pub p_value: String,
+    /// Expression converting raw register value to user-facing value (FROM direction).
+    pub formula_to: String,
+    /// Expression converting user-facing value back to raw register value (TO direction).
+    pub formula_from: String,
+    /// Mapping of expression variables to provider node names for `formula_to`.
+    pub variables_to: Vec<(String, String)>,
+    /// Mapping of expression variables to provider node names for `formula_from`.
+    pub variables_from: Vec<(String, String)>,
+    /// Engineering unit (if provided).
+    pub unit: Option<String>,
+    /// Desired output type.
+    pub output: SkOutput,
+}
+
+/// Declaration of an IntConverter node for integer-specific bidirectional conversion.
+#[derive(Debug, Clone)]
+pub struct IntConverterDecl {
+    /// Feature name exposed to clients.
+    pub name: String,
+    /// Name of the node providing the raw register value.
+    pub p_value: String,
+    /// Expression converting raw register value to user-facing value (FROM direction).
+    pub formula_to: String,
+    /// Expression converting user-facing value back to raw register value (TO direction).
+    pub formula_from: String,
+    /// Mapping of expression variables to provider node names for `formula_to`.
+    pub variables_to: Vec<(String, String)>,
+    /// Mapping of expression variables to provider node names for `formula_from`.
+    pub variables_from: Vec<(String, String)>,
+    /// Engineering unit (if provided).
+    pub unit: Option<String>,
+}
+
+/// Declaration of a StringReg node for string-typed register access.
+#[derive(Debug, Clone)]
+pub struct StringDecl {
+    /// Feature name exposed to clients.
+    pub name: String,
+    /// Addressing metadata for the register block.
+    pub addressing: Addressing,
+    /// Access privileges.
+    pub access: AccessMode,
+}
+
 /// Declaration of a node extracted from the GenICam XML description.
 #[derive(Debug, Clone)]
 pub enum NodeDecl {
@@ -234,6 +289,12 @@ pub enum NodeDecl {
     Category { name: String, children: Vec<String> },
     /// Computed value backed by an arithmetic expression referencing other nodes.
     SwissKnife(SwissKnifeDecl),
+    /// Converter transforming raw values to/from user-facing floating-point values.
+    Converter(ConverterDecl),
+    /// IntConverter transforming raw values to/from user-facing integer values.
+    IntConverter(IntConverterDecl),
+    /// StringReg for string-typed register access.
+    String(StringDecl),
 }
 
 /// Full XML model describing the GenICam schema version and all declared nodes.
@@ -336,6 +397,18 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 }
                 b"SwissKnife" => {
                     let node = parse_swissknife(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"Converter" => {
+                    let node = parse_converter(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"IntConverter" => {
+                    let node = parse_int_converter(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"StringReg" | b"String" => {
+                    let node = parse_string(&mut reader, e.clone())?;
                     nodes.push(node);
                 }
                 _ => {

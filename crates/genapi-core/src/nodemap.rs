@@ -12,8 +12,8 @@ use crate::conversions::{
     interpret_bitfield_value, map_bitops_error, round_to_i64,
 };
 use crate::nodes::{
-    BooleanNode, CategoryNode, CommandNode, EnumMapping, EnumNode, FloatNode, IntegerNode, Node,
-    SkNode,
+    BooleanNode, CategoryNode, CommandNode, ConverterNode, EnumMapping, EnumNode, FloatNode,
+    IntConverterNode, IntegerNode, Node, SkNode, StringNode,
 };
 use crate::swissknife::{
     collect_identifiers, evaluate as eval_ast, parse_expression, EvalError as SkEvalError,
@@ -275,6 +275,108 @@ impl NodeMap {
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::SwissKnife(node));
+                }
+                NodeDecl::Converter(decl) => {
+                    let name = decl.name;
+                    let ast_to = parse_expression(&decl.formula_to).map_err(|err| {
+                        GenApiError::ExprParse {
+                            name: name.clone(),
+                            msg: format!("FormulaTo: {err}"),
+                        }
+                    })?;
+                    let ast_from = parse_expression(&decl.formula_from).map_err(|err| {
+                        GenApiError::ExprParse {
+                            name: name.clone(),
+                            msg: format!("FormulaFrom: {err}"),
+                        }
+                    })?;
+                    // Register dependencies for all variable providers
+                    for (_, provider) in &decl.variables_to {
+                        dependents
+                            .entry(provider.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    for (_, provider) in &decl.variables_from {
+                        if !decl.variables_to.iter().any(|(_, p)| p == provider) {
+                            dependents
+                                .entry(provider.clone())
+                                .or_default()
+                                .push(name.clone());
+                        }
+                    }
+                    // Also depend on p_value
+                    dependents
+                        .entry(decl.p_value.clone())
+                        .or_default()
+                        .push(name.clone());
+                    let node = ConverterNode {
+                        name: name.clone(),
+                        p_value: decl.p_value,
+                        ast_to,
+                        ast_from,
+                        vars_to: decl.variables_to,
+                        vars_from: decl.variables_from,
+                        unit: decl.unit,
+                        output: decl.output,
+                        cache: std::cell::RefCell::new(None),
+                    };
+                    nodes.insert(name, Node::Converter(node));
+                }
+                NodeDecl::IntConverter(decl) => {
+                    let name = decl.name;
+                    let ast_to = parse_expression(&decl.formula_to).map_err(|err| {
+                        GenApiError::ExprParse {
+                            name: name.clone(),
+                            msg: format!("FormulaTo: {err}"),
+                        }
+                    })?;
+                    let ast_from = parse_expression(&decl.formula_from).map_err(|err| {
+                        GenApiError::ExprParse {
+                            name: name.clone(),
+                            msg: format!("FormulaFrom: {err}"),
+                        }
+                    })?;
+                    for (_, provider) in &decl.variables_to {
+                        dependents
+                            .entry(provider.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    for (_, provider) in &decl.variables_from {
+                        if !decl.variables_to.iter().any(|(_, p)| p == provider) {
+                            dependents
+                                .entry(provider.clone())
+                                .or_default()
+                                .push(name.clone());
+                        }
+                    }
+                    dependents
+                        .entry(decl.p_value.clone())
+                        .or_default()
+                        .push(name.clone());
+                    let node = IntConverterNode {
+                        name: name.clone(),
+                        p_value: decl.p_value,
+                        ast_to,
+                        ast_from,
+                        vars_to: decl.variables_to,
+                        vars_from: decl.variables_from,
+                        unit: decl.unit,
+                        cache: std::cell::RefCell::new(None),
+                    };
+                    nodes.insert(name, Node::IntConverter(node));
+                }
+                NodeDecl::String(decl) => {
+                    let name = decl.name;
+                    register_addressing_dependency(&mut dependents, &name, &decl.addressing);
+                    let node = StringNode {
+                        name: name.clone(),
+                        addressing: decl.addressing,
+                        access: decl.access,
+                        cache: std::cell::RefCell::new(None),
+                    };
+                    nodes.insert(name, Node::String(node));
                 }
             }
         }
@@ -846,6 +948,22 @@ impl NodeMap {
                         msg: "division by zero".into(),
                     });
                 }
+                Err(SkEvalError::UnknownFunction(func)) => {
+                    return Err(GenApiError::ExprEval {
+                        name: node.name.clone(),
+                        msg: format!("unknown function: {func}"),
+                    });
+                }
+                Err(SkEvalError::ArityMismatch {
+                    name: func,
+                    expected,
+                    got,
+                }) => {
+                    return Err(GenApiError::ExprEval {
+                        name: node.name.clone(),
+                        msg: format!("function {func} expects {expected} args, got {got}"),
+                    });
+                }
             };
             debug!(node = %node.name, inputs = ?inputs, output = value, "evaluate SwissKnife");
             Ok(value)
@@ -876,6 +994,10 @@ impl NodeMap {
             }),
             Some(Node::Enum(_)) => self.get_enum_numeric(provider, io).map(|v| v as f64),
             Some(Node::SwissKnife(node)) => self.evaluate_swissknife(node, io, stack),
+            Some(Node::Converter(node)) => self.evaluate_converter(node, io, stack),
+            Some(Node::IntConverter(node)) => self
+                .evaluate_int_converter(node, io, stack)
+                .map(|v| v as f64),
             Some(_) => Err(GenApiError::Type(provider.to_string())),
             None => Err(GenApiError::NodeNotFound(provider.to_string())),
         }
@@ -928,6 +1050,224 @@ impl NodeMap {
     fn bump_generation(&self) {
         let current = self.generation.get();
         self.generation.set(current.wrapping_add(1));
+    }
+
+    // ========================================================================
+    // Converter/IntConverter/String support
+    // ========================================================================
+
+    fn get_converter_node(&self, name: &str) -> Result<&ConverterNode, GenApiError> {
+        match self.nodes.get(name) {
+            Some(Node::Converter(node)) => Ok(node),
+            Some(_) => Err(GenApiError::Type(name.to_string())),
+            None => Err(GenApiError::NodeNotFound(name.to_string())),
+        }
+    }
+
+    fn get_int_converter_node(&self, name: &str) -> Result<&IntConverterNode, GenApiError> {
+        match self.nodes.get(name) {
+            Some(Node::IntConverter(node)) => Ok(node),
+            Some(_) => Err(GenApiError::Type(name.to_string())),
+            None => Err(GenApiError::NodeNotFound(name.to_string())),
+        }
+    }
+
+    fn get_string_node(&self, name: &str) -> Result<&StringNode, GenApiError> {
+        match self.nodes.get(name) {
+            Some(Node::String(node)) => Ok(node),
+            Some(_) => Err(GenApiError::Type(name.to_string())),
+            None => Err(GenApiError::NodeNotFound(name.to_string())),
+        }
+    }
+
+    /// Read a Converter feature value (float) using the provided transport.
+    pub fn get_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<f64, GenApiError> {
+        let node = self.get_converter_node(name)?;
+        if let Some((value, gen)) = *node.cache.borrow() {
+            if gen == self.generation.get() {
+                return Ok(value);
+            }
+        }
+        let mut stack = HashSet::new();
+        let value = self.evaluate_converter(node, io, &mut stack)?;
+        node.cache.replace(Some((value, self.generation.get())));
+        Ok(value)
+    }
+
+    /// Read an IntConverter feature value (integer) using the provided transport.
+    pub fn get_int_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
+        let node = self.get_int_converter_node(name)?;
+        if let Some((value, gen)) = *node.cache.borrow() {
+            if gen == self.generation.get() {
+                return Ok(value);
+            }
+        }
+        let mut stack = HashSet::new();
+        let value = self.evaluate_int_converter(node, io, &mut stack)?;
+        node.cache.replace(Some((value, self.generation.get())));
+        Ok(value)
+    }
+
+    /// Read a String feature value using the provided transport.
+    pub fn get_string(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
+        let node = self.get_string_node(name)?;
+        ensure_readable(&node.access, name)?;
+        if let Some((ref value, gen)) = *node.cache.borrow() {
+            if gen == self.generation.get() {
+                return Ok(value.clone());
+            }
+        }
+        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        let raw = io.read(address, len as usize)?;
+        // Convert bytes to string, stopping at first null byte
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let value = String::from_utf8_lossy(&raw[..end]).to_string();
+        node.cache
+            .replace(Some((value.clone(), self.generation.get())));
+        debug!(node = %name, value = %value, "get_string");
+        Ok(value)
+    }
+
+    /// Write a String feature value using the provided transport.
+    pub fn set_string(
+        &self,
+        name: &str,
+        value: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<(), GenApiError> {
+        let node = self.get_string_node(name)?;
+        ensure_writable(&node.access, name)?;
+        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        // Build byte buffer with null termination
+        let mut buf = vec![0u8; len as usize];
+        let bytes = value.as_bytes();
+        let copy_len = bytes.len().min(len as usize);
+        buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        io.write(address, &buf)?;
+        node.cache
+            .replace(Some((value.to_string(), self.generation.get())));
+        self.invalidate_dependents(name);
+        debug!(node = %name, value = %value, "set_string");
+        Ok(())
+    }
+
+    fn evaluate_converter(
+        &self,
+        node: &ConverterNode,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<f64, GenApiError> {
+        if !stack.insert(node.name.clone()) {
+            stack.remove(&node.name);
+            return Err(GenApiError::ExprEval {
+                name: node.name.clone(),
+                msg: "cyclic dependency".into(),
+            });
+        }
+
+        let result = (|| {
+            // Build variable map for formula evaluation
+            let mut values: HashMap<String, f64> = HashMap::new();
+            for (var, provider) in &node.vars_to {
+                let value = self.resolve_numeric(provider, io, stack)?;
+                values.insert(var.clone(), value);
+            }
+            // Evaluate the formula
+            let mut resolver = |ident: &str| -> Result<f64, SkEvalError> {
+                values
+                    .get(ident)
+                    .copied()
+                    .ok_or_else(|| SkEvalError::UnknownVariable(ident.to_string()))
+            };
+            match eval_ast(&node.ast_to, &mut resolver) {
+                Ok(value) => {
+                    debug!(node = %node.name, value, "evaluate Converter");
+                    Ok(value)
+                }
+                Err(SkEvalError::UnknownVariable(var)) => Err(GenApiError::UnknownVariable {
+                    name: node.name.clone(),
+                    var,
+                }),
+                Err(SkEvalError::DivisionByZero) => Err(GenApiError::ExprEval {
+                    name: node.name.clone(),
+                    msg: "division by zero".into(),
+                }),
+                Err(SkEvalError::UnknownFunction(func)) => Err(GenApiError::ExprEval {
+                    name: node.name.clone(),
+                    msg: format!("unknown function: {func}"),
+                }),
+                Err(SkEvalError::ArityMismatch {
+                    name: func,
+                    expected,
+                    got,
+                }) => Err(GenApiError::ExprEval {
+                    name: node.name.clone(),
+                    msg: format!("function {func} expects {expected} args, got {got}"),
+                }),
+            }
+        })();
+
+        stack.remove(&node.name);
+        result
+    }
+
+    fn evaluate_int_converter(
+        &self,
+        node: &IntConverterNode,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<i64, GenApiError> {
+        if !stack.insert(node.name.clone()) {
+            stack.remove(&node.name);
+            return Err(GenApiError::ExprEval {
+                name: node.name.clone(),
+                msg: "cyclic dependency".into(),
+            });
+        }
+
+        let result = (|| {
+            let mut values: HashMap<String, f64> = HashMap::new();
+            for (var, provider) in &node.vars_to {
+                let value = self.resolve_numeric(provider, io, stack)?;
+                values.insert(var.clone(), value);
+            }
+            let mut resolver = |ident: &str| -> Result<f64, SkEvalError> {
+                values
+                    .get(ident)
+                    .copied()
+                    .ok_or_else(|| SkEvalError::UnknownVariable(ident.to_string()))
+            };
+            match eval_ast(&node.ast_to, &mut resolver) {
+                Ok(value) => {
+                    let int_value = round_to_i64(&node.name, value)?;
+                    debug!(node = %node.name, int_value, "evaluate IntConverter");
+                    Ok(int_value)
+                }
+                Err(SkEvalError::UnknownVariable(var)) => Err(GenApiError::UnknownVariable {
+                    name: node.name.clone(),
+                    var,
+                }),
+                Err(SkEvalError::DivisionByZero) => Err(GenApiError::ExprEval {
+                    name: node.name.clone(),
+                    msg: "division by zero".into(),
+                }),
+                Err(SkEvalError::UnknownFunction(func)) => Err(GenApiError::ExprEval {
+                    name: node.name.clone(),
+                    msg: format!("unknown function: {func}"),
+                }),
+                Err(SkEvalError::ArityMismatch {
+                    name: func,
+                    expected,
+                    got,
+                }) => Err(GenApiError::ExprEval {
+                    name: node.name.clone(),
+                    msg: format!("function {func} expects {expected} args, got {got}"),
+                }),
+            }
+        })();
+
+        stack.remove(&node.name);
+        result
     }
 }
 

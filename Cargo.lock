@@ -624,6 +624,7 @@ dependencies = [
  "fastrand",
  "genicp",
  "if-addrs",
+ "libc",
  "socket2 0.5.10",
  "thiserror",
  "tokio",

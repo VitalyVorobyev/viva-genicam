@@ -4,7 +4,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use crate::util::{
-    attribute_value, attribute_value_required, parse_u64, read_text_start, skip_element,
+    attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
 use crate::{NodeDecl, XmlError};
 
@@ -16,6 +16,8 @@ pub fn parse_command(
     let name = attribute_value_required(&start, b"Name")?;
     let mut address = None;
     let mut length = None;
+    let mut pvalue = None;
+    let mut command_value = None;
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
@@ -33,6 +35,17 @@ pub fn parse_command(
                         XmlError::Invalid(format!("length out of range for node {name}"))
                     })?);
                 }
+                b"pValue" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        pvalue = Some(target.to_string());
+                    }
+                }
+                b"CommandValue" => {
+                    let text = read_text_start(reader, e)?;
+                    command_value = Some(parse_i64(&text)?);
+                }
                 _ => skip_element(reader, e.name().as_ref())?,
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
@@ -47,22 +60,28 @@ pub fn parse_command(
         buf.clear();
     }
 
-    let address = address
-        .ok_or_else(|| XmlError::Invalid(format!("Command node {name} is missing <Address>")))?;
-    let length = length.unwrap_or(1);
+    if address.is_none() && pvalue.is_none() {
+        return Err(XmlError::Invalid(format!(
+            "Command node {name} is missing both <Address> and <pValue>"
+        )));
+    }
+    let length = length.unwrap_or(4);
 
     Ok(NodeDecl::Command {
         name,
         address,
         len: length,
+        pvalue,
+        command_value,
     })
 }
 
 /// Parse an empty `<Command />` element.
 pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(start, b"Name")?;
-    let address = attribute_value_required(start, b"Address")?;
-    let address = parse_u64(&address)?;
+    let address = attribute_value(start, b"Address")?
+        .map(|v| parse_u64(&v))
+        .transpose()?;
     let length = attribute_value(start, b"Length")?;
     let length = match length {
         Some(value) => {
@@ -70,12 +89,14 @@ pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError>
             u32::try_from(raw)
                 .map_err(|_| XmlError::Invalid("command length out of range".into()))?
         }
-        None => 1,
+        None => 4,
     };
     Ok(NodeDecl::Command {
         name,
         address,
         len: length,
+        pvalue: None,
+        command_value: None,
     })
 }
 

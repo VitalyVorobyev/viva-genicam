@@ -137,23 +137,26 @@ fn run_real() -> Result<(), Box<dyn Error>> {
 fn print_gain_addressing(nodemap: &NodeMap) {
     if let Some(Node::Integer(node)) = nodemap.node(sfnc::GAIN) {
         match &node.addressing {
-            Addressing::Fixed { address, len } => {
+            Some(Addressing::Fixed { address, len }) => {
                 println!("Gain uses fixed address 0x{address:08X} ({} bytes)", len);
             }
-            Addressing::BySelector { selector, map } => {
+            Some(Addressing::BySelector { selector, map }) => {
                 println!("Gain addresses by selector {selector}:");
                 for (value, (addr, len)) in map {
                     println!("  {value:>8} -> 0x{addr:08X} ({} bytes)", len);
                 }
             }
-            Addressing::Indirect {
+            Some(Addressing::Indirect {
                 p_address_node,
                 len,
-            } => {
+            }) => {
                 println!(
                     "Gain resolves address via {p_address_node} ({} bytes per register)",
                     len
                 );
+            }
+            None => {
+                println!("Gain has no direct addressing (pValue-backed)");
             }
         }
     }

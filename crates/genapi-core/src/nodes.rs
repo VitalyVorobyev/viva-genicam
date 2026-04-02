@@ -70,8 +70,8 @@ impl Node {
 pub struct IntegerNode {
     /// Unique feature name.
     pub name: String,
-    /// Register addressing metadata (fixed, selector-based, or indirect).
-    pub addressing: Addressing,
+    /// Register addressing metadata (absent when delegated via `pvalue`).
+    pub addressing: Option<Addressing>,
     /// Nominal register length in bytes.
     pub len: u32,
     /// Declared access rights.
@@ -90,6 +90,14 @@ pub struct IntegerNode {
     pub selectors: Vec<String>,
     /// Selector gating rules in the form `(selector, allowed values)`.
     pub selected_if: Vec<(String, Vec<String>)>,
+    /// Node providing the value (delegates read/write).
+    pub pvalue: Option<String>,
+    /// Node providing the dynamic maximum.
+    pub p_max: Option<String>,
+    /// Node providing the dynamic minimum.
+    pub p_min: Option<String>,
+    /// Static value for constant nodes.
+    pub value: Option<i64>,
     pub(crate) cache: RefCell<Option<i64>>,
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
 }
@@ -98,7 +106,8 @@ pub struct IntegerNode {
 #[derive(Debug)]
 pub struct FloatNode {
     pub name: String,
-    pub addressing: Addressing,
+    /// Register addressing metadata (absent when delegated via `pvalue`).
+    pub addressing: Option<Addressing>,
     pub access: AccessMode,
     pub min: f64,
     pub max: f64,
@@ -109,6 +118,8 @@ pub struct FloatNode {
     pub offset: Option<f64>,
     pub selectors: Vec<String>,
     pub selected_if: Vec<(String, Vec<String>)>,
+    /// Node providing the value (delegates read/write).
+    pub pvalue: Option<String>,
     pub(crate) cache: RefCell<Option<f64>>,
 }
 
@@ -116,8 +127,11 @@ pub struct FloatNode {
 #[derive(Debug)]
 pub struct EnumNode {
     pub name: String,
-    pub addressing: Addressing,
+    /// Register addressing metadata (absent when delegated via `pvalue`).
+    pub addressing: Option<Addressing>,
     pub access: AccessMode,
+    /// Node providing the integer value (delegates register read/write).
+    pub pvalue: Option<String>,
     pub entries: Vec<EnumEntryDecl>,
     pub default: Option<String>,
     pub selectors: Vec<String>,
@@ -144,12 +158,20 @@ impl EnumNode {
 #[derive(Debug)]
 pub struct BooleanNode {
     pub name: String,
-    pub addressing: Addressing,
+    /// Register addressing metadata (absent when delegated via `pvalue`).
+    pub addressing: Option<Addressing>,
     pub len: u32,
     pub access: AccessMode,
-    pub bitfield: BitField,
+    /// Optional bitfield (absent for pValue-backed booleans).
+    pub bitfield: Option<BitField>,
     pub selectors: Vec<String>,
     pub selected_if: Vec<(String, Vec<String>)>,
+    /// Node providing the value (delegates read/write).
+    pub pvalue: Option<String>,
+    /// On value for pValue-backed booleans.
+    pub on_value: Option<i64>,
+    /// Off value for pValue-backed booleans.
+    pub off_value: Option<i64>,
     pub(crate) cache: RefCell<Option<bool>>,
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
 }
@@ -176,8 +198,13 @@ pub struct SkNode {
 #[derive(Debug)]
 pub struct CommandNode {
     pub name: String,
-    pub address: u64,
+    /// Fixed register address (absent when delegated via `pvalue`).
+    pub address: Option<u64>,
     pub len: u32,
+    /// Node providing the command register.
+    pub pvalue: Option<String>,
+    /// Value to write when executing the command.
+    pub command_value: Option<i64>,
 }
 
 /// Category node describing child feature names.

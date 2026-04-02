@@ -7,6 +7,7 @@
 //! gated via conditional compilation and otherwise fall back to sane defaults.
 
 use std::collections::VecDeque;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -31,6 +32,40 @@ pub const DEFAULT_RCVBUF_BYTES: usize = 4 << 20; // 4 MiB
 /// interfacing with low level sysfs files.
 const IFACE_NAME_MAX: usize = 15; // As per `IFNAMSIZ - 1`.
 
+/// Resolve an interface index from its name using platform-specific APIs.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn iface_name_to_index(name: &str) -> io::Result<u32> {
+    let index_path = format!("/sys/class/net/{name}/ifindex");
+    fs::read_to_string(&index_path)
+        .map_err(|err| io::Error::new(err.kind(), format!("{index_path}: {err}")))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+/// Resolve an interface index from its name using `if_nametoindex(3)`.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn iface_name_to_index(name: &str) -> io::Result<u32> {
+    use std::ffi::CString;
+
+    let c_name = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("interface name contains null byte: '{name}'"),
+        )
+    })?;
+    // SAFETY: `if_nametoindex` is a POSIX function that takes a valid C string.
+    let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    if index == 0 {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("interface '{name}' not found"),
+        ))
+    } else {
+        Ok(index)
+    }
+}
+
 /// Representation of a host network interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Iface {
@@ -50,12 +85,7 @@ impl Iface {
             ));
         }
 
-        let index_path = format!("/sys/class/net/{name}/ifindex");
-        let index = fs::read_to_string(&index_path)
-            .map_err(|err| io::Error::new(err.kind(), format!("{index_path}: {err}")))?
-            .trim()
-            .parse::<u32>()
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let index = iface_name_to_index(name)?;
 
         let mut ipv4 = None;
         let mut ipv6 = None;
@@ -346,6 +376,17 @@ mod tests {
     #[test]
     fn accept_valid_group() {
         assert!(validate_multicast_inputs(Ipv4Addr::new(239, 192, 1, 10), 1).is_ok());
+    }
+
+    #[test]
+    fn from_system_loopback() {
+        let lo_name = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let iface = Iface::from_system(lo_name).expect("loopback interface should exist");
+        assert!(iface.ipv4().unwrap().is_loopback());
     }
 
     #[test]

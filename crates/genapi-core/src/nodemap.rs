@@ -95,8 +95,32 @@ impl NodeMap {
                     bitfield,
                     selectors,
                     selected_if,
+                    pvalue,
+                    p_max,
+                    p_min,
+                    value,
                 } => {
-                    register_addressing_dependency(&mut dependents, &name, &addressing);
+                    if let Some(ref addr) = addressing {
+                        register_addressing_dependency(&mut dependents, &name, addr);
+                    }
+                    if let Some(ref pv) = pvalue {
+                        dependents
+                            .entry(pv.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    if let Some(ref pm) = p_max {
+                        dependents
+                            .entry(pm.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    if let Some(ref pm) = p_min {
+                        dependents
+                            .entry(pm.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     for (selector, _) in &selected_if {
                         dependents
                             .entry(selector.clone())
@@ -115,6 +139,10 @@ impl NodeMap {
                         bitfield,
                         selectors,
                         selected_if,
+                        pvalue,
+                        p_max,
+                        p_min,
+                        value,
                         cache: std::cell::RefCell::new(None),
                         raw_cache: std::cell::RefCell::new(None),
                     };
@@ -131,8 +159,17 @@ impl NodeMap {
                     offset,
                     selectors,
                     selected_if,
+                    pvalue,
                 } => {
-                    register_addressing_dependency(&mut dependents, &name, &addressing);
+                    if let Some(ref addr) = addressing {
+                        register_addressing_dependency(&mut dependents, &name, addr);
+                    }
+                    if let Some(ref pv) = pvalue {
+                        dependents
+                            .entry(pv.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     for (selector, _) in &selected_if {
                         dependents
                             .entry(selector.clone())
@@ -150,6 +187,7 @@ impl NodeMap {
                         offset,
                         selectors,
                         selected_if,
+                        pvalue,
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::Float(node));
@@ -162,8 +200,17 @@ impl NodeMap {
                     default,
                     selectors,
                     selected_if,
+                    pvalue,
                 } => {
-                    register_addressing_dependency(&mut dependents, &name, &addressing);
+                    if let Some(ref addr) = addressing {
+                        register_addressing_dependency(&mut dependents, &name, addr);
+                    }
+                    if let Some(ref pv) = pvalue {
+                        dependents
+                            .entry(pv.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     for (selector, _) in &selected_if {
                         dependents
                             .entry(selector.clone())
@@ -188,6 +235,7 @@ impl NodeMap {
                         name: name.clone(),
                         addressing,
                         access,
+                        pvalue,
                         entries,
                         default,
                         selectors,
@@ -206,8 +254,19 @@ impl NodeMap {
                     bitfield,
                     selectors,
                     selected_if,
+                    pvalue,
+                    on_value,
+                    off_value,
                 } => {
-                    register_addressing_dependency(&mut dependents, &name, &addressing);
+                    if let Some(ref addr) = addressing {
+                        register_addressing_dependency(&mut dependents, &name, addr);
+                    }
+                    if let Some(ref pv) = pvalue {
+                        dependents
+                            .entry(pv.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     for (selector, _) in &selected_if {
                         dependents
                             .entry(selector.clone())
@@ -222,16 +281,33 @@ impl NodeMap {
                         bitfield,
                         selectors,
                         selected_if,
+                        pvalue,
+                        on_value,
+                        off_value,
                         cache: std::cell::RefCell::new(None),
                         raw_cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::Boolean(node));
                 }
-                NodeDecl::Command { name, address, len } => {
+                NodeDecl::Command {
+                    name,
+                    address,
+                    len,
+                    pvalue,
+                    command_value,
+                } => {
+                    if let Some(ref pv) = pvalue {
+                        dependents
+                            .entry(pv.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     let node = CommandNode {
                         name: name.clone(),
                         address,
                         len,
+                        pvalue,
+                        command_value,
                     };
                     nodes.insert(name, Node::Command(node));
                 }
@@ -411,7 +487,20 @@ impl NodeMap {
         let node = self.get_integer_node(name)?;
         ensure_readable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        // Return static value if present.
+        if let Some(v) = node.value {
+            return Ok(v);
+        }
+        // Delegate to pValue node if present.
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            return self.get_integer(&pv, io);
+        }
+        let addressing = node
+            .addressing
+            .as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
             return Ok(value);
         }
@@ -441,7 +530,15 @@ impl NodeMap {
         let node = self.get_integer_node(name)?;
         ensure_writable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            return self.set_integer(&pv, value, io);
+        }
+        let addressing = node
+            .addressing
+            .as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         if value < node.min || value > node.max {
             return Err(GenApiError::Range(name.to_string()));
         }
@@ -497,7 +594,15 @@ impl NodeMap {
         let node = self.get_float_node(name)?;
         ensure_readable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            return self.get_float(&pv, io);
+        }
+        let addressing = node
+            .addressing
+            .as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
             return Ok(value);
         }
@@ -522,7 +627,15 @@ impl NodeMap {
         let node = self.get_float_node(name)?;
         ensure_writable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            return self.set_float(&pv, value, io);
+        }
+        let addressing = node
+            .addressing
+            .as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         if value < node.min || value > node.max {
             return Err(GenApiError::Range(name.to_string()));
         }
@@ -543,7 +656,20 @@ impl NodeMap {
         let node = self.get_enum_node(name)?;
         ensure_readable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        // When pValue is set, read the integer from the delegate node.
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            if let Some(value) = node.value_cache.borrow().clone() {
+                return Ok(value);
+            }
+            let raw_value = self.get_integer(&pv, io)?;
+            let entry = self.lookup_enum_entry(node, raw_value, io)?;
+            node.value_cache.replace(Some(entry.clone()));
+            return Ok(entry);
+        }
+        let addressing = node.addressing.as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         if let Some(value) = node.value_cache.borrow().clone() {
             return Ok(value);
         }
@@ -568,7 +694,29 @@ impl NodeMap {
         let node = self.get_enum_node(name)?;
         ensure_writable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            let entry_decl = node
+                .entries
+                .iter()
+                .find(|candidate| candidate.name == entry)
+                .ok_or_else(|| GenApiError::EnumNoSuchEntry {
+                    node: name.to_string(),
+                    entry: entry.to_string(),
+                })?;
+            let raw_value = self.resolve_enum_entry_value(node, entry_decl, io)?;
+            let entry_str = entry.to_string();
+            // Re-borrow node after mutable self call.
+            self.set_integer(&pv, raw_value, io)?;
+            let node = self.get_enum_node(name)?;
+            node.value_cache.replace(Some(entry_str));
+            node.invalidate();
+            self.invalidate_dependents(name);
+            return Ok(());
+        }
+        let addressing = node.addressing.as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         let entry_decl = node
             .entries
             .iter()
@@ -613,7 +761,17 @@ impl NodeMap {
         let node = self.get_bool_node(name)?;
         ensure_readable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            let raw = self.get_integer(&pv, io)?;
+            let on = node.on_value.unwrap_or(1);
+            return Ok(raw == on);
+        }
+        let addressing = node.addressing.as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+        let bitfield = node.bitfield
+            .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
             return Ok(value);
         }
@@ -621,7 +779,7 @@ impl NodeMap {
             GenApiError::Io(_) => err,
             other => other,
         })?;
-        let raw_value = extract(&raw, node.bitfield).map_err(|err| map_bitops_error(name, err))?;
+        let raw_value = extract(&raw, bitfield).map_err(|err| map_bitops_error(name, err))?;
         let value = raw_value != 0;
         debug!(node = %name, raw = raw_value, value, "read boolean feature");
         node.cache.replace(Some(value));
@@ -639,10 +797,21 @@ impl NodeMap {
         let node = self.get_bool_node(name)?;
         ensure_writable(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            let on = node.on_value.unwrap_or(1);
+            let off = node.off_value.unwrap_or(0);
+            let raw = if value { on } else { off };
+            return self.set_integer(&pv, raw, io);
+        }
+        let addressing = node.addressing.as_ref()
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+        let bitfield = node.bitfield
+            .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
+        let (address, len) = self.resolve_address(name, addressing, io)?;
         let encoded = if value { 1 } else { 0 };
         let mut raw = get_raw_or_read(&node.raw_cache, io, address, len)?;
-        insert(&mut raw, node.bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
+        insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
         debug!(node = %name, raw = encoded, value, "write boolean feature");
         io.write(address, &raw).map_err(|err| match err {
             GenApiError::Io(_) => err,
@@ -654,20 +823,30 @@ impl NodeMap {
         Ok(())
     }
 
-    /// Execute a command feature by writing a one-valued payload.
+    /// Execute a command feature by writing a value to the command register.
     pub fn exec_command(&mut self, name: &str, io: &dyn RegisterIo) -> Result<(), GenApiError> {
         let node = self.get_command_node(name)?;
+        // Determine the value to write and the target.
+        let cmd_value = node.command_value.unwrap_or(1);
+
+        if let Some(ref pv) = node.pvalue {
+            // Delegate to the pValue node.
+            let pv = pv.clone();
+            debug!(node = %name, "execute command via pValue");
+            return self.set_integer(&pv, cmd_value, io);
+        }
+
+        let address = node.address.ok_or_else(|| {
+            GenApiError::NodeNotFound(format!("{name}: no address or pValue"))
+        })?;
         if node.len == 0 {
             return Err(GenApiError::Parse(format!(
                 "command node {name} has zero length"
             )));
         }
-        let mut data = vec![0u8; node.len as usize];
-        if let Some(last) = data.last_mut() {
-            *last = 1;
-        }
+        let data = i64_to_bytes(name, cmd_value, node.len)?;
         debug!(node = %name, "execute command");
-        io.write(node.address, &data).map_err(|err| match err {
+        io.write(address, &data).map_err(|err| match err {
             GenApiError::Io(_) => err,
             other => other,
         })?;

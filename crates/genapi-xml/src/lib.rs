@@ -219,12 +219,12 @@ pub struct StringDecl {
 /// Declaration of a node extracted from the GenICam XML description.
 #[derive(Debug, Clone)]
 pub enum NodeDecl {
-    /// Integer feature backed by a fixed register block.
+    /// Integer feature backed by a register block or delegated via pValue.
     Integer {
         /// Feature name.
         name: String,
-        /// Addressing metadata.
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         /// Length in bytes of the register payload.
         len: u32,
         /// Access privileges.
@@ -243,11 +243,21 @@ pub enum NodeDecl {
         selectors: Vec<String>,
         /// Selector gating rules in the form (selector name, allowed values).
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the value (delegates read/write to another node).
+        pvalue: Option<String>,
+        /// Node providing the dynamic maximum.
+        p_max: Option<String>,
+        /// Node providing the dynamic minimum.
+        p_min: Option<String>,
+        /// Static value (for constant integer nodes with `<Value>`).
+        value: Option<i64>,
     },
-    /// Floating point feature backed by an integer register with scaling.
+    /// Floating point feature backed by an integer register with scaling
+    /// or delegated via pValue.
     Float {
         name: String,
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         access: AccessMode,
         min: f64,
         max: f64,
@@ -258,32 +268,49 @@ pub enum NodeDecl {
         offset: Option<f64>,
         selectors: Vec<String>,
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the value (delegates read/write to another node).
+        pvalue: Option<String>,
     },
     /// Enumeration feature exposing a list of named integer values.
     Enum {
         name: String,
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         access: AccessMode,
         entries: Vec<EnumEntryDecl>,
         default: Option<String>,
         selectors: Vec<String>,
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the integer value (delegates register read/write).
+        pvalue: Option<String>,
     },
-    /// Boolean feature backed by a single bit/byte register.
+    /// Boolean feature backed by a single bit/byte register or delegated via pValue.
     Boolean {
         name: String,
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         len: u32,
         access: AccessMode,
-        bitfield: BitField,
+        bitfield: Option<BitField>,
         selectors: Vec<String>,
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the value (delegates read/write to another node).
+        pvalue: Option<String>,
+        /// On value for pValue-backed booleans.
+        on_value: Option<i64>,
+        /// Off value for pValue-backed booleans.
+        off_value: Option<i64>,
     },
     /// Command feature that triggers an action when written.
     Command {
         name: String,
-        address: u64,
+        /// Fixed register address (absent when delegated via `pvalue`).
+        address: Option<u64>,
         len: u32,
+        /// Node providing the command register (delegates write).
+        pvalue: Option<String>,
+        /// Value to write when executing the command.
+        command_value: Option<i64>,
     },
     /// Category used to organise features.
     Category { name: String, children: Vec<String> },
@@ -371,11 +398,16 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 b"RegisterDescription" => {
                     version = schema_version_from(e)?;
                 }
-                b"Integer" => {
+                b"Integer" | b"IntReg" | b"MaskedIntReg" => {
                     let node = parse_integer(&mut reader, e.clone())?;
                     nodes.push(node);
                 }
-                b"Float" => {
+                b"IntSwissKnife" => {
+                    // IntSwissKnife may use hex literals and Formula tag which our
+                    // expression parser doesn't fully support yet. Skip gracefully.
+                    skip_element(&mut reader, e.name().as_ref())?;
+                }
+                b"Float" | b"FloatReg" => {
                     let node = parse_float(&mut reader, e.clone())?;
                     nodes.push(node);
                 }
@@ -731,7 +763,7 @@ mod tests {
             } => {
                 assert_eq!(name, "RegAddr");
                 assert!(
-                    matches!(addressing, Addressing::Fixed { address, len } if *address == 0x2000 && *len == 4)
+                    matches!(addressing, Some(Addressing::Fixed { address, len }) if *address == 0x2000 && *len == 4)
                 );
             }
             other => panic!("unexpected node: {other:?}"),
@@ -742,10 +774,10 @@ mod tests {
             } => {
                 assert_eq!(name, "Gain");
                 match addressing {
-                    Addressing::Indirect {
+                    Some(Addressing::Indirect {
                         p_address_node,
                         len,
-                    } => {
+                    }) => {
                         assert_eq!(p_address_node, "RegAddr");
                         assert_eq!(*len, 4);
                     }
@@ -778,7 +810,7 @@ mod tests {
         match &model.nodes[0] {
             NodeDecl::Integer { len, bitfield, .. } => {
                 assert_eq!(*len, 4);
-                let field = bitfield.expect("bitfield present");
+                let field = bitfield.as_ref().expect("bitfield present");
                 assert_eq!(field.byte_order, ByteOrder::Big);
                 assert_eq!(field.bit_length, 8);
                 assert_eq!(field.bit_offset, 16);
@@ -805,9 +837,10 @@ mod tests {
         match &model.nodes[0] {
             NodeDecl::Boolean { len, bitfield, .. } => {
                 assert_eq!(*len, 1);
-                assert_eq!(bitfield.byte_order, ByteOrder::Little);
-                assert_eq!(bitfield.bit_length, 1);
-                assert_eq!(bitfield.bit_offset, 3);
+                let bf = bitfield.as_ref().expect("bitfield present");
+                assert_eq!(bf.byte_order, ByteOrder::Little);
+                assert_eq!(bf.bit_length, 1);
+                assert_eq!(bf.bit_offset, 3);
             }
             other => panic!("unexpected node: {other:?}"),
         }
@@ -832,7 +865,7 @@ mod tests {
         assert_eq!(model.nodes.len(), 1);
         match &model.nodes[0] {
             NodeDecl::Integer { bitfield, .. } => {
-                let field = bitfield.expect("bitfield present");
+                let field = bitfield.as_ref().expect("bitfield present");
                 assert_eq!(field.byte_order, ByteOrder::Little);
                 assert_eq!(field.bit_length, 8);
                 assert_eq!(field.bit_offset, 8);

@@ -756,6 +756,18 @@ impl RegisterIo for GigeRegisterIo {
 pub async fn connect_gige(
     device: &gige::DeviceInfo,
 ) -> Result<Camera<GigeRegisterIo>, GenicamError> {
+    let (camera, _xml) = connect_gige_with_xml(device).await?;
+    Ok(camera)
+}
+
+/// Connect to a GigE Vision camera and return both a [`Camera`] and the raw
+/// GenICam XML string fetched from the device.
+///
+/// This is useful when the caller needs the XML for purposes beyond node
+/// evaluation (e.g. forwarding it over a network API).
+pub async fn connect_gige_with_xml(
+    device: &gige::DeviceInfo,
+) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
     use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
@@ -796,7 +808,7 @@ pub async fn connect_gige(
     let transport = GigeRegisterIo::new(handle, control_device);
 
     info!("GigE camera connected successfully");
-    Ok(Camera::new(transport, nodemap))
+    Ok((Camera::new(transport, nodemap), xml))
 }
 
 fn parse_bool(value: &str) -> Option<bool> {

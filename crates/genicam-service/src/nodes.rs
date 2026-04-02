@@ -229,6 +229,41 @@ pub async fn run_bulk_read_queryable(
     }
 }
 
+/// Publish initial values for common SFNC nodes after device connection.
+pub async fn publish_initial_values(
+    session: &Session,
+    device: &crate::device::DeviceHandle,
+) {
+    let device_id = device.device_id();
+    // Read and publish key SFNC feature values.
+    let sfnc_nodes = [
+        "Width",
+        "Height",
+        "PixelFormat",
+        "ExposureTime",
+        "ExposureTimeAbs",
+        "Gain",
+        "GainRaw",
+        "AcquisitionMode",
+        "DeviceModelName",
+        "DeviceVendorName",
+        "DeviceSerialNumber",
+        "SensorWidth",
+        "SensorHeight",
+        "OffsetX",
+        "OffsetY",
+        "BinningHorizontal",
+        "BinningVertical",
+    ];
+
+    for name in &sfnc_nodes {
+        if let Ok(value) = device.get_feature(name).await {
+            publish_node_value(session, device_id, name, &value).await;
+        }
+    }
+    info!(device_id, "published initial node values");
+}
+
 /// Publish a single node value update.
 async fn publish_node_value(session: &Session, device_id: &str, name: &str, value: &str) {
     let update = NodeValueUpdate {

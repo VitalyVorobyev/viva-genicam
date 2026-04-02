@@ -1,11 +1,10 @@
 //! GenICam camera service — bridges genicam-rs to Zenoh for genicam-studio.
-#![allow(dead_code)]
 
 mod acquisition;
 mod config;
 mod device;
-mod discovery;
 mod nodes;
+mod pixel_format;
 mod status;
 mod xml;
 
@@ -116,7 +115,7 @@ async fn run_discovery_loop(
                     }
 
                     info!(device_id, ip = %dev_info.ip, "new camera, connecting...");
-                    match DeviceHandle::connect(&dev_info).await {
+                    match DeviceHandle::connect(&dev_info, iface.clone()).await {
                         Ok(handle) => {
                             let handle = Arc::new(handle);
                             info!(device_id, "connected, spawning service tasks");
@@ -172,6 +171,7 @@ async fn spawn_device_tasks(
 
     // Publish connected status.
     status::publish_connected(&session, &device_id).await;
+    nodes::publish_initial_values(&session, &device).await;
 
     vec![
         tokio::spawn(xml::run(

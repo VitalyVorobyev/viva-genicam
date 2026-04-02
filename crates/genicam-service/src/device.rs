@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use genicam::{connect_gige_with_xml, gige, Camera, GenicamError, GigeRegisterIo};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Wraps a connected camera with its raw XML and device identity.
 pub struct DeviceHandle {
@@ -11,11 +11,16 @@ pub struct DeviceHandle {
     raw_xml: String,
     device_id: String,
     info: gige::DeviceInfo,
+    /// Network interface name for stream setup (e.g. "en0").
+    iface_name: Option<String>,
 }
 
 impl DeviceHandle {
     /// Connect to a discovered device and return a handle.
-    pub async fn connect(info: &gige::DeviceInfo) -> Result<Self, GenicamError> {
+    pub async fn connect(
+        info: &gige::DeviceInfo,
+        iface_name: Option<String>,
+    ) -> Result<Self, GenicamError> {
         let (camera, xml) = connect_gige_with_xml(info).await?;
         let device_id = Self::derive_device_id(info);
         Ok(Self {
@@ -23,6 +28,7 @@ impl DeviceHandle {
             raw_xml: xml,
             device_id,
             info: info.clone(),
+            iface_name,
         })
     }
 
@@ -46,6 +52,20 @@ impl DeviceHandle {
 
     pub fn info(&self) -> &gige::DeviceInfo {
         &self.info
+    }
+
+    pub fn iface_name(&self) -> Option<&str> {
+        self.iface_name.as_deref()
+    }
+
+    /// Open a second GigeDevice connection for GVSP stream control.
+    pub async fn open_stream_device(&self) -> Result<gige::GigeDevice, GenicamError> {
+        use std::net::{IpAddr, SocketAddr};
+        let addr = SocketAddr::new(IpAddr::V4(self.info.ip), gige::GVCP_PORT);
+        info!(device_id = self.device_id, %addr, "opening stream control device");
+        gige::GigeDevice::open(addr)
+            .await
+            .map_err(|e| GenicamError::Transport(e.to_string()))
     }
 
     /// Read a feature value via spawn_blocking.
@@ -84,6 +104,7 @@ impl DeviceHandle {
     }
 
     /// Read the model name from the camera (best-effort).
+    #[allow(dead_code)]
     pub async fn model_name(&self) -> String {
         self.get_feature("DeviceModelName")
             .await
@@ -96,6 +117,7 @@ impl DeviceHandle {
     }
 
     /// Read the serial number from the camera (best-effort).
+    #[allow(dead_code)]
     pub async fn serial_number(&self) -> String {
         match self.get_feature("DeviceSerialNumber").await {
             Ok(sn) if !sn.is_empty() => sn,

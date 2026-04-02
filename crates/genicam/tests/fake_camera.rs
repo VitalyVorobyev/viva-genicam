@@ -243,6 +243,10 @@ async fn test_read_nonexistent_node() {
 
 // ---------------------------------------------------------------------------
 // Phase 3: Streaming
+//
+// NOTE: These tests timeout on macOS loopback because GVSP (raw UDP frame
+// packets) cannot traverse the loopback interface reliably on macOS.
+// They are expected to pass when run against a real camera on a real NIC.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

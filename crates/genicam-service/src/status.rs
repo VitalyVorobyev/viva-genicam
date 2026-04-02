@@ -26,6 +26,7 @@ pub async fn publish_connected(session: &Arc<Session>, device_id: &str) {
 }
 
 /// Publish a disconnected status for the device.
+#[allow(dead_code)]
 pub async fn publish_disconnected(session: &Arc<Session>, device_id: &str, reason: &str) {
     let status = DeviceStatus {
         connected: false,

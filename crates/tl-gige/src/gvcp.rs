@@ -659,7 +659,7 @@ impl GigeDevice {
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_ADDRESS);
         self.write_mem(addr, &ip.octets()).await?;
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_PORT);
-        self.write_mem(addr, &port.to_be_bytes()).await?;
+        self.write_mem(addr, &(port as u32).to_be_bytes()).await?;
         Ok(())
     }
 

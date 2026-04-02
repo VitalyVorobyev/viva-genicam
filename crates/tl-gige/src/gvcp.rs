@@ -60,18 +60,23 @@ pub mod consts {
     /// Maximum number of bytes captured while listening for discovery responses.
     pub const DISCOVERY_BUFFER: usize = 2048;
 
-    /// Base register for stream channel configuration (GigE Vision 2.1, table 63).
-    pub const STREAM_CHANNEL_BASE: u64 = 0x0900_0400;
+    /// Base register for stream channel 0 (GigE Vision bootstrap register map).
+    ///
+    /// The GigE Vision specification defines stream channel bootstrap registers
+    /// starting at 0x0d00. Note: some cameras may use different offsets declared
+    /// in their GenICam XML (e.g. SFNC `GevSCDA` nodes). The bootstrap offsets
+    /// here match the aravis implementation and the GigE Vision 2.x standard.
+    pub const STREAM_CHANNEL_BASE: u64 = 0x0d00;
     /// Stride in bytes between successive stream channel blocks.
     pub const STREAM_CHANNEL_STRIDE: u64 = 0x40;
-    /// Offset for `GevSCPHostIPAddress` within a stream channel block.
-    pub const STREAM_DESTINATION_ADDRESS: u64 = 0x00;
     /// Offset for `GevSCPHostPort` within a stream channel block.
-    pub const STREAM_DESTINATION_PORT: u64 = 0x04;
+    pub const STREAM_DESTINATION_PORT: u64 = 0x00;
     /// Offset for `GevSCPSPacketSize` within a stream channel block.
-    pub const STREAM_PACKET_SIZE: u64 = 0x24;
+    pub const STREAM_PACKET_SIZE: u64 = 0x04;
     /// Offset for `GevSCPD` (packet delay) within a stream channel block.
-    pub const STREAM_PACKET_DELAY: u64 = 0x28;
+    pub const STREAM_PACKET_DELAY: u64 = 0x08;
+    /// Offset for `GevSCDA` (stream destination IP address) within a stream channel block.
+    pub const STREAM_DESTINATION_ADDRESS: u64 = 0x18;
 }
 
 /// Public alias for the GVCP well-known port.

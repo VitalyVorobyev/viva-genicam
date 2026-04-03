@@ -171,16 +171,25 @@ pub enum GvspPacket {
 }
 
 /// Parse a raw UDP payload into a GVSP packet.
+/// Parse a GVSP packet from raw bytes.
+///
+/// GVSP header layout (8 bytes):
+///
+/// | Offset | Size | Field         |
+/// |--------|------|---------------|
+/// |      0 |    2 | Status        |
+/// |      2 |    2 | Block ID      |
+/// |      4 |    1 | Packet format |
+/// |      5 |    3 | Packet ID     |
 pub fn parse_packet(payload: &[u8]) -> Result<GvspPacket, GvspError> {
     if payload.len() < GVSP_HEADER_SIZE {
         return Err(GvspError::Invalid("GVSP header truncated"));
     }
-    let mut cursor = payload;
-    let status = cursor.get_u16();
-    let block_id = cursor.get_u16();
-    let packet_id = cursor.get_u16();
-    let payload_type = (status >> 8) as u8;
-    let packet_format = status & 0x00FF;
+    let status = u16::from_be_bytes([payload[0], payload[1]]);
+    let block_id = u16::from_be_bytes([payload[2], payload[3]]);
+    let packet_format = payload[4];
+    let packet_id = u32::from_be_bytes([0, payload[5], payload[6], payload[7]]) as u16;
+    let payload_type = (status >> 4) as u8;
 
     match packet_format {
         0x01 => parse_leader(
@@ -189,29 +198,43 @@ pub fn parse_packet(payload: &[u8]) -> Result<GvspPacket, GvspError> {
             payload_type,
             &payload[GVSP_HEADER_SIZE..],
         ),
-        0x02 => parse_payload(packet_id, block_id, &payload[GVSP_HEADER_SIZE..]),
-        0x03 => parse_trailer(packet_id, block_id, &payload[GVSP_HEADER_SIZE..]),
+        0x03 => parse_payload(packet_id, block_id, &payload[GVSP_HEADER_SIZE..]),
+        0x02 => parse_trailer(packet_id, block_id, &payload[GVSP_HEADER_SIZE..]),
         _ => Err(GvspError::Unsupported("packet format")),
     }
 }
 
+/// Parse a GVSP Data Leader packet.
+///
+/// Leader payload layout:
+///
+/// | Offset | Size | Field        |
+/// |--------|------|--------------|
+/// |      0 |    2 | Reserved     |
+/// |      2 |    2 | Payload type |
+/// |      4 |    8 | Timestamp    |
+/// |     12 |    4 | Pixel format |
+/// |     16 |    4 | Width        |
+/// |     20 |    4 | Height       |
 fn parse_leader(
     packet_id: u16,
     block_id: u16,
-    payload_type: u8,
+    _payload_type_header: u8,
     payload: &[u8],
 ) -> Result<GvspPacket, GvspError> {
-    if payload_type != PAYLOAD_TYPE_IMAGE {
-        return Err(GvspError::Unsupported("payload type"));
-    }
     if payload.len() < 24 {
         return Err(GvspError::Invalid("leader payload truncated"));
     }
     let mut cursor = payload;
+    let _reserved = cursor.get_u16();
+    let payload_type = cursor.get_u16() as u8;
+    if payload_type != PAYLOAD_TYPE_IMAGE {
+        return Err(GvspError::Unsupported("payload type"));
+    }
     let timestamp = cursor.get_u64();
+    let pixel_format = cursor.get_u32();
     let width = cursor.get_u32();
     let height = cursor.get_u32();
-    let pixel_format = cursor.get_u32();
     Ok(GvspPacket::Leader {
         block_id,
         packet_id,

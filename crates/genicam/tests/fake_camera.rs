@@ -309,6 +309,56 @@ async fn setup_stream(
     (frame_stream, camera)
 }
 
+/// Diagnostic: full StreamBuilder + FrameStream, acquisition via direct write_mem (async).
+#[tokio::test]
+#[ignore]
+async fn test_raw_gvsp_socket() {
+    skip_if_no_aravis!();
+    let _cam = common::FakeCamera::start();
+    let device_info = discover_fake().await;
+
+    use std::net::{IpAddr, SocketAddr};
+
+    let control_addr = SocketAddr::new(IpAddr::V4(device_info.ip), gige::GVCP_PORT);
+
+    let mut device = gige::GigeDevice::open(control_addr)
+        .await
+        .expect("open device");
+    device.claim_control().await.expect("claim CCP");
+
+    let iface =
+        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
+    let stream = genicam::StreamBuilder::new(&mut device)
+        .iface(iface)
+        .auto_packet_size(false)
+        .build()
+        .await
+        .expect("build stream");
+    let mut frame_stream = genicam::FrameStream::new(stream, None);
+
+    // Start acquisition directly (async, not spawn_blocking).
+    device
+        .write_mem(0x124, &1u32.to_be_bytes())
+        .await
+        .expect("acq start");
+
+    // Try FrameStream::next_frame directly.
+    let result = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame()).await;
+    match result {
+        Ok(Ok(Some(frame))) => {
+            eprintln!("FRAME: {}x{} {:?}", frame.width, frame.height, frame.pixel_format);
+        }
+        Ok(Ok(None)) => panic!("stream ended without frames"),
+        Ok(Err(e)) => panic!("frame error: {e}"),
+        Err(_) => panic!("FrameStream timeout — packets arrive on raw socket but FrameStream fails"),
+    }
+
+    device
+        .write_mem(0x124, &0u32.to_be_bytes())
+        .await
+        .expect("acq stop");
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_stream_receives_frames() {

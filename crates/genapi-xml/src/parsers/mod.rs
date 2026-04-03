@@ -3,6 +3,7 @@
 mod control;
 mod converter;
 mod numeric;
+mod struct_reg;
 mod swissknife;
 mod symbolic;
 
@@ -10,6 +11,7 @@ pub use control::{parse_category, parse_category_empty, parse_command, parse_com
 pub use converter::{parse_converter, parse_int_converter, parse_string};
 pub use numeric::{parse_float, parse_integer};
 pub use swissknife::parse_swissknife;
+pub use struct_reg::parse_struct_reg;
 pub use symbolic::{parse_boolean, parse_enum};
 
 use quick_xml::events::BytesStart;

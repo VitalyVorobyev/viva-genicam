@@ -18,7 +18,7 @@ use thiserror::Error;
 use parsers::{
     parse_boolean, parse_category, parse_category_empty, parse_command, parse_command_empty,
     parse_converter, parse_enum, parse_float, parse_int_converter, parse_integer, parse_string,
-    parse_swissknife,
+    parse_struct_reg, parse_swissknife,
 };
 use util::{attribute_value, skip_element};
 
@@ -403,9 +403,8 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     nodes.push(node);
                 }
                 b"IntSwissKnife" => {
-                    // IntSwissKnife may use hex literals and Formula tag which our
-                    // expression parser doesn't fully support yet. Skip gracefully.
-                    skip_element(&mut reader, e.name().as_ref())?;
+                    let node = parse_swissknife(&mut reader, e.clone())?;
+                    nodes.push(node);
                 }
                 b"Float" | b"FloatReg" => {
                     let node = parse_float(&mut reader, e.clone())?;
@@ -442,6 +441,14 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 b"StringReg" | b"String" => {
                     let node = parse_string(&mut reader, e.clone())?;
                     nodes.push(node);
+                }
+                b"StructReg" => {
+                    let entries = parse_struct_reg(&mut reader, e.clone())?;
+                    nodes.extend(entries);
+                }
+                b"Port" => {
+                    // Port nodes are transport-level abstractions; skip them.
+                    skip_element(&mut reader, e.name().as_ref())?;
                 }
                 _ => {
                     skip_element(&mut reader, e.name().as_ref())?;
@@ -691,6 +698,44 @@ mod tests {
         assert_eq!(
             swiss.variables[1],
             ("Offset".to_string(), "Offset".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_int_swissknife_with_hex_and_ampersand() {
+        // Test that &amp; is decoded to & and hex literals are supported.
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntSwissKnife Name="PayloadSize">
+                    <pVariable Name="W">Width</pVariable>
+                    <pVariable Name="H">Height</pVariable>
+                    <pVariable Name="PF">PixelFormat</pVariable>
+                    <Formula>W * H * ((PF>>16)&amp;0xFF) / 8</Formula>
+                </IntSwissKnife>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse intswissknife");
+        assert_eq!(model.nodes.len(), 1);
+        let swiss = model
+            .nodes
+            .iter()
+            .find_map(|decl| match decl {
+                NodeDecl::SwissKnife(node) => Some(node),
+                _ => None,
+            })
+            .expect("swissknife present");
+        assert_eq!(swiss.name, "PayloadSize");
+        // &amp; should be decoded to &
+        assert!(
+            swiss.expr.contains('&'),
+            "expression should contain decoded '&': {}",
+            swiss.expr
+        );
+        assert!(
+            swiss.expr.contains("0xFF"),
+            "expression should contain hex literal: {}",
+            swiss.expr
         );
     }
 

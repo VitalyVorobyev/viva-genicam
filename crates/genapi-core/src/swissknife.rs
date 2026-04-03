@@ -591,6 +591,27 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self) -> Result<Token, ParseError> {
         let start = self.pos;
+
+        // Check for hex literal: 0x or 0X
+        if self.peek() == Some(b'0') {
+            let next = self.input.get(self.pos + 1).copied();
+            if next == Some(b'x') || next == Some(b'X') {
+                self.pos += 2; // skip "0x"
+                let hex_start = self.pos;
+                while let Some(b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F') = self.peek() {
+                    self.pos += 1;
+                }
+                if self.pos == hex_start {
+                    return Err(ParseError::new("hex literal has no digits"));
+                }
+                let hex_text = std::str::from_utf8(&self.input[hex_start..self.pos])
+                    .map_err(|_| ParseError::new("invalid UTF-8 in hex literal"))?;
+                let value = u64::from_str_radix(hex_text, 16)
+                    .map_err(|_| ParseError::new(format!("invalid hex literal: 0x{hex_text}")))?;
+                return Ok(Token::Number(value as f64));
+            }
+        }
+
         let mut seen_digit = false;
         let mut seen_dot = false;
         let mut seen_exp = false;
@@ -1043,6 +1064,23 @@ mod tests {
         assert_eq!(eval_expr("5 ^ 3", &[]), 6.0); // 101 ^ 011 = 110
         assert_eq!(eval_expr("1 << 3", &[]), 8.0);
         assert_eq!(eval_expr("8 >> 2", &[]), 2.0);
+    }
+
+    #[test]
+    fn hex_literals() {
+        assert_eq!(eval_expr("0xFF", &[]), 255.0);
+        assert_eq!(eval_expr("0x10", &[]), 16.0);
+        assert_eq!(eval_expr("0x0", &[]), 0.0);
+        assert_eq!(eval_expr("0xDEAD", &[]), 0xDEAD as f64);
+        assert_eq!(eval_expr("(0x01080001 >> 16) & 0xFF", &[]), 8.0);
+        // The aravis PayloadSize formula
+        assert_eq!(
+            eval_expr(
+                "W * H * ((PF>>16)&0xFF) / 8",
+                &[("W", 512.0), ("H", 512.0), ("PF", 0x01080001_u32 as f64)]
+            ),
+            512.0 * 512.0 * 8.0 / 8.0
+        );
     }
 
     #[test]

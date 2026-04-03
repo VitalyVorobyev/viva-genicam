@@ -448,7 +448,7 @@ impl GigeDevice {
     /// Connect to a device GVCP endpoint.
     ///
     /// The connection is ready for register read/write but does not claim
-    /// control privilege. Call [`claim_control`] before configuring streaming
+    /// control privilege. Call [`Self::claim_control`] before configuring streaming
     /// or starting acquisition.
     pub async fn open(addr: SocketAddr) -> Result<Self, GigeError> {
         let local_ip = match addr.ip() {

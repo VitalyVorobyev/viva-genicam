@@ -1,4 +1,4 @@
-//! Per-device state wrapping Camera<GigeRegisterIo>.
+//! Per-device state wrapping `Camera<GigeRegisterIo>`.
 
 use std::sync::{Arc, Mutex};
 

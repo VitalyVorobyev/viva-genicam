@@ -27,6 +27,7 @@ pfnc = { version = "0.1.0", path = "../pfnc" }
 genicp = { version = "0.1.0", path = "../genicp" }
 
 [dev-dependencies]
+genapi-xml = { version = "0.1.0", path = "../genapi-xml" }
 fastrand = "2"
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }

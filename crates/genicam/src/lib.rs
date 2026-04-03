@@ -775,11 +775,17 @@ pub async fn connect_gige_with_xml(
     let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
     info!(%control_addr, "connecting to GigE Vision camera");
 
-    let control = Arc::new(AsyncMutex::new(
-        gige::GigeDevice::open(control_addr)
-            .await
-            .map_err(|e| GenicamError::transport(e.to_string()))?,
-    ));
+    let mut device = gige::GigeDevice::open(control_addr)
+        .await
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    // Claim control privilege (required before configuration and streaming).
+    device
+        .claim_control()
+        .await
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    let control = Arc::new(AsyncMutex::new(device));
 
     // Fetch and parse the GenApi XML.
     let xml = genapi_xml::fetch_and_load_xml({

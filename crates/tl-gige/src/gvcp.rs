@@ -34,6 +34,14 @@ pub mod consts {
     /// Opcode of the packet resend acknowledgement.
     pub const PACKET_RESEND_ACK: u16 = 0x0041;
 
+    /// Address of the Control Channel Privilege (CCP) register.
+    ///
+    /// A controller must write `CONTROL_PRIVILEGE` to this register before the
+    /// device accepts stream configuration or acquisition commands.
+    pub const CONTROL_CHANNEL_PRIVILEGE: u64 = 0x0a00;
+    /// CCP value claiming exclusive control.
+    pub const CCP_CONTROL: u32 = 1 << 1;
+
     /// Address of the SFNC `GevMessageChannel0DestinationAddress` register.
     pub const MESSAGE_DESTINATION_ADDRESS: u64 = 0x0900_0200;
     /// Address of the SFNC `GevMessageChannel0DestinationPort` register.
@@ -440,6 +448,10 @@ pub struct StreamParams {
 
 impl GigeDevice {
     /// Connect to a device GVCP endpoint.
+    ///
+    /// The connection is ready for register read/write but does not claim
+    /// control privilege. Call [`claim_control`] before configuring streaming
+    /// or starting acquisition.
     pub async fn open(addr: SocketAddr) -> Result<Self, GigeError> {
         let local_ip = match addr.ip() {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -455,6 +467,26 @@ impl GigeDevice {
             request_id: 1,
             rng: Rng::new(),
         })
+    }
+
+    /// Claim control channel privilege (CCP).
+    ///
+    /// Required by the GigE Vision specification before the device accepts
+    /// stream configuration or acquisition commands.
+    pub async fn claim_control(&mut self) -> Result<(), GigeError> {
+        self.write_mem(
+            consts::CONTROL_CHANNEL_PRIVILEGE,
+            &consts::CCP_CONTROL.to_be_bytes(),
+        )
+        .await?;
+        debug!(addr = %self.remote, "claimed control channel privilege");
+        Ok(())
+    }
+
+    /// Release control channel privilege.
+    pub async fn release_control(&mut self) -> Result<(), GigeError> {
+        self.write_mem(consts::CONTROL_CHANNEL_PRIVILEGE, &0u32.to_be_bytes())
+            .await
     }
 
     /// Return the remote GVCP socket address associated with this device.

@@ -9,6 +9,8 @@
 
 mod common;
 
+#[allow(clippy::single_component_path_imports)]
+use genapi_xml;
 use genicam::{connect_gige, connect_gige_with_xml, gige, Camera, GigeRegisterIo};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -244,37 +246,77 @@ async fn test_read_nonexistent_node() {
 // ---------------------------------------------------------------------------
 // Phase 3: Streaming
 //
-// NOTE: These tests timeout on macOS loopback because GVSP (raw UDP frame
-// packets) cannot traverse the loopback interface reliably on macOS.
-// They are expected to pass when run against a real camera on a real NIC.
+// These tests use a single GVCP connection for both control and streaming.
+// GigE Vision's CCP (Control Channel Privilege) requires that the same
+// socket that claimed control also configures stream registers.
 // ---------------------------------------------------------------------------
+
+/// Helper: set up a streaming session.
+///
+/// Uses a single CCP-holding connection for stream config and acquisition.
+/// XML is fetched via a temporary non-CCP connection (reads don't need CCP).
+/// Returns (FrameStream, Camera wrapped around the CCP device).
+async fn setup_stream(
+    device_info: &gige::DeviceInfo,
+) -> (genicam::FrameStream, Arc<Mutex<Camera<GigeRegisterIo>>>) {
+    use std::net::{IpAddr, SocketAddr};
+
+    let control_addr = SocketAddr::new(IpAddr::V4(device_info.ip), gige::GVCP_PORT);
+
+    // Fetch XML via a temporary connection (reads don't require CCP).
+    let xml = genapi_xml::fetch_and_load_xml({
+        let addr = control_addr;
+        move |address, length| {
+            let addr = addr;
+            async move {
+                let mut dev = gige::GigeDevice::open(addr)
+                    .await
+                    .map_err(|e| genapi_xml::XmlError::Transport(e.to_string()))?;
+                dev.read_mem(address, length)
+                    .await
+                    .map_err(|e| genapi_xml::XmlError::Transport(e.to_string()))
+            }
+        }
+    })
+    .await
+    .expect("fetch XML");
+
+    let model = genapi_xml::parse(&xml).expect("parse XML");
+    let nodemap = genicam::genapi::NodeMap::from(model);
+
+    // Main device: claim CCP, configure stream, then use for register I/O.
+    let mut device = gige::GigeDevice::open(control_addr)
+        .await
+        .expect("open device");
+    device.claim_control().await.expect("claim control");
+
+    // Configure stream on the CCP-holding device.
+    let iface =
+        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
+    let stream = genicam::StreamBuilder::new(&mut device)
+        .iface(iface)
+        .auto_packet_size(false)
+        .build()
+        .await
+        .expect("build stream");
+    let frame_stream = genicam::FrameStream::new(stream, None);
+
+    // Wrap the CCP-holding device into Camera for feature access.
+    let handle = tokio::runtime::Handle::current();
+    let transport = GigeRegisterIo::new(handle, device);
+    let camera = Arc::new(Mutex::new(Camera::new(transport, nodemap)));
+
+    (frame_stream, camera)
+}
 
 #[tokio::test]
 #[ignore]
 async fn test_stream_receives_frames() {
     skip_if_no_aravis!();
     let _cam = common::FakeCamera::start();
+    let device_info = discover_fake().await;
 
-    let device = discover_fake().await;
-    let camera = connect_fake().await;
-
-    // Second connection for stream control.
-    use std::net::{IpAddr, SocketAddr};
-    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
-    let mut stream_device = gige::GigeDevice::open(control_addr)
-        .await
-        .expect("open stream device");
-
-    let iface =
-        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface not found");
-    let stream = genicam::StreamBuilder::new(&mut stream_device)
-        .iface(iface)
-        .auto_packet_size(false)
-        .build()
-        .await
-        .expect("build stream");
-
-    let mut frame_stream = genicam::FrameStream::new(stream, None);
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
 
     // Start acquisition.
     let cam = camera.clone();
@@ -285,7 +327,7 @@ async fn test_stream_receives_frames() {
     .await
     .unwrap();
 
-    // Receive at least one frame with timeout.
+    // Receive at least one frame.
     let frame = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
         .await
         .expect("timeout waiting for frame")
@@ -296,7 +338,6 @@ async fn test_stream_receives_frames() {
     assert!(frame.height > 0, "frame height should be positive");
     assert!(!frame.payload.is_empty(), "frame payload should not be empty");
 
-    // Stop acquisition.
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
         let mut cam = cam.lock().unwrap();
@@ -311,9 +352,9 @@ async fn test_stream_receives_frames() {
 async fn test_frame_dimensions_match() {
     skip_if_no_aravis!();
     let _cam = common::FakeCamera::start();
+    let device_info = discover_fake().await;
 
-    let device = discover_fake().await;
-    let camera = connect_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
 
     // Read expected dimensions.
     let expected_w: u32 = blocking_get(&camera, "Width")
@@ -326,24 +367,6 @@ async fn test_frame_dimensions_match() {
         .expect("Height")
         .parse()
         .unwrap();
-
-    // Stream a frame.
-    use std::net::{IpAddr, SocketAddr};
-    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
-    let mut stream_device = gige::GigeDevice::open(control_addr)
-        .await
-        .expect("open stream device");
-
-    let iface =
-        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface not found");
-    let stream = genicam::StreamBuilder::new(&mut stream_device)
-        .iface(iface)
-        .auto_packet_size(false)
-        .build()
-        .await
-        .expect("build stream");
-
-    let mut frame_stream = genicam::FrameStream::new(stream, None);
 
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
@@ -376,28 +399,10 @@ async fn test_frame_dimensions_match() {
 async fn test_full_lifecycle() {
     skip_if_no_aravis!();
     let _cam = common::FakeCamera::start();
+    let device_info = discover_fake().await;
 
-    let device = discover_fake().await;
-    let camera = connect_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
 
-    use std::net::{IpAddr, SocketAddr};
-    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
-    let mut stream_device = gige::GigeDevice::open(control_addr)
-        .await
-        .expect("open stream device");
-
-    let iface =
-        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface not found");
-    let stream = genicam::StreamBuilder::new(&mut stream_device)
-        .iface(iface)
-        .auto_packet_size(false)
-        .build()
-        .await
-        .expect("build stream");
-
-    let mut frame_stream = genicam::FrameStream::new(stream, None);
-
-    // Start acquisition.
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
         let mut cam = cam.lock().unwrap();
@@ -417,7 +422,6 @@ async fn test_full_lifecycle() {
         assert!(frame.height > 0);
     }
 
-    // Stop acquisition.
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
         let mut cam = cam.lock().unwrap();
@@ -426,7 +430,6 @@ async fn test_full_lifecycle() {
     .await
     .unwrap();
 
-    // Drop everything — should not panic.
     drop(frame_stream);
     drop(camera);
 }

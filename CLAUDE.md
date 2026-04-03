@@ -67,7 +67,7 @@ genicp                  - Protocol primitives: GenCP encode/decode
 
 ## Key Abstractions
 
-**`RegisterIo` trait** (`genapi-core`): Core abstraction for register read/write. Implemented by `GigeDevice` (via async adapter) and `MockIo` for tests.
+**`RegisterIo` trait** (`genapi-core`): Core abstraction for register read/write. Implemented by `GigeDevice` (via async adapter), `MockIo` for tests, and `NullIo` for offline browsing.
 
 **`NodeMap`** (`genapi-core`): Parsed from XML, stores nodes by name, tracks dependency graph for cache invalidation. Supports `pValue` delegation (Integer/Float/Enum/Boolean/Command nodes can delegate to IntReg or other backing nodes).
 
@@ -85,20 +85,27 @@ Unit tests are embedded in source modules (`mod tests { }`). Integration tests a
 # Test single crate
 cargo test -p genapi-core
 
-# Integration tests with fake camera (8/11 pass; 3 streaming tests are known-skip on macOS loopback)
+# Integration tests with fake camera (12/12 pass on macOS loopback)
 cargo test -p genicam --test fake_camera -- --ignored --test-threads=1
 
 # Test with logging
 RUST_LOG=debug cargo test --workspace -- --nocapture
 ```
 
-**Note:** Streaming integration tests (`test_stream_*`, `test_full_lifecycle`) timeout on macOS loopback due to GVSP UDP limitations. They pass on real NICs with physical cameras.
-
 ## Documentation
 
 - **mdBook**: `book/` directory - tutorials, architecture, networking cookbook
 - **API docs**: Generated via `cargo doc`, published to GitHub Pages
 - **Examples**: 16 examples in `crates/genicam/examples/`
+
+## Shared Crate API (SX handoff)
+
+`genapi-xml` and `genapi-core` are designed for external consumption by genicam-studio:
+- All `genapi-xml` public types derive `Serialize`/`Deserialize` (serde)
+- `genapi-core` provides introspection: `NodeMap::node_names()`, `dependents()`, `categories()`, `Node::kind_name()`, `access_mode()`, `name()`
+- `NullIo` enables offline XML browsing without a camera
+- Both crates compile for `wasm32-unknown-unknown`
+- `fetch_and_load_xml` is behind the `fetch` feature flag (default on)
 
 ## Standards
 

@@ -184,9 +184,10 @@ Zenoh when acquisition is started from genicam-studio.
 
 ## Integration testing
 
-Integration tests use `arv-fake-gv-camera-0.8` from the
-[Aravis](https://github.com/AravisProject/aravis) project as a simulated
-GigE Vision device.
+12 integration tests validate the full stack against `arv-fake-gv-camera-0.8`
+from [Aravis](https://github.com/AravisProject/aravis) — covering discovery,
+connection, XML parsing, feature read/write, command execution, and frame
+streaming (all pass on macOS loopback).
 
 ```bash
 # Install aravis (macOS)

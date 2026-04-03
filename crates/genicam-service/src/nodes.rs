@@ -230,10 +230,7 @@ pub async fn run_bulk_read_queryable(
 }
 
 /// Publish initial values for common SFNC nodes after device connection.
-pub async fn publish_initial_values(
-    session: &Session,
-    device: &crate::device::DeviceHandle,
-) {
+pub async fn publish_initial_values(session: &Session, device: &crate::device::DeviceHandle) {
     let device_id = device.device_id();
     // Read and publish key SFNC feature values.
     let sfnc_nodes = [

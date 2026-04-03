@@ -44,8 +44,7 @@ impl FakeCamera {
         while start.elapsed() < STARTUP_TIMEOUT {
             // Try sending a minimal GVCP discovery packet and see if we get a response.
             if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
-                sock.set_read_timeout(Some(Duration::from_millis(200)))
-                    .ok();
+                sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
                 // GVCP discovery command: flags=0x11, cmd=0x0002, len=0, req_id=0x0001
                 let discovery_pkt = [0x42, 0x11, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01];
                 if sock.send_to(&discovery_pkt, addr).is_ok() {

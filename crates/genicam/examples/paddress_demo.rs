@@ -163,10 +163,11 @@ fn collect_indirect_integers(model: &genapi_xml::XmlModel) -> Vec<(String, Strin
 
 fn print_indirect_nodes(node: Option<&Node>) {
     if let Some(Node::Integer(genicam::genapi::IntegerNode {
-        addressing: Some(Addressing::Indirect {
-            p_address_node,
-            len,
-        }),
+        addressing:
+            Some(Addressing::Indirect {
+                p_address_node,
+                len,
+            }),
         ..
     })) = node
     {

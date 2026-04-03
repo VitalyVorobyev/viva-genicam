@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fastrand::Rng;
-use genicp::{
-    decode_ack, AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode,
-};
+use genicp::{decode_ack, AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode};
 use if_addrs::{get_if_addrs, IfAddr};
 use thiserror::Error;
 use tokio::net::UdpSocket;
@@ -393,7 +391,7 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
     // String fields.
     let manufacturer = read_fixed_string(&mut cursor, 32)?; // 72
     let model = read_fixed_string(&mut cursor, 32)?; // 104
-    // Remaining fields (version, info, serial, user name) are optional.
+                                                     // Remaining fields (version, info, serial, user name) are optional.
 
     Ok(DeviceInfo {
         ip,
@@ -647,8 +645,7 @@ impl GigeDevice {
 
         let mut offset = 0usize;
         while offset < data.len() {
-            let chunk =
-                (data.len() - offset).min(consts::GENCP_MAX_BLOCK - GVCP_WRITE_OVERHEAD);
+            let chunk = (data.len() - offset).min(consts::GENCP_MAX_BLOCK - GVCP_WRITE_OVERHEAD);
             if chunk == 0 {
                 return Err(GigeError::Protocol("write chunk size is zero".into()));
             }

@@ -36,5 +36,4 @@ impl Cli {
     pub fn discovery_interval(&self) -> Duration {
         Duration::from_secs(self.discovery_interval_s)
     }
-
 }

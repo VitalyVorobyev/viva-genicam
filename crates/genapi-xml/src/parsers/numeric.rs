@@ -253,10 +253,7 @@ pub fn parse_integer(
             .as_ref()
             .and_then(|a| addressing_lengths(a).first().copied())
             .unwrap_or(4);
-        let lengths = addr
-            .as_ref()
-            .map(addressing_lengths)
-            .unwrap_or_default();
+        let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
         let bf = bitfield.finish(&name, &lengths).ok().flatten();
         (addr, len, bf)
     } else {
@@ -400,10 +397,8 @@ pub fn parse_float(
         buf.clear();
     }
 
-    let min =
-        min.unwrap_or(f64::MIN);
-    let max =
-        max.unwrap_or(f64::MAX);
+    let min = min.unwrap_or(f64::MIN);
+    let max = max.unwrap_or(f64::MAX);
     let scale = match (scale_num, scale_den) {
         (Some(num), Some(den)) if den != 0 => Some((num, den)),
         (None, None) => None,

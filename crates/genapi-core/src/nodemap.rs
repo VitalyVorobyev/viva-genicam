@@ -104,22 +104,13 @@ impl NodeMap {
                         register_addressing_dependency(&mut dependents, &name, addr);
                     }
                     if let Some(ref pv) = pvalue {
-                        dependents
-                            .entry(pv.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pv.clone()).or_default().push(name.clone());
                     }
                     if let Some(ref pm) = p_max {
-                        dependents
-                            .entry(pm.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pm.clone()).or_default().push(name.clone());
                     }
                     if let Some(ref pm) = p_min {
-                        dependents
-                            .entry(pm.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pm.clone()).or_default().push(name.clone());
                     }
                     for (selector, _) in &selected_if {
                         dependents
@@ -165,10 +156,7 @@ impl NodeMap {
                         register_addressing_dependency(&mut dependents, &name, addr);
                     }
                     if let Some(ref pv) = pvalue {
-                        dependents
-                            .entry(pv.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pv.clone()).or_default().push(name.clone());
                     }
                     for (selector, _) in &selected_if {
                         dependents
@@ -206,10 +194,7 @@ impl NodeMap {
                         register_addressing_dependency(&mut dependents, &name, addr);
                     }
                     if let Some(ref pv) = pvalue {
-                        dependents
-                            .entry(pv.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pv.clone()).or_default().push(name.clone());
                     }
                     for (selector, _) in &selected_if {
                         dependents
@@ -262,10 +247,7 @@ impl NodeMap {
                         register_addressing_dependency(&mut dependents, &name, addr);
                     }
                     if let Some(ref pv) = pvalue {
-                        dependents
-                            .entry(pv.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pv.clone()).or_default().push(name.clone());
                     }
                     for (selector, _) in &selected_if {
                         dependents
@@ -297,10 +279,7 @@ impl NodeMap {
                     command_value,
                 } => {
                     if let Some(ref pv) = pvalue {
-                        dependents
-                            .entry(pv.clone())
-                            .or_default()
-                            .push(name.clone());
+                        dependents.entry(pv.clone()).or_default().push(name.clone());
                     }
                     let node = CommandNode {
                         name: name.clone(),
@@ -667,7 +646,9 @@ impl NodeMap {
             node.value_cache.replace(Some(entry.clone()));
             return Ok(entry);
         }
-        let addressing = node.addressing.as_ref()
+        let addressing = node
+            .addressing
+            .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
         if let Some(value) = node.value_cache.borrow().clone() {
@@ -714,7 +695,9 @@ impl NodeMap {
             self.invalidate_dependents(name);
             return Ok(());
         }
-        let addressing = node.addressing.as_ref()
+        let addressing = node
+            .addressing
+            .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
         let entry_decl = node
@@ -767,9 +750,12 @@ impl NodeMap {
             let on = node.on_value.unwrap_or(1);
             return Ok(raw == on);
         }
-        let addressing = node.addressing.as_ref()
+        let addressing = node
+            .addressing
+            .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let bitfield = node.bitfield
+        let bitfield = node
+            .bitfield
             .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
@@ -804,9 +790,12 @@ impl NodeMap {
             let raw = if value { on } else { off };
             return self.set_integer(&pv, raw, io);
         }
-        let addressing = node.addressing.as_ref()
+        let addressing = node
+            .addressing
+            .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let bitfield = node.bitfield
+        let bitfield = node
+            .bitfield
             .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
         let encoded = if value { 1 } else { 0 };
@@ -836,9 +825,9 @@ impl NodeMap {
             return self.set_integer(&pv, cmd_value, io);
         }
 
-        let address = node.address.ok_or_else(|| {
-            GenApiError::NodeNotFound(format!("{name}: no address or pValue"))
-        })?;
+        let address = node
+            .address
+            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no address or pValue")))?;
         if node.len == 0 {
             return Err(GenApiError::Parse(format!(
                 "command node {name} has zero length"

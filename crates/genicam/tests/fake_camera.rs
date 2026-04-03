@@ -202,7 +202,9 @@ async fn test_set_and_readback_width() {
         .await
         .expect("set Width");
 
-    let readback = blocking_get(&camera, "Width").await.expect("readback Width");
+    let readback = blocking_get(&camera, "Width")
+        .await
+        .expect("readback Width");
     let readback_val: i64 = readback.parse().unwrap();
     assert_eq!(
         readback_val, new_val,
@@ -292,8 +294,7 @@ async fn setup_stream(
     device.claim_control().await.expect("claim control");
 
     // Configure stream on the CCP-holding device.
-    let iface =
-        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
+    let iface = gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
     let stream = genicam::StreamBuilder::new(&mut device)
         .iface(iface)
         .auto_packet_size(false)
@@ -327,8 +328,7 @@ async fn test_raw_gvsp_socket() {
         .expect("open device");
     device.claim_control().await.expect("claim CCP");
 
-    let iface =
-        gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
+    let iface = gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
     let stream = genicam::StreamBuilder::new(&mut device)
         .iface(iface)
         .auto_packet_size(false)
@@ -347,11 +347,16 @@ async fn test_raw_gvsp_socket() {
     let result = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame()).await;
     match result {
         Ok(Ok(Some(frame))) => {
-            eprintln!("FRAME: {}x{} {:?}", frame.width, frame.height, frame.pixel_format);
+            eprintln!(
+                "FRAME: {}x{} {:?}",
+                frame.width, frame.height, frame.pixel_format
+            );
         }
         Ok(Ok(None)) => panic!("stream ended without frames"),
         Ok(Err(e)) => panic!("frame error: {e}"),
-        Err(_) => panic!("FrameStream timeout — packets arrive on raw socket but FrameStream fails"),
+        Err(_) => {
+            panic!("FrameStream timeout — packets arrive on raw socket but FrameStream fails")
+        }
     }
 
     device
@@ -387,7 +392,10 @@ async fn test_stream_receives_frames() {
 
     assert!(frame.width > 0, "frame width should be positive");
     assert!(frame.height > 0, "frame height should be positive");
-    assert!(!frame.payload.is_empty(), "frame payload should not be empty");
+    assert!(
+        !frame.payload.is_empty(),
+        "frame payload should not be empty"
+    );
 
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {

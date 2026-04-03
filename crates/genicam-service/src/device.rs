@@ -73,9 +73,9 @@ impl DeviceHandle {
         let cam = self.camera.clone();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || {
-            let cam = cam.lock().map_err(|_| {
-                GenicamError::Transport("camera mutex poisoned".to_string())
-            })?;
+            let cam = cam
+                .lock()
+                .map_err(|_| GenicamError::Transport("camera mutex poisoned".to_string()))?;
             cam.get(&name)
         })
         .await
@@ -88,9 +88,9 @@ impl DeviceHandle {
         let name = name.to_string();
         let value = value.to_string();
         tokio::task::spawn_blocking(move || {
-            let mut cam = cam.lock().map_err(|_| {
-                GenicamError::Transport("camera mutex poisoned".to_string())
-            })?;
+            let mut cam = cam
+                .lock()
+                .map_err(|_| GenicamError::Transport("camera mutex poisoned".to_string()))?;
             cam.set(&name, &value)
         })
         .await

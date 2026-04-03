@@ -331,11 +331,7 @@ async fn publish_status(session: &Session, device_id: &str, active: bool) {
     }
 }
 
-async fn publish_image_meta(
-    session: &Session,
-    device: &DeviceHandle,
-    device_id: &str,
-) {
+async fn publish_image_meta(session: &Session, device: &DeviceHandle, device_id: &str) {
     let width = device
         .get_feature("Width")
         .await

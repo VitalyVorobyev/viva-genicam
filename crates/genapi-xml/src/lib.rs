@@ -5,14 +5,17 @@
 //! into a structured representation that can be used by the core evaluation engine.
 
 mod builders;
+#[cfg(feature = "fetch")]
 mod fetch;
 mod parsers;
 mod util;
 
+#[cfg(feature = "fetch")]
 pub use fetch::fetch_and_load_xml;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use parsers::{
@@ -23,7 +26,7 @@ use parsers::{
 use util::{attribute_value, skip_element};
 
 /// Source of the numeric value backing an enumeration entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumValueSrc {
     /// Numeric literal declared directly in the XML.
     Literal(i64),
@@ -32,7 +35,7 @@ pub enum EnumValueSrc {
 }
 
 /// Declaration for a single enumeration entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumEntryDecl {
     /// Symbolic entry name exposed to clients.
     pub name: String,
@@ -55,7 +58,7 @@ pub enum XmlError {
 }
 
 /// Access privileges for a GenICam node as described in the XML.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccessMode {
     /// Read-only node. The underlying register must not be modified by the client.
     RO,
@@ -77,7 +80,7 @@ impl AccessMode {
 }
 
 /// Register addressing metadata for a node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Addressing {
     /// Node uses a fixed register block regardless of selector state.
     Fixed { address: u64, len: u32 },
@@ -98,7 +101,7 @@ pub enum Addressing {
 }
 
 /// Byte order used to interpret a multi-byte register payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ByteOrder {
     /// The first byte contains the least significant bits.
     Little,
@@ -117,7 +120,7 @@ impl ByteOrder {
 }
 
 /// Bitfield metadata describing a sub-range of a register payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitField {
     /// Starting bit offset within the interpreted register value.
     pub bit_offset: u16,
@@ -128,7 +131,7 @@ pub struct BitField {
 }
 
 /// Output type of a SwissKnife expression node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SkOutput {
     /// Integer output. The runtime rounds the computed value to the nearest
     /// integer with ties going towards zero.
@@ -150,7 +153,7 @@ impl SkOutput {
 }
 
 /// Declaration of a SwissKnife node consisting of an arithmetic expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwissKnifeDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -166,7 +169,7 @@ pub struct SwissKnifeDecl {
 ///
 /// Converters expose a floating-point value computed from an underlying
 /// register or node via a formula.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConverterDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -187,7 +190,7 @@ pub struct ConverterDecl {
 }
 
 /// Declaration of an IntConverter node for integer-specific bidirectional conversion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntConverterDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -206,7 +209,7 @@ pub struct IntConverterDecl {
 }
 
 /// Declaration of a StringReg node for string-typed register access.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StringDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -217,7 +220,7 @@ pub struct StringDecl {
 }
 
 /// Declaration of a node extracted from the GenICam XML description.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeDecl {
     /// Integer feature backed by a register block or delegated via pValue.
     Integer {
@@ -325,7 +328,7 @@ pub enum NodeDecl {
 }
 
 /// Full XML model describing the GenICam schema version and all declared nodes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XmlModel {
     /// Combined schema version extracted from the RegisterDescription attributes.
     pub version: String,

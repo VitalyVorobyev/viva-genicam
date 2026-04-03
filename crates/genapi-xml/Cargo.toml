@@ -13,8 +13,13 @@ categories = ["hardware-support", "network-programming", "science::robotics"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = ["fetch"]
+fetch = []
+
 [dependencies]
 quick-xml = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

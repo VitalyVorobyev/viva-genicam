@@ -34,6 +34,54 @@ pub enum Node {
 }
 
 impl Node {
+    /// Return the GenICam node type name (e.g. "Integer", "Float", "Enumeration").
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Node::Integer(_) => "Integer",
+            Node::Float(_) => "Float",
+            Node::Enum(_) => "Enumeration",
+            Node::Boolean(_) => "Boolean",
+            Node::Command(_) => "Command",
+            Node::Category(_) => "Category",
+            Node::SwissKnife(_) => "SwissKnife",
+            Node::Converter(_) => "Converter",
+            Node::IntConverter(_) => "IntConverter",
+            Node::String(_) => "StringReg",
+        }
+    }
+
+    /// Return the access mode of the node, if applicable.
+    pub fn access_mode(&self) -> Option<genapi_xml::AccessMode> {
+        match self {
+            Node::Integer(n) => Some(n.access),
+            Node::Float(n) => Some(n.access),
+            Node::Enum(n) => Some(n.access),
+            Node::Boolean(n) => Some(n.access),
+            Node::Command(_) => Some(genapi_xml::AccessMode::WO),
+            Node::Category(_) => None,
+            Node::SwissKnife(_) => Some(genapi_xml::AccessMode::RO),
+            Node::Converter(_) => Some(genapi_xml::AccessMode::RO),
+            Node::IntConverter(_) => Some(genapi_xml::AccessMode::RO),
+            Node::String(n) => Some(n.access),
+        }
+    }
+
+    /// Return the node name.
+    pub fn name(&self) -> &str {
+        match self {
+            Node::Integer(n) => &n.name,
+            Node::Float(n) => &n.name,
+            Node::Enum(n) => &n.name,
+            Node::Boolean(n) => &n.name,
+            Node::Command(n) => &n.name,
+            Node::Category(n) => &n.name,
+            Node::SwissKnife(n) => &n.name,
+            Node::Converter(n) => &n.name,
+            Node::IntConverter(n) => &n.name,
+            Node::String(n) => &n.name,
+        }
+    }
+
     pub(crate) fn invalidate_cache(&self) {
         match self {
             Node::Integer(node) => {

@@ -77,6 +77,32 @@ impl NodeMap {
         self.nodes.get(name)
     }
 
+    /// Return an iterator over all node names in the map.
+    pub fn node_names(&self) -> impl Iterator<Item = &str> {
+        self.nodes.keys().map(|s| s.as_str())
+    }
+
+    /// Return the list of nodes that should be invalidated when `name` changes.
+    ///
+    /// Returns an empty slice if the node has no dependents.
+    pub fn dependents(&self, name: &str) -> &[String] {
+        self.dependents
+            .get(name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Return all category nodes as `(name, children)` pairs.
+    pub fn categories(&self) -> Vec<(&str, &[String])> {
+        self.nodes
+            .values()
+            .filter_map(|node| match node {
+                Node::Category(cat) => Some((cat.name.as_str(), cat.children.as_slice())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Construct a [`NodeMap`] from an [`XmlModel`], validating SwissKnife expressions.
     pub fn try_from_xml(model: XmlModel) -> Result<Self, GenApiError> {
         let mut nodes = HashMap::new();

@@ -235,8 +235,12 @@ async fn frame_loop(
     mut stop: watch::Receiver<bool>,
 ) {
     let image_key = keys::image(&device_id);
+    let status_key = keys::acquisition_status(&device_id);
     let mut seq: u32 = 0;
     let mut frames_acquired: u64 = 0;
+    let mut fps_start = tokio::time::Instant::now();
+    let mut fps_frame_count: u64 = 0;
+    let fps_interval = std::time::Duration::from_secs(1);
 
     loop {
         tokio::select! {
@@ -252,7 +256,6 @@ async fn frame_loop(
                         };
                         let encoded_header = header.encode();
 
-                        // Concatenate header + pixel payload.
                         let mut payload = Vec::with_capacity(
                             encoded_header.len() + frame.payload.len(),
                         );
@@ -265,9 +268,23 @@ async fn frame_loop(
 
                         seq = seq.wrapping_add(1);
                         frames_acquired += 1;
+                        fps_frame_count += 1;
 
-                        if frames_acquired.is_multiple_of(100) {
-                            debug!(device_id, frames_acquired, "frame streaming progress");
+                        // Publish FPS periodically.
+                        let elapsed = fps_start.elapsed();
+                        if elapsed >= fps_interval {
+                            let fps = fps_frame_count as f32 / elapsed.as_secs_f32();
+                            let status = AcquisitionStatus {
+                                active: true,
+                                fps: Some(fps),
+                                dropped: 0,
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&status) {
+                                let _ = session.put(&status_key, payload).await;
+                            }
+                            fps_start = tokio::time::Instant::now();
+                            fps_frame_count = 0;
+                            debug!(device_id, fps, frames_acquired, "streaming");
                         }
                     }
                     Ok(None) => {

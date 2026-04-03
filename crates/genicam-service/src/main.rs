@@ -15,7 +15,7 @@ use clap::Parser;
 use config::Cli;
 use device::DeviceHandle;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -32,7 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let discovery_timeout = cli.discovery_timeout();
     let discovery_interval = cli.discovery_interval();
-    let _announce_interval = cli.announce_interval();
     let iface = cli.iface.clone();
 
     // Per-device task tracking.
@@ -49,7 +48,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             session_ref,
             discovery_timeout,
             discovery_interval,
-            _announce_interval,
             iface,
             shutdown_rx_ref,
             active_ref,
@@ -83,7 +81,6 @@ async fn run_discovery_loop(
     session: Arc<zenoh::Session>,
     discovery_timeout: std::time::Duration,
     discovery_interval: std::time::Duration,
-    _announce_interval: std::time::Duration,
     iface: Option<String>,
     mut shutdown: watch::Receiver<bool>,
     active_devices: Arc<tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
@@ -97,13 +94,17 @@ async fn run_discovery_loop(
             None => gige::discover(discovery_timeout).await,
         };
 
+        let mut discovered_ids = std::collections::HashSet::new();
+
         match devices {
             Ok(found) => {
+                for dev_info in &found {
+                    discovered_ids.insert(derive_device_id(dev_info));
+                }
                 for dev_info in found {
                     let device_id = derive_device_id(&dev_info);
                     let mut active = active_devices.lock().await;
                     if active.contains_key(&device_id) {
-                        // Already connected — just publish announce.
                         drop(active);
                         publish_announce(
                             &session,
@@ -143,12 +144,24 @@ async fn run_discovery_loop(
             }
         }
 
-        // Publish announces for all known devices.
-        let active = active_devices.lock().await;
-        for device_id in active.keys() {
-            publish_announce(&session, device_id, "").await;
+        // Detect lost devices (discovered_ids is empty on discovery failure — skip cleanup).
+        if !discovered_ids.is_empty() {
+            let mut active = active_devices.lock().await;
+            let lost: Vec<String> = active
+                .keys()
+                .filter(|id| !discovered_ids.contains(id.as_str()))
+                .cloned()
+                .collect();
+            for device_id in lost {
+                warn!(device_id, "device lost, cleaning up");
+                if let Some(tasks) = active.remove(&device_id) {
+                    for task in tasks {
+                        task.abort();
+                    }
+                }
+                status::publish_disconnected(&session, &device_id, "device lost").await;
+            }
         }
-        drop(active);
 
         tokio::select! {
             _ = tokio::time::sleep(discovery_interval) => {}

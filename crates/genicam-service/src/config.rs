@@ -19,10 +19,6 @@ pub struct Cli {
     #[arg(long, default_value_t = 5)]
     pub discovery_interval_s: u64,
 
-    /// Announce interval in seconds.
-    #[arg(long, default_value_t = 2)]
-    pub announce_interval_s: u64,
-
     /// Zenoh configuration file.
     #[arg(long)]
     pub zenoh_config: Option<String>,
@@ -41,7 +37,4 @@ impl Cli {
         Duration::from_secs(self.discovery_interval_s)
     }
 
-    pub fn announce_interval(&self) -> Duration {
-        Duration::from_secs(self.announce_interval_s)
-    }
 }

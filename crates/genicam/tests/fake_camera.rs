@@ -249,6 +249,7 @@ async fn test_read_nonexistent_node() {
 // These tests use a single GVCP connection for both control and streaming.
 // GigE Vision's CCP (Control Channel Privilege) requires that the same
 // socket that claimed control also configures stream registers.
+// All 12 tests pass on macOS loopback with arv-fake-gv-camera-0.8.
 // ---------------------------------------------------------------------------
 
 /// Helper: set up a streaming session.

@@ -198,11 +198,16 @@ pub async fn discover(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeError> {
 }
 
 /// Discover devices only on the specified interface name.
+/// Discover devices only on the specified interface name.
+///
+/// When a user explicitly names an interface (including loopback like `lo0`),
+/// it is always included — the loopback filter only applies to the unfiltered
+/// [`discover`] call.
 pub async fn discover_on_interface(
     timeout: Duration,
     interface: &str,
 ) -> Result<Vec<DeviceInfo>, GigeError> {
-    discover_impl(timeout, Some(interface), false).await
+    discover_impl(timeout, Some(interface), true).await
 }
 
 /// Discover devices on all interfaces including loopback.

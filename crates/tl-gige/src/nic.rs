@@ -44,10 +44,7 @@ fn iface_name_to_index(name: &str) -> io::Result<u32> {
 }
 
 /// Resolve an interface index from its name using `if_nametoindex(3)`.
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "android"))
-))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
 fn iface_name_to_index(name: &str) -> io::Result<u32> {
     use std::ffi::CString;
 

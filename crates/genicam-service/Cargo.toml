@@ -1,7 +1,7 @@
 [package]
 name = "genicam-service"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "GenICam camera service with Zenoh API for genicam-studio"
 license = "MIT"
 publish = false

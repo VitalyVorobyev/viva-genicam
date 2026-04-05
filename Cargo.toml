@@ -9,6 +9,8 @@ members = [
   "crates/sfnc",
   "crates/genicam",
   "crates/gencamctl",
+  # genicam-service excluded: depends on genicam_zenoh_api from ../genicam-studio
+  # "crates/genicam-service",
   # "crates/gentl-cti",
 ]
 resolver = "2"

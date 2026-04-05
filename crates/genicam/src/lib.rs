@@ -202,6 +202,23 @@ impl<T: RegisterIo> Camera<T> {
                     Ok(self.nodemap.get_integer(name, &self.transport)?.to_string())
                 }
             },
+            Some(Node::Converter(conv)) => match conv.output {
+                SkOutput::Float => Ok(self
+                    .nodemap
+                    .get_converter(name, &self.transport)?
+                    .to_string()),
+                SkOutput::Integer => {
+                    Ok((self.nodemap.get_converter(name, &self.transport)? as i64).to_string())
+                }
+            },
+            Some(Node::IntConverter(_)) => Ok(self
+                .nodemap
+                .get_int_converter(name, &self.transport)?
+                .to_string()),
+            Some(Node::String(_)) => self
+                .nodemap
+                .get_string(name, &self.transport)
+                .map_err(Into::into),
             Some(Node::Command(_)) => {
                 Err(GenicamError::GenApi(GenApiError::Type(name.to_string())))
             }
@@ -242,6 +259,16 @@ impl<T: RegisterIo> Camera<T> {
                     .map_err(Into::into)
             }
             Some(Node::SwissKnife(_)) => Err(GenApiError::Type(name.to_string()).into()),
+            Some(Node::Converter(_)) => {
+                // Converters are read-only from the user perspective
+                // (they transform values from underlying nodes)
+                Err(GenApiError::Type(name.to_string()).into())
+            }
+            Some(Node::IntConverter(_)) => Err(GenApiError::Type(name.to_string()).into()),
+            Some(Node::String(_)) => self
+                .nodemap
+                .set_string(name, value, &self.transport)
+                .map_err(Into::into),
             Some(Node::Command(_)) => self
                 .nodemap
                 .exec_command(name, &self.transport)
@@ -729,6 +756,18 @@ impl RegisterIo for GigeRegisterIo {
 pub async fn connect_gige(
     device: &gige::DeviceInfo,
 ) -> Result<Camera<GigeRegisterIo>, GenicamError> {
+    let (camera, _xml) = connect_gige_with_xml(device).await?;
+    Ok(camera)
+}
+
+/// Connect to a GigE Vision camera and return both a [`Camera`] and the raw
+/// GenICam XML string fetched from the device.
+///
+/// This is useful when the caller needs the XML for purposes beyond node
+/// evaluation (e.g. forwarding it over a network API).
+pub async fn connect_gige_with_xml(
+    device: &gige::DeviceInfo,
+) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
     use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
@@ -736,11 +775,17 @@ pub async fn connect_gige(
     let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
     info!(%control_addr, "connecting to GigE Vision camera");
 
-    let control = Arc::new(AsyncMutex::new(
-        gige::GigeDevice::open(control_addr)
-            .await
-            .map_err(|e| GenicamError::transport(e.to_string()))?,
-    ));
+    let mut device = gige::GigeDevice::open(control_addr)
+        .await
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    // Claim control privilege (required before configuration and streaming).
+    device
+        .claim_control()
+        .await
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    let control = Arc::new(AsyncMutex::new(device));
 
     // Fetch and parse the GenApi XML.
     let xml = genapi_xml::fetch_and_load_xml({
@@ -769,7 +814,7 @@ pub async fn connect_gige(
     let transport = GigeRegisterIo::new(handle, control_device);
 
     info!("GigE camera connected successfully");
-    Ok(Camera::new(transport, nodemap))
+    Ok((Camera::new(transport, nodemap), xml))
 }
 
 fn parse_bool(value: &str) -> Option<bool> {

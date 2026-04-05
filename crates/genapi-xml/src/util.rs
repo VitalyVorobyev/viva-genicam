@@ -12,10 +12,13 @@ pub fn read_text_start(
     start: &BytesStart<'_>,
 ) -> Result<String, XmlError> {
     let end_buf = start.name().as_ref().to_vec();
-    reader
+    let text = reader
         .read_text(QName(&end_buf))
+        .map_err(|err| XmlError::Xml(err.to_string()))?;
+    // Unescape XML entities (&amp; → &, &lt; → <, etc.).
+    quick_xml::escape::unescape(&text)
         .map(|cow| cow.into_owned())
-        .map_err(|err| XmlError::Xml(err.to_string()))
+        .map_err(|err| XmlError::Xml(format!("unescape error: {err}")))
 }
 
 /// Extract an optional attribute value from an XML start element.
@@ -83,17 +86,15 @@ pub fn parse_f64(value: &str) -> Result<f64, XmlError> {
 }
 
 /// Skip over an XML element and all of its children.
-pub fn skip_element(reader: &mut Reader<&[u8]>, name: &[u8]) -> Result<(), XmlError> {
+pub fn skip_element(reader: &mut Reader<&[u8]>, _name: &[u8]) -> Result<(), XmlError> {
     use quick_xml::events::Event;
     let mut depth = 1usize;
     let mut buf = Vec::new();
     while depth > 0 {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(_)) => depth += 1,
-            Ok(Event::End(ref e)) => {
-                if e.name().as_ref() == name {
-                    depth -= 1;
-                }
+            Ok(Event::End(_)) => {
+                depth -= 1;
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid("unexpected end of file".into()));

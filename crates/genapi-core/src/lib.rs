@@ -11,7 +11,7 @@ mod swissknife;
 
 pub use error::GenApiError;
 pub use genapi_xml::SkOutput;
-pub use io::RegisterIo;
+pub use io::{NullIo, RegisterIo};
 pub use nodemap::NodeMap;
 pub use nodes::{
     BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, IntegerNode, Node, SkNode,

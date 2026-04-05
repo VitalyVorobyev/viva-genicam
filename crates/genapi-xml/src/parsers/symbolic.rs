@@ -36,9 +36,18 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
+    let mut pvalue = None;
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
+                b"pValue" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        pvalue = Some(target.to_string());
+                    }
+                }
                 b"Address" | TAG_P_ADDRESS | b"Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
                         skip_element(reader, e.name().as_ref())?;
@@ -98,7 +107,11 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
         )));
     }
 
-    let addressing = addressing.finalize(&name, Some(4))?;
+    let addressing = if pvalue.is_some() {
+        addressing.finalize(&name, Some(4)).ok()
+    } else {
+        Some(addressing.finalize(&name, Some(4))?)
+    };
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Enum {
@@ -109,6 +122,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
         default,
         selectors,
         selected_if,
+        pvalue,
     })
 }
 
@@ -129,6 +143,9 @@ pub fn parse_boolean(
         addressing.set_length(len);
     }
     let mut access = AccessMode::RW;
+    let mut pvalue = None;
+    let mut on_value = None;
+    let mut off_value = None;
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
@@ -138,6 +155,21 @@ pub fn parse_boolean(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
+                b"pValue" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        pvalue = Some(target.to_string());
+                    }
+                }
+                b"OnValue" => {
+                    let text = read_text_start(reader, e)?;
+                    on_value = Some(parse_i64(&text)?);
+                }
+                b"OffValue" => {
+                    let text = read_text_start(reader, e)?;
+                    off_value = Some(parse_i64(&text)?);
+                }
                 b"Address" => {
                     let text = read_text_start(reader, e)?;
                     addressing.attach_selected_address(parse_u64(&text)?, None);
@@ -286,24 +318,35 @@ pub fn parse_boolean(
         buf.clear();
     }
 
-    let addressing = addressing.finalize(&name, Some(4))?;
-    let lengths = addressing_lengths(&addressing);
-    let len = lengths
-        .first()
-        .copied()
-        .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
-    let bitfield = match bitfield.finish(&name, &lengths)? {
-        Some(field) => field,
-        None if len == 1 => BitField {
-            bit_offset: 0,
-            bit_length: 1,
-            byte_order: ByteOrder::Little,
-        },
-        None => {
-            return Err(XmlError::Invalid(format!(
-                "Boolean node {name} requires explicit bitfield metadata"
-            )))
-        }
+    let (addressing, len, bitfield) = if pvalue.is_some() {
+        // pValue-backed boolean: addressing and bitfield are optional.
+        let addr = addressing.finalize(&name, Some(4)).ok();
+        let len = addr
+            .as_ref()
+            .and_then(|a| addressing_lengths(a).first().copied())
+            .unwrap_or(4);
+        (addr, len, None)
+    } else {
+        let addr = addressing.finalize(&name, Some(4))?;
+        let lengths = addressing_lengths(&addr);
+        let len = lengths
+            .first()
+            .copied()
+            .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
+        let bf = match bitfield.finish(&name, &lengths)? {
+            Some(field) => Some(field),
+            None if len == 1 => Some(BitField {
+                bit_offset: 0,
+                bit_length: 1,
+                byte_order: ByteOrder::Little,
+            }),
+            None => {
+                return Err(XmlError::Invalid(format!(
+                    "Boolean node {name} requires explicit bitfield metadata"
+                )))
+            }
+        };
+        (Some(addr), len, bf)
     };
     let (selectors, selected_if) = selector_state.into_parts();
 
@@ -315,6 +358,9 @@ pub fn parse_boolean(
         bitfield,
         selectors,
         selected_if,
+        pvalue,
+        on_value,
+        off_value,
     })
 }
 

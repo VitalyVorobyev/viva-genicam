@@ -3,28 +3,40 @@
 Pure Rust building blocks for **GenICam** with an **Ethernet-first (GigE Vision)** focus.  
 Cargo workspace, modular crates (GenCP, GVCP/GVSP, GenApi core), and small examples.
 
-## Current status (Nov 2025)
-  * ✅ Discovery (GVCP) on selected NICs; enumerate devices.
-  * ✅ Control path (GenCP over GVCP): read/write device memory; fetch GenICam XML.
-  * ✅ GenApi (Tier-1): basic NodeMap (Integer/Float/Enum/Bool/Command), ranges, access modes.
-  * ✅ SwissKnife expression nodes and selector-aware NodeMap support for common patterns (subset of Tier-2 GenApi).
+## Current status (Apr 2026)
+  * ✅ Discovery (GVCP) on selected NICs; enumerate devices. Loopback support for simulated cameras.
+  * ✅ Control path (GVCP): read/write device memory; fetch GenICam XML. Correct GVCP wire format.
+  * ✅ GenApi (Tier-1): NodeMap (Integer/Float/Enum/Bool/Command/Category), ranges, access modes.
+  * ✅ GenApi (Tier-2): Converter, IntConverter, String, IntReg, MaskedIntReg nodes.
+  * ✅ pValue delegation: Integer, Float, Enum, Boolean, Command nodes delegate to backing registers.
+  * ✅ SwissKnife: full expression support (arithmetic, comparisons, ternary, logical, bitwise, math functions, Formula alias).
   * ✅ Selector-based address switching for common features (e.g., `GainSelector`).
-  * Streaming (GVSP): packet reassembly, resend, MTU/packet size & delay, backpressure, stats.
-  * Events & actions: message channel events; action commands (synchronization).
-  * Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
+  * ✅ High-level streaming API: `FrameStream` async iterator with auto-resend.
+  * ✅ `connect_gige()` / `connect_gige_with_xml()` for camera connection with auto XML fetch.
+  * ✅ Streaming (GVSP): packet reassembly, resend, MTU/packet size & delay, backpressure, stats.
+  * ✅ Events & actions: message channel events; action commands (synchronization).
+  * ✅ Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
+  * ✅ **Sensor service** (`genicam-service`): Zenoh bridge for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) — discovery, XML, node read/write, acquisition control, frame streaming.
+  * ✅ Integration tests against `arv-fake-gv-camera` (aravis simulator).
+  * ✅ macOS support: `Iface::from_system`, loopback discovery.
   * USB3 Vision transport (planned).
-  * Advanced GenApi nodes (Converter, more complex expressions, wider SFNC coverage — planned).
-  * GenTL producer (.cti) and PFNC/SFNC helper utilities (planned).
 
 ## Workspace layout
 
+```
 crates/
-  genicp/        # GenCP encode/decode
-  tl-gige/       # GigE Vision (GVCP/GVSP)
-  genapi-xml/    # GenICam XML loader & schema-lite parser
-  genapi-core/   # NodeMap & evaluation
-  genicam/       # Public API facade
-crates/genicam/examples/  # Small demos (see below)
+  genicp/            # GenCP encode/decode
+  tl-gige/           # GigE Vision (GVCP/GVSP)
+  genapi-xml/        # GenICam XML loader & schema-lite parser
+  genapi-core/       # NodeMap & evaluation
+  genicam/           # Public API facade
+  genicam-service/   # Zenoh camera service for genicam-studio
+  gencamctl/         # CLI binary
+  pfnc/              # Pixel Format Naming Convention
+  sfnc/              # Standard Feature Naming Convention
+crates/genicam/examples/   # Small demos (see below)
+crates/genicam/tests/      # Integration tests (arv-fake-gv-camera)
+```
 
 ## Documentation
 
@@ -152,6 +164,38 @@ For more examples and troubleshooting tips, see the
 [Discovery](book/src/tutorials/discovery.md)
 and [Streaming](book/src/tutorials/streaming.md) tutorials.
 
+## genicam-service
+
+The `genicam-service` binary bridges real GigE Vision cameras to
+[genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) via Zenoh.
+It implements the Zenoh API contract defined in `genicam-studio/docs/zenoh-api.md`.
+
+```bash
+# Start the service (discovers cameras on the specified interface)
+cargo run -p genicam-service -- --iface en0
+
+# With verbose logging
+cargo run -p genicam-service -- --iface en0 -vv
+```
+
+The service automatically discovers cameras, publishes device announcements,
+serves GenICam XML, handles node read/write queries, and streams frames over
+Zenoh when acquisition is started from genicam-studio.
+
+## Integration testing
+
+12 integration tests validate the full stack against `arv-fake-gv-camera-0.8`
+from [Aravis](https://github.com/AravisProject/aravis) — covering discovery,
+connection, XML parsing, feature read/write, command execution, and frame
+streaming (all pass on macOS loopback).
+
+```bash
+# Install aravis (macOS)
+brew install aravis
+
+# Run integration tests (starts fake camera automatically)
+cargo test -p genicam --test fake_camera -- --ignored --test-threads=1
+```
 
 ## Troubleshooting
 

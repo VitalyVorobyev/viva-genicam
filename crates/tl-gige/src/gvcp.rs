@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fastrand::Rng;
-use genicp::{
-    decode_ack, encode_cmd, AckHeader, CommandFlags, GenCpAck, GenCpCmd, OpCode, StatusCode,
-};
+use genicp::{decode_ack, AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode};
 use if_addrs::{get_if_addrs, IfAddr};
 use thiserror::Error;
 use tokio::net::UdpSocket;
@@ -33,6 +31,14 @@ pub mod consts {
     pub const PACKET_RESEND_COMMAND: u16 = 0x0040;
     /// Opcode of the packet resend acknowledgement.
     pub const PACKET_RESEND_ACK: u16 = 0x0041;
+
+    /// Address of the Control Channel Privilege (CCP) register.
+    ///
+    /// A controller must write `CONTROL_PRIVILEGE` to this register before the
+    /// device accepts stream configuration or acquisition commands.
+    pub const CONTROL_CHANNEL_PRIVILEGE: u64 = 0x0a00;
+    /// CCP value claiming exclusive control.
+    pub const CCP_CONTROL: u32 = 1 << 1;
 
     /// Address of the SFNC `GevMessageChannel0DestinationAddress` register.
     pub const MESSAGE_DESTINATION_ADDRESS: u64 = 0x0900_0200;
@@ -60,18 +66,23 @@ pub mod consts {
     /// Maximum number of bytes captured while listening for discovery responses.
     pub const DISCOVERY_BUFFER: usize = 2048;
 
-    /// Base register for stream channel configuration (GigE Vision 2.1, table 63).
-    pub const STREAM_CHANNEL_BASE: u64 = 0x0900_0400;
+    /// Base register for stream channel 0 (GigE Vision bootstrap register map).
+    ///
+    /// The GigE Vision specification defines stream channel bootstrap registers
+    /// starting at 0x0d00. Note: some cameras may use different offsets declared
+    /// in their GenICam XML (e.g. SFNC `GevSCDA` nodes). The bootstrap offsets
+    /// here match the aravis implementation and the GigE Vision 2.x standard.
+    pub const STREAM_CHANNEL_BASE: u64 = 0x0d00;
     /// Stride in bytes between successive stream channel blocks.
     pub const STREAM_CHANNEL_STRIDE: u64 = 0x40;
-    /// Offset for `GevSCPHostIPAddress` within a stream channel block.
-    pub const STREAM_DESTINATION_ADDRESS: u64 = 0x00;
     /// Offset for `GevSCPHostPort` within a stream channel block.
-    pub const STREAM_DESTINATION_PORT: u64 = 0x04;
+    pub const STREAM_DESTINATION_PORT: u64 = 0x00;
     /// Offset for `GevSCPSPacketSize` within a stream channel block.
-    pub const STREAM_PACKET_SIZE: u64 = 0x24;
+    pub const STREAM_PACKET_SIZE: u64 = 0x04;
     /// Offset for `GevSCPD` (packet delay) within a stream channel block.
-    pub const STREAM_PACKET_DELAY: u64 = 0x28;
+    pub const STREAM_PACKET_DELAY: u64 = 0x08;
+    /// Offset for `GevSCDA` (stream destination IP address) within a stream channel block.
+    pub const STREAM_DESTINATION_ADDRESS: u64 = 0x18;
 }
 
 /// Public alias for the GVCP well-known port.
@@ -90,16 +101,36 @@ pub struct GvcpRequestHeader {
     pub request_id: u16,
 }
 
+/// GVCP command message key value (first byte of every GVCP command packet).
+const GVCP_CMD_KEY: u8 = 0x42;
+
 impl GvcpRequestHeader {
     /// Encode the header into a `Bytes` buffer ready to be transmitted.
+    ///
+    /// Uses proper GVCP wire format: byte 0 = `0x42` (command key),
+    /// byte 1 = flags byte (bit 0 = ACK_REQUIRED, bit 4 = BROADCAST).
     pub fn encode(self, payload: &[u8]) -> Bytes {
         let mut buf = BytesMut::with_capacity(genicp::HEADER_SIZE + payload.len());
-        buf.put_u16(self.flags.bits());
+        // GVCP command header: key byte + flags byte (not a u16 flags field).
+        buf.put_u8(GVCP_CMD_KEY);
+        buf.put_u8(self.gvcp_flags_byte());
         buf.put_u16(self.command);
         buf.put_u16(self.length);
         buf.put_u16(self.request_id);
         buf.extend_from_slice(payload);
         buf.freeze()
+    }
+
+    /// Convert `CommandFlags` to the single-byte GVCP flag field.
+    fn gvcp_flags_byte(&self) -> u8 {
+        let mut byte = 0u8;
+        if self.flags.contains(CommandFlags::ACK_REQUIRED) {
+            byte |= 0x01;
+        }
+        if self.flags.contains(CommandFlags::BROADCAST) {
+            byte |= 0x10;
+        }
+        byte
     }
 }
 
@@ -163,27 +194,41 @@ impl DeviceInfo {
 
 /// Discover GigE Vision devices on the local network by broadcasting a GVCP discovery command.
 pub async fn discover(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeError> {
-    discover_filtered(timeout, None).await
+    discover_impl(timeout, None, false).await
 }
 
 /// Discover devices only on the specified interface name.
+/// Discover devices only on the specified interface name.
+///
+/// When a user explicitly names an interface (including loopback like `lo0`),
+/// it is always included — the loopback filter only applies to the unfiltered
+/// [`discover`] call.
 pub async fn discover_on_interface(
     timeout: Duration,
     interface: &str,
 ) -> Result<Vec<DeviceInfo>, GigeError> {
-    discover_filtered(timeout, Some(interface)).await
+    discover_impl(timeout, Some(interface), true).await
 }
 
-async fn discover_filtered(
+/// Discover devices on all interfaces including loopback.
+///
+/// This is useful for testing with simulated cameras (e.g. `arv-fake-gv-camera`)
+/// bound to `127.0.0.1`.
+pub async fn discover_all(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeError> {
+    discover_impl(timeout, None, true).await
+}
+
+async fn discover_impl(
     timeout: Duration,
     iface_filter: Option<&str>,
+    include_loopback: bool,
 ) -> Result<Vec<DeviceInfo>, GigeError> {
     let mut interfaces = Vec::new();
     for iface in get_if_addrs()? {
         let IfAddr::V4(v4) = iface.addr else {
             continue;
         };
-        if v4.ip.is_loopback() {
+        if !include_loopback && v4.ip.is_loopback() {
             continue;
         }
         if let Some(filter) = iface_filter {
@@ -205,9 +250,15 @@ async fn discover_filtered(
         join_set.spawn(async move {
             let local_addr = SocketAddr::new(IpAddr::V4(v4.ip), 0);
             let socket = UdpSocket::bind(local_addr).await?;
-            socket.set_broadcast(true)?;
-            let broadcast = v4.broadcast.unwrap_or(Ipv4Addr::BROADCAST);
-            let destination = SocketAddr::new(IpAddr::V4(broadcast), consts::PORT);
+            // On loopback, broadcast is not supported on some platforms (macOS).
+            // Send unicast discovery directly to the local address instead.
+            let destination = if v4.ip.is_loopback() {
+                SocketAddr::new(IpAddr::V4(v4.ip), consts::PORT)
+            } else {
+                socket.set_broadcast(true)?;
+                let broadcast = v4.broadcast.unwrap_or(Ipv4Addr::BROADCAST);
+                SocketAddr::new(IpAddr::V4(broadcast), consts::PORT)
+            };
 
             let header = GvcpRequestHeader {
                 flags: CommandFlags::ACK_REQUIRED | CommandFlags::BROADCAST,
@@ -286,28 +337,66 @@ fn parse_discovery_ack(buf: &[u8], expected_request: u16) -> Result<Option<Devic
     Ok(Some(info))
 }
 
+/// Parse a GigE Vision Discovery ACK payload (248 bytes).
+///
+/// Field layout per GigE Vision specification (table 7-4):
+///
+/// | Offset | Size | Field                        |
+/// |--------|------|------------------------------|
+/// |      0 |    2 | Spec version major           |
+/// |      2 |    2 | Spec version minor           |
+/// |      4 |    4 | Device mode                  |
+/// |      8 |    4 | Reserved                     |
+/// |     12 |    2 | MAC address high             |
+/// |     14 |    4 | MAC address low              |
+/// |     18 |    4 | Supported IP config          |
+/// |     22 |    4 | Current IP config            |
+/// |     26 |   10 | Reserved                     |
+/// |     36 |    4 | Current IP address           |
+/// |     40 |   12 | Reserved                     |
+/// |     52 |    4 | Current subnet mask          |
+/// |     56 |   12 | Reserved                     |
+/// |     68 |    4 | Default gateway              |
+/// |     72 |   32 | Manufacturer name            |
+/// |    106 |   32 | Model name                   |
+/// |    138 |   32 | Device version               |
+/// |    170 |   48 | Manufacturer specific info   |
+/// |    218 |   16 | Serial number                |
+/// |    234 |   16 | User defined name            |
 fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
-    let mut cursor = Cursor::new(payload);
-    if cursor.remaining() < 32 {
+    // Minimum size to reach past the current IP field.
+    if payload.len() < 40 {
         return Err(GigeError::Protocol("discovery payload too small".into()));
     }
-    let _spec_major = cursor.get_u16();
-    let _spec_minor = cursor.get_u16();
-    let _device_mode = cursor.get_u32();
-    let _device_class = cursor.get_u16();
-    let _device_capability = cursor.get_u16();
+    let mut cursor = Cursor::new(payload);
+    let _spec_major = cursor.get_u16(); // 0
+    let _spec_minor = cursor.get_u16(); // 2
+    let _device_mode = cursor.get_u32(); // 4
+    let _reserved = cursor.get_u32(); // 8
+
+    // MAC: 2 bytes high + 4 bytes low = 6 bytes at offset 12.
     let mut mac = [0u8; 6];
-    cursor.copy_to_slice(&mut mac);
-    let _ip_config_options = cursor.get_u16();
-    let _ip_config_current = cursor.get_u16();
-    let ip = Ipv4Addr::from(cursor.get_u32());
-    let _subnet = cursor.get_u32();
-    let _gateway = cursor.get_u32();
-    let manufacturer = read_fixed_string(&mut cursor, 32)?;
-    let model = read_fixed_string(&mut cursor, 32)?;
-    let _ = skip_string(&mut cursor, 32);
-    let _ = skip_string(&mut cursor, 16);
-    let _ = skip_string(&mut cursor, 16);
+    cursor.copy_to_slice(&mut mac); // 12..18
+
+    let _supported_ip_config = cursor.get_u32(); // 18
+    let _current_ip_config = cursor.get_u32(); // 22
+
+    // 10 bytes reserved before current IP.
+    cursor.advance(10); // 26..36
+    let ip = Ipv4Addr::from(cursor.get_u32()); // 36
+
+    // 12 bytes reserved before subnet.
+    cursor.advance(12); // 40..52
+    let _subnet = cursor.get_u32(); // 52
+
+    // 12 bytes reserved before gateway.
+    cursor.advance(12); // 56..68
+    let _gateway = cursor.get_u32(); // 68
+
+    // String fields.
+    let manufacturer = read_fixed_string(&mut cursor, 32)?; // 72
+    let model = read_fixed_string(&mut cursor, 32)?; // 104
+                                                     // Remaining fields (version, info, serial, user name) are optional.
 
     Ok(DeviceInfo {
         ip,
@@ -324,14 +413,6 @@ fn read_fixed_string(cursor: &mut Cursor<&[u8]>, len: usize) -> Result<Option<St
     let mut buf = vec![0u8; len];
     cursor.copy_to_slice(&mut buf);
     Ok(parse_string(&buf))
-}
-
-fn skip_string(cursor: &mut Cursor<&[u8]>, len: usize) -> Option<()> {
-    if cursor.remaining() < len {
-        return None;
-    }
-    cursor.advance(len);
-    Some(())
 }
 
 fn parse_string(bytes: &[u8]) -> Option<String> {
@@ -370,6 +451,10 @@ pub struct StreamParams {
 
 impl GigeDevice {
     /// Connect to a device GVCP endpoint.
+    ///
+    /// The connection is ready for register read/write but does not claim
+    /// control privilege. Call [`Self::claim_control`] before configuring streaming
+    /// or starting acquisition.
     pub async fn open(addr: SocketAddr) -> Result<Self, GigeError> {
         let local_ip = match addr.ip() {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -385,6 +470,26 @@ impl GigeDevice {
             request_id: 1,
             rng: Rng::new(),
         })
+    }
+
+    /// Claim control channel privilege (CCP).
+    ///
+    /// Required by the GigE Vision specification before the device accepts
+    /// stream configuration or acquisition commands.
+    pub async fn claim_control(&mut self) -> Result<(), GigeError> {
+        self.write_mem(
+            consts::CONTROL_CHANNEL_PRIVILEGE,
+            &consts::CCP_CONTROL.to_be_bytes(),
+        )
+        .await?;
+        debug!(addr = %self.remote, "claimed control channel privilege");
+        Ok(())
+    }
+
+    /// Release control channel privilege.
+    pub async fn release_control(&mut self) -> Result<(), GigeError> {
+        self.write_mem(consts::CONTROL_CHANNEL_PRIVILEGE, &0u32.to_be_bytes())
+            .await
     }
 
     /// Return the remote GVCP socket address associated with this device.
@@ -412,17 +517,14 @@ impl GigeDevice {
             attempt += 1;
             let request_id = self.next_request_id();
             let payload_bytes = payload.clone().freeze();
-            let cmd = GenCpCmd {
-                header: genicp::CommandHeader {
-                    flags: CommandFlags::ACK_REQUIRED,
-                    opcode,
-                    length: payload_bytes.len() as u16,
-                    request_id,
-                },
-                payload: payload_bytes.clone(),
+            let header = GvcpRequestHeader {
+                flags: CommandFlags::ACK_REQUIRED,
+                command: opcode.command_code(),
+                length: payload_bytes.len() as u16,
+                request_id,
             };
-            let encoded = encode_cmd(&cmd);
-            trace!(request_id, opcode = ?opcode, bytes = encoded.len(), attempt, "sending GenCP command");
+            let encoded = header.encode(&payload_bytes);
+            trace!(request_id, opcode = ?opcode, bytes = encoded.len(), attempt, "sending GVCP command");
             if let Err(err) = self.socket.send(&encoded).await {
                 if attempt >= consts::MAX_RETRIES {
                     return Err(err.into());
@@ -504,23 +606,34 @@ impl GigeDevice {
     }
 
     /// Read a block of memory from the remote device with chunking and retries.
+    ///
+    /// Uses GVCP READMEM format: 4-byte address + 2-byte reserved + 2-byte count.
+    /// The acknowledgement carries: 4-byte address echo + data bytes.
     pub async fn read_mem(&mut self, addr: u64, len: usize) -> Result<Vec<u8>, GigeError> {
         let mut remaining = len;
         let mut offset = 0usize;
         let mut data = Vec::with_capacity(len);
         while remaining > 0 {
             let chunk = remaining.min(consts::GENCP_MAX_BLOCK);
-            let mut payload = BytesMut::with_capacity(12);
-            payload.put_u64(addr + offset as u64);
-            payload.put_u32(chunk as u32);
+            let mut payload = BytesMut::with_capacity(8);
+            payload.put_u32((addr + offset as u64) as u32);
+            payload.put_u16(0); // reserved
+            payload.put_u16(chunk as u16);
             let ack = self.transact_with_retry(OpCode::ReadMem, payload).await?;
-            if ack.payload.len() != chunk {
+            // GVCP READMEM_ACK: 4-byte address prefix + data.
+            let ack_data = if ack.payload.len() >= 4 + chunk {
+                &ack.payload[4..4 + chunk]
+            } else if ack.payload.len() == chunk {
+                // Some devices omit the address echo.
+                &ack.payload[..chunk]
+            } else {
                 return Err(GigeError::Protocol(format!(
-                    "expected {chunk} bytes but device returned {}",
+                    "expected {} bytes but device returned {}",
+                    chunk,
                     ack.payload.len()
                 )));
-            }
-            data.extend_from_slice(&ack.payload);
+            };
+            data.extend_from_slice(ack_data);
             remaining -= chunk;
             offset += chunk;
         }
@@ -528,19 +641,25 @@ impl GigeDevice {
     }
 
     /// Write a block of memory to the remote device with chunking and retries.
+    ///
+    /// Uses GVCP WRITEMEM format: 4-byte address + data bytes.
+    /// The acknowledgement carries: 4-byte reserved (index).
     pub async fn write_mem(&mut self, addr: u64, data: &[u8]) -> Result<(), GigeError> {
+        /// GVCP WRITEMEM overhead: 4-byte address prefix.
+        const GVCP_WRITE_OVERHEAD: usize = 4;
+
         let mut offset = 0usize;
         while offset < data.len() {
-            let chunk =
-                (data.len() - offset).min(consts::GENCP_MAX_BLOCK - consts::GENCP_WRITE_OVERHEAD);
+            let chunk = (data.len() - offset).min(consts::GENCP_MAX_BLOCK - GVCP_WRITE_OVERHEAD);
             if chunk == 0 {
                 return Err(GigeError::Protocol("write chunk size is zero".into()));
             }
-            let mut payload = BytesMut::with_capacity(consts::GENCP_WRITE_OVERHEAD + chunk);
-            payload.put_u64(addr + offset as u64);
+            let mut payload = BytesMut::with_capacity(GVCP_WRITE_OVERHEAD + chunk);
+            payload.put_u32((addr + offset as u64) as u32);
             payload.extend_from_slice(&data[offset..offset + chunk]);
             let ack = self.transact_with_retry(OpCode::WriteMem, payload).await?;
-            if !ack.payload.is_empty() {
+            // GVCP WRITEMEM_ACK: 4-byte reserved payload.
+            if ack.payload.len() > 4 {
                 return Err(GigeError::Protocol(
                     "write acknowledgement carried unexpected payload".into(),
                 ));
@@ -579,7 +698,7 @@ impl GigeDevice {
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_ADDRESS);
         self.write_mem(addr, &ip.octets()).await?;
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_PORT);
-        self.write_mem(addr, &port.to_be_bytes()).await?;
+        self.write_mem(addr, &(port as u32).to_be_bytes()).await?;
         Ok(())
     }
 
@@ -742,7 +861,9 @@ mod tests {
         let payload = [1u8, 2, 3, 4];
         let encoded = header.encode(&payload);
         assert_eq!(encoded.len(), genicp::HEADER_SIZE + payload.len());
-        assert_eq!(&encoded[0..2], &header.flags.bits().to_be_bytes());
+        // GVCP wire format: byte 0 = 0x42 key, byte 1 = flags byte.
+        assert_eq!(encoded[0], GVCP_CMD_KEY);
+        assert_eq!(encoded[1], 0x01); // ACK_REQUIRED
         assert_eq!(&encoded[2..4], &header.command.to_be_bytes());
         assert_eq!(&encoded[4..6], &header.length.to_be_bytes());
         assert_eq!(&encoded[6..8], &header.request_id.to_be_bytes());

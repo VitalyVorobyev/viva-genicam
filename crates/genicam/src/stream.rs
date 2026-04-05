@@ -551,9 +551,9 @@ impl FrameStream {
             }
 
             // Receive next packet.
-            let len = match self.socket.recv(&mut self.recv_buffer).await {
-                Ok(0) => return Ok(None), // Stream closed.
-                Ok(len) => len,
+            let len = match self.socket.recv_from(&mut self.recv_buffer).await {
+                Ok((0, _)) => return Ok(None), // Stream closed.
+                Ok((len, _)) => len,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) => {
                     return Err(GenicamError::transport(format!("socket recv failed: {e}")));

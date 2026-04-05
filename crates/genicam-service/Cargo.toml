@@ -1,0 +1,22 @@
+[package]
+name = "genicam-service"
+version = "0.1.0"
+edition = "2024"
+description = "GenICam camera service with Zenoh API for genicam-studio"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "genicam-service"
+path = "src/main.rs"
+
+[dependencies]
+genicam = { path = "../genicam" }
+genicam_zenoh_api = { path = "../../../genicam-studio/crates/genicam_zenoh_api" }
+zenoh = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

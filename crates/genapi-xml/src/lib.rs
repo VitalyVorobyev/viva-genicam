@@ -5,24 +5,28 @@
 //! into a structured representation that can be used by the core evaluation engine.
 
 mod builders;
+#[cfg(feature = "fetch")]
 mod fetch;
 mod parsers;
 mod util;
 
+#[cfg(feature = "fetch")]
 pub use fetch::fetch_and_load_xml;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use parsers::{
     parse_boolean, parse_category, parse_category_empty, parse_command, parse_command_empty,
-    parse_enum, parse_float, parse_integer, parse_swissknife,
+    parse_converter, parse_enum, parse_float, parse_int_converter, parse_integer, parse_string,
+    parse_struct_reg, parse_swissknife,
 };
 use util::{attribute_value, skip_element};
 
 /// Source of the numeric value backing an enumeration entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumValueSrc {
     /// Numeric literal declared directly in the XML.
     Literal(i64),
@@ -31,7 +35,7 @@ pub enum EnumValueSrc {
 }
 
 /// Declaration for a single enumeration entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumEntryDecl {
     /// Symbolic entry name exposed to clients.
     pub name: String,
@@ -54,7 +58,7 @@ pub enum XmlError {
 }
 
 /// Access privileges for a GenICam node as described in the XML.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccessMode {
     /// Read-only node. The underlying register must not be modified by the client.
     RO,
@@ -76,7 +80,7 @@ impl AccessMode {
 }
 
 /// Register addressing metadata for a node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Addressing {
     /// Node uses a fixed register block regardless of selector state.
     Fixed { address: u64, len: u32 },
@@ -97,7 +101,7 @@ pub enum Addressing {
 }
 
 /// Byte order used to interpret a multi-byte register payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ByteOrder {
     /// The first byte contains the least significant bits.
     Little,
@@ -116,7 +120,7 @@ impl ByteOrder {
 }
 
 /// Bitfield metadata describing a sub-range of a register payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitField {
     /// Starting bit offset within the interpreted register value.
     pub bit_offset: u16,
@@ -127,7 +131,7 @@ pub struct BitField {
 }
 
 /// Output type of a SwissKnife expression node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SkOutput {
     /// Integer output. The runtime rounds the computed value to the nearest
     /// integer with ties going towards zero.
@@ -149,7 +153,7 @@ impl SkOutput {
 }
 
 /// Declaration of a SwissKnife node consisting of an arithmetic expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwissKnifeDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -161,15 +165,69 @@ pub struct SwissKnifeDecl {
     pub output: SkOutput,
 }
 
+/// Declaration of a Converter node for bidirectional value transformation.
+///
+/// Converters expose a floating-point value computed from an underlying
+/// register or node via a formula.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConverterDecl {
+    /// Feature name exposed to clients.
+    pub name: String,
+    /// Name of the node providing the raw register value.
+    pub p_value: String,
+    /// Expression converting raw register value to user-facing value (FROM direction).
+    pub formula_to: String,
+    /// Expression converting user-facing value back to raw register value (TO direction).
+    pub formula_from: String,
+    /// Mapping of expression variables to provider node names for `formula_to`.
+    pub variables_to: Vec<(String, String)>,
+    /// Mapping of expression variables to provider node names for `formula_from`.
+    pub variables_from: Vec<(String, String)>,
+    /// Engineering unit (if provided).
+    pub unit: Option<String>,
+    /// Desired output type.
+    pub output: SkOutput,
+}
+
+/// Declaration of an IntConverter node for integer-specific bidirectional conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntConverterDecl {
+    /// Feature name exposed to clients.
+    pub name: String,
+    /// Name of the node providing the raw register value.
+    pub p_value: String,
+    /// Expression converting raw register value to user-facing value (FROM direction).
+    pub formula_to: String,
+    /// Expression converting user-facing value back to raw register value (TO direction).
+    pub formula_from: String,
+    /// Mapping of expression variables to provider node names for `formula_to`.
+    pub variables_to: Vec<(String, String)>,
+    /// Mapping of expression variables to provider node names for `formula_from`.
+    pub variables_from: Vec<(String, String)>,
+    /// Engineering unit (if provided).
+    pub unit: Option<String>,
+}
+
+/// Declaration of a StringReg node for string-typed register access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StringDecl {
+    /// Feature name exposed to clients.
+    pub name: String,
+    /// Addressing metadata for the register block.
+    pub addressing: Addressing,
+    /// Access privileges.
+    pub access: AccessMode,
+}
+
 /// Declaration of a node extracted from the GenICam XML description.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeDecl {
-    /// Integer feature backed by a fixed register block.
+    /// Integer feature backed by a register block or delegated via pValue.
     Integer {
         /// Feature name.
         name: String,
-        /// Addressing metadata.
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         /// Length in bytes of the register payload.
         len: u32,
         /// Access privileges.
@@ -188,11 +246,21 @@ pub enum NodeDecl {
         selectors: Vec<String>,
         /// Selector gating rules in the form (selector name, allowed values).
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the value (delegates read/write to another node).
+        pvalue: Option<String>,
+        /// Node providing the dynamic maximum.
+        p_max: Option<String>,
+        /// Node providing the dynamic minimum.
+        p_min: Option<String>,
+        /// Static value (for constant integer nodes with `<Value>`).
+        value: Option<i64>,
     },
-    /// Floating point feature backed by an integer register with scaling.
+    /// Floating point feature backed by an integer register with scaling
+    /// or delegated via pValue.
     Float {
         name: String,
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         access: AccessMode,
         min: f64,
         max: f64,
@@ -203,41 +271,64 @@ pub enum NodeDecl {
         offset: Option<f64>,
         selectors: Vec<String>,
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the value (delegates read/write to another node).
+        pvalue: Option<String>,
     },
     /// Enumeration feature exposing a list of named integer values.
     Enum {
         name: String,
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         access: AccessMode,
         entries: Vec<EnumEntryDecl>,
         default: Option<String>,
         selectors: Vec<String>,
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the integer value (delegates register read/write).
+        pvalue: Option<String>,
     },
-    /// Boolean feature backed by a single bit/byte register.
+    /// Boolean feature backed by a single bit/byte register or delegated via pValue.
     Boolean {
         name: String,
-        addressing: Addressing,
+        /// Addressing metadata (absent when delegated via `pvalue`).
+        addressing: Option<Addressing>,
         len: u32,
         access: AccessMode,
-        bitfield: BitField,
+        bitfield: Option<BitField>,
         selectors: Vec<String>,
         selected_if: Vec<(String, Vec<String>)>,
+        /// Node providing the value (delegates read/write to another node).
+        pvalue: Option<String>,
+        /// On value for pValue-backed booleans.
+        on_value: Option<i64>,
+        /// Off value for pValue-backed booleans.
+        off_value: Option<i64>,
     },
     /// Command feature that triggers an action when written.
     Command {
         name: String,
-        address: u64,
+        /// Fixed register address (absent when delegated via `pvalue`).
+        address: Option<u64>,
         len: u32,
+        /// Node providing the command register (delegates write).
+        pvalue: Option<String>,
+        /// Value to write when executing the command.
+        command_value: Option<i64>,
     },
     /// Category used to organise features.
     Category { name: String, children: Vec<String> },
     /// Computed value backed by an arithmetic expression referencing other nodes.
     SwissKnife(SwissKnifeDecl),
+    /// Converter transforming raw values to/from user-facing floating-point values.
+    Converter(ConverterDecl),
+    /// IntConverter transforming raw values to/from user-facing integer values.
+    IntConverter(IntConverterDecl),
+    /// StringReg for string-typed register access.
+    String(StringDecl),
 }
 
 /// Full XML model describing the GenICam schema version and all declared nodes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XmlModel {
     /// Combined schema version extracted from the RegisterDescription attributes.
     pub version: String,
@@ -310,11 +401,15 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 b"RegisterDescription" => {
                     version = schema_version_from(e)?;
                 }
-                b"Integer" => {
+                b"Integer" | b"IntReg" | b"MaskedIntReg" => {
                     let node = parse_integer(&mut reader, e.clone())?;
                     nodes.push(node);
                 }
-                b"Float" => {
+                b"IntSwissKnife" => {
+                    let node = parse_swissknife(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"Float" | b"FloatReg" => {
                     let node = parse_float(&mut reader, e.clone())?;
                     nodes.push(node);
                 }
@@ -337,6 +432,26 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 b"SwissKnife" => {
                     let node = parse_swissknife(&mut reader, e.clone())?;
                     nodes.push(node);
+                }
+                b"Converter" => {
+                    let node = parse_converter(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"IntConverter" => {
+                    let node = parse_int_converter(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"StringReg" | b"String" => {
+                    let node = parse_string(&mut reader, e.clone())?;
+                    nodes.push(node);
+                }
+                b"StructReg" => {
+                    let entries = parse_struct_reg(&mut reader, e.clone())?;
+                    nodes.extend(entries);
+                }
+                b"Port" => {
+                    // Port nodes are transport-level abstractions; skip them.
+                    skip_element(&mut reader, e.name().as_ref())?;
                 }
                 _ => {
                     skip_element(&mut reader, e.name().as_ref())?;
@@ -590,6 +705,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_int_swissknife_with_hex_and_ampersand() {
+        // Test that &amp; is decoded to & and hex literals are supported.
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntSwissKnife Name="PayloadSize">
+                    <pVariable Name="W">Width</pVariable>
+                    <pVariable Name="H">Height</pVariable>
+                    <pVariable Name="PF">PixelFormat</pVariable>
+                    <Formula>W * H * ((PF>>16)&amp;0xFF) / 8</Formula>
+                </IntSwissKnife>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse intswissknife");
+        assert_eq!(model.nodes.len(), 1);
+        let swiss = model
+            .nodes
+            .iter()
+            .find_map(|decl| match decl {
+                NodeDecl::SwissKnife(node) => Some(node),
+                _ => None,
+            })
+            .expect("swissknife present");
+        assert_eq!(swiss.name, "PayloadSize");
+        // &amp; should be decoded to &
+        assert!(
+            swiss.expr.contains('&'),
+            "expression should contain decoded '&': {}",
+            swiss.expr
+        );
+        assert!(
+            swiss.expr.contains("0xFF"),
+            "expression should contain hex literal: {}",
+            swiss.expr
+        );
+    }
+
+    #[test]
     fn parse_enum_entry_with_pvalue() {
         const XML: &str = r#"
             <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
@@ -658,7 +811,7 @@ mod tests {
             } => {
                 assert_eq!(name, "RegAddr");
                 assert!(
-                    matches!(addressing, Addressing::Fixed { address, len } if *address == 0x2000 && *len == 4)
+                    matches!(addressing, Some(Addressing::Fixed { address, len }) if *address == 0x2000 && *len == 4)
                 );
             }
             other => panic!("unexpected node: {other:?}"),
@@ -669,10 +822,10 @@ mod tests {
             } => {
                 assert_eq!(name, "Gain");
                 match addressing {
-                    Addressing::Indirect {
+                    Some(Addressing::Indirect {
                         p_address_node,
                         len,
-                    } => {
+                    }) => {
                         assert_eq!(p_address_node, "RegAddr");
                         assert_eq!(*len, 4);
                     }
@@ -705,7 +858,7 @@ mod tests {
         match &model.nodes[0] {
             NodeDecl::Integer { len, bitfield, .. } => {
                 assert_eq!(*len, 4);
-                let field = bitfield.expect("bitfield present");
+                let field = bitfield.as_ref().expect("bitfield present");
                 assert_eq!(field.byte_order, ByteOrder::Big);
                 assert_eq!(field.bit_length, 8);
                 assert_eq!(field.bit_offset, 16);
@@ -732,9 +885,10 @@ mod tests {
         match &model.nodes[0] {
             NodeDecl::Boolean { len, bitfield, .. } => {
                 assert_eq!(*len, 1);
-                assert_eq!(bitfield.byte_order, ByteOrder::Little);
-                assert_eq!(bitfield.bit_length, 1);
-                assert_eq!(bitfield.bit_offset, 3);
+                let bf = bitfield.as_ref().expect("bitfield present");
+                assert_eq!(bf.byte_order, ByteOrder::Little);
+                assert_eq!(bf.bit_length, 1);
+                assert_eq!(bf.bit_offset, 3);
             }
             other => panic!("unexpected node: {other:?}"),
         }
@@ -759,7 +913,7 @@ mod tests {
         assert_eq!(model.nodes.len(), 1);
         match &model.nodes[0] {
             NodeDecl::Integer { bitfield, .. } => {
-                let field = bitfield.expect("bitfield present");
+                let field = bitfield.as_ref().expect("bitfield present");
                 assert_eq!(field.byte_order, ByteOrder::Little);
                 assert_eq!(field.bit_length, 8);
                 assert_eq!(field.bit_offset, 8);

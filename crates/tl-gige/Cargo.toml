@@ -25,6 +25,9 @@ fastrand = "2"
 async-trait = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 
+[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "net", "time"] }

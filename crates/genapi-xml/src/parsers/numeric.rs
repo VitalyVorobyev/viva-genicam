@@ -37,6 +37,10 @@ pub fn parse_integer(
     let mut max = None;
     let mut inc = None;
     let mut unit = None;
+    let mut pvalue = None;
+    let mut p_max = None;
+    let mut p_min = None;
+    let mut static_value: Option<i64> = None;
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
@@ -46,6 +50,31 @@ pub fn parse_integer(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
+                b"pValue" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        pvalue = Some(target.to_string());
+                    }
+                }
+                b"pMax" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        p_max = Some(target.to_string());
+                    }
+                }
+                b"pMin" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        p_min = Some(target.to_string());
+                    }
+                }
+                TAG_VALUE => {
+                    let text = read_text_start(reader, e)?;
+                    static_value = Some(parse_i64(&text)?);
+                }
                 b"Address" => {
                     let text = read_text_start(reader, e)?;
                     addressing.attach_selected_address(parse_u64(&text)?, None);
@@ -213,18 +242,30 @@ pub fn parse_integer(
         buf.clear();
     }
 
-    let min =
-        min.ok_or_else(|| XmlError::Invalid(format!("Integer node {name} is missing <Min>")))?;
-    let max =
-        max.ok_or_else(|| XmlError::Invalid(format!("Integer node {name} is missing <Max>")))?;
+    // Min/Max are optional per GenICam standard; use full-range defaults.
+    let min = min.unwrap_or(i64::MIN);
+    let max = max.unwrap_or(i64::MAX);
 
-    let addressing = addressing.finalize(&name, Some(4))?;
-    let lengths = addressing_lengths(&addressing);
-    let len = lengths
-        .first()
-        .copied()
-        .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
-    let bitfield = bitfield.finish(&name, &lengths)?;
+    // When pValue or static Value is set, addressing is optional.
+    let (addressing, len, bitfield) = if pvalue.is_some() || static_value.is_some() {
+        let addr = addressing.finalize(&name, Some(4)).ok();
+        let len = addr
+            .as_ref()
+            .and_then(|a| addressing_lengths(a).first().copied())
+            .unwrap_or(4);
+        let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
+        let bf = bitfield.finish(&name, &lengths).ok().flatten();
+        (addr, len, bf)
+    } else {
+        let addr = addressing.finalize(&name, Some(4))?;
+        let lengths = addressing_lengths(&addr);
+        let len = lengths
+            .first()
+            .copied()
+            .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
+        let bf = bitfield.finish(&name, &lengths)?;
+        (Some(addr), len, bf)
+    };
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Integer {
@@ -239,6 +280,10 @@ pub fn parse_integer(
         bitfield,
         selectors,
         selected_if,
+        pvalue,
+        p_max,
+        p_min,
+        value: static_value,
     })
 }
 
@@ -265,6 +310,7 @@ pub fn parse_float(
     let mut scale_num: Option<i64> = None;
     let mut scale_den: Option<i64> = None;
     let mut offset = None;
+    let mut pvalue = None;
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
@@ -272,6 +318,13 @@ pub fn parse_float(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
+                b"pValue" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        pvalue = Some(target.to_string());
+                    }
+                }
                 b"Address" | TAG_P_ADDRESS | b"Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
                         skip_element(reader, e.name().as_ref())?;
@@ -344,10 +397,8 @@ pub fn parse_float(
         buf.clear();
     }
 
-    let min =
-        min.ok_or_else(|| XmlError::Invalid(format!("Float node {name} is missing <Min>")))?;
-    let max =
-        max.ok_or_else(|| XmlError::Invalid(format!("Float node {name} is missing <Max>")))?;
+    let min = min.unwrap_or(f64::MIN);
+    let max = max.unwrap_or(f64::MAX);
     let scale = match (scale_num, scale_den) {
         (Some(num), Some(den)) if den != 0 => Some((num, den)),
         (None, None) => None,
@@ -355,7 +406,11 @@ pub fn parse_float(
         _ => None,
     };
 
-    let addressing = addressing.finalize(&name, Some(8))?;
+    let addressing = if pvalue.is_some() {
+        addressing.finalize(&name, Some(8)).ok()
+    } else {
+        Some(addressing.finalize(&name, Some(8))?)
+    };
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Float {
@@ -369,5 +424,6 @@ pub fn parse_float(
         offset,
         selectors,
         selected_if,
+        pvalue,
     })
 }

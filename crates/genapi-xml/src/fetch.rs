@@ -5,8 +5,9 @@ use std::future::Future;
 use crate::util::parse_u64;
 use crate::XmlError;
 
-/// Address of the first URL register in device memory.
-const FIRST_URL_ADDRESS: u64 = 0x0000;
+/// Address of the first URL register in the GigE Vision bootstrap register map.
+/// GigE Vision spec: GevFirstURL at 0x0200 (512 bytes max).
+const FIRST_URL_ADDRESS: u64 = 0x0200;
 /// Maximum length of the first URL string.
 const FIRST_URL_MAX_LEN: usize = 512;
 
@@ -59,6 +60,7 @@ enum UrlLocation {
     /// Memory-mapped local XML at a fixed address.
     Local { address: u64, length: usize },
     /// Named local XML resource (unsupported).
+    #[allow(dead_code)]
     LocalNamed(String),
     /// HTTP(S) remote URL (unsupported).
     Http(String),
@@ -68,11 +70,14 @@ enum UrlLocation {
 
 impl UrlLocation {
     fn parse(url: &str) -> Result<Self, XmlError> {
-        if let Some(rest) = url.strip_prefix("local:") {
-            parse_local_url(rest)
-        } else if url.starts_with("http://") || url.starts_with("https://") {
+        let lower = url.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("local:") {
+            // Use original URL (case-preserved) for the rest, at same offset.
+            let rest_original = &url[url.len() - rest.len()..];
+            parse_local_url(rest_original)
+        } else if lower.starts_with("http://") || lower.starts_with("https://") {
             Ok(UrlLocation::Http(url.to_string()))
-        } else if url.starts_with("file://") {
+        } else if lower.starts_with("file://") {
             Ok(UrlLocation::File(url.to_string()))
         } else {
             Err(XmlError::Unsupported(format!("unknown URL scheme: {url}")))
@@ -81,14 +86,41 @@ impl UrlLocation {
 }
 
 /// Parse a `local:` URL into its components.
+///
+/// Supports two formats:
+///
+/// 1. **Key-value**: `local:address=0x10;length=0x3`
+/// 2. **GenICam standard**: `Local:///filename;hex_address;hex_length`
+///
+/// In format 2, the filename is optional (can be just `///;addr;len`).
 fn parse_local_url(rest: &str) -> Result<UrlLocation, XmlError> {
-    let trimmed = rest.trim();
+    // Strip the `///` prefix used by the standard GenICam URL format.
+    let trimmed = rest.strip_prefix("///").unwrap_or(rest).trim();
     if trimmed.is_empty() {
         return Err(XmlError::Invalid("empty local URL".into()));
     }
+
+    let parts: Vec<&str> = trimmed.split(';').collect();
+
+    // GenICam standard format: filename;hex_address;hex_length (3 semicolon-separated parts).
+    if parts.len() >= 3 {
+        let addr_str = parts[parts.len() - 2].trim();
+        let len_str = parts[parts.len() - 1].trim();
+        if let (Ok(address), Ok(length)) = (
+            u64::from_str_radix(addr_str, 16),
+            u64::from_str_radix(len_str, 16),
+        ) {
+            return Ok(UrlLocation::Local {
+                address,
+                length: length as usize,
+            });
+        }
+    }
+
+    // Fall back to key-value parsing.
     let mut address = None;
     let mut length = None;
-    for part in trimmed.split([';', ',']) {
+    for part in parts {
         let token = part.trim();
         if token.is_empty() {
             continue;
@@ -111,9 +143,8 @@ fn parse_local_url(rest: &str) -> Result<UrlLocation, XmlError> {
             }
         } else if token.starts_with("0x") {
             address = Some(parse_u64(token)?);
-        } else {
-            return Ok(UrlLocation::LocalNamed(token.to_string()));
         }
+        // Ignore unrecognized tokens (like the filename).
     }
     match (address, length) {
         (Some(address), Some(length)) => Ok(UrlLocation::Local { address, length }),

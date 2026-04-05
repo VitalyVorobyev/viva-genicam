@@ -22,7 +22,7 @@ pub fn parse_swissknife(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"Expression" => {
+                b"Expression" | b"Formula" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
@@ -67,7 +67,7 @@ pub fn parse_swissknife(
                         )));
                     }
                 }
-                b"Expression" => {
+                b"Expression" | b"Formula" => {
                     let text = attribute_value_required(e, TAG_VALUE)?;
                     let trimmed = text.trim();
                     if trimmed.is_empty() {

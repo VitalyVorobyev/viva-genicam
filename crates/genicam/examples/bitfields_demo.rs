@@ -130,11 +130,14 @@ fn describe_node(nodemap: &NodeMap, name: &str) {
                 }
             }
             Node::Boolean(meta) => {
-                let field = meta.bitfield;
-                println!(
-                    "{name} -> Boolean, {:?}, offset {}, length {}",
-                    field.byte_order, field.bit_offset, field.bit_length
-                );
+                if let Some(field) = meta.bitfield {
+                    println!(
+                        "{name} -> Boolean, {:?}, offset {}, length {}",
+                        field.byte_order, field.bit_offset, field.bit_length
+                    );
+                } else {
+                    println!("{name} -> Boolean (pValue-backed)");
+                }
             }
             other => println!("{name} -> {:?}", other),
         }

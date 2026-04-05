@@ -25,6 +25,46 @@ pub struct AddressEntry {
 }
 
 impl AddressingBuilder {
+    /// Create a new builder with the node name for error messages.
+    pub fn new(_node: &str) -> Self {
+        Self {
+            fixed_address: None,
+            length: None,
+            selector: None,
+            entries: Vec::new(),
+            pending_value: None,
+            pending_len: None,
+            p_address_node: None,
+        }
+    }
+
+    /// Finalize the builder into an [`Addressing`] variant using default length 0.
+    ///
+    /// This is useful for StringReg nodes where the length is optional and can
+    /// default to the full register.
+    pub fn build(self) -> Addressing {
+        let len = self.length.unwrap_or(0);
+        if let Some(p_address_node) = self.p_address_node {
+            Addressing::Indirect {
+                p_address_node,
+                len,
+            }
+        } else if let Some(address) = self.fixed_address {
+            Addressing::Fixed { address, len }
+        } else if !self.entries.is_empty() {
+            let selector = self.selector.unwrap_or_default();
+            let map = self
+                .entries
+                .iter()
+                .map(|e| (e.value.clone(), (e.address, e.len.unwrap_or(len))))
+                .collect();
+            Addressing::BySelector { selector, map }
+        } else {
+            // Return fixed with zero address if nothing specified
+            Addressing::Fixed { address: 0, len }
+        }
+    }
+
     /// Set a fixed register address.
     pub fn set_fixed_address(&mut self, address: u64) {
         self.fixed_address = Some(address);

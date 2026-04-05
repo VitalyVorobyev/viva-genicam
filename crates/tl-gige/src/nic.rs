@@ -44,7 +44,10 @@ fn iface_name_to_index(name: &str) -> io::Result<u32> {
 }
 
 /// Resolve an interface index from its name using `if_nametoindex(3)`.
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android"))
+))]
 fn iface_name_to_index(name: &str) -> io::Result<u32> {
     use std::ffi::CString;
 
@@ -64,6 +67,22 @@ fn iface_name_to_index(name: &str) -> io::Result<u32> {
     } else {
         Ok(index)
     }
+}
+
+/// Resolve an interface index from its name on Windows.
+#[cfg(target_os = "windows")]
+fn iface_name_to_index(name: &str) -> io::Result<u32> {
+    // On Windows, interface indices are not easily resolved by name via libc.
+    // Fall back to iterating if_addrs to find a matching interface.
+    for (idx, iface) in if_addrs::get_if_addrs()?.iter().enumerate() {
+        if iface.name == name {
+            return Ok((idx + 1) as u32);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("interface '{name}' not found"),
+    ))
 }
 
 /// Representation of a host network interface.
@@ -379,6 +398,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn from_system_loopback() {
         let lo_name = if cfg!(target_os = "macos") {
             "lo0"

@@ -25,6 +25,10 @@ async-trait = { workspace = true }
 sfnc = { version = "0.1.0", path = "../sfnc" }
 pfnc = { version = "0.1.0", path = "../pfnc" }
 genicp = { version = "0.1.0", path = "../genicp" }
+gvsp-capture = { path = "../../../gvsp-capture/crates/gvsp-capture", optional = true }
+
+[features]
+fast-capture = ["dep:gvsp-capture"]
 
 [dev-dependencies]
 genapi-xml = { version = "0.1.0", path = "../genapi-xml" }

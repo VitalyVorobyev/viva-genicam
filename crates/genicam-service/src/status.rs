@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use genicam_zenoh_api::{keys, DeviceStatus};
+use genicam_zenoh_api::{DeviceStatus, keys};
 use tracing::{info, warn};
 use zenoh::Session;
 

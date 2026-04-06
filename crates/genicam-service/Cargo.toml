@@ -6,6 +6,10 @@ description = "GenICam camera service with Zenoh API for genicam-studio"
 license = "MIT"
 publish = false
 
+[lib]
+name = "genicam_service"
+path = "src/lib.rs"
+
 [[bin]]
 name = "genicam-service"
 path = "src/main.rs"

@@ -212,7 +212,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Joined multicast group; waiting for frames...");
 
     loop {
-        let (len, _) = match stream.socket().recv_from(&mut recv_buffer).await {
+        let (len, _) = match stream
+            .socket()
+            .expect("UDP socket")
+            .recv_from(&mut recv_buffer)
+            .await
+        {
             Ok(res) => res,
             Err(err) => {
                 warn!(error = %err, "socket receive failed; stopping capture");

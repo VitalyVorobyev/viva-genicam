@@ -133,7 +133,7 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
                 interrupted = true;
                 break;
             }
-            recv = stream.socket().recv_from(&mut recv_buffer) => {
+            recv = stream.socket().expect("UDP socket").recv_from(&mut recv_buffer) => {
                 let (len, _) = match recv {
                     Ok(result) => result,
                     Err(err) => {

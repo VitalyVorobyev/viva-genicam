@@ -101,6 +101,8 @@ pub use chunks::{parse_chunk_bytes, ChunkKind, ChunkMap, ChunkValue};
 pub use events::{Event, EventStream};
 pub use frame::Frame;
 pub use gige::action::{AckSummary, ActionParams};
+#[cfg(feature = "fast-capture")]
+pub use stream::{CaptureConfig, RawPacket, StreamTransport, UdpTransport};
 pub use stream::{FrameStream, Stream, StreamBuilder, StreamDest};
 pub use time::TimeSync;
 
@@ -709,6 +711,16 @@ impl GigeRegisterIo {
             handle,
             device: Mutex::new(device),
         }
+    }
+
+    /// Lock the underlying [`GigeDevice`] for direct async operations.
+    ///
+    /// This is intended for callers that need the raw device (e.g. stream
+    /// channel configuration) while the `Camera` wrapper holds the transport.
+    pub fn lock_device(&self) -> Result<MutexGuard<'_, GigeDevice>, GenicamError> {
+        self.device
+            .lock()
+            .map_err(|_| GenicamError::transport("gige device mutex poisoned"))
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, GigeDevice>, GenApiError> {

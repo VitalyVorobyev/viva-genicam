@@ -170,7 +170,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut last_pixel_format: Option<PixelFormat> = None;
 
     while frames_remaining > 0 {
-        let (len, _) = stream.socket().recv_from(&mut recv_buffer).await?;
+        let (len, _) = stream
+            .socket()
+            .expect("UDP socket")
+            .recv_from(&mut recv_buffer)
+            .await?;
         let packet = match gvsp::parse_packet(&recv_buffer[..len]) {
             Ok(packet) => packet,
             Err(err) => {

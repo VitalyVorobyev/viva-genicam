@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use genicam_zenoh_api::{keys, DeviceXmlResponse};
+use genicam_zenoh_api::{DeviceXmlResponse, keys};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use zenoh::Session;

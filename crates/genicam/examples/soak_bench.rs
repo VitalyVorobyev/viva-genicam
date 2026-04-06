@@ -306,7 +306,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 info!("received ctrl-c; stopping bench");
                 break;
             }
-            recv = stream.socket().recv_from(&mut recv_buffer) => {
+            recv = stream.socket().expect("UDP socket").recv_from(&mut recv_buffer) => {
                 let (len, _) = match recv {
                     Ok(res) => res,
                     Err(err) => {

@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
+use genicam::FrameStream;
 use genicam::gige::nic::Iface;
-use genicam::{FrameStream, StreamBuilder};
 use genicam_zenoh_api::frame_header::FrameHeader;
 use genicam_zenoh_api::{
-    keys, AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, ImageMeta,
-    NodeOpResponse,
+    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, ImageMeta, NodeOpResponse,
+    keys,
 };
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -119,30 +119,10 @@ async fn handle_start(
     stop_tx: &watch::Sender<bool>,
     frame_task: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> NodeOpResponse {
-    // Start acquisition on the camera.
-    if let Err(e) = device.exec_command("AcquisitionStart").await {
-        return NodeOpResponse {
-            ok: false,
-            error: Some(format!("AcquisitionStart failed: {e}")),
-        };
-    }
-
-    // Open a stream device and build a FrameStream.
-    let mut stream_device = match device.open_stream_device().await {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = device.exec_command("AcquisitionStop").await;
-            return NodeOpResponse {
-                ok: false,
-                error: Some(format!("failed to open stream device: {e}")),
-            };
-        }
-    };
-
+    // 1. Resolve the network interface for GVSP reception.
     let iface = match resolve_iface(device) {
         Ok(i) => i,
         Err(e) => {
-            let _ = device.exec_command("AcquisitionStop").await;
             return NodeOpResponse {
                 ok: false,
                 error: Some(format!("interface resolution failed: {e}")),
@@ -150,15 +130,12 @@ async fn handle_start(
         }
     };
 
-    let stream = match StreamBuilder::new(&mut stream_device)
-        .iface(iface)
-        .auto_packet_size(true)
-        .build()
-        .await
-    {
-        Ok(s) => s,
+    // 2. Configure stream registers (SCDA/SCPH/SCPS) and bind socket using
+    //    the CCP-holding device. This must happen BEFORE AcquisitionStart so
+    //    the camera knows where to send GVSP packets.
+    let mut frame_stream = match device.build_stream(iface).await {
+        Ok(fs) => fs,
         Err(e) => {
-            let _ = device.exec_command("AcquisitionStop").await;
             return NodeOpResponse {
                 ok: false,
                 error: Some(format!("stream build failed: {e}")),
@@ -166,28 +143,30 @@ async fn handle_start(
         }
     };
 
-    let mut frame_stream = FrameStream::new(stream, None);
-
-    // Publish ImageMeta.
+    // 3. Publish metadata before starting acquisition.
     publish_image_meta(session, device, device_id).await;
 
-    // Publish active status.
+    // 4. Start acquisition — camera begins streaming to the configured destination.
+    if let Err(e) = device.exec_command("AcquisitionStart").await {
+        return NodeOpResponse {
+            ok: false,
+            error: Some(format!("AcquisitionStart failed: {e}")),
+        };
+    }
+
+    // 5. Publish active status and spawn the frame loop.
     publish_status(session, device_id, true).await;
 
     info!(device_id, "acquisition started, spawning frame loop");
 
-    // Reset stop signal.
     let _ = stop_tx.send(false);
     let stop_rx = stop_tx.subscribe();
 
-    // Spawn the frame streaming task.
     let session_clone = session.clone();
     let device_id_owned = device_id.to_string();
 
     let handle = tokio::spawn(async move {
         frame_loop(session_clone, device_id_owned, &mut frame_stream, stop_rx).await;
-        // stream_device is moved into this task and dropped on exit.
-        drop(stream_device);
     });
 
     *frame_task = Some(handle);

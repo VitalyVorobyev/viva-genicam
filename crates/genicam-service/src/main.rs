@@ -1,19 +1,13 @@
 //! GenICam camera service — bridges genicam-rs to Zenoh for genicam-studio.
 
-mod acquisition;
-mod config;
-mod device;
-mod nodes;
-mod pixel_format;
-mod status;
-mod xml;
-
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
-use config::Cli;
-use device::DeviceHandle;
+use genicam_service::config::Cli;
+use genicam_service::device::DeviceHandle;
+use genicam_service::{acquisition, nodes, status, xml};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -213,11 +207,12 @@ async fn spawn_device_tasks(
             device.clone(),
             shutdown.clone(),
         )),
+        tokio::spawn(heartbeat_loop(device.clone(), shutdown.clone())),
     ]
 }
 
 async fn publish_announce(session: &zenoh::Session, device_id: &str, model: &str) {
-    use genicam_zenoh_api::{keys, DeviceAnnounce, API_VERSION};
+    use genicam_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
 
     let announce = DeviceAnnounce {
         id: device_id.to_string(),
@@ -251,6 +246,26 @@ fn init_tracing(verbose: u8) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// Periodically read a register to keep the GVCP control channel alive.
+///
+/// GigE Vision cameras drop CCP (Control Channel Privilege) after a heartbeat
+/// timeout (~3 s on aravis). This task reads the CCP register every second.
+async fn heartbeat_loop(device: Arc<DeviceHandle>, mut shutdown: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(e) = device.heartbeat_ping().await {
+                    warn!(error = %e, "heartbeat failed");
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+        }
+    }
 }
 
 fn load_zenoh_config(

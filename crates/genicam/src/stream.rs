@@ -21,7 +21,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant, SystemTime};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use pfnc::PixelFormat;
 use tokio::net::UdpSocket;
 use tracing::{debug, info, trace, warn};
@@ -34,7 +34,53 @@ use tl_gige::gvsp::{self, GvspPacket, PacketBitmap, StreamConfig};
 use tl_gige::nic::{self, Iface, McOptions, DEFAULT_RCVBUF_BYTES};
 use tl_gige::stats::{StreamStats, StreamStatsAccumulator};
 
+#[cfg(feature = "fast-capture")]
+pub use gvsp_capture::{CaptureConfig, RawPacket, StreamTransport, UdpTransport};
+
 pub use tl_gige::gvsp::StreamDest;
+
+/// Internal packet source abstraction.
+///
+/// Holds either a standard UDP socket or a custom transport backend.
+/// This avoids making `Stream`/`FrameStream` generic while supporting
+/// both paths.
+pub(crate) enum PacketSource {
+    Udp(UdpSocket),
+    #[cfg(feature = "fast-capture")]
+    Transport(Box<dyn StreamTransport>),
+}
+
+impl PacketSource {
+    /// Receive raw packet bytes from the source.
+    async fn recv(&self, buf: &mut [u8]) -> Result<Bytes, GenicamError> {
+        match self {
+            PacketSource::Udp(socket) => {
+                let (len, _) = socket
+                    .recv_from(buf)
+                    .await
+                    .map_err(|e| GenicamError::transport(format!("socket recv failed: {e}")))?;
+                Ok(Bytes::copy_from_slice(&buf[..len]))
+            }
+            #[cfg(feature = "fast-capture")]
+            PacketSource::Transport(t) => {
+                let packet = t
+                    .recv()
+                    .await
+                    .map_err(|e| GenicamError::transport(format!("transport recv failed: {e}")))?;
+                Ok(packet.data)
+            }
+        }
+    }
+
+    /// Borrow the UDP socket, if this is the UDP path.
+    fn as_udp_socket(&self) -> Option<&UdpSocket> {
+        match self {
+            PacketSource::Udp(s) => Some(s),
+            #[cfg(feature = "fast-capture")]
+            PacketSource::Transport(_) => None,
+        }
+    }
+}
 
 /// Builder for configuring a GVSP stream.
 pub struct StreamBuilder<'a> {
@@ -48,6 +94,8 @@ pub struct StreamBuilder<'a> {
     packet_delay: Option<u32>,
     channel: u32,
     dst_port: u16,
+    #[cfg(feature = "fast-capture")]
+    transport: Option<Box<dyn StreamTransport>>,
 }
 
 impl<'a> StreamBuilder<'a> {
@@ -64,6 +112,8 @@ impl<'a> StreamBuilder<'a> {
             packet_delay: None,
             channel: 0,
             dst_port: 0,
+            #[cfg(feature = "fast-capture")]
+            transport: None,
         }
     }
 
@@ -155,6 +205,19 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Inject a custom [`StreamTransport`] backend for packet reception.
+    ///
+    /// When set, the builder skips UDP socket creation and uses the provided
+    /// transport instead. The transport's [`add_port_filter`](StreamTransport::add_port_filter)
+    /// is called with the negotiated GVSP destination port.
+    ///
+    /// Requires the `fast-capture` feature.
+    #[cfg(feature = "fast-capture")]
+    pub fn transport(mut self, transport: Box<dyn StreamTransport>) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
     /// Finalise the builder and return a configured [`Stream`].
     pub async fn build(self) -> Result<Stream, GenicamError> {
         let iface = self
@@ -233,30 +296,28 @@ impl<'a> StreamBuilder<'a> {
             .await
             .map_err(|err| GenicamError::transport(err.to_string()))?;
 
-        let socket = match &dest {
-            StreamDest::Unicast { dst_port, .. } => {
-                let bind_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
-                nic::bind_udp(bind_ip, *dst_port, Some(iface.clone()), self.rcvbuf_bytes)
-                    .await
-                    .map_err(|err| GenicamError::transport(err.to_string()))?
-            }
-            StreamDest::Multicast {
-                group,
-                port,
-                loopback,
-                ttl,
-            } => {
-                let opts = McOptions {
-                    loopback: *loopback,
-                    ttl: *ttl,
-                    rcvbuf_bytes: self.rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
-                    ..McOptions::default()
-                };
-                nic::bind_multicast(&iface, *group, *port, &opts)
-                    .await
-                    .map_err(|err| GenicamError::transport(err.to_string()))?
-            }
+        // Build the packet source: custom transport or standard UDP socket.
+        #[cfg(feature = "fast-capture")]
+        let source = if let Some(mut transport) = self.transport {
+            let config = CaptureConfig {
+                interface: iface.name().to_string(),
+                buffer_size: self.rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
+            };
+            transport
+                .open(config)
+                .await
+                .map_err(|e| GenicamError::transport(format!("transport open failed: {e}")))?;
+            transport
+                .add_port_filter(dest.port())
+                .await
+                .map_err(|e| GenicamError::transport(format!("add_port_filter failed: {e}")))?;
+            PacketSource::Transport(transport)
+        } else {
+            PacketSource::Udp(Self::bind_socket(&dest, &iface, self.rcvbuf_bytes).await?)
         };
+
+        #[cfg(not(feature = "fast-capture"))]
+        let source = PacketSource::Udp(Self::bind_socket(&dest, &iface, self.rcvbuf_bytes).await?);
 
         let source_filter = if dest.is_multicast() {
             None
@@ -284,39 +345,71 @@ impl<'a> StreamBuilder<'a> {
 
         let stats = StreamStatsAccumulator::new();
         Ok(Stream {
-            socket,
+            source,
             stats,
             params,
             config,
         })
     }
+
+    /// Bind a UDP socket for the given stream destination.
+    async fn bind_socket(
+        dest: &StreamDest,
+        iface: &Iface,
+        rcvbuf_bytes: Option<usize>,
+    ) -> Result<UdpSocket, GenicamError> {
+        match dest {
+            StreamDest::Unicast { dst_port, .. } => {
+                let bind_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+                nic::bind_udp(bind_ip, *dst_port, Some(iface.clone()), rcvbuf_bytes)
+                    .await
+                    .map_err(|err| GenicamError::transport(err.to_string()))
+            }
+            StreamDest::Multicast {
+                group,
+                port,
+                loopback,
+                ttl,
+            } => {
+                let opts = McOptions {
+                    loopback: *loopback,
+                    ttl: *ttl,
+                    rcvbuf_bytes: rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
+                    ..McOptions::default()
+                };
+                nic::bind_multicast(iface, *group, *port, &opts)
+                    .await
+                    .map_err(|err| GenicamError::transport(err.to_string()))
+            }
+        }
+    }
 }
 
-/// Handle returned by [`StreamBuilder`] providing access to the configured socket
-/// and statistics.
+/// Handle returned by [`StreamBuilder`] providing access to the configured
+/// packet source and statistics.
 pub struct Stream {
-    socket: UdpSocket,
+    source: PacketSource,
     stats: StreamStatsAccumulator,
     params: StreamParams,
     config: StreamConfig,
 }
 
 impl Stream {
-    /// Borrow the underlying UDP socket.
-    pub fn socket(&self) -> &UdpSocket {
-        &self.socket
+    /// Borrow the underlying UDP socket (returns `None` when using a custom transport).
+    pub fn socket(&self) -> Option<&UdpSocket> {
+        self.source.as_udp_socket()
     }
 
-    /// Consume the stream and return the UDP socket together with the shared statistics handle.
-    pub fn into_parts(
+    /// Consume the stream and return its parts.
+    pub(crate) fn into_parts(
         self,
     ) -> (
-        UdpSocket,
+        PacketSource,
         StreamStatsAccumulator,
         StreamParams,
         StreamConfig,
     ) {
-        (self.socket, self.stats, self.params, self.config)
+        (self.source, self.stats, self.params, self.config)
     }
 
     /// Access the negotiated stream parameters.
@@ -462,7 +555,7 @@ impl FrameAssemblyState {
 /// }
 /// ```
 pub struct FrameStream {
-    socket: UdpSocket,
+    source: PacketSource,
     stats: StreamStatsAccumulator,
     params: StreamParams,
     config: StreamConfig,
@@ -477,11 +570,11 @@ impl FrameStream {
     ///
     /// Optionally accepts a [`TimeSync`] for mapping device timestamps to host time.
     pub fn new(stream: Stream, time_sync: Option<TimeSync>) -> Self {
-        let (socket, stats, params, config) = stream.into_parts();
+        let (source, stats, params, config) = stream.into_parts();
         let buffer_size = (params.packet_size as usize + 64).max(4096);
 
         Self {
-            socket,
+            source,
             stats,
             params,
             config,
@@ -525,9 +618,9 @@ impl FrameStream {
         &self.config
     }
 
-    /// Borrow the underlying UDP socket for advanced use cases.
-    pub fn socket(&self) -> &UdpSocket {
-        &self.socket
+    /// Borrow the underlying UDP socket (returns `None` when using a custom transport).
+    pub fn socket(&self) -> Option<&UdpSocket> {
+        self.source.as_udp_socket()
     }
 
     /// Receive the next complete frame.
@@ -551,17 +644,14 @@ impl FrameStream {
             }
 
             // Receive next packet.
-            let len = match self.socket.recv_from(&mut self.recv_buffer).await {
-                Ok((0, _)) => return Ok(None), // Stream closed.
-                Ok((len, _)) => len,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(e) => {
-                    return Err(GenicamError::transport(format!("socket recv failed: {e}")));
-                }
+            let raw = match self.source.recv(&mut self.recv_buffer).await {
+                Ok(data) if data.is_empty() => return Ok(None), // Stream closed.
+                Ok(data) => data,
+                Err(e) => return Err(e),
             };
 
             // Parse GVSP packet.
-            let packet = match gvsp::parse_packet(&self.recv_buffer[..len]) {
+            let packet = match gvsp::parse_packet(&raw) {
                 Ok(p) => p,
                 Err(e) => {
                     trace!(error = %e, "discarding malformed GVSP packet");

@@ -2,8 +2,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use genicam::{connect_gige_with_xml, gige, Camera, GenicamError, GigeRegisterIo};
-use tracing::{debug, info};
+use genicam::gige::nic::Iface;
+use genicam::{
+    Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
+};
+use tracing::debug;
 
 /// Wraps a connected camera with its raw XML and device identity.
 pub struct DeviceHandle {
@@ -58,14 +61,51 @@ impl DeviceHandle {
         self.iface_name.as_deref()
     }
 
-    /// Open a second GigeDevice connection for GVSP stream control.
-    pub async fn open_stream_device(&self) -> Result<gige::GigeDevice, GenicamError> {
-        use std::net::{IpAddr, SocketAddr};
-        let addr = SocketAddr::new(IpAddr::V4(self.info.ip), gige::GVCP_PORT);
-        info!(device_id = self.device_id, %addr, "opening stream control device");
-        gige::GigeDevice::open(addr)
-            .await
-            .map_err(|e| GenicamError::Transport(e.to_string()))
+    /// Build a GVSP stream using the CCP-holding device.
+    ///
+    /// This configures the stream channel registers (SCDA, SCPH, SCPS) on the
+    /// device that owns Control Channel Privilege and binds the receiving UDP
+    /// socket. The returned [`FrameStream`] is ready for frame reception.
+    pub async fn build_stream(&self, iface: Iface) -> Result<FrameStream, GenicamError> {
+        let cam = self.camera.clone();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let cam = cam
+                .lock()
+                .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
+            let mut device = cam.transport().lock_device()?;
+            handle.block_on(async {
+                let stream = StreamBuilder::new(&mut device)
+                    .iface(iface)
+                    .auto_packet_size(true)
+                    .build()
+                    .await?;
+                Ok(FrameStream::new(stream, None))
+            })
+        })
+        .await
+        .map_err(|e| GenicamError::Transport(e.to_string()))?
+    }
+
+    /// Send a heartbeat read to keep the control channel alive.
+    ///
+    /// GigE Vision cameras drop CCP after a timeout (~3 s on aravis fake camera)
+    /// if no GVCP traffic is received. This reads the CCP register as a keep-alive.
+    pub async fn heartbeat_ping(&self) -> Result<(), GenicamError> {
+        let cam = self.camera.clone();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let cam = cam
+                .lock()
+                .map_err(|_| GenicamError::Transport("mutex poisoned".into()))?;
+            let mut device = cam.transport().lock_device()?;
+            handle
+                .block_on(device.read_mem(0x0A00, 4))
+                .map_err(|e| GenicamError::Transport(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| GenicamError::Transport(e.to_string()))?
     }
 
     /// Read a feature value via spawn_blocking.

@@ -1,12 +1,14 @@
 //! Per-device state wrapping `Camera<GigeRegisterIo>`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use genicam::gige::gvcp::consts as gvcp_consts;
 use genicam::gige::nic::Iface;
 use genicam::{
     Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Wraps a connected camera with its raw XML and device identity.
 pub struct DeviceHandle {
@@ -16,6 +18,9 @@ pub struct DeviceHandle {
     info: gige::DeviceInfo,
     /// Network interface name for stream setup (e.g. "en0").
     iface_name: Option<String>,
+    /// When true the heartbeat loop should skip pinging to avoid mutex
+    /// contention during connection refresh (which replaces the camera).
+    heartbeat_paused: AtomicBool,
 }
 
 impl DeviceHandle {
@@ -32,6 +37,7 @@ impl DeviceHandle {
             device_id,
             info: info.clone(),
             iface_name,
+            heartbeat_paused: AtomicBool::new(false),
         })
     }
 
@@ -61,6 +67,21 @@ impl DeviceHandle {
         self.iface_name.as_deref()
     }
 
+    /// Pause the heartbeat loop so it skips pinging.
+    pub fn pause_heartbeat(&self) {
+        self.heartbeat_paused.store(true, Ordering::Release);
+    }
+
+    /// Resume the heartbeat loop after a pause.
+    pub fn resume_heartbeat(&self) {
+        self.heartbeat_paused.store(false, Ordering::Release);
+    }
+
+    /// Returns `true` while heartbeat pings should be skipped.
+    pub fn is_heartbeat_paused(&self) -> bool {
+        self.heartbeat_paused.load(Ordering::Acquire)
+    }
+
     /// Build a GVSP stream using the CCP-holding device.
     ///
     /// This configures the stream channel registers (SCDA, SCPH, SCPS) on the
@@ -87,10 +108,70 @@ impl DeviceHandle {
         .map_err(|e| GenicamError::Transport(e.to_string()))?
     }
 
+    /// Refresh the control connection and replace the cached camera handle.
+    ///
+    /// The Aravis fake camera on macOS loopback can stop producing frames after
+    /// a longer idle period even though register reads still succeed. Reopening
+    /// the control connection immediately before stream setup restores the
+    /// working state without changing the higher-level device identity.
+    ///
+    /// The heartbeat loop is paused while the swap happens to avoid the old
+    /// socket holding the camera mutex (the old CCP is revoked once the new
+    /// connection claims it, so the old heartbeat would retry for up to 2 s
+    /// and starve the new connection's CCP timer).
+    pub async fn refresh_connection(&self) -> Result<(), GenicamError> {
+        // 1. Pause heartbeat so it does not contend for the mutex on the
+        //    old (now CCP-revoked) socket while we create the new connection.
+        self.pause_heartbeat();
+        info!(
+            device_id = self.device_id,
+            "heartbeat paused for connection refresh"
+        );
+
+        let result = connect_gige_with_xml(&self.info).await;
+
+        match result {
+            Ok((camera, _xml)) => {
+                // 2. Swap the camera handle.
+                {
+                    let mut slot = self
+                        .camera
+                        .lock()
+                        .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
+                    *slot = camera;
+                }
+
+                // 3. Send an immediate heartbeat on the new socket to reset
+                //    the camera's CCP timer before any other operations.
+                if let Err(e) = self.heartbeat_ping().await {
+                    info!(
+                        device_id = self.device_id,
+                        error = %e,
+                        "immediate heartbeat after refresh failed (non-fatal)"
+                    );
+                }
+
+                // 4. Resume heartbeat loop.
+                self.resume_heartbeat();
+                info!(
+                    device_id = self.device_id,
+                    "heartbeat resumed after connection refresh"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // On failure, resume heartbeat with the old connection intact.
+                self.resume_heartbeat();
+                Err(e)
+            }
+        }
+    }
+
     /// Send a heartbeat read to keep the control channel alive.
     ///
     /// GigE Vision cameras drop CCP after a timeout (~3 s on aravis fake camera)
-    /// if no GVCP traffic is received. This reads the CCP register as a keep-alive.
+    /// if no GVCP traffic is received. This reads the CCP register via GVCP
+    /// READREG so Aravis updates its controller heartbeat timer.
     pub async fn heartbeat_ping(&self) -> Result<(), GenicamError> {
         let cam = self.camera.clone();
         let handle = tokio::runtime::Handle::current();
@@ -99,9 +180,15 @@ impl DeviceHandle {
                 .lock()
                 .map_err(|_| GenicamError::Transport("mutex poisoned".into()))?;
             let mut device = cam.transport().lock_device()?;
-            handle
-                .block_on(device.read_mem(0x0A00, 4))
+            let privilege = handle
+                .block_on(device.read_register(gvcp_consts::CONTROL_CHANNEL_PRIVILEGE as u32))
                 .map_err(|e| GenicamError::Transport(e.to_string()))?;
+            let controller_bits = gvcp_consts::CCP_CONTROL | gvcp_consts::CCP_EXCLUSIVE;
+            if privilege & controller_bits == 0 {
+                return Err(GenicamError::Transport(format!(
+                    "control channel privilege lost (ccp=0x{privilege:08x})"
+                )));
+            }
             Ok(())
         })
         .await

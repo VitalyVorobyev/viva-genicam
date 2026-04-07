@@ -137,10 +137,16 @@ async fn spawn_service_tasks(
 }
 
 async fn heartbeat_loop(device: Arc<DeviceHandle>, mut shutdown: watch::Receiver<bool>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    use tokio::time::MissedTickBehavior;
+
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                if device.is_heartbeat_paused() {
+                    continue;
+                }
                 let _ = device.heartbeat_ping().await;
             }
             _ = shutdown.changed() => {
@@ -317,6 +323,93 @@ async fn e2e_double_start_rejected() {
 
     // Stop to clean up.
     let _ = send_acq_command(&session, &device_id, AcquisitionCommand::Stop).await;
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+}
+
+/// Verify a running acquisition remains live beyond the fake camera heartbeat window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn e2e_sustained_streaming() {
+    if !aravis_available() {
+        eprintln!("SKIPPED: {FAKE_CAMERA_BIN} not found on PATH");
+        return;
+    }
+    let _cam = FakeCamera::start();
+
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .expect("discovery failed");
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface_name().to_string()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = spawn_service_tasks(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let image_key = keys::image(&device_id);
+    let subscriber = session.declare_subscriber(&image_key).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Start).await;
+    assert!(resp.ok, "AcquisitionStart failed: {:?}", resp.error);
+
+    let stream_duration = Duration::from_secs(6);
+    let max_allowed_gap = Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + stream_duration;
+    let mut frame_count: u64 = 0;
+    let mut last_frame = tokio::time::Instant::now();
+    let mut max_observed_gap = Duration::ZERO;
+
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async()).await {
+            Ok(Ok(sample)) => {
+                let payload = sample.payload().to_bytes();
+                assert!(
+                    payload.len() > 16,
+                    "frame payload too small during sustained stream: {} bytes",
+                    payload.len()
+                );
+                let now = tokio::time::Instant::now();
+                let gap = now - last_frame;
+                if gap > max_observed_gap {
+                    max_observed_gap = gap;
+                }
+                last_frame = now;
+                frame_count += 1;
+            }
+            Ok(Err(e)) => panic!("subscriber closed unexpectedly: {e}"),
+            Err(_) => panic!(
+                "no frame received for 5 s during sustained stream; frames so far: {frame_count}"
+            ),
+        }
+    }
+
+    assert!(
+        frame_count > 50,
+        "expected >50 frames in 6 s, got {frame_count}"
+    );
+    assert!(
+        max_observed_gap < max_allowed_gap,
+        "max inter-frame gap {:?} exceeds {:?}; total frames: {frame_count}",
+        max_observed_gap,
+        max_allowed_gap,
+    );
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Stop).await;
+    assert!(resp.ok, "AcquisitionStop failed: {:?}", resp.error);
+
     let _ = shutdown_tx.send(true);
     for task in tasks {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;

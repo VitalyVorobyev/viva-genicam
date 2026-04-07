@@ -9,7 +9,7 @@ use genicam_service::config::Cli;
 use genicam_service::device::DeviceHandle;
 use genicam_service::{acquisition, nodes, status, xml};
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -251,14 +251,55 @@ fn init_tracing(verbose: u8) {
 /// Periodically read a register to keep the GVCP control channel alive.
 ///
 /// GigE Vision cameras drop CCP (Control Channel Privilege) after a heartbeat
-/// timeout (~3 s on aravis). This task reads the CCP register every second.
+/// timeout (~3 s on aravis). We ping every 500 ms so that even with mutex
+/// contention or scheduling delays we have 5 chances before the timer expires.
+///
+/// The loop respects [`DeviceHandle::is_heartbeat_paused`] so that
+/// `refresh_connection` can swap the underlying camera without the old
+/// socket's heartbeat holding the mutex and starving the new CCP timer.
 async fn heartbeat_loop(device: Arc<DeviceHandle>, mut shutdown: watch::Receiver<bool>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    use tokio::time::MissedTickBehavior;
+
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    // After a long pause (e.g. during refresh_connection) reset the interval
+    // so we don't burst-fire stale ticks — one fresh ping is enough.
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = device.heartbeat_ping().await {
-                    warn!(error = %e, "heartbeat failed");
+                if device.is_heartbeat_paused() {
+                    debug!("heartbeat skipped (paused for connection refresh)");
+                    continue;
+                }
+                let start = tokio::time::Instant::now();
+                match device.heartbeat_ping().await {
+                    Ok(()) => {
+                        if consecutive_failures > 0 {
+                            info!(
+                                consecutive_failures,
+                                "heartbeat recovered"
+                            );
+                        }
+                        consecutive_failures = 0;
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        warn!(
+                            error = %e,
+                            consecutive_failures,
+                            "heartbeat failed"
+                        );
+                    }
+                }
+                let elapsed = start.elapsed();
+                if elapsed > Duration::from_millis(400) {
+                    warn!(
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "heartbeat ping slow (possible mutex contention)"
+                    );
                 }
             }
             _ = shutdown.changed() => {

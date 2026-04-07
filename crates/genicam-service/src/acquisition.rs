@@ -119,6 +119,21 @@ async fn handle_start(
     stop_tx: &watch::Sender<bool>,
     frame_task: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> NodeOpResponse {
+    // Best-effort refresh before stream setup. On macOS loopback the fake
+    // Aravis camera can sit discovered/idle for a while and then fail to
+    // deliver GVSP until the control channel is reopened. Immediate-start
+    // cases can still work with the existing control channel, so a refresh
+    // timeout falls back to the current connection instead of failing start.
+    if cfg!(target_os = "macos")
+        && let Err(e) = device.refresh_connection().await
+    {
+        warn!(
+            device_id,
+            error = %e,
+            "camera reconnect before acquisition failed; continuing with existing control connection"
+        );
+    }
+
     // 1. Resolve the network interface for GVSP reception.
     let iface = match resolve_iface(device) {
         Ok(i) => i,
@@ -143,21 +158,15 @@ async fn handle_start(
         }
     };
 
-    // 3. Publish metadata before starting acquisition.
-    publish_image_meta(session, device, device_id).await;
-
-    // 4. Start acquisition — camera begins streaming to the configured destination.
-    if let Err(e) = device.exec_command("AcquisitionStart").await {
-        return NodeOpResponse {
-            ok: false,
-            error: Some(format!("AcquisitionStart failed: {e}")),
-        };
+    // 2b. Immediate heartbeat to refresh the CCP timer after the potentially
+    //     long stream-setup phase, before the 3 sequential get_feature calls
+    //     in publish_image_meta.
+    if let Err(e) = device.heartbeat_ping().await {
+        warn!(device_id, error = %e, "heartbeat after build_stream failed (non-fatal)");
     }
 
-    // 5. Publish active status and spawn the frame loop.
-    publish_status(session, device_id, true).await;
-
-    info!(device_id, "acquisition started, spawning frame loop");
+    // 3. Publish metadata before starting acquisition.
+    publish_image_meta(session, device, device_id).await;
 
     let _ = stop_tx.send(false);
     let stop_rx = stop_tx.subscribe();
@@ -168,6 +177,33 @@ async fn handle_start(
     let handle = tokio::spawn(async move {
         frame_loop(session_clone, device_id_owned, &mut frame_stream, stop_rx).await;
     });
+
+    // Let the spawned task reach its first `next_frame()` poll before the
+    // camera starts emitting GVSP. Without this yield, `tokio::spawn` only
+    // schedules the task; on macOS loopback the fake camera can otherwise
+    // outrun the receiver and the stream may never recover.
+    tokio::task::yield_now().await;
+
+    // 4. Start acquisition only after the frame loop is armed.
+    //
+    // On macOS loopback, the fake Aravis camera can start emitting GVSP
+    // immediately after AcquisitionStart. If the reader task is spawned only
+    // afterwards, the initial leader/payload packets can be missed and the
+    // stream may never recover in practice. Arming the reader first keeps the
+    // UDP socket draining from the first packet onward.
+    if let Err(e) = device.exec_command("AcquisitionStart").await {
+        handle.abort();
+        let _ = handle.await;
+        return NodeOpResponse {
+            ok: false,
+            error: Some(format!("AcquisitionStart failed: {e}")),
+        };
+    }
+
+    // 5. Publish active status now that the device is streaming.
+    publish_status(session, device_id, true).await;
+
+    info!(device_id, "acquisition started, frame loop armed");
 
     *frame_task = Some(handle);
 
@@ -220,13 +256,55 @@ async fn frame_loop(
     let mut fps_start = tokio::time::Instant::now();
     let mut fps_frame_count: u64 = 0;
     let fps_interval = std::time::Duration::from_secs(1);
+    let mut logged_first_gvsp_frame = false;
+    let mut logged_first_image_publish = false;
+    let mut logged_payload_trim = false;
 
     loop {
         tokio::select! {
             result = frame_stream.next_frame() => {
                 match result {
                     Ok(Some(frame)) => {
+                        if !logged_first_gvsp_frame {
+                            info!(
+                                device_id,
+                                width = frame.width,
+                                height = frame.height,
+                                pixel_format = ?frame.pixel_format,
+                                payload = frame.payload.len(),
+                                "first GVSP frame received"
+                            );
+                            logged_first_gvsp_frame = true;
+                        }
+
                         let zenoh_pf = pfnc_to_zenoh(frame.pixel_format);
+                        let expected_payload_len =
+                            ((frame.width as f32 * frame.height as f32) * zenoh_pf.bytes_per_pixel())
+                                as usize;
+                        let image_bytes = if frame.payload.len() < expected_payload_len {
+                            warn!(
+                                device_id,
+                                seq,
+                                actual = frame.payload.len(),
+                                expected = expected_payload_len,
+                                "dropping undersized frame payload"
+                            );
+                            continue;
+                        } else if frame.payload.len() > expected_payload_len {
+                            if !logged_payload_trim {
+                                warn!(
+                                    device_id,
+                                    actual = frame.payload.len(),
+                                    expected = expected_payload_len,
+                                    "trimming trailing bytes from frame payload before Zenoh publish"
+                                );
+                                logged_payload_trim = true;
+                            }
+                            &frame.payload[..expected_payload_len]
+                        } else {
+                            frame.payload.as_ref()
+                        };
+
                         let header = FrameHeader {
                             pixel_format: zenoh_pf,
                             width: frame.width,
@@ -236,13 +314,22 @@ async fn frame_loop(
                         let encoded_header = header.encode();
 
                         let mut payload = Vec::with_capacity(
-                            encoded_header.len() + frame.payload.len(),
+                            encoded_header.len() + image_bytes.len(),
                         );
                         payload.extend_from_slice(&encoded_header);
-                        payload.extend_from_slice(&frame.payload);
+                        payload.extend_from_slice(image_bytes);
+                        let payload_len = payload.len();
 
                         if let Err(e) = session.put(&image_key, payload).await {
                             warn!(device_id, error = %e, "failed to publish frame");
+                        } else if !logged_first_image_publish {
+                            info!(
+                                device_id,
+                                seq,
+                                bytes = payload_len,
+                                "published first image frame to Zenoh"
+                            );
+                            logged_first_image_publish = true;
                         }
 
                         seq = seq.wrapping_add(1);

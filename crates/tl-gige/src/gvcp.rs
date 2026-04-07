@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fastrand::Rng;
-use genicp::{decode_ack, AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode};
-use if_addrs::{get_if_addrs, IfAddr};
+use genicp::{AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode, decode_ack};
+use if_addrs::{IfAddr, get_if_addrs};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::task::JoinSet;
@@ -39,6 +39,8 @@ pub mod consts {
     pub const CONTROL_CHANNEL_PRIVILEGE: u64 = 0x0a00;
     /// CCP value claiming exclusive control.
     pub const CCP_CONTROL: u32 = 1 << 1;
+    /// CCP value indicating an exclusive owner.
+    pub const CCP_EXCLUSIVE: u32 = 1 << 0;
 
     /// Address of the SFNC `GevMessageChannel0DestinationAddress` register.
     pub const MESSAGE_DESTINATION_ADDRESS: u64 = 0x0900_0200;
@@ -396,7 +398,7 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
     // String fields.
     let manufacturer = read_fixed_string(&mut cursor, 32)?; // 72
     let model = read_fixed_string(&mut cursor, 32)?; // 104
-                                                     // Remaining fields (version, info, serial, user name) are optional.
+    // Remaining fields (version, info, serial, user name) are optional.
 
     Ok(DeviceInfo {
         ip,
@@ -419,11 +421,7 @@ fn parse_string(bytes: &[u8]) -> Option<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     let slice = &bytes[..end];
     let s = String::from_utf8_lossy(slice).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// GVCP device handle.
@@ -477,9 +475,9 @@ impl GigeDevice {
     /// Required by the GigE Vision specification before the device accepts
     /// stream configuration or acquisition commands.
     pub async fn claim_control(&mut self) -> Result<(), GigeError> {
-        self.write_mem(
-            consts::CONTROL_CHANNEL_PRIVILEGE,
-            &consts::CCP_CONTROL.to_be_bytes(),
+        self.write_register(
+            consts::CONTROL_CHANNEL_PRIVILEGE as u32,
+            consts::CCP_CONTROL,
         )
         .await?;
         debug!(addr = %self.remote, "claimed control channel privilege");
@@ -488,7 +486,7 @@ impl GigeDevice {
 
     /// Release control channel privilege.
     pub async fn release_control(&mut self) -> Result<(), GigeError> {
-        self.write_mem(consts::CONTROL_CHANNEL_PRIVILEGE, &0u32.to_be_bytes())
+        self.write_register(consts::CONTROL_CHANNEL_PRIVILEGE as u32, 0)
             .await
     }
 
@@ -603,6 +601,46 @@ impl GigeDevice {
         let delay = base + jitter;
         debug!(attempt, delay = ?delay, "gvcp retry backoff");
         time::sleep(delay).await;
+    }
+
+    /// Read a single 32-bit bootstrap or device register.
+    ///
+    /// Uses GVCP READREG format: 4-byte register address.
+    /// The acknowledgement carries the 4-byte register value.
+    pub async fn read_register(&mut self, addr: u32) -> Result<u32, GigeError> {
+        let mut payload = BytesMut::with_capacity(4);
+        payload.put_u32(addr);
+        let ack = self
+            .transact_with_retry(OpCode::ReadRegister, payload)
+            .await?;
+        if ack.payload.len() != 4 {
+            return Err(GigeError::Protocol(format!(
+                "expected 4-byte register ack but device returned {} bytes",
+                ack.payload.len()
+            )));
+        }
+        let mut cursor = &ack.payload[..];
+        Ok(cursor.get_u32())
+    }
+
+    /// Write a single 32-bit bootstrap or device register.
+    ///
+    /// Uses GVCP WRITEREG format: 4-byte register address + 4-byte value.
+    /// The acknowledgement carries a 4-byte data index placeholder.
+    pub async fn write_register(&mut self, addr: u32, value: u32) -> Result<(), GigeError> {
+        let mut payload = BytesMut::with_capacity(8);
+        payload.put_u32(addr);
+        payload.put_u32(value);
+        let ack = self
+            .transact_with_retry(OpCode::WriteRegister, payload)
+            .await?;
+        if ack.payload.len() != 4 {
+            return Err(GigeError::Protocol(format!(
+                "expected 4-byte register write ack but device returned {} bytes",
+                ack.payload.len()
+            )));
+        }
+        Ok(())
     }
 
     /// Read a block of memory from the remote device with chunking and retries.
@@ -809,10 +847,7 @@ impl GigeDevice {
         let packet = header.encode(&payload);
         trace!(
             block_id,
-            first_packet,
-            last_packet,
-            request_id,
-            "sending packet resend request"
+            first_packet, last_packet, request_id, "sending packet resend request"
         );
         self.socket.send(&packet).await?;
         let mut buf = [0u8; genicp::HEADER_SIZE];

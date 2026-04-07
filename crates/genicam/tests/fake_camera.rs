@@ -11,7 +11,7 @@ mod common;
 
 #[allow(clippy::single_component_path_imports)]
 use genapi_xml;
-use genicam::{connect_gige, connect_gige_with_xml, gige, Camera, GigeRegisterIo};
+use genicam::{Camera, GigeRegisterIo, connect_gige, connect_gige_with_xml, gige};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -126,6 +126,36 @@ async fn test_connect_and_fetch_xml() {
         nodemap.node("Height").is_some(),
         "NodeMap should contain Height"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_claim_control_visible_via_register_read() {
+    skip_if_no_aravis!();
+    let _cam = common::FakeCamera::start();
+
+    let device_info = discover_fake().await;
+    use std::net::{IpAddr, SocketAddr};
+
+    let control_addr = SocketAddr::new(IpAddr::V4(device_info.ip), gige::GVCP_PORT);
+    let mut device = gige::GigeDevice::open(control_addr)
+        .await
+        .expect("open device");
+
+    device.claim_control().await.expect("claim CCP");
+
+    let privilege = device
+        .read_register(gige::gvcp::consts::CONTROL_CHANNEL_PRIVILEGE as u32)
+        .await
+        .expect("read CCP register");
+    let controller_bits = gige::gvcp::consts::CCP_CONTROL | gige::gvcp::consts::CCP_EXCLUSIVE;
+    assert_ne!(
+        privilege & controller_bits,
+        0,
+        "CCP register should report an active controller, got 0x{privilege:08x}"
+    );
+
+    device.release_control().await.expect("release CCP");
 }
 
 // ---------------------------------------------------------------------------

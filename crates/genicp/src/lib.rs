@@ -22,6 +22,10 @@ bitflags! {
 /// GenCP operation codes supported by this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCode {
+    /// Read a single bootstrap or device register.
+    ReadRegister,
+    /// Write a single bootstrap or device register.
+    WriteRegister,
     /// Read a block of memory from the device.
     ReadMem,
     /// Write a block of memory to the device.
@@ -32,6 +36,8 @@ impl OpCode {
     /// Raw command value as defined by the GenCP/GVCP specification.
     pub const fn command_code(self) -> u16 {
         match self {
+            OpCode::ReadRegister => 0x0080,
+            OpCode::WriteRegister => 0x0082,
             OpCode::ReadMem => 0x0084,
             OpCode::WriteMem => 0x0086,
         }
@@ -45,6 +51,8 @@ impl OpCode {
     #[allow(dead_code)]
     fn from_command(code: u16) -> Result<Self, GenCpError> {
         match code {
+            0x0080 => Ok(OpCode::ReadRegister),
+            0x0082 => Ok(OpCode::WriteRegister),
             0x0084 => Ok(OpCode::ReadMem),
             0x0086 => Ok(OpCode::WriteMem),
             _ => Err(GenCpError::UnknownOpcode(code)),
@@ -53,6 +61,8 @@ impl OpCode {
 
     fn from_ack(code: u16) -> Result<Self, GenCpError> {
         match code {
+            0x0081 => Ok(OpCode::ReadRegister),
+            0x0083 => Ok(OpCode::WriteRegister),
             0x0085 => Ok(OpCode::ReadMem),
             0x0087 => Ok(OpCode::WriteMem),
             _ => Err(GenCpError::UnknownOpcode(code)),
@@ -210,6 +220,99 @@ pub fn decode_ack(buf: &[u8]) -> Result<GenCpAck, GenCpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_read_register_roundtrip() {
+        let payload = {
+            let mut p = BytesMut::with_capacity(4);
+            p.put_u32(0x0000_0a00);
+            p.freeze()
+        };
+        let cmd = GenCpCmd {
+            header: CommandHeader {
+                flags: CommandFlags::ACK_REQUIRED,
+                opcode: OpCode::ReadRegister,
+                length: payload.len() as u16,
+                request_id: 0x41,
+            },
+            payload,
+        };
+
+        let encoded = encode_cmd(&cmd);
+        assert_eq!(
+            &encoded[..2],
+            &CommandFlags::ACK_REQUIRED.bits().to_be_bytes()
+        );
+        assert_eq!(&encoded[2..4], &0x0080u16.to_be_bytes());
+        assert_eq!(&encoded[4..6], &(cmd.payload.len() as u16).to_be_bytes());
+        assert_eq!(&encoded[6..8], &0x0041u16.to_be_bytes());
+        assert_eq!(&encoded[8..], &cmd.payload[..]);
+    }
+
+    #[test]
+    fn encode_write_register_roundtrip() {
+        let payload = {
+            let mut p = BytesMut::with_capacity(8);
+            p.put_u32(0x0000_0a00);
+            p.put_u32(0x0000_0002);
+            p.freeze()
+        };
+        let cmd = GenCpCmd {
+            header: CommandHeader {
+                flags: CommandFlags::ACK_REQUIRED,
+                opcode: OpCode::WriteRegister,
+                length: payload.len() as u16,
+                request_id: 0x43,
+            },
+            payload,
+        };
+
+        let encoded = encode_cmd(&cmd);
+        assert_eq!(
+            &encoded[..2],
+            &CommandFlags::ACK_REQUIRED.bits().to_be_bytes()
+        );
+        assert_eq!(&encoded[2..4], &0x0082u16.to_be_bytes());
+        assert_eq!(&encoded[4..6], &(cmd.payload.len() as u16).to_be_bytes());
+        assert_eq!(&encoded[6..8], &0x0043u16.to_be_bytes());
+        assert_eq!(&encoded[8..], &cmd.payload[..]);
+    }
+
+    #[test]
+    fn decode_read_register_ack() {
+        let value = 0x0000_0002u32;
+        let mut buf = BytesMut::with_capacity(HEADER_SIZE + 4);
+        buf.put_u16(0x0000);
+        buf.put_u16(0x0081);
+        buf.put_u16(4);
+        buf.put_u16(0x4141);
+        buf.put_u32(value);
+
+        let ack = decode_ack(&buf).expect("decode");
+        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.opcode, OpCode::ReadRegister);
+        assert_eq!(ack.header.length, 4);
+        assert_eq!(ack.header.request_id, 0x4141);
+        assert_eq!(&ack.payload[..], &value.to_be_bytes());
+    }
+
+    #[test]
+    fn decode_write_register_ack() {
+        let index = 1u32;
+        let mut buf = BytesMut::with_capacity(HEADER_SIZE + 4);
+        buf.put_u16(0x0000);
+        buf.put_u16(0x0083);
+        buf.put_u16(4);
+        buf.put_u16(0x4343);
+        buf.put_u32(index);
+
+        let ack = decode_ack(&buf).expect("decode");
+        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.opcode, OpCode::WriteRegister);
+        assert_eq!(ack.header.length, 4);
+        assert_eq!(ack.header.request_id, 0x4343);
+        assert_eq!(&ack.payload[..], &index.to_be_bytes());
+    }
 
     #[test]
     fn encode_read_mem_roundtrip() {

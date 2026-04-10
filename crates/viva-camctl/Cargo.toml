@@ -15,7 +15,7 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 
-viva-genicam = { version = "0.1.0", path = "../viva-genicam", features = ["u3v"] }
+viva-genicam = { version = "0.1.0", path = "../viva-genicam", features = ["u3v-usb"] }
 viva-gige = { version = "0.1.0", path = "../viva-gige" }
 viva-sfnc = { version = "0.1.0", path = "../viva-sfnc" }
 viva-pfnc = { version = "0.1.0", path = "../viva-pfnc" }

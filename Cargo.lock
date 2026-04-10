@@ -3122,6 +3122,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "viva-fake-u3v"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "viva-gencp",
+ "viva-u3v",
+]
+
+[[package]]
 name = "viva-genapi"
 version = "0.1.0"
 dependencies = [
@@ -3164,6 +3173,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "viva-fake-gige",
+ "viva-fake-u3v",
  "viva-genapi",
  "viva-genapi-xml",
  "viva-gencp",

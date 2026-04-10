@@ -6,6 +6,7 @@ use tracing::info;
 
 use viva_genicam::{connect_u3v, Camera, U3vRegisterIo};
 use viva_u3v::discovery::{discover, U3vDeviceInfo};
+use viva_u3v::usb::RusbTransfer;
 
 use crate::common;
 
@@ -85,7 +86,7 @@ fn select_usb_device(index: Option<usize>) -> Result<U3vDeviceInfo> {
         .ok_or_else(|| anyhow!("no USB3 Vision device at index {idx}"))
 }
 
-fn open_usb_camera(index: Option<usize>) -> Result<Camera<U3vRegisterIo>> {
+fn open_usb_camera(index: Option<usize>) -> Result<Camera<U3vRegisterIo<RusbTransfer>>> {
     let dev = select_usb_device(index)?;
     info!(
         vid = format!("{:04x}", dev.vendor_id),

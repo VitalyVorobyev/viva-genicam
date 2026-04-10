@@ -12,6 +12,7 @@ members = [
   "crates/viva-zenoh-api",
   "crates/viva-service",
   "crates/viva-fake-gige",
+  "crates/viva-fake-u3v",
   # "crates/gentl-cti",
 ]
 exclude = [

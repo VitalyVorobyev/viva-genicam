@@ -841,36 +841,33 @@ pub async fn connect_gige_with_xml(
 
 /// Blocking [`RegisterIo`] adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
 ///
-/// Unlike [`GigeRegisterIo`] (which bridges async GigE I/O via `block_on`),
-/// USB operations are inherently synchronous, so this adapter simply forwards
-/// calls through a `Mutex` for thread safety.
+/// Generic over `T: UsbTransfer` so that real hardware (`RusbTransfer`) and
+/// test doubles (`MockUsbTransfer`, `FakeU3vTransport`) all work through the
+/// same code path. USB operations are inherently synchronous, so this adapter
+/// simply forwards calls through a `Mutex` for thread safety.
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
-pub struct U3vRegisterIo {
-    device: Mutex<u3v::device::U3vDevice<u3v::usb::RusbTransfer>>,
+pub struct U3vRegisterIo<T: u3v::usb::UsbTransfer + 'static> {
+    device: Mutex<u3v::device::U3vDevice<T>>,
 }
 
 #[cfg(feature = "u3v")]
-impl U3vRegisterIo {
+impl<T: u3v::usb::UsbTransfer + 'static> U3vRegisterIo<T> {
     /// Create a new adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
-    pub fn new(device: u3v::device::U3vDevice<u3v::usb::RusbTransfer>) -> Self {
+    pub fn new(device: u3v::device::U3vDevice<T>) -> Self {
         Self {
             device: Mutex::new(device),
         }
     }
 
     /// Lock the underlying device for direct access (e.g. stream configuration).
-    pub fn lock_device(
-        &self,
-    ) -> Result<MutexGuard<'_, u3v::device::U3vDevice<u3v::usb::RusbTransfer>>, GenicamError> {
+    pub fn lock_device(&self) -> Result<MutexGuard<'_, u3v::device::U3vDevice<T>>, GenicamError> {
         self.device
             .lock()
             .map_err(|_| GenicamError::transport("u3v device mutex poisoned"))
     }
 
-    fn lock(
-        &self,
-    ) -> Result<MutexGuard<'_, u3v::device::U3vDevice<u3v::usb::RusbTransfer>>, GenApiError> {
+    fn lock(&self) -> Result<MutexGuard<'_, u3v::device::U3vDevice<T>>, GenApiError> {
         self.device
             .lock()
             .map_err(|_| GenApiError::Io("u3v device mutex poisoned".into()))
@@ -878,7 +875,7 @@ impl U3vRegisterIo {
 }
 
 #[cfg(feature = "u3v")]
-impl RegisterIo for U3vRegisterIo {
+impl<T: u3v::usb::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
         let mut device = self.lock()?;
         device
@@ -912,22 +909,22 @@ impl RegisterIo for U3vRegisterIo {
 /// let mut camera = connect_u3v(&device)?;
 /// camera.set("ExposureTime", "5000")?;
 /// ```
-#[cfg(feature = "u3v")]
-#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+#[cfg(feature = "u3v-usb")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v-usb")))]
 pub fn connect_u3v(
     device: &u3v::discovery::U3vDeviceInfo,
-) -> Result<Camera<U3vRegisterIo>, GenicamError> {
+) -> Result<Camera<U3vRegisterIo<u3v::usb::RusbTransfer>>, GenicamError> {
     let (camera, _xml) = connect_u3v_with_xml(device)?;
     Ok(camera)
 }
 
 /// Connect to a USB3 Vision camera and return both a [`Camera`] and the raw
 /// GenICam XML string fetched from the device.
-#[cfg(feature = "u3v")]
-#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+#[cfg(feature = "u3v-usb")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v-usb")))]
 pub fn connect_u3v_with_xml(
     device_info: &u3v::discovery::U3vDeviceInfo,
-) -> Result<(Camera<U3vRegisterIo>, String), GenicamError> {
+) -> Result<(Camera<U3vRegisterIo<u3v::usb::RusbTransfer>>, String), GenicamError> {
     info!(
         vendor_id = device_info.vendor_id,
         product_id = device_info.product_id,
@@ -946,6 +943,26 @@ pub fn connect_u3v_with_xml(
     let transport = U3vRegisterIo::new(device);
 
     info!("USB3 Vision camera connected successfully");
+    Ok((Camera::new(transport, nodemap), xml))
+}
+
+/// Create a [`Camera`] from an already-opened [`U3vDevice`](u3v::device::U3vDevice)
+/// with any [`UsbTransfer`](u3v::usb::UsbTransfer) backend.
+///
+/// This is the generic entry point for testing with fake or mock transports.
+/// The device must have been opened and bootstrapped (ABRM/SBRM read)
+/// before calling this function.
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub fn open_u3v_device<T: u3v::usb::UsbTransfer + 'static>(
+    mut device: u3v::device::U3vDevice<T>,
+) -> Result<(Camera<U3vRegisterIo<T>>, String), GenicamError> {
+    let xml = device
+        .fetch_xml()
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+    let model = viva_genapi_xml::parse(&xml).map_err(|e| GenicamError::transport(e.to_string()))?;
+    let nodemap = genapi::NodeMap::from(model);
+    let transport = U3vRegisterIo::new(device);
     Ok((Camera::new(transport, nodemap), xml))
 }
 

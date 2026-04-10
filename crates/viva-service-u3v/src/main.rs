@@ -3,6 +3,7 @@
 //! This is the U3V equivalent of `viva-service` (GigE Vision).
 //! Supports a `--fake` flag for testing without USB hardware.
 
+mod acquisition;
 mod device;
 
 use std::sync::Arc;
@@ -141,6 +142,11 @@ async fn run_fake_camera(
         shutdown.clone(),
     ));
     tokio::spawn(nodes::run_bulk_read_queryable(
+        session.clone(),
+        handle.clone(),
+        shutdown.clone(),
+    ));
+    tokio::spawn(acquisition::run(
         session.clone(),
         handle.clone(),
         shutdown.clone(),

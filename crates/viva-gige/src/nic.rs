@@ -27,10 +27,14 @@ use tracing::warn;
 /// requiring elevated privileges.
 pub const DEFAULT_RCVBUF_BYTES: usize = 4 << 20; // 4 MiB
 
-/// Maximum size for interface names supported by the kernel on Linux. The
-/// constant is used to validate the provided names before using them when
-/// interfacing with low level sysfs files.
-const IFACE_NAME_MAX: usize = 15; // As per `IFNAMSIZ - 1`.
+/// Maximum length for interface names. On Linux this matches `IFNAMSIZ - 1`
+/// (15). On Windows, interface names are GUIDs like
+/// `{F5DA665D-1913-11F1-9F17-806E6F6E6963}` (38 chars), so a larger limit
+/// is needed.
+#[cfg(not(target_os = "windows"))]
+const IFACE_NAME_MAX: usize = 15;
+#[cfg(target_os = "windows")]
+const IFACE_NAME_MAX: usize = 64;
 
 /// Resolve an interface index from its name using platform-specific APIs.
 #[cfg(any(target_os = "linux", target_os = "android"))]

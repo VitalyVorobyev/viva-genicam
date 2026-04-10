@@ -118,18 +118,6 @@ async fn run_fake_camera(
     status::publish_connected(&session, &device_id).await;
     nodes::publish_initial_values(&session, handle.as_ref()).await;
 
-    let announce = DeviceAnnounce {
-        id: device_id.clone(),
-        name: "FakeU3V".to_string(),
-        model: "FakeU3V".to_string(),
-        serial: "FAKE-001".to_string(),
-        api_version: Some(API_VERSION),
-    };
-    let key = keys::announce(&device_id);
-    if let Ok(payload) = serde_json::to_vec(&announce) {
-        let _ = session.put(&key, payload).await;
-    }
-
     info!(
         device_id,
         "fake U3V camera connected, spawning service tasks"
@@ -157,6 +145,32 @@ async fn run_fake_camera(
         handle.clone(),
         shutdown.clone(),
     ));
+
+    // Periodic announce so the studio discovers the device even if it
+    // starts after the service (studio subscribes to announce topic).
+    let announce_session = session.clone();
+    let announce_device_id = device_id.clone();
+    let mut announce_shutdown = shutdown;
+    tokio::spawn(async move {
+        let announce = DeviceAnnounce {
+            id: announce_device_id.clone(),
+            name: "FakeU3V".to_string(),
+            model: "FakeU3V".to_string(),
+            serial: "FAKE-001".to_string(),
+            api_version: Some(API_VERSION),
+        };
+        let key = keys::announce(&announce_device_id);
+        let payload = serde_json::to_vec(&announce).unwrap();
+        loop {
+            let _ = announce_session.put(&key, payload.clone()).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = announce_shutdown.changed() => {
+                    if *announce_shutdown.borrow() { break; }
+                }
+            }
+        }
+    });
 
     info!(
         device_id,

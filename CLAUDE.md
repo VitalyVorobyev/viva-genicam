@@ -122,7 +122,7 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 # T2: cd ../genicam-studio/apps/genicam-studio-tauri && cargo tauri dev
 ```
 
-**Important**: The `--zenoh-config` flag pointing to `zenoh-local.json5` is required for both GigE and U3V services when connecting to genicam-studio. Without it, Zenoh uses default scouting which won't find the studio.
+**Important**: The `--zenoh-config` flag pointing to `zenoh-local.json5` is required on the **service** side (both GigE and U3V) when connecting to genicam-studio. The studio loads its own Zenoh config automatically in dev mode (`cargo tauri dev`).
 
 ## Documentation
 

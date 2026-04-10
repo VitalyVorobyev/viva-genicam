@@ -93,7 +93,7 @@ async fn spawn_service_tasks(
     let device_id = device.device_id().to_string();
 
     status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, &device).await;
+    nodes::publish_initial_values(&session, device.as_ref()).await;
 
     vec![
         tokio::spawn(xml::run(

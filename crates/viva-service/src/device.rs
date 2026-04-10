@@ -10,7 +10,25 @@ use viva_genicam::{
     connect_gige_with_xml, gige, Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder,
 };
 
-/// Wraps a connected camera with its raw XML and device identity.
+/// Transport-agnostic device operations used by shared Zenoh queryable handlers.
+///
+/// Implemented by [`DeviceHandle`] (GigE) and `U3vDeviceHandle` (USB3 Vision).
+/// The `nodes` module and initial value publishing use only this trait.
+#[async_trait::async_trait]
+pub trait DeviceOps: Send + Sync + 'static {
+    /// Unique device identifier (e.g. "cam-aabbccddeeff" for GigE).
+    fn device_id(&self) -> &str;
+    /// Raw GenICam XML fetched from the device.
+    fn raw_xml(&self) -> &str;
+    /// Read a feature value by name.
+    async fn get_feature(&self, name: &str) -> Result<String, GenicamError>;
+    /// Write a feature value by name.
+    async fn set_feature(&self, name: &str, value: &str) -> Result<(), GenicamError>;
+    /// Execute a command node.
+    async fn exec_command(&self, name: &str) -> Result<(), GenicamError>;
+}
+
+/// GigE Vision device handle wrapping `Camera<GigeRegisterIo>`.
 pub struct DeviceHandle {
     camera: Arc<Mutex<Camera<GigeRegisterIo>>>,
     raw_xml: String,
@@ -253,5 +271,28 @@ impl DeviceHandle {
                 self.device_id.clone()
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl DeviceOps for DeviceHandle {
+    fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    fn raw_xml(&self) -> &str {
+        &self.raw_xml
+    }
+
+    async fn get_feature(&self, name: &str) -> Result<String, GenicamError> {
+        DeviceHandle::get_feature(self, name).await
+    }
+
+    async fn set_feature(&self, name: &str, value: &str) -> Result<(), GenicamError> {
+        DeviceHandle::set_feature(self, name, value).await
+    }
+
+    async fn exec_command(&self, name: &str) -> Result<(), GenicamError> {
+        DeviceHandle::exec_command(self, name).await
     }
 }

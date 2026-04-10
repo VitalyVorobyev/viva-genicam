@@ -1,0 +1,26 @@
+[package]
+name = "viva-service-u3v"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "viva-service-u3v"
+path = "src/main.rs"
+
+[dependencies]
+viva-service = { version = "0.1.0", path = "../viva-service" }
+viva-genicam = { version = "0.1.0", path = "../viva-genicam", features = ["u3v"] }
+viva-u3v = { version = "0.1.0", path = "../viva-u3v" }
+viva-fake-u3v = { path = "../viva-fake-u3v" }
+viva-zenoh-api = { version = "0.1.0", path = "../viva-zenoh-api" }
+zenoh = "1"
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "signal"] }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

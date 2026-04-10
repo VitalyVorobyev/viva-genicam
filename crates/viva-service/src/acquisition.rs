@@ -169,7 +169,7 @@ async fn handle_start(
     }
 
     // 3. Publish metadata before starting acquisition.
-    publish_image_meta(session, device, device_id).await;
+    publish_image_meta(session, device.as_ref(), device_id).await;
 
     let _ = stop_tx.send(false);
     let stop_rx = stop_tx.subscribe();
@@ -388,7 +388,8 @@ fn resolve_iface(device: &DeviceHandle) -> Result<Iface, String> {
     }
 }
 
-async fn publish_status(session: &Session, device_id: &str, active: bool) {
+/// Publish acquisition status to Zenoh.
+pub async fn publish_status(session: &Session, device_id: &str, active: bool) {
     let status = AcquisitionStatus {
         active,
         fps: None,
@@ -400,7 +401,12 @@ async fn publish_status(session: &Session, device_id: &str, active: bool) {
     }
 }
 
-async fn publish_image_meta(session: &Session, device: &DeviceHandle, device_id: &str) {
+/// Publish image metadata (width, height, pixel format) to Zenoh.
+pub async fn publish_image_meta<D: crate::device::DeviceOps>(
+    session: &Session,
+    device: &D,
+    device_id: &str,
+) {
     let width = device
         .get_feature("Width")
         .await

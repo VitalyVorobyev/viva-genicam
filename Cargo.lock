@@ -3211,6 +3211,7 @@ dependencies = [
 name = "viva-service"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "serde",
  "serde_json",
@@ -3219,6 +3220,24 @@ dependencies = [
  "tracing-subscriber",
  "viva-fake-gige",
  "viva-genicam",
+ "viva-zenoh-api",
+ "zenoh",
+]
+
+[[package]]
+name = "viva-service-u3v"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "viva-fake-u3v",
+ "viva-genicam",
+ "viva-service",
+ "viva-u3v",
  "viva-zenoh-api",
  "zenoh",
 ]

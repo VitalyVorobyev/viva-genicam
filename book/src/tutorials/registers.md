@@ -6,8 +6,8 @@ Goal of this tutorial:
 - Understand how features map to the underlying **registers**.
 - Learn the basics of **selectors** (e.g. `GainSelector`) and how they affect values.
 - See how to do the same thing from:
-  - The `gencamctl` CLI.
-  - The `genicam` Rust examples.
+  - The `viva-camctl` CLI.
+  - The `viva-genicam` Rust examples.
 
 If you haven’t done so yet, first go through:
 
@@ -30,20 +30,20 @@ GenApi XML:
   - More complex ones may be derived via **SwissKnife** expressions or depend
     on **selectors**.
 
-The `genapi-core` crate:
+The `viva-genapi` crate:
 
-- Loads the XML (via `genapi-xml`).
+- Loads the XML (via `viva-genapi-xml`).
 - Builds a **NodeMap**.
 - Lets you read and write features by name using typed accessors.
 
-The `genicam` crate and `gencamctl` CLI sit on top of this NodeMap and try to
+The `viva-genicam` crate and `viva-camctl` CLI sit on top of this NodeMap and try to
 hide most of the low-level details.
 
 ---
 
-## Step 1 – Inspect features with `gencamctl`
+## Step 1 – Inspect features with `viva-camctl`
 
-The `gencamctl` CLI exposes basic feature access via `get` and `set` subcommands.  [oai_citation:0‡GitHub](https://github.com/VitalyVorobyev/genicam-rs)  
+The `viva-camctl` CLI exposes basic feature access via `get` and `set` subcommands.  [oai_citation:0‡GitHub](https://github.com/VitalyVorobyev/genicam-rs)  
 
 You need:
 
@@ -55,7 +55,7 @@ You need:
 Example: read `ExposureTime` from a camera at `192.168.0.10`:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   get --ip 192.168.0.10 --name ExposureTime
 ```
 
@@ -67,7 +67,7 @@ You should see:
 If you prefer machine-readable output, add --json:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   get --ip 192.168.0.10 --name ExposureTime --json
 ```
 
@@ -79,14 +79,14 @@ To change a value, use the set subcommand. For example, set exposure to
 5000 microseconds:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name ExposureTime --value 5000
 ```
 
 Then verify:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   get --ip 192.168.0.10 --name ExposureTime
 ```
 
@@ -95,7 +95,7 @@ If the value doesn’t change:
 - There may be constraints (e.g. limited range, alignment).
 - Another feature (like ExposureAuto) may be overriding manual control.
 
-Those cases are described in more depth in the [genapi-core chapter](../crates/genapi-core.md).
+Those cases are described in more depth in the [viva-genapi chapter](../crates/viva-genapi.md).
 
 ⸻
 
@@ -111,11 +111,11 @@ are editing. The NodeMap takes care of switching the right registers.
 
 ### 2.1. Inspect which selectors exist
 
-You can use gencamctl to dump a selector feature and see its possible values.
+You can use viva-camctl to dump a selector feature and see its possible values.
 For example, to inspect GainSelector:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   get --ip 192.168.0.10 --name GainSelector --json
 ```
 
@@ -129,27 +129,27 @@ To set different gains for different channels, a typical sequence is:
 
 ```bash
 # Select the red channel, then set Gain
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name GainSelector --value Red
 
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name Gain --value 5.0
 
 # Select the blue channel, then set Gain
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name GainSelector --value Blue
 
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name Gain --value 3.0
 ```
 
 From your perspective, you are just changing features. Internally,
-genapi-core:
+viva-genapi:
 - Evaluates the selector.
 - Resolves which nodes and registers are active.
 - Applies any SwissKnife expressions as needed.
 
-The [selectors_demo￼example](../crates/genicam.md) in the genicam crate
+The [selectors_demo￼example](../crates/genicam.md) in the viva-genicam crate
 shows this pattern in Rust.  ￼
 
 ⸻
@@ -163,7 +163,7 @@ The genicam crate provides examples that mirror the CLI operations.  ￼
 Run the get_set_feature example:
 
 ```bash
-cargo run -p genicam --example get_set_feature
+cargo run -p viva-genicam --example get_set_feature
 ```
 
 This example demonstrates:
@@ -172,7 +172,7 @@ This example demonstrates:
 - Printing its value and metadata.
 - Setting a new value and verifying it.
 
-Inspect the source under crates/genicam/examples/get_set_feature.rs for a
+Inspect the source under crates/viva-genicam/examples/get_set_feature.rs for a
 minimal template you can reuse in your own project.
 
 Typical pseudo-flow inside that example (simplified):
@@ -199,7 +199,7 @@ the repository for exact signatures.
 To see selector logic in code, run:
 
 ```bash
-cargo run -p genicam --example selectors_demo
+cargo run -p viva-genicam --example selectors_demo
 ```
 
 This example walks through:
@@ -224,10 +224,10 @@ However, there are cases where raw registers are still useful:
 - Working with undocumented features that are not in the XML.
 - Bringing up very early prototypes where the GenApi XML is incomplete.
 
-The lower-level crates (tl-gige and genicp) expose primitives for reading
+The lower-level crates (viva-gige and viva-gencp) expose primitives for reading
 and writing device memory directly. Refer to:
-- [tl-gige chapter](../crates/tl-gige.md)
-- [genicp chapter](../crates/genicp.md)
+- [viva-gige chapter](../crates/viva-gige.md)
+- [viva-gencp chapter](../crates/viva-gencp.md)
 
 for details and examples. Be careful: writing to arbitrary registers can easily
 put the device into an unusable state until power-cycled.
@@ -237,7 +237,7 @@ put the device into an unusable state until power-cycled.
 ## Recap
 
 After this tutorial you should be able to:
-- Read and write GenApi features by name using gencamctl.
+- Read and write GenApi features by name using viva-camctl.
 - Understand and use selector features (e.g. GainSelector → Gain).
 - Locate and run the genicam examples (get_set_feature, selectors_demo)
 as templates for your own applications.

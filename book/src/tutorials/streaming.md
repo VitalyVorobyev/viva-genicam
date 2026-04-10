@@ -4,8 +4,8 @@ Goal of this tutorial:
 
 - Start a **GVSP** stream from your camera.
 - See how to:
-  - Run streaming from the `gencamctl` CLI.
-  - Run a basic streaming example from the `genicam` crate.
+  - Run streaming from the `viva-camctl` CLI.
+  - Run a basic streaming example from the `viva-genicam` crate.
 - Understand the key knobs for stability:
   - Packet size / MTU
   - Packet delay
@@ -35,18 +35,18 @@ Very simplified:
 3. The host reassembles packets into complete frames, handles resends and
    timeouts, and exposes a stream of “frames + stats” to you.
 
-The `tl-gige` crate owns the low-level GVSP packet handling. The `genicam`
-crate builds on that to present a higher-level streaming API. `gencamctl`
-wraps `genicam` in a CLI.
+The `viva-gige` crate owns the low-level GVSP packet handling. The `viva-genicam`
+crate builds on that to present a higher-level streaming API. `viva-camctl`
+wraps `viva-genicam` in a CLI.
 
 ---
 
-## 2. Streaming with `gencamctl`
+## 2. Streaming with `viva-camctl`
 
 The exact flags may evolve; always check:
 
 ```bash
-cargo run -p gencamctl -- stream --help
+cargo run -p viva-camctl -- stream --help
 ```
 
 for the authoritative list. The examples below illustrate the typical usage
@@ -58,7 +58,7 @@ Start a stream from a camera at 192.168.0.10 using the host interface
 192.168.0.5:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   stream --ip 192.168.0.10 --iface 192.168.0.5
 ```
 
@@ -81,11 +81,11 @@ tool.
 ### 2.2. Saving frames to disk
 
 Many users want to save frames as a quick sanity check or for offline
-analysis. If gencamctl stream exposes options like --output / --dir /
+analysis. If viva-camctl stream exposes options like --output / --dir /
 --save, use them; for example:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   stream --ip 192.168.0.10 --iface 192.168.0.5 \
   --count 100 --output ./frames
 ```
@@ -98,7 +98,7 @@ Typical behaviour:
 - Some simple container format.
 
 If you are unsure which formats are supported, check --help or the
-gencamctl crate documentation.
+viva-camctl crate documentation.
 
 Saved frames are useful to:
 - Inspect pixel data in an image viewer or with Python/OpenCV.
@@ -109,12 +109,12 @@ Saved frames are useful to:
 ## 3. Streaming from Rust using genicam
 
 The genicam crate usually offers one or more streaming examples (search for
-stream_ in crates/genicam/examples/).
+stream_ in crates/viva-genicam/examples/).
 
 Run the simplest one, for example:
 
 ```bash
-cargo run -p genicam --example stream_basic
+cargo run -p viva-genicam --example stream_basic
 ```
 
 (If the actual example name differs, adapt accordingly.)
@@ -208,7 +208,7 @@ GVSP supports packet resends:
 - It requests resends from the camera.
 - The camera re-sends the missing packets.
 
-The tl-gige layer surfaces statistics like:
+The viva-gige layer surfaces statistics like:
 - Dropped packets.
 - Number of resend requests.
 - Number of resent packets actually received.
@@ -231,7 +231,7 @@ If streaming starts but is unreliable, here is a practical checklist:
 	- Ensure no other tool (vendor viewer) is already consuming the stream.
 	- Double-check any firewall rules that might block UDP on the stream port.
 3.	Frames arrive but with wrong size or format
-	- Verify PixelFormat and ROI in the NodeMap (gencamctl get / set).
+	- Verify PixelFormat and ROI in the NodeMap (viva-camctl get / set).
 	- Confirm your code interprets the buffer layout correctly (Mono8 vs Bayer).
 4.	Intermittent hiccups under load
 	- Look at CPU usage and other traffic on the same NIC.
@@ -248,16 +248,16 @@ When in doubt:
 ## 6. Recap
 
 After this tutorial you should be able to:
-- Start a GVSP stream using gencamctl.
-- Run a streaming example from the genicam crate.
+- Start a GVSP stream using viva-camctl.
+- Run a streaming example from the viva-genicam crate.
 - Interpret basic streaming stats (frames, drops, resends, throughput).
 - Know which knobs to tweak first when streaming is unreliable:
 - MTU, packet size, packet delay, frame rate, dedicated NIC.
 
 For more detailed background on how GVCP/GVSP packets are handled internally,
-see the [tl-gige￼crate chapter](../crates/tl-gige.md).
+see the [viva-gige￼crate chapter](../crates/viva-gige.md).
 
 Next steps:
 - [Networking](../networking.md) — a more systematic look at NIC configuration,
 MTU, and common deployment topologies.
-- Later: dedicated crate chapters for `tl-gige` and `genicam` for contributor-level details.
+- Later: dedicated crate chapters for `viva-gige` and `viva-genicam` for contributor-level details.

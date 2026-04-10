@@ -1,0 +1,13 @@
+[package]
+name = "viva-fake-gige"
+version = "0.1.0"
+edition = "2021"
+description = "In-process fake GigE Vision camera for testing and demos"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+publish = false
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+bytes = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,33 @@
+[package]
+name = "viva-service"
+version = "0.1.0"
+edition = "2021"
+description = "Zenoh bridge exposing GenICam cameras as network-accessible services"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "zenoh", "vision", "camera", "gige"]
+categories = ["hardware-support", "network-programming"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "viva_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "viva-service"
+path = "src/main.rs"
+
+[dependencies]
+viva-genicam = { version = "0.1.0", path = "../viva-genicam" }
+viva-zenoh-api = { version = "0.1.0", path = "../viva-zenoh-api" }
+zenoh = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

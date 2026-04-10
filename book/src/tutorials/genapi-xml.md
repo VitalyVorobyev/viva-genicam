@@ -3,7 +3,7 @@
 Goal of this tutorial:
 
 - Understand **what** the GenICam XML is and **where** it lives.
-- See how `genapi-xml`:
+- See how `viva-genapi-xml`:
   - Fetches the XML from the device (via the **FirstURL** register).
   - Parses it into a lightweight internal representation.
 - Learn how to call this from Rust using a simple **memory reader closure**.
@@ -34,9 +34,9 @@ path, the host:
    - Often a “local” memory address + size.
    - In theory, it could be `http://…` or `file://…` as well.
 3. Reads the XML bytes from that location.
-4. Hands the XML string to a GenApi implementation (here: `genapi-core`).
+4. Hands the XML string to a GenApi implementation (here: `viva-genapi`).
 
-The `genapi-xml` crate encapsulates steps 1–3:
+The `viva-genapi-xml` crate encapsulates steps 1–3:
 
 - Discover **where** to read XML from.
 - Read it over the existing memory read primitive.
@@ -44,9 +44,9 @@ The `genapi-xml` crate encapsulates steps 1–3:
 
 ---
 
-## 2. Overview of `genapi-xml`
+## 2. Overview of `viva-genapi-xml`
 
-At a high level, `genapi-xml` provides three building blocks:
+At a high level, `viva-genapi-xml` provides three building blocks:
 
 - A function that **fetches** the XML from the device using a memory reader:
 
@@ -74,7 +74,7 @@ You normally will not call these directly in application code (the genicam
 crate does this for you), but they are useful when:
 - Debugging why a particular feature behaves a certain way.
 - Inspecting how a vendor encoded selectors or SwissKnife expressions.
-- Adding support for new node types or schema variations in genapi-core.
+- Adding support for new node types or schema variations in viva-genapi.
 
 ⸻
 
@@ -82,7 +82,7 @@ crate does this for you), but they are useful when:
 
 This section shows how you could call genapi-xml directly. The exact types
 in your code will differ depending on whether you start from genicam or
-tl-gige, but the pattern is always the same:
+viva-gige, but the pattern is always the same:
 1.	Open a device.
 2.	Provide a read_mem(addr, len) async function/closure.
 3.	Call fetch_and_load_xml(read_mem).
@@ -103,7 +103,7 @@ Internally it will:
 
 Your job is to plug in a closure that uses whatever transport you have:
 - A genicam device method (e.g. device.read_memory(address, length)).
-- A low-level tl-gige control primitive.
+- A low-level viva-gige control primitive.
 
 ### 3.2. Example: fetch XML using a genicam-style device
 
@@ -111,12 +111,12 @@ Below is illustrative pseudocode. Use it as a template and adapt to the
 actual types in your project.
 
 ```rust
-use genapi_xml::{fetch_and_load_xml, XmlError};
+use viva_genapi_xml::{fetch_and_load_xml, XmlError};
 use std::future::Future;
 
 async fn fetch_xml_for_device() -> Result<String, XmlError> {
     // 1. Open your device using the higher-level API.
-    //    Exact API varies; adjust to your real `genicam` / `tl-gige` types.
+    //    Exact API varies; adjust to your real `viva-genicam` / `viva-gige` types.
     let mut ctx = genicam::Context::new().map_err(|e| XmlError::Transport(e.to_string()))?;
     let mut dev = ctx
         .open_by_ip("192.168.0.10".parse().unwrap())
@@ -135,7 +135,7 @@ async fn fetch_xml_for_device() -> Result<String, XmlError> {
         }
     };
 
-    // 3. Ask `genapi-xml` to follow FirstURL and return the XML document.
+    // 3. Ask `viva-genapi-xml` to follow FirstURL and return the XML document.
     let xml = fetch_and_load_xml(&mut read_mem).await?;
     Ok(xml)
 }
@@ -157,10 +157,10 @@ like:
 - “What are the top-level categories / features?”
 - “Does this XML look obviously broken?”
 
-`genapi-xml` exposes a lightweight parse function for that:
+`viva-genapi-xml` exposes a lightweight parse function for that:
 
 ```rust
-use genapi_xml::{parse_into_minimal_nodes, XmlError};
+use viva_genapi_xml::{parse_into_minimal_nodes, XmlError};
 
 fn inspect_xml(xml: &str) -> Result<(), XmlError> {
     let info = parse_into_minimal_nodes(xml)?;
@@ -201,19 +201,19 @@ carry:
     - Access mode (RO/WO/RW).
     - Bitfield and byte-order information.
     - Selector relationships and SwissKnife expressions.
-2.	Feed this XmlModel into genapi-core, which:
+2.	Feed this XmlModel into viva-genapi, which:
 	- Instantiates a NodeMap.
 	- Resolves feature dependencies, selectors, and expressions at runtime.
 	- Exposes typed getters/setters like get_float("ExposureTime").
 
 You do not need to perform this plumbing manually in a typical application:
 - The genicam crate will fetch and parse XML as part of its device setup.
-- The gencamctl CLI uses that same pipeline when you call get / set on
+- The viva-camctl CLI uses that same pipeline when you call get / set on
 features.
 
 If you want the gory details, see:
 	- GenApi XML loader: genapi-xml￼
-	- GenApi core & NodeMap: genapi-core￼
+	- GenApi core & NodeMap: viva-genapi￼
 
 (these chapters go into internal structures and how to extend them).
 
@@ -222,21 +222,21 @@ If you want the gory details, see:
 ## 6. When should you look at the XML?
 
 Most of the time, you can treat the XML as an implementation detail and just:
-- Use gencamctl for manual experimentation.
+- Use viva-camctl for manual experimentation.
 - Use genicam’s NodeMap accessors from Rust.
 
 You should crack open the XML when:
 - A feature behaves differently from the SFNC documentation.
 - Selectors are not doing what you expect.
 - You hit a SwissKnife or bitfield corner case.
-- You are adding support for a new vendor-specific wrinkle to genapi-core.
+- You are adding support for a new vendor-specific wrinkle to viva-genapi.
 
 Typical workflow:
 1.	Use your transport or genicam helper to dump the XML to a file.
 2.	Run parse_into_minimal_nodes to quickly confirm schema and top-level
 layout.
 3.	Run the “full” XML → XmlModel path (via the crate internals) when working
-on genapi-core changes.
+on viva-genapi changes.
 4.	Use a normal XML editor / viewer when manually exploring categories and
 features.
 

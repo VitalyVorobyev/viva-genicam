@@ -1,0 +1,22 @@
+[package]
+name = "viva-gencp"
+version = "0.1.0"
+edition = "2021"
+description = "Transport-agnostic GenCP encode/decode and status mapping"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "vision", "gige", "protocol"]
+categories = ["hardware-support", "network-programming", "science::robotics"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }

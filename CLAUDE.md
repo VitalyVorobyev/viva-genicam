@@ -10,7 +10,7 @@ We do not maintain backward compatibility at this early development stage. The p
 
 ## Related Projects
 
-- **genicam-studio** (`../genicam-studio`) — Tauri desktop app that consumes genicam-service via Zenoh. Contains the `genicam_zenoh_api` crate (shared wire types) and a mock camera service.
+- **genicam-studio** (`../genicam-studio`) — Tauri desktop app that consumes viva-service via Zenoh. Contains the `viva_zenoh_api` crate (shared wire types) and a mock camera service.
 - **aravis** (`../aravis`) — C library for GenICam cameras. Provides `arv-fake-gv-camera-0.8` used for integration testing.
 
 ## Build Commands
@@ -23,7 +23,7 @@ cargo build --workspace
 cargo test --workspace
 
 # Integration tests (requires arv-fake-gv-camera-0.8 installed)
-cargo test -p genicam --test fake_camera -- --ignored --test-threads=1
+cargo test -p viva-genicam --test fake_camera -- --ignored --test-threads=1
 
 # Format check (CI requirement)
 cargo fmt --all --check
@@ -35,10 +35,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --all-features --no-deps
 
 # Run sensor service
-cargo run -p genicam-service -- --iface en0
+cargo run -p viva-service -- --iface en0
 
 # Run CLI tool
-cargo run -p gencamctl -- list
+cargo run -p viva-camctl -- list
 ```
 
 ## Architecture
@@ -46,47 +46,47 @@ cargo run -p gencamctl -- list
 **Layered design (bottom to top):**
 
 ```
-genicam-service         - Zenoh bridge: real cameras → genicam-studio
+viva-service            - Zenoh bridge: real cameras → genicam-studio
     ↓
-genicam (facade)        - End-user API: Camera<T>, discovery, streaming
+viva-genicam (facade)   - End-user API: Camera<T>, discovery, streaming
     ↓
-genapi-core             - GenApi engine: NodeMap, node evaluation, caching
+viva-genapi             - GenApi engine: NodeMap, node evaluation, caching
     ↓
-genapi-xml              - XML parsing: GenICam XML → XmlModel IR
+viva-genapi-xml         - XML parsing: GenICam XML → XmlModel IR
     ↓
-tl-gige / tl-u3v        - Transport: GVCP/GVSP for GigE, USB3 Vision (planned)
+viva-gige / viva-u3v    - Transport: GVCP/GVSP for GigE, USB3 Vision (planned)
     ↓
-genicp                  - Protocol primitives: GenCP encode/decode
+viva-gencp              - Protocol primitives: GenCP encode/decode
 ```
 
 **Supporting crates:**
-- `pfnc` - Pixel Format Naming Convention tables
-- `sfnc` - Standard Feature Naming Convention
-- `gencamctl` - CLI binary
-- `genicam-service` - Zenoh camera service for genicam-studio (depends on `genicam_zenoh_api` from `../genicam-studio`)
+- `viva-pfnc` - Pixel Format Naming Convention tables
+- `viva-sfnc` - Standard Feature Naming Convention
+- `viva-camctl` - CLI binary
+- `viva-service` - Zenoh camera service for genicam-studio (depends on `viva_zenoh_api` from `../genicam-studio`)
 
 ## Key Abstractions
 
-**`RegisterIo` trait** (`genapi-core`): Core abstraction for register read/write. Implemented by `GigeDevice` (via async adapter), `MockIo` for tests, and `NullIo` for offline browsing.
+**`RegisterIo` trait** (`viva-genapi`): Core abstraction for register read/write. Implemented by `GigeDevice` (via async adapter), `MockIo` for tests, and `NullIo` for offline browsing.
 
-**`NodeMap`** (`genapi-core`): Parsed from XML, stores nodes by name, tracks dependency graph for cache invalidation. Supports `pValue` delegation (Integer/Float/Enum/Boolean/Command nodes can delegate to IntReg or other backing nodes).
+**`NodeMap`** (`viva-genapi`): Parsed from XML, stores nodes by name, tracks dependency graph for cache invalidation. Supports `pValue` delegation (Integer/Float/Enum/Boolean/Command nodes can delegate to IntReg or other backing nodes).
 
 **`Node` enum**: Integer, Float, Enum, Boolean, Command, Category, SwissKnife, Converter, IntConverter, String.
 
-**`GigeDevice`** (`tl-gige`): Async UDP wrapper for GVCP discovery/control and GVSP streaming. Uses proper GVCP wire format (0x42 key byte, 4-byte addresses).
+**`GigeDevice`** (`viva-gige`): Async UDP wrapper for GVCP discovery/control and GVSP streaming. Uses proper GVCP wire format (0x42 key byte, 4-byte addresses).
 
-**`DeviceHandle`** (`genicam-service`): Wraps `Camera<GigeRegisterIo>` with `spawn_blocking` for async-safe access from Zenoh queryable handlers.
+**`DeviceHandle`** (`viva-service`): Wraps `Camera<GigeRegisterIo>` with `spawn_blocking` for async-safe access from Zenoh queryable handlers.
 
 ## Testing
 
-Unit tests are embedded in source modules (`mod tests { }`). Integration tests against `arv-fake-gv-camera-0.8` live in `crates/genicam/tests/fake_camera.rs` (marked `#[ignore]`, require aravis installed).
+Unit tests are embedded in source modules (`mod tests { }`). Integration tests against `arv-fake-gv-camera-0.8` live in `crates/viva-genicam/tests/fake_camera.rs` (marked `#[ignore]`, require aravis installed).
 
 ```bash
 # Test single crate
-cargo test -p genapi-core
+cargo test -p viva-genapi
 
 # Integration tests with fake camera (12/12 pass on macOS loopback)
-cargo test -p genicam --test fake_camera -- --ignored --test-threads=1
+cargo test -p viva-genicam --test fake_camera -- --ignored --test-threads=1
 
 # Test with logging
 RUST_LOG=debug cargo test --workspace -- --nocapture
@@ -96,13 +96,13 @@ RUST_LOG=debug cargo test --workspace -- --nocapture
 
 - **mdBook**: `book/` directory - tutorials, architecture, networking cookbook
 - **API docs**: Generated via `cargo doc`, published to GitHub Pages
-- **Examples**: 16 examples in `crates/genicam/examples/`
+- **Examples**: 16 examples in `crates/viva-genicam/examples/`
 
 ## Shared Crate API (SX handoff)
 
-`genapi-xml` and `genapi-core` are designed for external consumption by genicam-studio:
-- All `genapi-xml` public types derive `Serialize`/`Deserialize` (serde)
-- `genapi-core` provides introspection: `NodeMap::node_names()`, `dependents()`, `categories()`, `Node::kind_name()`, `access_mode()`, `name()`
+`viva-genapi-xml` and `viva-genapi` are designed for external consumption by genicam-studio:
+- All `viva-genapi-xml` public types derive `Serialize`/`Deserialize` (serde)
+- `viva-genapi` provides introspection: `NodeMap::node_names()`, `dependents()`, `categories()`, `Node::kind_name()`, `access_mode()`, `name()`
 - `NullIo` enables offline XML browsing without a camera
 - Both crates compile for `wasm32-unknown-unknown`
 - `fetch_and_load_xml` is behind the `fetch` feature flag (default on)

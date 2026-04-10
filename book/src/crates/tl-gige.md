@@ -1,15 +1,15 @@
-# `tl-gige` — GigE Vision Transport (GVCP/GVSP)
+# `viva-gige` — GigE Vision Transport (GVCP/GVSP)
 
-`tl-gige` implements GigE Vision transport primitives for **Windows, Linux, and macOS**:
+`viva-gige` implements GigE Vision transport primitives for **Windows, Linux, and macOS**:
 
 - **Discovery** (GVCP) bound to a specific local interface
 - **Control path** (GVCP register read/write, GenCP semantics)
 - **Events/Actions** (GVCP)
 - **Streaming** (GVSP) with reassembly, resend requests, MTU/packet-size negotiation, and basic stats
 
-This chapter explains concepts, config knobs, and usage patterns—both via CLI (`gencamctl`) and via Rust APIs.
+This chapter explains concepts, config knobs, and usage patterns—both via CLI (`viva-camctl`) and via Rust APIs.
 
-> ⚠️ Names in the snippets reflect the crate import style `tl_gige` (Cargo package `tl-gige`). If an identifier differs in your codebase, adjust accordingly—we’ll keep this page updated as APIs stabilize.
+> ⚠️ Names in the snippets reflect the crate import style `viva_gige` (Cargo package `viva-gige`). If an identifier differs in your codebase, adjust accordingly—we’ll keep this page updated as APIs stabilize.
 
 ---
 
@@ -35,13 +35,13 @@ On multi-NIC hosts, **always bind** to the NIC connected to your camera network.
 
 1. **By local IPv4** (recommended for scripts/CLI):
 ```bash
-cargo run -p gencamctl -- list --iface 192.168.0.5
+cargo run -p viva-camctl -- list --iface 192.168.0.5
 ````
 
 2. **By interface name** (if your API exposes it):
 
 ```rust
-use tl_gige::net::InterfaceSelector;
+use viva_gige::net::InterfaceSelector;
 let sel = InterfaceSelector::ByName("Ethernet 2"); // or ByIpv4("192.168.0.5")
 ```
 
@@ -56,13 +56,13 @@ Discovery sends a **broadcast GVCP** command and collects replies for a small wi
 CLI:
 
 ```bash
-cargo run -p gencamctl -- list --iface 192.168.0.5
+cargo run -p viva-camctl -- list --iface 192.168.0.5
 ```
 
 Rust pattern:
 
 ```rust
-use tl_gige::{discovery::discover_on, net::InterfaceSelector, Result};
+use viva_gige::{discovery::discover_on, net::InterfaceSelector, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -82,25 +82,25 @@ async fn main() -> Result<()> {
 
 ## Control path (GVCP register access)
 
-Most GenICam features eventually map to **register reads/writes**. `tl-gige` provides helpers to open a control session and perform 8/16/32‑bit (and block) register operations.
+Most GenICam features eventually map to **register reads/writes**. `viva-gige` provides helpers to open a control session and perform 8/16/32‑bit (and block) register operations.
 
 CLI (examples):
 
 ```bash
 # Read a named feature via the high-level stack
-cargo run -p gencamctl -- get --ip 192.168.0.10 --name ExposureTime
+cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
 
 # Write a value
-cargo run -p gencamctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
+cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
 
 # Low-level register read (if exposed by CLI)
-cargo run -p gencamctl -- peek --ip 192.168.0.10 --addr 0x0010_0200 --len 4
+cargo run -p viva-camctl -- peek --ip 192.168.0.10 --addr 0x0010_0200 --len 4
 ```
 
 Rust pattern (low‑level):
 
 ```rust
-use tl_gige::{control::ControlClient, net::InterfaceSelector, Result};
+use viva_gige::{control::ControlClient, net::InterfaceSelector, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -138,13 +138,13 @@ CLI (basic):
 
 ```bash
 # Auto-negotiate packet size and store first 2 frames
-cargo run -p gencamctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
+cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 ```
 
 Rust pattern (high‑level sketch):
 
 ```rust
-use tl_gige::{stream::{StreamBuilder, ResendPolicy}, net::InterfaceSelector};
+use viva_gige::{stream::{StreamBuilder, ResendPolicy}, net::InterfaceSelector};
 
 let stream = StreamBuilder::new("192.168.0.10".parse().unwrap())
     .interface(InterfaceSelector::ByIpv4("192.168.0.5".parse().unwrap()))
@@ -209,7 +209,7 @@ while let Some(frame) = stream.next().await { /* reassembled frame bytes + metad
 Enable logs with `RUST_LOG`/`tracing_subscriber`:
 
 ```bash
-RUST_LOG=info,tl_gige=debug cargo run -p gencamctl -- stream ...
+RUST_LOG=info,viva_gige=debug cargo run -p viva-camctl -- stream ...
 ```
 
 Common categories:
@@ -231,7 +231,7 @@ Common categories:
 ## Minimal end‑to‑end example
 
 ```rust
-use tl_gige::{discovery::discover_on, control::ControlClient, stream::StreamBuilder, net::InterfaceSelector};
+use viva_gige::{discovery::discover_on, control::ControlClient, stream::StreamBuilder, net::InterfaceSelector};
 
 # #[tokio::main]
 # async fn main() -> anyhow::Result<()> {
@@ -258,6 +258,6 @@ if let Some(frame) = stream.next().await { println!("got {} bytes", frame.bytes.
 
 ## See also
 
-* [`genicp`](genicp.md): message layouts & helpers for control path
-* [`genapi-xml`](genapi-xml.md) and [`genapi-core`](genapi-core.md): NodeMap, selectors, **SwissKnife** evaluation
+* [`viva-gencp`](genicp.md): message layouts & helpers for control path
+* [`viva-genapi-xml`](genapi-xml.md) and [`viva-genapi`](genapi-core.md): NodeMap, selectors, **SwissKnife** evaluation
 * Tutorials: [Registers](../tutorials/registers.md), [Streaming](../tutorials/streaming.md)

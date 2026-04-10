@@ -1,0 +1,20 @@
+[package]
+name = "viva-genapi"
+version = "0.1.0"
+edition = "2021"
+description = "In-memory GenApi node map, evaluation, and feature access helpers"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "genapi", "vision", "camera"]
+categories = ["hardware-support", "science::robotics"]
+
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+viva-genapi-xml = { version = "0.1.0", path = "../viva-genapi-xml" }

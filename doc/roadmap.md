@@ -47,7 +47,7 @@ All core functionality works end-to-end: discovery, connection with CCP, XML fet
 - Case-insensitive URL scheme, GenICam standard URL format
 
 ### Phase 6: Sensor Service (Apr 2026)
-- `genicam-service` crate: Zenoh bridge for genicam-studio
+- `viva-service` crate: Zenoh bridge for genicam-studio
 - Discovery loop with DeviceAnnounce publishing
 - XML, node set/execute/bulk-read queryables
 - Acquisition control with FrameStream → FrameHeader → Zenoh publish

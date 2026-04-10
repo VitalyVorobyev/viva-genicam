@@ -1,0 +1,22 @@
+[package]
+name = "viva-camctl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+time = { version = "0.3", features = ["formatting"] }
+
+viva-genicam = { version = "0.1.0", path = "../viva-genicam" }
+viva-gige = { version = "0.1.0", path = "../viva-gige" }
+viva-sfnc = { version = "0.1.0", path = "../viva-sfnc" }
+viva-pfnc = { version = "0.1.0", path = "../viva-pfnc" }
+viva-genapi-xml = { version = "0.1.0", path = "../viva-genapi-xml" }

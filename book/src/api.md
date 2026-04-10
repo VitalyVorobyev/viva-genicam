@@ -5,8 +5,8 @@ this book.
 
 For crates in this workspace:
 
-- [`genicam` API](api/genicam/index.html)
-- [`tl-gige` API](api/tl_gige/index.html)
-- [`genapi-core` API](api/genapi_core/index.html)
-- [`genapi-xml` API](api/genapi_xml/index.html)
-- [`genicp` API](api/genicp/index.html)
+- [`viva-genicam` API](api/viva-genicam/index.html)
+- [`viva-gige` API](api/viva_gige/index.html)
+- [`viva-genapi` API](api/viva_genapi/index.html)
+- [`viva-genapi-xml` API](api/viva_genapi_xml/index.html)
+- [`viva-gencp` API](api/genicp/index.html)

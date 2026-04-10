@@ -1,20 +1,20 @@
 [workspace]
 members = [
-  "crates/genicp",
-  "crates/genapi-xml",
-  "crates/genapi-core",
-  "crates/tl-gige",
-  "crates/tl-u3v",
-  "crates/pfnc",
-  "crates/sfnc",
-  "crates/genicam",
-  "crates/gencamctl",
-  # genicam-service excluded: depends on genicam_zenoh_api from ../genicam-studio
-  # "crates/genicam-service",
+  "crates/viva-gencp",
+  "crates/viva-genapi-xml",
+  "crates/viva-genapi",
+  "crates/viva-gige",
+  "crates/viva-u3v",
+  "crates/viva-pfnc",
+  "crates/viva-sfnc",
+  "crates/viva-genicam",
+  "crates/viva-camctl",
+  "crates/viva-zenoh-api",
+  "crates/viva-service",
+  "crates/viva-fake-gige",
   # "crates/gentl-cti",
 ]
 exclude = [
-  "crates/genicam-service",
   "crates/gentl-cti",
 ]
 resolver = "2"

@@ -3219,9 +3219,11 @@ version = "0.1.0"
 name = "viva-u3v"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "rusb",
  "thiserror 1.0.69",
- "tokio",
+ "tracing",
+ "viva-gencp",
 ]
 
 [[package]]

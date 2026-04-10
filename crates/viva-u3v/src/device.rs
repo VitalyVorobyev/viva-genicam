@@ -130,6 +130,7 @@ impl U3vDevice<crate::usb::RusbTransfer> {
     /// Open a USB3 Vision device from a [`U3vDeviceInfo`](crate::discovery::U3vDeviceInfo)
     /// obtained via [`discover()`](crate::discovery::discover).
     pub fn open_device(info: &crate::discovery::U3vDeviceInfo) -> Result<Self, U3vError> {
+        use rusb::UsbContext;
         let context = rusb::Context::new().map_err(|e| U3vError::Usb(e.to_string()))?;
         let devices = context
             .devices()
@@ -145,7 +146,7 @@ impl U3vDevice<crate::usb::RusbTransfer> {
                 ))
             })?;
 
-        let mut handle = device.open().map_err(|e| U3vError::Usb(e.to_string()))?;
+        let handle = device.open().map_err(|e| U3vError::Usb(e.to_string()))?;
 
         // Claim all U3V interfaces.
         let iface = &info.interface_info;

@@ -49,6 +49,7 @@ impl std::fmt::Display for U3vDeviceInfo {
 #[cfg(feature = "usb")]
 pub fn discover() -> Result<Vec<U3vDeviceInfo>, U3vError> {
     use crate::descriptor::{is_likely_u3v_device, parse_u3v_interfaces};
+    use rusb::UsbContext;
 
     let context = rusb::Context::new().map_err(|e| U3vError::Usb(e.to_string()))?;
     let devices = context

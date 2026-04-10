@@ -74,6 +74,9 @@ pub use viva_gencp as gencp;
 pub use viva_gige as gige;
 pub use viva_pfnc as pfnc;
 pub use viva_sfnc as sfnc;
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub use viva_u3v as u3v;
 
 pub mod chunks;
 pub mod events;
@@ -829,6 +832,120 @@ pub async fn connect_gige_with_xml(
     let transport = GigeRegisterIo::new(handle, control_device);
 
     info!("GigE camera connected successfully");
+    Ok((Camera::new(transport, nodemap), xml))
+}
+
+// ---------------------------------------------------------------------------
+// USB3 Vision transport (behind `u3v` feature)
+// ---------------------------------------------------------------------------
+
+/// Blocking [`RegisterIo`] adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
+///
+/// Unlike [`GigeRegisterIo`] (which bridges async GigE I/O via `block_on`),
+/// USB operations are inherently synchronous, so this adapter simply forwards
+/// calls through a `Mutex` for thread safety.
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub struct U3vRegisterIo {
+    device: Mutex<u3v::device::U3vDevice<u3v::usb::RusbTransfer>>,
+}
+
+#[cfg(feature = "u3v")]
+impl U3vRegisterIo {
+    /// Create a new adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
+    pub fn new(device: u3v::device::U3vDevice<u3v::usb::RusbTransfer>) -> Self {
+        Self {
+            device: Mutex::new(device),
+        }
+    }
+
+    /// Lock the underlying device for direct access (e.g. stream configuration).
+    pub fn lock_device(
+        &self,
+    ) -> Result<MutexGuard<'_, u3v::device::U3vDevice<u3v::usb::RusbTransfer>>, GenicamError> {
+        self.device
+            .lock()
+            .map_err(|_| GenicamError::transport("u3v device mutex poisoned"))
+    }
+
+    fn lock(
+        &self,
+    ) -> Result<MutexGuard<'_, u3v::device::U3vDevice<u3v::usb::RusbTransfer>>, GenApiError> {
+        self.device
+            .lock()
+            .map_err(|_| GenApiError::Io("u3v device mutex poisoned".into()))
+    }
+}
+
+#[cfg(feature = "u3v")]
+impl RegisterIo for U3vRegisterIo {
+    fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+        let mut device = self.lock()?;
+        device
+            .read_mem(addr, len)
+            .map_err(|e| GenApiError::Io(e.to_string()))
+    }
+
+    fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
+        let mut device = self.lock()?;
+        device
+            .write_mem(addr, data)
+            .map_err(|e| GenApiError::Io(e.to_string()))
+    }
+}
+
+/// Connect to a USB3 Vision camera and return a fully configured [`Camera`].
+///
+/// This convenience function handles all connection boilerplate:
+/// 1. Opens the USB device and claims U3V interfaces
+/// 2. Reads ABRM/SBRM bootstrap registers
+/// 3. Fetches and parses the GenApi XML from the manifest table
+/// 4. Builds the nodemap and creates the transport adapter
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use viva_genicam::{u3v, connect_u3v};
+///
+/// let devices = u3v::discovery::discover()?;
+/// let device = devices.into_iter().next().expect("no U3V camera found");
+/// let mut camera = connect_u3v(&device)?;
+/// camera.set("ExposureTime", "5000")?;
+/// ```
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub fn connect_u3v(
+    device: &u3v::discovery::U3vDeviceInfo,
+) -> Result<Camera<U3vRegisterIo>, GenicamError> {
+    let (camera, _xml) = connect_u3v_with_xml(device)?;
+    Ok(camera)
+}
+
+/// Connect to a USB3 Vision camera and return both a [`Camera`] and the raw
+/// GenICam XML string fetched from the device.
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub fn connect_u3v_with_xml(
+    device_info: &u3v::discovery::U3vDeviceInfo,
+) -> Result<(Camera<U3vRegisterIo>, String), GenicamError> {
+    info!(
+        vendor_id = device_info.vendor_id,
+        product_id = device_info.product_id,
+        "connecting to USB3 Vision camera"
+    );
+
+    let mut device = u3v::device::U3vDevice::open_device(device_info)
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    let xml = device
+        .fetch_xml()
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    let model = viva_genapi_xml::parse(&xml).map_err(|e| GenicamError::transport(e.to_string()))?;
+    let nodemap = genapi::NodeMap::from(model);
+    let transport = U3vRegisterIo::new(device);
+
+    info!("USB3 Vision camera connected successfully");
     Ok((Camera::new(transport, nodemap), xml))
 }
 

@@ -25,6 +25,12 @@ async-trait = { workspace = true }
 viva-sfnc = { version = "0.1.0", path = "../viva-sfnc" }
 viva-pfnc = { version = "0.1.0", path = "../viva-pfnc" }
 viva-gencp = { version = "0.1.0", path = "../viva-gencp" }
+viva-u3v = { version = "0.1.0", path = "../viva-u3v", optional = true, features = ["usb"] }
+
+[features]
+default = []
+u3v = ["viva-u3v"]
+
 [dev-dependencies]
 viva-genapi-xml = { version = "0.1.0", path = "../viva-genapi-xml" }
 viva-fake-gige = { path = "../viva-fake-gige" }

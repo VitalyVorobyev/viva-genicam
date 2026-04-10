@@ -119,6 +119,44 @@ impl<T: UsbTransfer> U3vDevice<T> {
     pub fn event_ep(&self) -> Option<u8> {
         self.event_ep
     }
+
+    /// Read the SIRM, configure stream sizes, and create a [`U3vStream`]
+    /// for receiving frames.
+    ///
+    /// The stream endpoint must have been discovered during device open.
+    /// Configures the SIRM with the device's maximum leader/trailer sizes
+    /// and the specified payload size, then enables streaming.
+    pub fn open_stream(
+        &mut self,
+        payload_size: u64,
+    ) -> Result<crate::stream::U3vStream<T>, U3vError> {
+        let ep = self
+            .stream_ep
+            .ok_or_else(|| U3vError::Protocol("device has no streaming endpoint".into()))?;
+
+        let sirm = self.read_sirm()?;
+        sirm.configure(
+            &mut self.control,
+            payload_size,
+            sirm.max_leader_size,
+            sirm.max_trailer_size,
+        )?;
+        sirm.enable(&mut self.control)?;
+
+        Ok(crate::stream::U3vStream::new(
+            self.control.transport().clone(),
+            ep,
+            sirm.max_leader_size as usize,
+            sirm.max_trailer_size as usize,
+            payload_size as usize,
+        ))
+    }
+
+    /// Disable streaming via the SIRM control register.
+    pub fn stop_stream(&mut self) -> Result<(), U3vError> {
+        let sirm = self.read_sirm()?;
+        sirm.disable(&mut self.control)
+    }
 }
 
 // ---------------------------------------------------------------------------

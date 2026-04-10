@@ -76,6 +76,11 @@ impl<T: UsbTransfer> ControlChannel<T> {
         self.timeout = timeout;
     }
 
+    /// Access the underlying transport (e.g. to share with a stream).
+    pub fn transport(&self) -> &Arc<T> {
+        &self.transport
+    }
+
     /// Read a single 32-bit register at `addr`.
     pub fn read_register(&mut self, addr: u64) -> Result<u32, U3vError> {
         let mut payload = BytesMut::with_capacity(8);

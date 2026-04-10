@@ -11,6 +11,7 @@ pub mod control;
 pub mod descriptor;
 pub mod device;
 pub mod discovery;
+pub mod stream;
 pub mod usb;
 
 use viva_gencp::StatusCode;

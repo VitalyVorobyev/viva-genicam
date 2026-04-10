@@ -227,6 +227,43 @@ impl Sirm {
     }
 }
 
+impl Sirm {
+    /// Enable streaming by setting bit 0 of the SIRM control register.
+    pub fn enable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
+        let val = self.control | 0x0000_0001;
+        control.write_mem(self.base + sirm_reg::SIRM_CONTROL, &val.to_be_bytes())
+    }
+
+    /// Disable streaming by clearing bit 0 of the SIRM control register.
+    pub fn disable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
+        let val = self.control & !0x0000_0001;
+        control.write_mem(self.base + sirm_reg::SIRM_CONTROL, &val.to_be_bytes())
+    }
+
+    /// Write the requested payload, leader, and trailer sizes to the SIRM.
+    pub fn configure<T: UsbTransfer>(
+        &self,
+        control: &mut ControlChannel<T>,
+        payload_size: u64,
+        leader_size: u32,
+        trailer_size: u32,
+    ) -> Result<(), U3vError> {
+        control.write_mem(
+            self.base + sirm_reg::REQ_PAYLOAD_SIZE,
+            &payload_size.to_be_bytes(),
+        )?;
+        control.write_mem(
+            self.base + sirm_reg::REQ_LEADER_SIZE,
+            &leader_size.to_be_bytes(),
+        )?;
+        control.write_mem(
+            self.base + sirm_reg::REQ_TRAILER_SIZE,
+            &trailer_size.to_be_bytes(),
+        )?;
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Manifest table entry (for locating GenICam XML)
 // ---------------------------------------------------------------------------

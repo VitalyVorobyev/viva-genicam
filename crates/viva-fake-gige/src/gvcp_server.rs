@@ -225,6 +225,7 @@ async fn handle_writereg(
         let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
         let value = &chunk[4..8];
         store.write(addr, value);
+        store.handle_special_write(addr);
         check_acquisition(addr, value, acq_start, acq_stop_flag);
     }
     // WRITEREG ACK includes a 4-byte data index placeholder.
@@ -275,6 +276,7 @@ async fn handle_writemem(
     let data = &payload[4..];
     let mut store = regs.lock().await;
     store.write(addr, data);
+    store.handle_special_write(addr);
     check_acquisition(addr, data, acq_start, acq_stop_flag);
 
     // WRITEMEM ACK payload: address(4)
@@ -287,16 +289,16 @@ async fn handle_writemem(
 
 /// Check if a write targets an acquisition register and notify accordingly.
 fn check_acquisition(addr: u64, data: &[u8], acq_start: &Notify, acq_stop_flag: &AtomicBool) {
-    if addr == 0x20020 && data.len() >= 4 {
-        // AcquisitionStart command register
+    use crate::registers::{REG_ACQ_START, REG_ACQ_STOP};
+
+    if addr == REG_ACQ_START && data.len() >= 4 {
         let val = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if val != 0 {
             debug!("AcquisitionStart triggered");
             acq_stop_flag.store(false, Ordering::SeqCst);
             acq_start.notify_one();
         }
-    } else if addr == 0x20024 && data.len() >= 4 {
-        // AcquisitionStop command register
+    } else if addr == REG_ACQ_STOP && data.len() >= 4 {
         let val = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if val != 0 {
             debug!("AcquisitionStop triggered");

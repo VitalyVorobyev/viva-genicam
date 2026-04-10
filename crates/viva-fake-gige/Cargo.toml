@@ -7,7 +7,13 @@ license = "MIT"
 repository = "https://github.com/VitalyVorobyev/genicam-rs"
 publish = false
 
+[[bin]]
+name = "viva-fake-gige"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
 bytes = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }

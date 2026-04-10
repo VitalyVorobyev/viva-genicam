@@ -11,7 +11,7 @@ We do not maintain backward compatibility at this early development stage. The p
 ## Related Projects
 
 - **genicam-studio** (`../genicam-studio`) — Tauri desktop app that consumes viva-service via Zenoh. Contains the `viva_zenoh_api` crate (shared wire types) and a mock camera service.
-- **aravis** (`../aravis`) — C library for GenICam cameras. Provides `arv-fake-gv-camera-0.8` used for integration testing.
+- **aravis** (`../aravis`) — C library for GenICam cameras. Optional; used only for conformance testing against a third-party implementation. Not required for development or CI.
 
 ## Build Commands
 
@@ -22,8 +22,8 @@ cargo build --workspace
 # Run all tests
 cargo test --workspace
 
-# Integration tests (requires arv-fake-gv-camera-0.8 installed)
-cargo test -p viva-genicam --test fake_camera -- --ignored --test-threads=1
+# Integration tests (uses in-process fake camera, no external tools needed)
+cargo test -p viva-genicam --test fake_camera
 
 # Format check (CI requirement)
 cargo fmt --all --check
@@ -79,7 +79,7 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 
 ## Testing
 
-Unit tests are embedded in source modules (`mod tests { }`). Integration tests against `arv-fake-gv-camera-0.8` live in `crates/viva-genicam/tests/fake_camera.rs` (marked `#[ignore]`, require aravis installed).
+Unit tests are embedded in source modules (`mod tests { }`). Integration tests use the in-process `viva-fake-gige` simulator and run automatically with `cargo test --workspace` -- no external tools required.
 
 ```bash
 # Test single crate

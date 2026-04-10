@@ -3,7 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{BufMut, BytesMut};
 use tokio::net::UdpSocket;
@@ -43,6 +43,8 @@ pub async fn run(
 
         let frame_interval = Duration::from_micros(1_000_000 / fps.max(1) as u64);
         let mut block_id: u16 = 1;
+        // Device clock: nanoseconds since acquisition start (1 GHz tick rate).
+        let clock_origin = Instant::now();
 
         loop {
             // Check stop flag.
@@ -51,8 +53,17 @@ pub async fn run(
                 break;
             }
 
-            // Read current stream destination from registers.
-            let (dest_ip, dest_port, packet_size, width, height, pixel_format) = {
+            // Read current stream destination and config from registers.
+            let (
+                dest_ip,
+                dest_port,
+                packet_size,
+                width,
+                height,
+                pixel_format,
+                chunk_active,
+                exposure_time,
+            ) = {
                 let store = regs.lock().await;
                 (
                     store.stream_dest_ip(),
@@ -61,6 +72,8 @@ pub async fn run(
                     store.width(),
                     store.height(),
                     store.pixel_format_code(),
+                    store.chunk_mode_active(),
+                    store.exposure_time(),
                 )
             };
 
@@ -80,11 +93,15 @@ pub async fn run(
             let bpp: u32 = if pixel_format == 0x02180014 { 3 } else { 1 }; // RGB8 : Mono8
             let image_size = (width * height * bpp) as usize;
 
-            // Generate synthetic image (horizontal gradient).
-            let image = generate_gradient(width as usize, height as usize, bpp as usize, block_id);
+            // Generate animated test pattern.
+            let image =
+                generate_test_pattern(width as usize, height as usize, bpp as usize, block_id);
+
+            // Device timestamp: nanoseconds since acquisition start.
+            let timestamp = clock_origin.elapsed().as_nanos() as u64;
 
             // Send leader packet (packet_id = 0).
-            let leader = build_leader(block_id, width, height, pixel_format);
+            let leader = build_leader(block_id, width, height, pixel_format, timestamp);
             let _ = socket.send_to(&leader, dest).await;
 
             // Send payload packets.
@@ -98,8 +115,13 @@ pub async fn run(
                 offset = end;
             }
 
-            // Send trailer packet.
-            let trailer = build_trailer(block_id, packet_id);
+            // Send trailer packet (with optional chunk data).
+            let chunk_data = if chunk_active {
+                build_chunk_data(timestamp, exposure_time)
+            } else {
+                Vec::new()
+            };
+            let trailer = build_trailer(block_id, packet_id, &chunk_data);
             let _ = socket.send_to(&trailer, dest).await;
 
             trace!(block_id, packets = packet_id + 1, %dest, "frame sent");
@@ -113,31 +135,77 @@ pub async fn run(
     }
 }
 
-/// Generate a gradient test pattern.
-fn generate_gradient(width: usize, height: usize, bpp: usize, seed: u16) -> Vec<u8> {
+/// Generate a test pattern that animates across frames.
+///
+/// Mono8: concentric rings radiating from center, shifting with each frame.
+/// RGB8: colorful plasma-like pattern with animated hue rotation.
+fn generate_test_pattern(width: usize, height: usize, bpp: usize, frame: u16) -> Vec<u8> {
     let size = width * height * bpp;
     let mut data = vec![0u8; size];
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 / 2.0;
+    let phase = frame as f32 * 0.15;
 
     for y in 0..height {
         for x in 0..width {
             let offset = (y * width + x) * bpp;
-            let val = ((x as u16)
-                .wrapping_add(seed)
-                .wrapping_mul(255 / width.max(1) as u16)) as u8;
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+
             if bpp == 1 {
+                // Concentric rings with radial gradient
+                let ring = ((dist * 0.1 - phase) * 2.0).sin();
+                let radial = 1.0 - (dist / (cx.max(cy) * 1.2)).min(1.0);
+                let val = ((ring * 0.5 + 0.5) * radial * 255.0) as u8;
                 data[offset] = val;
             } else if bpp >= 3 {
-                data[offset] = val; // R
-                data[offset + 1] = ((y * 255) / height.max(1)) as u8; // G
-                data[offset + 2] = seed as u8; // B
+                // Plasma pattern with hue rotation
+                let angle = dy.atan2(dx);
+                let v1 = ((dist * 0.05 - phase).sin() + 1.0) * 0.5;
+                let v2 = ((angle * 3.0 + phase * 2.0).sin() + 1.0) * 0.5;
+                let v3 = (((x as f32 * 0.02 + y as f32 * 0.03 + phase).sin()) + 1.0) * 0.5;
+
+                let hue = (v1 + v2) * 0.5 + phase * 0.1;
+                let sat = 0.7 + v3 * 0.3;
+                let val = 0.5 + v1 * 0.5;
+                let (r, g, b) = hsv_to_rgb(hue % 1.0, sat, val);
+                data[offset] = r;
+                data[offset + 1] = g;
+                data[offset + 2] = b;
             }
         }
     }
     data
 }
 
+/// Convert HSV (all 0.0..1.0) to RGB (0..255).
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h * 6.0;
+    let i = h.floor() as u32;
+    let f = h - i as f32;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i % 6 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+}
+
 /// Build a GVSP leader packet.
-fn build_leader(block_id: u16, width: u32, height: u32, pixel_format: u32) -> Vec<u8> {
+fn build_leader(
+    block_id: u16,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    timestamp: u64,
+) -> Vec<u8> {
     // GVSP header (8 bytes) + leader payload (36 bytes)
     let mut buf = BytesMut::with_capacity(44);
 
@@ -151,7 +219,7 @@ fn build_leader(block_id: u16, width: u32, height: u32, pixel_format: u32) -> Ve
     // Leader payload
     buf.put_u16(0); // reserved
     buf.put_u16(PAYLOAD_IMAGE); // payload_type
-    buf.put_u64(0); // timestamp
+    buf.put_u64(timestamp); // timestamp
     buf.put_u32(pixel_format); // pixel_format
     buf.put_u32(width); // size_x
     buf.put_u32(height); // size_y
@@ -179,10 +247,9 @@ fn build_payload(block_id: u16, packet_id: u16, data: &[u8]) -> Vec<u8> {
     buf.to_vec()
 }
 
-/// Build a GVSP trailer packet.
-fn build_trailer(block_id: u16, packet_id: u16) -> Vec<u8> {
-    // GVSP header (8 bytes) + trailer payload (8 bytes)
-    let mut buf = BytesMut::with_capacity(16);
+/// Build a GVSP trailer packet with optional chunk data.
+fn build_trailer(block_id: u16, packet_id: u16, chunk_data: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(16 + chunk_data.len());
 
     // GVSP header
     buf.put_u16(0); // status
@@ -192,9 +259,37 @@ fn build_trailer(block_id: u16, packet_id: u16) -> Vec<u8> {
     buf.put_u16(packet_id); // packet_id = last payload + 1
 
     // Trailer payload
+    buf.put_u16(0); // reserved/status
+    if chunk_data.is_empty() {
+        buf.put_u16(PAYLOAD_IMAGE); // payload_type
+    } else {
+        buf.put_u16(0x4001); // payload_type: image + chunk
+    }
+    buf.put_u32(0); // size_y
+
+    // Append chunk data blocks
+    buf.put_slice(chunk_data);
+
+    buf.to_vec()
+}
+
+/// Build chunk data blocks: Timestamp (0x0001) + ExposureTime (0x1002).
+///
+/// Each chunk: [id: u16][reserved: u16][length: u32][data...]
+fn build_chunk_data(timestamp: u64, exposure_time: f64) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(32);
+
+    // Chunk: Timestamp (id=0x0001, 8 bytes LE)
+    buf.put_u16(0x0001); // chunk id
     buf.put_u16(0); // reserved
-    buf.put_u16(PAYLOAD_IMAGE); // payload_type
-    buf.put_u32(0); // size_y (can be used for validation)
+    buf.put_u32(8); // data length
+    buf.put_u64_le(timestamp); // timestamp value (little-endian per spec)
+
+    // Chunk: ExposureTime (id=0x1002, 8 bytes LE)
+    buf.put_u16(0x1002); // chunk id
+    buf.put_u16(0); // reserved
+    buf.put_u32(8); // data length
+    buf.put_f64_le(exposure_time); // exposure time value (little-endian)
 
     buf.to_vec()
 }

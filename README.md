@@ -17,7 +17,7 @@ Cargo workspace, modular crates (GenCP, GVCP/GVSP, GenApi core), and small examp
   * ✅ Events & actions: message channel events; action commands (synchronization).
   * ✅ Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
   * ✅ **Sensor service** (`viva-service`): Zenoh bridge for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) — discovery, XML, node read/write, acquisition control, frame streaming.
-  * ✅ Integration tests against `arv-fake-gv-camera` (aravis simulator).
+  * ✅ Self-contained integration tests with `viva-fake-gige` (in-process fake camera, no external tools).
   * ✅ macOS support: `Iface::from_system`, loopback discovery.
   * USB3 Vision transport (planned).
 
@@ -185,17 +185,17 @@ Zenoh when acquisition is started from genicam-studio.
 
 ## Integration testing
 
-12 integration tests validate the full stack against `arv-fake-gv-camera-0.8`
-from [Aravis](https://github.com/AravisProject/aravis) — covering discovery,
-connection, XML parsing, feature read/write, command execution, and frame
-streaming (all pass on macOS loopback).
+Integration tests use the built-in `viva-fake-gige` camera simulator -- no
+external tools or hardware required. 15 tests cover the full stack: discovery,
+connection, XML parsing, feature read/write, command execution, frame streaming,
+and the Zenoh service bridge.
 
 ```bash
-# Install aravis (macOS)
-brew install aravis
+# Run all tests (fake camera starts automatically)
+cargo test --workspace
 
-# Run integration tests (starts fake camera automatically)
-cargo test -p viva-genicam --test fake_camera -- --ignored --test-threads=1
+# Run a self-contained demo (discovery → features → streaming)
+cargo run -p viva-genicam --example demo_fake_camera
 ```
 
 ## Troubleshooting

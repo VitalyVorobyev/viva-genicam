@@ -1,15 +1,14 @@
-//! End-to-end integration test: fake camera → genicam-service → Zenoh client.
+//! End-to-end integration test: fake camera -> viva-service -> Zenoh client.
 //!
-//! Requires `arv-fake-gv-camera-0.8` on PATH. Run with:
+//! Uses the in-process `viva-fake-gige` camera -- no external tools required.
 //!
 //! ```sh
-//! cargo test --test fake_camera_e2e -- --ignored --test-threads=1
+//! cargo test -p viva-service --test fake_camera_e2e
 //! ```
 
 use std::net::Ipv4Addr;
-use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use viva_service::acquisition;
 use viva_service::device::DeviceHandle;
@@ -17,69 +16,51 @@ use viva_service::nodes;
 use viva_service::status;
 use viva_service::xml;
 
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex, OwnedMutexGuard};
+use viva_fake_gige::FakeCamera;
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{keys, AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse};
 
 // ---------------------------------------------------------------------------
-// Fake camera process guard
+// Fake camera guard with global port lock
 // ---------------------------------------------------------------------------
 
-const FAKE_CAMERA_BIN: &str = "arv-fake-gv-camera-0.8";
-const GVCP_PORT: u16 = 3956;
+static CAMERA_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
 
-struct FakeCamera {
-    child: Child,
+fn camera_lock() -> Arc<Mutex<()>> {
+    CAMERA_LOCK.get_or_init(|| Arc::new(Mutex::new(()))).clone()
 }
 
-impl FakeCamera {
-    fn start() -> Self {
-        let child = Command::new(FAKE_CAMERA_BIN)
-            .args(["-i", "127.0.0.1"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("Failed to start {FAKE_CAMERA_BIN}: {e}"));
+struct TestCamera {
+    camera: Option<FakeCamera>,
+    _guard: OwnedMutexGuard<()>,
+}
 
-        let cam = FakeCamera { child };
-        cam.wait_for_ready();
-        cam
-    }
-
-    fn wait_for_ready(&self) {
-        let start = Instant::now();
-        let addr: std::net::SocketAddr = ([127, 0, 0, 1], GVCP_PORT).into();
-        while start.elapsed() < Duration::from_secs(5) {
-            if let Ok(sock) = std::net::UdpSocket::bind("127.0.0.1:0") {
-                sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
-                let discovery_pkt = [0x42, 0x11, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01];
-                if sock.send_to(&discovery_pkt, addr).is_ok() {
-                    let mut buf = [0u8; 512];
-                    if sock.recv_from(&mut buf).is_ok() {
-                        return;
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
+impl TestCamera {
+    async fn start() -> Self {
+        let guard = camera_lock().lock_owned().await;
+        let camera = FakeCamera::builder()
+            .bind_ip([127, 0, 0, 1].into())
+            .port(3956)
+            .width(640)
+            .height(480)
+            .fps(30)
+            .build()
+            .await
+            .expect("failed to start fake camera");
+        TestCamera {
+            camera: Some(camera),
+            _guard: guard,
         }
-        panic!("Fake camera did not start within 5 s");
     }
 }
 
-impl Drop for FakeCamera {
+impl Drop for TestCamera {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(camera) = self.camera.take() {
+            camera.stop();
+        }
     }
-}
-
-fn aravis_available() -> bool {
-    Command::new(FAKE_CAMERA_BIN)
-        .arg("--help")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
 }
 
 fn loopback_iface_name() -> &'static str {
@@ -94,7 +75,7 @@ fn loopback_iface_name() -> &'static str {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Spawn the same set of per-device tasks that genicam-service normally runs.
+/// Spawn the same set of per-device tasks that viva-service normally runs.
 async fn spawn_service_tasks(
     session: Arc<zenoh::Session>,
     device: Arc<DeviceHandle>,
@@ -183,15 +164,10 @@ async fn send_acq_command(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Full round-trip: discover → connect → stream → receive frames → stop.
+/// Full round-trip: discover -> connect -> stream -> receive frames -> stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn e2e_acquisition_roundtrip() {
-    if !aravis_available() {
-        eprintln!("SKIPPED: {FAKE_CAMERA_BIN} not found on PATH");
-        return;
-    }
-    let _cam = FakeCamera::start();
+    let _cam = TestCamera::start().await;
 
     // 1. Open a Zenoh session.
     let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
@@ -261,12 +237,9 @@ async fn e2e_acquisition_roundtrip() {
 
     // 9. Verify streaming has stopped (no frames within 2 s).
     let late = tokio::time::timeout(Duration::from_secs(2), subscriber.recv_async()).await;
-    // It's acceptable to receive a few trailing frames, but eventually it must stop.
     if late.is_ok() {
-        // Drain any leftover frames.
         let drain_result =
             tokio::time::timeout(Duration::from_secs(2), subscriber.recv_async()).await;
-        // Eventually we should get a timeout.
         if drain_result.is_ok() {
             let drain_result2 =
                 tokio::time::timeout(Duration::from_secs(2), subscriber.recv_async()).await;
@@ -286,13 +259,8 @@ async fn e2e_acquisition_roundtrip() {
 
 /// Verify that starting acquisition twice returns an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn e2e_double_start_rejected() {
-    if !aravis_available() {
-        eprintln!("SKIPPED: {FAKE_CAMERA_BIN} not found on PATH");
-        return;
-    }
-    let _cam = FakeCamera::start();
+    let _cam = TestCamera::start().await;
 
     let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
     let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
@@ -329,15 +297,10 @@ async fn e2e_double_start_rejected() {
     }
 }
 
-/// Verify a running acquisition remains live beyond the fake camera heartbeat window.
+/// Verify a running acquisition remains live beyond the heartbeat window.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn e2e_sustained_streaming() {
-    if !aravis_available() {
-        eprintln!("SKIPPED: {FAKE_CAMERA_BIN} not found on PATH");
-        return;
-    }
-    let _cam = FakeCamera::start();
+    let _cam = TestCamera::start().await;
 
     let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
     let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))

@@ -3146,8 +3146,10 @@ name = "viva-fake-gige"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "clap",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3235,6 +3237,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "viva-fake-gige",
  "viva-genicam",
  "viva-zenoh-api",
  "zenoh",

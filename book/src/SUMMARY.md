@@ -16,6 +16,7 @@
   - [Registers: read & write](tutorials/registers.md)
   - [Fetch & parse GenApi XML](tutorials/genapi-xml.md)
   - [Streaming (GVSP) – first steps](tutorials/streaming.md)
+  - [Testing without hardware](tutorials/fake-camera.md)
 - [Networking Guide (GigE Vision)](networking.md)
 - [Error Handling & Tracing](errors-logging.md)
 - [Testing & Dev Environment](testing.md)

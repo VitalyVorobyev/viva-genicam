@@ -506,7 +506,7 @@ impl RegisterMap {
     ///
     /// Initializes all bootstrap, feature, and device info registers with
     /// sensible defaults. The GenApi XML is embedded at [`XML_BLOB_BASE`].
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, pixel_format: u32) -> Self {
         let mut regs = HashMap::new();
 
         // ── Bootstrap registers ─────────────────────────────────────────
@@ -530,7 +530,7 @@ impl RegisterMap {
         // ── Image format ────────────────────────────────────────────────
         regs.insert(REG_WIDTH, width.to_be_bytes().to_vec());
         regs.insert(REG_HEIGHT, height.to_be_bytes().to_vec());
-        regs.insert(REG_PIXEL_FORMAT, 0x01080001u32.to_be_bytes().to_vec()); // Mono8
+        regs.insert(REG_PIXEL_FORMAT, pixel_format.to_be_bytes().to_vec());
         regs.insert(REG_OFFSET_X, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_OFFSET_Y, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_SENSOR_WIDTH, 4096u32.to_be_bytes().to_vec());

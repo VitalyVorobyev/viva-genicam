@@ -48,7 +48,12 @@ pub struct FakeCameraBuilder {
     fps: u32,
     bind_ip: Ipv4Addr,
     port: u16,
+    pixel_format: u32,
 }
+
+/// PFNC pixel format codes.
+pub const MONO8: u32 = 0x0108_0001;
+pub const RGB8: u32 = 0x0218_0014;
 
 impl Default for FakeCameraBuilder {
     fn default() -> Self {
@@ -58,6 +63,7 @@ impl Default for FakeCameraBuilder {
             fps: 30,
             bind_ip: Ipv4Addr::LOCALHOST,
             port: 3956,
+            pixel_format: MONO8,
         }
     }
 }
@@ -93,11 +99,20 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Set the initial pixel format (PFNC code). Default: Mono8.
+    ///
+    /// Use [`MONO8`] or [`RGB8`] constants.
+    pub fn pixel_format(mut self, code: u32) -> Self {
+        self.pixel_format = code;
+        self
+    }
+
     /// Start the fake camera and return a handle.
     pub async fn build(self) -> Result<FakeCamera, std::io::Error> {
         let regs = Arc::new(Mutex::new(registers::RegisterMap::new(
             self.width,
             self.height,
+            self.pixel_format,
         )));
 
         let acq_start = Arc::new(Notify::new());

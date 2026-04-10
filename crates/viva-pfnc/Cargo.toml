@@ -1,10 +1,12 @@
 [package]
 name = "viva-pfnc"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 description = "Pixel Format Naming Convention (PFNC) tables and helpers"
-license = "MIT"
-repository = "https://github.com/VitalyVorobyev/genicam-rs"
 readme = "README.md"
 keywords = ["genicam", "pfnc", "vision", "image"]
 categories = ["hardware-support", "science::robotics"]

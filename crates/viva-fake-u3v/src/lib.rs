@@ -26,8 +26,8 @@ pub use transport::FakeU3vTransport;
 
 use std::sync::Arc;
 
-use viva_u3v::device::U3vDevice;
 use viva_u3v::U3vError;
+use viva_u3v::device::U3vDevice;
 
 /// Builder for a fake USB3 Vision camera.
 ///

@@ -3,9 +3,9 @@
 //! Scans all connected USB devices for USB3 Vision interfaces and returns
 //! descriptive information for each discovered camera.
 
-use crate::descriptor::U3vInterfaceInfo;
 #[cfg(feature = "usb")]
 use crate::U3vError;
+use crate::descriptor::U3vInterfaceInfo;
 
 /// Information about a discovered USB3 Vision device.
 #[derive(Debug, Clone)]

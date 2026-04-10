@@ -1,16 +1,16 @@
 //! Parsers for Enumeration and Boolean nodes.
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use tracing::warn;
 
 use super::{
-    handle_addressing_empty, handle_addressing_start, handle_p_selected_empty,
-    handle_p_selected_start, handle_selected_empty, handle_selected_start, SelectorState, TAG_BIT,
-    TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK, TAG_MSB,
-    TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE,
+    SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS,
+    TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty,
+    handle_addressing_start, handle_p_selected_empty, handle_p_selected_start,
+    handle_selected_empty, handle_selected_start,
 };
-use crate::builders::{addressing_lengths, AddressingBuilder, BitfieldBuilder};
+use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
@@ -93,7 +93,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Enumeration node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}
@@ -310,7 +310,7 @@ pub fn parse_boolean(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Boolean node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}
@@ -343,7 +343,7 @@ pub fn parse_boolean(
             None => {
                 return Err(XmlError::Invalid(format!(
                     "Boolean node {name} requires explicit bitfield metadata"
-                )))
+                )));
             }
         };
         (Some(addr), len, bf)
@@ -411,7 +411,7 @@ fn parse_enum_entry(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid("unterminated EnumEntry element".into()))
+                return Err(XmlError::Invalid("unterminated EnumEntry element".into()));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}

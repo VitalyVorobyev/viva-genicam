@@ -33,8 +33,8 @@ mod gvsp_sender;
 pub mod registers;
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;

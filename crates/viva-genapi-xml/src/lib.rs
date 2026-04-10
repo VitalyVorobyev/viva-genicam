@@ -13,8 +13,8 @@ mod util;
 #[cfg(feature = "fetch")]
 pub use fetch::fetch_and_load_xml;
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

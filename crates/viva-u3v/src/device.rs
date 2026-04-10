@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use crate::U3vError;
 use crate::bootstrap::{Abrm, ManifestEntry, Sbrm, Sirm};
 use crate::control::ControlChannel;
 use crate::usb::UsbTransfer;
-use crate::U3vError;
 
 /// Default maximum command/ack transfer size used before reading SBRM.
 ///
@@ -120,7 +120,7 @@ impl<T: UsbTransfer> U3vDevice<T> {
         self.event_ep
     }
 
-    /// Read the SIRM, configure stream sizes, and create a [`U3vStream`]
+    /// Read the SIRM, configure stream sizes, and create a [`crate::stream::U3vStream`]
     /// for receiving frames.
     ///
     /// The stream endpoint must have been discovered during device open.

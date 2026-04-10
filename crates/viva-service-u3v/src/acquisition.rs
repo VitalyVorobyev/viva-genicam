@@ -8,7 +8,7 @@ use viva_service::acquisition::{publish_image_meta, publish_status};
 use viva_service::device::DeviceOps;
 use viva_service::pixel_format::pfnc_to_zenoh;
 use viva_zenoh_api::frame_header::FrameHeader;
-use viva_zenoh_api::{keys, AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse};
+use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse, keys};
 use zenoh::Session;
 
 use crate::device::U3vDeviceHandle;

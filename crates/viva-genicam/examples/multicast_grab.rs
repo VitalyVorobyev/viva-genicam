@@ -10,10 +10,10 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use viva_genapi_xml::XmlError;
 use viva_genicam::genapi::NodeMap;
+use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::gige::gvsp::{self, GvspPacket};
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::gige::stats::StreamStats;
-use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::pfnc::PixelFormat;
 use viva_genicam::{Camera, Frame, GigeRegisterIo, StreamBuilder, StreamDest};
 

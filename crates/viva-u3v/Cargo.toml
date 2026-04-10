@@ -1,11 +1,15 @@
 [package]
 name = "viva-u3v"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
-publish = false
+description = "USB3 Vision transport: bootstrap registers, GenCP-over-USB, and bulk streaming"
+readme = "README.md"
+keywords = ["genicam", "u3v", "usb", "vision"]
+categories = ["hardware-support", "science::robotics"]
 
 [dependencies]
 bytes = { workspace = true }

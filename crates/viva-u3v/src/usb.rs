@@ -20,7 +20,7 @@ pub trait UsbTransfer: Send + Sync {
     /// Read up to `buf.len()` bytes from the bulk IN `endpoint`.
     /// Returns the number of bytes actually read.
     fn bulk_read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration)
-        -> Result<usize, U3vError>;
+    -> Result<usize, U3vError>;
 }
 
 // ---------------------------------------------------------------------------

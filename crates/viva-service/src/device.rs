@@ -7,7 +7,7 @@ use tracing::{debug, info};
 use viva_genicam::gige::gvcp::consts as gvcp_consts;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
-    connect_gige_with_xml, gige, Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder,
+    Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
 };
 
 /// Transport-agnostic device operations used by shared Zenoh queryable handlers.

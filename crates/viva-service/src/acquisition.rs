@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
-use viva_genicam::gige::nic::Iface;
 use viva_genicam::FrameStream;
+use viva_genicam::gige::nic::Iface;
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
-    keys, AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, ImageMeta,
-    NodeOpResponse,
+    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, ImageMeta, NodeOpResponse,
+    keys,
 };
 use zenoh::Session;
 

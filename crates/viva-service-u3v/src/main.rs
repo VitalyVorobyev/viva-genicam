@@ -14,7 +14,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use viva_service::device::DeviceOps;
 use viva_service::{nodes, status, xml};
-use viva_zenoh_api::{keys, DeviceAnnounce, API_VERSION};
+use viva_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
 
 use crate::device::U3vDeviceHandle;
 
@@ -86,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .await?;
     } else {
-        error!("Real USB3 Vision discovery not yet integrated into the service. Use --fake for testing.");
+        error!(
+            "Real USB3 Vision discovery not yet integrated into the service. Use --fake for testing."
+        );
         return Ok(());
     }
 

@@ -4,4 +4,4 @@
 //! and computes a linear model mapping device ticks to host time. See the
 //! `viva_gige::time` module for full documentation.
 
-pub use viva_gige::time::{TimeSync, DEFAULT_TIME_WINDOW};
+pub use viva_gige::time::{DEFAULT_TIME_WINDOW, TimeSync};

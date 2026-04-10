@@ -1,34 +1,51 @@
 # viva-service
 
-Zenoh bridge exposing GenICam cameras as network-accessible services.
+Zenoh bridge that discovers GigE Vision cameras and exposes them as network-accessible services.
 
-This crate provides a binary (`viva-service`) that discovers GigE Vision
-cameras on the local network and makes them available over
-[Zenoh](https://zenoh.io/) pub/sub and queryables. Client applications (like
-[genicam-studio](https://github.com/VitalyVorobyev/genicam-studio)) connect
-to the service for camera discovery, feature control, and image streaming.
+Client applications like [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) connect to the service for camera discovery, feature control, and image streaming.
+
+> **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
+> Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
+> GenICam is a trademark of EMVA.
+
+## Features
+
+- **Auto-discovery** -- finds GigE Vision cameras on the specified network interface
+- **GenICam XML** -- serves the device description XML via Zenoh queryable
+- **Node read/write** -- live node value updates and feature control
+- **Acquisition** -- start/stop image acquisition from client applications
+- **Frame streaming** -- raw image data with 16-byte binary header over Zenoh pub/sub
+- **Device lifecycle** -- connection/disconnection tracking with status announcements
 
 ## Usage
 
 ```bash
+# Start the service
 cargo run -p viva-service -- --iface en0
+
+# With verbose logging
+cargo run -p viva-service -- --iface en0 -vv
 ```
 
 ## Zenoh API
 
-The service exposes cameras under `viva-genicam/devices/{id}/`:
+Cameras are exposed under `viva-genicam/devices/{id}/`:
 
-- `announce` -- periodic device discovery announcements
-- `xml` -- queryable returning the GenICam XML
-- `nodes/{name}/value` -- live node value updates
-- `nodes/{name}/set` -- queryable for writing node values
-- `nodes/{name}/execute` -- queryable for executing commands
-- `nodes/bulk/read` -- queryable for batch reads
-- `acquisition/control` -- start/stop acquisition
-- `image` -- raw frame data with 16-byte binary header
+| Endpoint | Description |
+|----------|-------------|
+| `announce` | Periodic device discovery announcements |
+| `xml` | Queryable returning the GenICam XML |
+| `nodes/{name}/value` | Live node value updates |
+| `nodes/{name}/set` | Queryable for writing node values |
+| `nodes/{name}/execute` | Queryable for executing commands |
+| `nodes/bulk/read` | Queryable for batch reads |
+| `acquisition/control` | Start/stop acquisition |
+| `image` | Raw frame data with binary header |
 
-Wire types are defined in the
-[`viva-zenoh-api`](https://crates.io/crates/viva-zenoh-api) crate.
+Wire types are defined in [`viva-zenoh-api`](https://crates.io/crates/viva-zenoh-api).
 
-See the [workspace README](https://github.com/VitalyVorobyev/genicam-rs)
-for the full project documentation.
+## Documentation
+
+[API reference (docs.rs)](https://docs.rs/viva-service)
+
+Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.

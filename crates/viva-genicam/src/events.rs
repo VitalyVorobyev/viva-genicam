@@ -9,8 +9,8 @@ use tracing::{debug, info, warn};
 use viva_gige::gvcp::consts as gvcp_consts;
 use viva_gige::message::{EventPacket, EventSocket};
 
-use crate::time::TimeSync;
 use crate::GenicamError;
+use crate::time::TimeSync;
 
 /// Public representation of a GigE Vision event.
 #[derive(Debug, Clone, PartialEq, Eq)]

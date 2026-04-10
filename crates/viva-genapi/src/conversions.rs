@@ -1,8 +1,8 @@
 //! Numeric conversion utilities for register values and bitfields.
 
+use crate::GenApiError;
 use crate::bitops::BitOpsError;
 use crate::nodes::FloatNode;
-use crate::GenApiError;
 
 /// Convert a big-endian byte slice (up to 8 bytes) to a signed 64-bit integer.
 pub fn bytes_to_i64(name: &str, bytes: &[u8]) -> Result<i64, GenApiError> {
@@ -153,19 +153,11 @@ fn round_ties_to_zero(value: f64) -> f64 {
     if value >= 0.0 {
         let base = value.floor();
         let frac = value - base;
-        if frac > 0.5 {
-            base + 1.0
-        } else {
-            base
-        }
+        if frac > 0.5 { base + 1.0 } else { base }
     } else {
         let base = value.ceil();
         let frac = value - base;
-        if frac < -0.5 {
-            base - 1.0
-        } else {
-            base
-        }
+        if frac < -0.5 { base - 1.0 } else { base }
     }
 }
 

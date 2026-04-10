@@ -15,7 +15,7 @@ use tracing::warn;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::gige::stats::StreamStats;
 use viva_genicam::pfnc::PixelFormat;
-use viva_genicam::{connect_gige, Frame, FrameStream, StreamBuilder};
+use viva_genicam::{Frame, FrameStream, StreamBuilder, connect_gige};
 
 #[derive(Debug, Clone)]
 struct Args {

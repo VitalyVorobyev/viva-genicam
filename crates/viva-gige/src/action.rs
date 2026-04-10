@@ -11,7 +11,7 @@ use tokio::net::UdpSocket;
 use tokio::time;
 use tracing::{debug, info, trace, warn};
 
-use crate::gvcp::{GvcpAckHeader, GvcpRequestHeader, GVCP_PORT};
+use crate::gvcp::{GVCP_PORT, GvcpAckHeader, GvcpRequestHeader};
 
 /// Constants describing the layout of action command packets.
 mod consts {

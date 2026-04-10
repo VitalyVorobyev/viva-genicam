@@ -11,9 +11,9 @@ use tokio::time;
 use tracing::{info, warn};
 use viva_genapi_xml::XmlError;
 use viva_genicam::genapi::NodeMap;
+use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::gige::gvsp::{self, GvspPacket};
 use viva_genicam::gige::nic::Iface;
-use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::{Camera, Frame, GigeRegisterIo, StreamBuilder, StreamDest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                         return Err(format!(
                             "unsupported dest mode '{other}'; expected unicast or multicast"
                         )
-                        .into())
+                        .into());
                     }
                 });
             }

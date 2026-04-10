@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
-use viva_zenoh_api::{keys, DeviceXmlResponse};
+use viva_zenoh_api::{DeviceXmlResponse, keys};
 use zenoh::Session;
 
 /// Declare a queryable for the device XML endpoint.

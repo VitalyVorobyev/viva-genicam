@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::usb::UsbTransfer;
 use crate::U3vError;
+use crate::usb::UsbTransfer;
 
 /// U3V stream leader prefix: "U3VL" in little-endian.
 const LEADER_PREFIX: u32 = 0x4C56_3355;

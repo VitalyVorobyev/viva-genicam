@@ -15,9 +15,9 @@
 
 use bytes::Buf;
 
+use crate::U3vError;
 use crate::control::ControlChannel;
 use crate::usb::UsbTransfer;
-use crate::U3vError;
 
 // ---------------------------------------------------------------------------
 // ABRM — Application Bootstrap Register Map (GenCP standard, at addr 0x0000)

@@ -1,7 +1,7 @@
 //! Parsers for Command and Category nodes.
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
@@ -52,7 +52,7 @@ pub fn parse_command(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Command node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}
@@ -133,7 +133,7 @@ pub fn parse_category(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Category node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}

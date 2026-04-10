@@ -13,8 +13,8 @@ use std::time::Duration;
 use bytes::{BufMut, BytesMut};
 use viva_gencp::{CommandFlags, OpCode, StatusCode};
 
-use crate::usb::UsbTransfer;
 use crate::U3vError;
+use crate::usb::UsbTransfer;
 
 /// U3V command prefix magic: "U3VC" in little-endian.
 const CMD_PREFIX: u32 = 0x4356_3355;

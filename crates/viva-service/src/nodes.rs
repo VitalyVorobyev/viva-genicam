@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use viva_zenoh_api::{
-    keys, BulkReadRequest, BulkReadResponse, NodeOpResponse, NodeSetRequest, NodeValueUpdate,
+    BulkReadRequest, BulkReadResponse, NodeOpResponse, NodeSetRequest, NodeValueUpdate, keys,
 };
 use zenoh::Session;
 

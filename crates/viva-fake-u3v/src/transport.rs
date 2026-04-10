@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
 use viva_gencp::{OpCode, StatusCode};
-use viva_u3v::usb::UsbTransfer;
 use viva_u3v::U3vError;
+use viva_u3v::usb::UsbTransfer;
 
 use crate::registers::RegisterMap;
 

@@ -5,21 +5,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use std::convert::TryInto;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use viva_genapi_xml::{self, XmlError};
 use viva_genicam::genapi::NodeMap;
 use viva_genicam::{Camera, GigeRegisterIo};
+use viva_gige::DeviceInfo;
 use viva_gige::discover_on_interface;
 use viva_gige::gvcp::GigeDevice;
 use viva_gige::nic::Iface;
-use viva_gige::DeviceInfo;
-use viva_gige::{discover, GVCP_PORT};
+use viva_gige::{GVCP_PORT, discover};
 
 pub const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 500;
 

@@ -1,11 +1,11 @@
 //! USB3 Vision CLI commands.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tracing::info;
 
-use viva_genicam::{connect_u3v, Camera, U3vRegisterIo};
-use viva_u3v::discovery::{discover, U3vDeviceInfo};
+use viva_genicam::{Camera, U3vRegisterIo, connect_u3v};
+use viva_u3v::discovery::{U3vDeviceInfo, discover};
 use viva_u3v::usb::RusbTransfer;
 
 use crate::common;

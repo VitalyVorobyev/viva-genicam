@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use viva_fake_gige::FakeCamera;
 use viva_genicam::gige;
-use viva_genicam::{connect_gige_with_xml, Camera, GigeRegisterIo};
+use viva_genicam::{Camera, GigeRegisterIo, connect_gige_with_xml};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

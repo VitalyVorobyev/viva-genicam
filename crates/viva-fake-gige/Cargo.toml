@@ -1,10 +1,11 @@
 [package]
 name = "viva-fake-gige"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "In-process fake GigE Vision camera for testing and demos"
-license = "MIT"
-repository = "https://github.com/VitalyVorobyev/genicam-rs"
 publish = false
 
 [[bin]]

@@ -1,7 +1,7 @@
 //! Parser for SwissKnife expression nodes.
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use super::TAG_VALUE;
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
@@ -90,7 +90,7 @@ pub fn parse_swissknife(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated SwissKnife node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}

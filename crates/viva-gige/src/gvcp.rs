@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fastrand::Rng;
-use if_addrs::{get_if_addrs, IfAddr};
+use if_addrs::{IfAddr, get_if_addrs};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::task::JoinSet;
 use tokio::time;
 use tracing::{debug, info, trace, warn};
-use viva_gencp::{decode_ack, AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode};
+use viva_gencp::{AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode, decode_ack};
 
 use crate::nic::{self, Iface};
 
@@ -398,7 +398,7 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
     // String fields.
     let manufacturer = read_fixed_string(&mut cursor, 32)?; // 72
     let model = read_fixed_string(&mut cursor, 32)?; // 104
-                                                     // Remaining fields (version, info, serial, user name) are optional.
+    // Remaining fields (version, info, serial, user name) are optional.
 
     Ok(DeviceInfo {
         ip,
@@ -421,11 +421,7 @@ fn parse_string(bytes: &[u8]) -> Option<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     let slice = &bytes[..end];
     let s = String::from_utf8_lossy(slice).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// GVCP device handle.
@@ -852,10 +848,7 @@ impl GigeDevice {
         let packet = header.encode(&payload);
         trace!(
             block_id,
-            first_packet,
-            last_packet,
-            request_id,
-            "sending packet resend request"
+            first_packet, last_packet, request_id, "sending packet resend request"
         );
         self.socket.send(&packet).await?;
         let mut buf = [0u8; viva_gencp::HEADER_SIZE];

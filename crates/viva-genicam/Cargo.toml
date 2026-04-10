@@ -1,10 +1,12 @@
 [package]
 name = "viva-genicam"
-version = "0.1.0"
-edition = "2021"
-description = "High level GenICam facade re-exporting transports, GenApi, and SFNC"
-license = "MIT"
-repository = "https://github.com/VitalyVorobyev/genicam-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "High-level GenICam facade: discovery, control, streaming, events"
 readme = "README.md"
 keywords = ["genicam", "vision", "gige", "camera"]
 categories = ["hardware-support", "network-programming", "science::robotics"]

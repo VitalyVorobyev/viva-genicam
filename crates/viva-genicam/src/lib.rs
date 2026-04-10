@@ -94,13 +94,13 @@ use crate::events::{
     enable_event_raw as enable_event_fallback, parse_event_id,
 };
 use crate::genapi::{GenApiError, Node, NodeMap, RegisterIo, SkOutput};
-use gige::gvcp::consts as gvcp_consts;
 use gige::GigeDevice;
+use gige::gvcp::consts as gvcp_consts;
 use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-pub use chunks::{parse_chunk_bytes, ChunkKind, ChunkMap, ChunkValue};
+pub use chunks::{ChunkKind, ChunkMap, ChunkValue, parse_chunk_bytes};
 pub use events::{Event, EventStream};
 pub use frame::Frame;
 pub use gige::action::{AckSummary, ActionParams};

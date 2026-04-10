@@ -3106,6 +3106,7 @@ dependencies = [
  "viva-gige",
  "viva-pfnc",
  "viva-sfnc",
+ "viva-u3v",
 ]
 
 [[package]]

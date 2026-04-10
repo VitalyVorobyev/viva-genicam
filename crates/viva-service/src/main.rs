@@ -178,7 +178,7 @@ async fn spawn_device_tasks(
 
     // Publish connected status.
     status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, &device).await;
+    nodes::publish_initial_values(&session, device.as_ref()).await;
 
     vec![
         tokio::spawn(xml::run(

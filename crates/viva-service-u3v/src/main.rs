@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long, default_value_t = 480)]
     height: u32,
 
+    /// Pixel format: mono8 or rgb8
+    #[arg(long, default_value = "mono8")]
+    pixel_format: String,
+
     /// Path to Zenoh configuration file
     #[arg(long)]
     zenoh_config: Option<String>,
@@ -63,12 +67,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     if cli.fake {
+        let pfnc = match cli.pixel_format.to_lowercase().as_str() {
+            "rgb8" | "rgb8packed" => 0x0218_0014u32,
+            _ => 0x0108_0001u32, // Mono8
+        };
         info!(
             width = cli.width,
             height = cli.height,
+            pixel_format = cli.pixel_format,
             "starting fake U3V camera"
         );
-        run_fake_camera(session.clone(), cli.width, cli.height, shutdown_rx.clone()).await?;
+        run_fake_camera(
+            session.clone(),
+            cli.width,
+            cli.height,
+            pfnc,
+            shutdown_rx.clone(),
+        )
+        .await?;
     } else {
         error!("Real USB3 Vision discovery not yet integrated into the service. Use --fake for testing.");
         return Ok(());
@@ -91,6 +107,7 @@ async fn run_fake_camera(
     session: Arc<zenoh::Session>,
     width: u32,
     height: u32,
+    pixel_format: u32,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use viva_genicam::open_u3v_device;
@@ -98,7 +115,7 @@ async fn run_fake_camera(
     let fake_transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(
         width,
         height,
-        0x0108_0001, // Mono8
+        pixel_format,
     ));
 
     let device =

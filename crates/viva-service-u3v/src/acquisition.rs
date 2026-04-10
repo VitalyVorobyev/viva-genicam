@@ -117,7 +117,15 @@ async fn handle_start(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(480);
-    let payload_size = (width * height) as usize; // Mono8: 1 byte per pixel
+    let pf_str = device
+        .get_feature("PixelFormat")
+        .await
+        .unwrap_or_else(|_| "Mono8".to_string());
+    let bpp: usize = match pf_str.as_str() {
+        "RGB8Packed" | "RGB8" | "BGR8" | "BGR8Packed" => 3,
+        _ => 1,
+    };
+    let payload_size = (width as usize) * (height as usize) * bpp;
 
     // Open U3V stream.
     let mut stream = match device.open_stream(payload_size) {

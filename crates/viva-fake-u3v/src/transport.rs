@@ -158,11 +158,20 @@ fn build_ack(status: StatusCode, opcode: OpCode, request_id: u16, payload: &[u8]
     buf.to_vec()
 }
 
-/// Thread-local stream phase tracker (stored in TransportState via frame_count).
+/// Bytes per pixel for the given PFNC code.
+fn bytes_per_pixel(pixel_format: u32) -> usize {
+    match pixel_format {
+        0x0218_0014 => 3, // RGB8Packed
+        _ => 1,           // Mono8 and others default to 1
+    }
+}
+
+/// Stream transfer state machine: leader → payload → trailer → leader → ...
 /// We cycle: frame_count % 3 == 0 → leader, 1 → payload, 2 → trailer.
 fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Result<usize, U3vError> {
     let phase = state.frame_count % 3;
     state.frame_count += 1;
+    let bpp = bytes_per_pixel(state.pixel_format);
 
     match phase {
         0 => {
@@ -173,18 +182,18 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
             Ok(n)
         }
         1 => {
-            // Payload: synthetic gray ramp.
-            let size = (state.width * state.height) as usize;
-            let n = size.min(buf.len());
-            for (i, byte) in buf.iter_mut().enumerate().take(n) {
-                *byte = (i % 256) as u8;
-            }
+            // Payload: animated test pattern.
+            let frame_idx = (state.frame_count / 3) as u16;
+            let data =
+                generate_test_pattern(state.width as usize, state.height as usize, bpp, frame_idx);
+            let n = data.len().min(buf.len());
+            buf[..n].copy_from_slice(&data[..n]);
             Ok(n)
         }
         2 => {
             // Trailer
             let block_id = state.frame_count / 3;
-            let payload_size = (state.width * state.height) as u64;
+            let payload_size = (state.width as u64) * (state.height as u64) * (bpp as u64);
             let trailer = build_trailer(block_id, payload_size);
             let n = trailer.len().min(buf.len());
             buf[..n].copy_from_slice(&trailer[..n]);
@@ -192,6 +201,67 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
         }
         _ => unreachable!(),
     }
+}
+
+/// Mono8: concentric rings radiating from center, shifting with each frame.
+/// RGB8: colorful plasma-like pattern with animated hue rotation.
+fn generate_test_pattern(width: usize, height: usize, bpp: usize, frame: u16) -> Vec<u8> {
+    let size = width * height * bpp;
+    let mut data = vec![0u8; size];
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 / 2.0;
+    let phase = frame as f32 * 0.15;
+
+    for y in 0..height {
+        for x in 0..width {
+            let offset = (y * width + x) * bpp;
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if bpp == 1 {
+                // Concentric rings with radial gradient
+                let ring = ((dist * 0.1 - phase) * 2.0).sin();
+                let radial = 1.0 - (dist / (cx.max(cy) * 1.2)).min(1.0);
+                let val = ((ring * 0.5 + 0.5) * radial * 255.0) as u8;
+                data[offset] = val;
+            } else if bpp >= 3 {
+                // Plasma pattern with hue rotation
+                let angle = dy.atan2(dx);
+                let v1 = ((dist * 0.05 - phase).sin() + 1.0) * 0.5;
+                let v2 = ((angle * 3.0 + phase * 2.0).sin() + 1.0) * 0.5;
+                let v3 = (((x as f32 * 0.02 + y as f32 * 0.03 + phase).sin()) + 1.0) * 0.5;
+
+                let hue = (v1 + v2) * 0.5 + phase * 0.1;
+                let sat = 0.7 + v3 * 0.3;
+                let val = 0.5 + v1 * 0.5;
+                let (r, g, b) = hsv_to_rgb(hue % 1.0, sat, val);
+                data[offset] = r;
+                data[offset + 1] = g;
+                data[offset + 2] = b;
+            }
+        }
+    }
+    data
+}
+
+/// Convert HSV (all 0.0..1.0) to RGB (0..255).
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h * 6.0;
+    let i = h.floor() as u32;
+    let f = h - i as f32;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i % 6 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 fn build_leader(width: u32, height: u32, pixel_format: u32) -> Vec<u8> {

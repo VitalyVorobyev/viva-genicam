@@ -64,13 +64,9 @@ async fn blocking_set(
     .unwrap()
 }
 
-/// Loopback interface name (platform-dependent).
-fn loopback_iface_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "lo0"
-    } else {
-        "lo"
-    }
+/// Resolve the loopback network interface (platform-independent).
+fn loopback_iface() -> gige::nic::Iface {
+    gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback iface")
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +289,7 @@ async fn setup_stream(
         .expect("open device");
     device.claim_control().await.expect("claim control");
 
-    let iface = gige::nic::Iface::from_system(loopback_iface_name()).expect("loopback iface");
+    let iface = loopback_iface();
     let stream = viva_genicam::StreamBuilder::new(&mut device)
         .iface(iface)
         .auto_packet_size(false)

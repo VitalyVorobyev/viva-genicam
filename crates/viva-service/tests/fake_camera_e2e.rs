@@ -72,12 +72,12 @@ impl Drop for TestCamera {
     }
 }
 
-fn loopback_iface_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "lo0"
-    } else {
-        "lo"
-    }
+/// Resolve the loopback interface name (platform-independent).
+fn loopback_iface_name() -> String {
+    viva_genicam::gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST)
+        .expect("loopback iface")
+        .name()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

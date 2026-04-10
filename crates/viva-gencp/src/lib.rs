@@ -119,6 +119,7 @@ impl StatusCode {
 
 /// Errors that can occur when dealing with GenCP packets.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GenCpError {
     #[error("invalid packet: {0}")]
     InvalidPacket(&'static str),

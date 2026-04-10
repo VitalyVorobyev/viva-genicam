@@ -93,7 +93,10 @@ pub async fn run(
                             },
                         };
 
-                        let payload = serde_json::to_vec(&response).unwrap();
+                        let Ok(payload) = serde_json::to_vec(&response) else {
+                            tracing::error!("failed to serialize acquisition response");
+                            continue;
+                        };
                         let _ = query.reply(&key, payload).await;
                     }
                     Err(_) => break,

@@ -14,6 +14,6 @@ pub fn pfnc_to_zenoh(pf: pfnc::PixelFormat) -> ZenohPixelFormat {
         pfnc::PixelFormat::BayerGB8 => ZenohPixelFormat::BayerGB8,
         pfnc::PixelFormat::RGB8Packed => ZenohPixelFormat::RGB8,
         pfnc::PixelFormat::BGR8Packed => ZenohPixelFormat::BGR8,
-        pfnc::PixelFormat::Unknown(_) => ZenohPixelFormat::Unknown,
+        _ => ZenohPixelFormat::Unknown,
     }
 }

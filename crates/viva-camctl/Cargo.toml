@@ -5,15 +5,15 @@ edition = "2021"
 publish = false
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-bytes = "1"
-time = { version = "0.3", features = ["formatting"] }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["macros", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+time = { workspace = true, features = ["formatting"] }
 
 viva-genicam = { version = "0.1.0", path = "../viva-genicam" }
 viva-gige = { version = "0.1.0", path = "../viva-gige" }

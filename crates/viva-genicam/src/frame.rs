@@ -61,7 +61,7 @@ impl Frame {
             | PixelFormat::BayerBG8
             | PixelFormat::BayerGR8 => self.bayer_to_rgb8(),
             PixelFormat::RGB8Packed => unreachable!("handled by as_rgb8 fast path"),
-            PixelFormat::Unknown(_) => Err(crate::GenicamError::UnsupportedPixelFormat(
+            _ => Err(crate::GenicamError::UnsupportedPixelFormat(
                 self.pixel_format,
             )),
         }

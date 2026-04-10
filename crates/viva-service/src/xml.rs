@@ -32,7 +32,10 @@ pub async fn run(
                 match query {
                     Ok(query) => {
                         debug!(device_id, "XML query received");
-                        let payload = serde_json::to_vec(&response).unwrap();
+                        let Ok(payload) = serde_json::to_vec(&response) else {
+                            tracing::error!("failed to serialize XML response");
+                            continue;
+                        };
                         if let Err(e) = query.reply(&key, payload).await {
                             warn!(device_id, error = %e, "failed to reply to XML query");
                         }

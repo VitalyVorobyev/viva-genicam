@@ -106,6 +106,7 @@ pub use time::TimeSync;
 
 /// Error type produced by the high level GenICam facade.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GenicamError {
     /// Wrapper around GenApi errors produced by the nodemap.
     #[error(transparent)]

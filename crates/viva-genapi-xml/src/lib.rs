@@ -46,6 +46,7 @@ pub struct EnumEntryDecl {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum XmlError {
     #[error("xml: {0}")]
     Xml(String),

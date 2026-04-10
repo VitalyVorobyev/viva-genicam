@@ -36,6 +36,7 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -118,9 +119,15 @@ impl FakeCameraBuilder {
         let acq_start = Arc::new(Notify::new());
         let acq_stop_flag = Arc::new(AtomicBool::new(false));
 
-        // Bind GVCP control socket.
-        let bind_addr = format!("{}:{}", self.bind_ip, self.port);
-        let socket = Arc::new(UdpSocket::bind(&bind_addr).await?);
+        // Bind GVCP control socket with SO_REUSEADDR to avoid TIME_WAIT issues.
+        let bind_addr: std::net::SocketAddr =
+            format!("{}:{}", self.bind_ip, self.port).parse().unwrap();
+        let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        sock.set_reuse_address(true)?;
+        sock.set_nonblocking(true)?;
+        sock.bind(&bind_addr.into())?;
+        let std_sock: std::net::UdpSocket = sock.into();
+        let socket = Arc::new(UdpSocket::from_std(std_sock)?);
         let local_addr = socket.local_addr()?;
         info!(%local_addr, "fake camera GVCP listening");
 

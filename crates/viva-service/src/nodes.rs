@@ -93,7 +93,10 @@ pub async fn run_set_queryable(
                         };
 
                         let reply_key = keys::node_set(&device_id, &node_name);
-                        let payload = serde_json::to_vec(&response).unwrap();
+                        let Ok(payload) = serde_json::to_vec(&response) else {
+                            tracing::error!("failed to serialize node set response");
+                            continue;
+                        };
                         let _ = query.reply(&reply_key, payload).await;
                     }
                     Err(_) => break,
@@ -145,7 +148,10 @@ pub async fn run_execute_queryable(
                         };
 
                         let reply_key = keys::node_execute(&device_id, &node_name);
-                        let payload = serde_json::to_vec(&response).unwrap();
+                        let Ok(payload) = serde_json::to_vec(&response) else {
+                            tracing::error!("failed to serialize execute response");
+                            continue;
+                        };
                         let _ = query.reply(&reply_key, payload).await;
                     }
                     Err(_) => break,
@@ -216,7 +222,10 @@ pub async fn run_bulk_read_queryable(
                             },
                         };
 
-                        let payload = serde_json::to_vec(&response).unwrap();
+                        let Ok(payload) = serde_json::to_vec(&response) else {
+                            tracing::error!("failed to serialize bulk read response");
+                            continue;
+                        };
                         let _ = query.reply(&key, payload).await;
                     }
                     Err(_) => break,

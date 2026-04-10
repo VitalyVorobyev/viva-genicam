@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Error type produced by GenApi operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GenApiError {
     /// The requested node does not exist in the nodemap.
     #[error("node not found: {0}")]

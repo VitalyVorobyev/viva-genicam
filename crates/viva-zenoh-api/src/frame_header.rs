@@ -23,10 +23,11 @@ pub const FRAME_MAGIC: u16 = 0x4746;
 pub const HEADER_SIZE: usize = 16;
 
 /// The only supported header version. Bumped when the layout changes.
-const SUPPORTED_VERSION: u8 = 1;
+pub const SUPPORTED_VERSION: u8 = 1;
 
 /// Errors returned by [`FrameHeader::decode`].
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameHeaderError {
     /// Buffer is shorter than [`HEADER_SIZE`] bytes.
     #[error("buffer too short: need {HEADER_SIZE} bytes, got {0}")]

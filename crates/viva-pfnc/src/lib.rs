@@ -5,6 +5,8 @@ use core::fmt;
 
 /// Enumeration of the pixel formats supported by the helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum PixelFormat {
     Mono8 = 0x0108_0001,

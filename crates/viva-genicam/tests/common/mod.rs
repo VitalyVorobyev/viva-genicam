@@ -25,15 +25,24 @@ impl TestCamera {
     /// Acquires a global lock to ensure only one camera runs at a time.
     pub async fn start() -> Self {
         let guard = camera_lock().lock_owned().await;
-        let camera = FakeCamera::builder()
-            .bind_ip([127, 0, 0, 1].into())
-            .port(3956)
-            .width(640)
-            .height(480)
-            .fps(30)
-            .build()
-            .await
-            .expect("failed to start fake camera");
+        let camera = loop {
+            match FakeCamera::builder()
+                .bind_ip([127, 0, 0, 1].into())
+                .port(3956)
+                .width(640)
+                .height(480)
+                .fps(30)
+                .build()
+                .await
+            {
+                Ok(cam) => break cam,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                Err(e) => panic!("failed to start fake camera: {e}"),
+            }
+        };
         TestCamera {
             camera: Some(camera),
             _guard: guard,

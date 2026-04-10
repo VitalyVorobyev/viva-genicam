@@ -1,0 +1,33 @@
+[package]
+name = "viva-gige"
+version = "0.1.0"
+edition = "2021"
+description = "GigE Vision transport: GVCP discovery, GenCP over GVCP, and GVSP"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "gige", "vision", "network"]
+categories = ["hardware-support", "network-programming", "science::robotics"]
+
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+if-addrs = { workspace = true }
+bytes = { workspace = true }
+viva-gencp = { version = "0.1.0", path = "../viva-gencp" }
+tokio = { workspace = true, features = ["macros", "net", "time"] }
+fastrand = "2"
+async-trait = { workspace = true }
+socket2 = { workspace = true, features = ["all"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "net", "time"] }

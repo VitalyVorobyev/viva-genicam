@@ -1,9 +1,9 @@
-# genapi-core
+# viva-genapi
 
-`genapi-core` builds and evaluates the **NodeMap** from the device’s GenApi XML. It supports common node kinds and **SwissKnife** expressions.
+`viva-genapi` builds and evaluates the **NodeMap** from the device’s GenApi XML. It supports common node kinds and **SwissKnife** expressions.
 
 ## Responsibilities
-- Parse the `genapi-xml` intermediate representation into in‑memory nodes.
+- Parse the `viva-genapi-xml` intermediate representation into in‑memory nodes.
 - Resolve node references and dependencies (incl. Selectors).
 - Provide `get_*`/`set_*` operations that either access registers or evaluate expressions.
 
@@ -15,7 +15,7 @@
 When a feature has selectors (e.g., `GainSelector`), evaluation temporarily switches the active selector context so reads/writes map to the correct addresses.
 
 ## Read/write examples (via façade)
-Below is a minimal flow using the `genicam` façade.
+Below is a minimal flow using the `viva-genicam` façade.
 
 ```rust
 use genicam::Client; // façade crate

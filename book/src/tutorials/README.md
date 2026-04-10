@@ -4,8 +4,8 @@ This section walks you through typical workflows step by step.
 
 The focus is a **GigE Vision** camera accessed over Ethernet, using:
 
-- The `gencamctl` CLI for quick experiments and ops work.
-- The `genicam` crate for Rust examples you can copy into your own code.
+- The `viva-camctl` CLI for quick experiments and ops work.
+- The `viva-genicam` crate for Rust examples you can copy into your own code.
 
 If you haven’t done so yet, first read:
 
@@ -30,7 +30,7 @@ If you are new to the project, the recommended reading order is:
 
 3. [GenApi XML](./genapi-xml.md)  
    Fetch the GenICam XML from a device, inspect it, and see how it maps to the
-   NodeMap used by `genapi-core`.
+   NodeMap used by `viva-genapi`.
 
 4. [Streaming](./streaming.md)  
    Start a GVSP stream, receive frames, look at stats, and learn which knobs
@@ -63,20 +63,20 @@ Networking￼ once that chapter is filled in.
 
 Tutorials overview
 	•	Discovery￼
-Use gencamctl and the genicam examples to find cameras and verify that
+Use viva-camctl and the genicam examples to find cameras and verify that
 basic communication is working.
 	•	Registers & features￼
 Use features by name, work with selectors, and know when to fall back to raw
 register access.
 	•	GenApi XML￼
 Fetch XML from the device, inspect it, and understand how genapi-xml
-and genapi-core use it.
+and viva-genapi use it.
 	•	Streaming￼
 Start streaming, tune packet size and delay, and interpret statistics and
 logging output.
 
 Each tutorial has:
-	•	A CLI variant using gencamctl.
-	•	A Rust variant using the genicam crate and its examples.
+	•	A CLI variant using viva-camctl.
+	•	A Rust variant using the viva-genicam crate and its examples.
 
 ---

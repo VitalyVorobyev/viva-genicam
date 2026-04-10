@@ -18,7 +18,7 @@ and the issues in the GitHub repository.
 Run:
 
 ```bash
-cargo run -p gencamctl -- list
+cargo run -p viva-camctl -- list
 ```
 
 If it shows nothing:
@@ -36,7 +36,7 @@ profile (Private / Domain).
 	- Use --iface <host-ip> to force the interface:
 
 ```bash
-cargo run -p gencamctl -- list --iface 192.168.0.5
+cargo run -p viva-camctl -- list --iface 192.168.0.5
 ```
 
 See also: [Discovery tutorial](./tutorials/discovery.md) and
@@ -49,7 +49,7 @@ See also: [Discovery tutorial](./tutorials/discovery.md) and
 Common causes:
 - Different NIC / interface:
     - The vendor tool may be using a different NIC or IP selection strategy.
-    - Compare which local IP it uses and pass that as --iface to gencamctl.
+    - Compare which local IP it uses and pass that as --iface to viva-camctl.
 - Different stream destination:
     - The camera might be configured to stream to a specific IP/port.
     - Ensure genicam-rs uses the same host IP and port, or reset the camera
@@ -87,21 +87,21 @@ See: [Networking](./networking.md) for NIC configuration details.
 
 ## “How do I set exposure, gain, pixel format, etc.?”
 
-Use the GenApi features via gencamctl or the genicam crate.
+Use the GenApi features via viva-camctl or the viva-genicam crate.
 
-Examples with gencamctl:
+Examples with viva-camctl:
 
 ```bash
 # Read ExposureTime
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   get --ip 192.168.0.10 --name ExposureTime
 
 # Set ExposureTime to 5000 (units depend on camera, often microseconds)
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name ExposureTime --value 5000
 
 # Set PixelFormat by name
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name PixelFormat --value Mono8
 ```
 
@@ -122,41 +122,41 @@ a different “row” than you expect.
 Typical sequence:
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name GainSelector --value Red
 
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   set --ip 192.168.0.10 --name Gain --value 5.0
 ```
 
 See: [Registers & features](./tutorials/registers.md) and the `selectors_demo`
-example in the genicam crate.
+example in the viva-genicam crate.
 
 ⸻
 
 ## “Do I need to care about the GenApi XML?”
 
 For most applications, no:
-- You can use features by name and let genapi-core handle the mapping.
+- You can use features by name and let viva-genapi handle the mapping.
 
 You should look at the XML when:
 - A feature behaves differently from the SFNC / vendor documentation.
 - You are debugging selector or SwissKnife behaviour.
-- You are contributing to genapi-core or genapi-xml.
+- You are contributing to viva-genapi or genapi-xml.
 
 See: [GenApi XML tutorial](./tutorials/genapi-xml.md)￼and the crate chapters
-for `genapi-xml` and `genapi-core` when they are filled in.
+for `viva-genapi-xml` and `viva-genapi` when they are filled in.
 
 ⸻
 
 ## “How do I save frames and look at them?”
 
-With gencamctl:
+With viva-camctl:
 - Use stream with an option like --count / --output (exact flags depend
 on the CLI):
 
 ```bash
-cargo run -p gencamctl -- \
+cargo run -p viva-camctl -- \
   stream --ip 192.168.0.10 --iface 192.168.0.5 \
   --count 100 --output ./frames
 ```

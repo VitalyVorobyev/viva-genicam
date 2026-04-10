@@ -1,0 +1,18 @@
+[package]
+name = "viva-sfnc"
+version = "0.1.0"
+edition = "2021"
+description = "Standard Feature Naming Convention (SFNC) descriptors for GenICam"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "sfnc", "vision", "camera"]
+categories = ["hardware-support", "science::robotics"]
+
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []

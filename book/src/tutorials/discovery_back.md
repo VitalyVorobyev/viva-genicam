@@ -8,15 +8,15 @@ Identify the IPv4 address of your NIC that’s connected to the camera network (
 ## 2) Run discovery
 ### Option A: Example (genicam crate)
 ```bash
-cargo run -p genicam --example list_cameras
+cargo run -p viva-genicam --example list_cameras
 ```
 
 The example prints each device’s key identifiers (IP/MAC, model, name). On multi‑NIC systems, export an env var or pass an argument if the example supports it (see the example’s `--help`).
 
-### Option B: CLI (gencamctl)
+### Option B: CLI (viva-camctl)
 
 ```bash
-cargo run -p gencamctl -- list --iface 192.168.0.5
+cargo run -p viva-camctl -- list --iface 192.168.0.5
 ```
 
 The `--iface` parameter binds discovery to the given local interface.

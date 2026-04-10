@@ -10,7 +10,7 @@ It focuses on:
 - Common **pitfalls and troubleshooting**.
 
 It is not a replacement for vendor or A3 documentation, but gives you enough
-background to make `gencamctl` and the `genicam` examples work reliably.  [oai_citation:0‡Wikipedia](https://en.wikipedia.org/wiki/GigE_Vision?utm_source=chatgpt.com)  
+background to make `viva-camctl` and the `viva-genicam` examples work reliably.  [oai_citation:0‡Wikipedia](https://en.wikipedia.org/wiki/GigE_Vision?utm_source=chatgpt.com)  
 
 If you have not yet done so, first go through:
 
@@ -166,7 +166,7 @@ All components in the path must agree:
 
 Typical steps:
 - Camera: set `GevSCPSPacketSize` or similar feature to a value below the
-path MTU (e.g. 8192 for MTU 9000). You can use gencamctl set to adjust this.
+path MTU (e.g. 8192 for MTU 9000). You can use viva-camctl set to adjust this.
 - Switch: enable jumbo frames in the management UI (name and steps vary by
 vendor).
 - Host NIC:
@@ -235,9 +235,9 @@ Monitor:
 
 On systems with more than one active NIC, automatic interface selection might
 pick the wrong one.
-- In gencamctl, use --iface <host-ip> to force the correct NIC.
+- In viva-camctl, use --iface <host-ip> to force the correct NIC.
 - In Rust examples, pass the desired local address when building the context
-or stream (see the genicam and tl-gige crate chapters for details).
+or stream (see the genicam and viva-gige crate chapters for details).
 
 If discovery only works when you specify --iface, but not without it:
 - You likely have:
@@ -283,7 +283,7 @@ Compare:
    - The vendor tool might:
 - Use a different MTU / packet size.
    - Adjust inter-packet delay automatically.
-   - Try to replicate those parameters with gencamctl and the NodeMap.
+   - Try to replicate those parameters with viva-camctl and the NodeMap.
 
 ⸻
 
@@ -296,7 +296,7 @@ After this chapter you should:
 	•	Have a structured approach to debugging discovery and streaming issues.
 
 For protocol-level details and tuning options exposed by this project:
-	•	See tl-gige￼ for transport internals.
+	•	See viva-gige￼ for transport internals.
 	•	See the Streaming tutorial￼ for concrete CLI and Rust examples.
 
 ---

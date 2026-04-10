@@ -37,8 +37,8 @@ jobs:
 
       - name: Package crates
         run: |
-          cargo package -p genicp --locked
-          cargo package -p genapi-xml --locked
+          cargo package -p viva-gencp --locked
+          cargo package -p viva-genapi-xml --locked
 
       - name: Build release binaries
         run: cargo build --release --locked --bin genicam-rs

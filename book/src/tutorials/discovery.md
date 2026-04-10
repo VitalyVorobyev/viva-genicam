@@ -4,8 +4,8 @@ Goal of this tutorial:
 
 - Verify that your host can **see** your GigE Vision camera.
 - Learn how to run discovery from:
-  - The `gencamctl` CLI.
-  - The `genicam` Rust examples.
+  - The `viva-camctl` CLI.
+  - The `viva-genicam` Rust examples.
 - Understand the most common issues (NIC selection, firewall, subnets).
 
 If discovery does not work, the other tutorials will not help much — fix this
@@ -33,9 +33,9 @@ Networking￼ once that chapter is filled in.
 
 ⸻
 
-## Step 1 – Discover with gencamctl
+## Step 1 – Discover with viva-camctl
 
-The easiest way to test discovery is the gencamctl CLI, which wraps the
+The easiest way to test discovery is the viva-camctl CLI, which wraps the
 genicam crate.
 
 ### 1.1. Basic discovery
@@ -43,7 +43,7 @@ genicam crate.
 Run:
 
 ```bash
-cargo run -p gencamctl -- list
+cargo run -p viva-camctl -- list
 ```
 
 What to expect:
@@ -58,12 +58,12 @@ What to expect:
 
 ### 1.2. Selecting an interface explicitly
 
-On multi-NIC systems, gencamctl may need to be told which interface to use.
+On multi-NIC systems, viva-camctl may need to be told which interface to use.
 
 Run:
 
 ```bash
-cargo run -p gencamctl -- list --iface 192.168.0.5
+cargo run -p viva-camctl -- list --iface 192.168.0.5
 ```
 
 Where 192.168.0.5 is the IPv4 address of your host NIC on the camera
@@ -87,7 +87,7 @@ from Rust code.
 Run:
 
 ```bash
-cargo run -p genicam --example list_cameras
+cargo run -p viva-genicam --example list_cameras
 ```
 
 This example:
@@ -98,7 +98,7 @@ Use this when you want to:
 - See how to embed discovery into your own Rust application.
 - Compare behaviour between the CLI and the library (they should match).
 
-The code for list_cameras lives under `crates/genicam/examples/` and is a
+The code for list_cameras lives under `crates/viva-genicam/examples/` and is a
 good starting point for your own experiments.
 
 ⸻
@@ -120,7 +120,7 @@ note) to avoid confusion later.
 
 ## Troubleshooting checklist
 
-If gencamctl -- list or list_cameras find no devices:
+If viva-camctl -- list or list_cameras find no devices:
 1.	Physical link
     - Is the link LED on the NIC / switch / camera lit?
     - Try a different Ethernet cable or port.
@@ -135,7 +135,7 @@ If gencamctl -- list or list_cameras find no devices:
 	- Use --iface <host-ip> to force the correct interface.
 	- Temporarily disable other NICs to confirm the problem is NIC selection.
 5. Vendor tools
-    - If the vendor’s viewer can see the camera but gencamctl cannot:
+    - If the vendor’s viewer can see the camera but viva-camctl cannot:
     - Compare which NIC / IP the vendor tool uses.
     - Check whether the vendor tool reconfigured the camera’s IP (e.g. via
 DHCP or “force IP” features).
@@ -143,8 +143,8 @@ DHCP or “force IP” features).
 If discovery is still failing after this checklist, capture logs with:
 
 ```bash
-RUST_LOG=debug cargo run -p gencamctl -- list --iface <host-ip>
+RUST_LOG=debug cargo run -p viva-camctl -- list --iface <host-ip>
 ```
 
 and open an issue with the log output and a short description of your setup.
-This will also be useful when extending the [GigE transport](../crates/tl-gige.md).
+This will also be useful when extending the [GigE transport](../crates/viva-gige.md).

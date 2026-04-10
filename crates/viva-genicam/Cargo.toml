@@ -1,0 +1,36 @@
+[package]
+name = "viva-genicam"
+version = "0.1.0"
+edition = "2021"
+description = "High level GenICam facade re-exporting transports, GenApi, and SFNC"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "vision", "gige", "camera"]
+categories = ["hardware-support", "network-programming", "science::robotics"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+viva-genapi = { version = "0.1.0", path = "../viva-genapi" }
+viva-genapi-xml = { version = "0.1.0", path = "../viva-genapi-xml" }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+tracing = { workspace = true }
+viva-gige = { version = "0.1.0", path = "../viva-gige" }
+async-trait = { workspace = true }
+viva-sfnc = { version = "0.1.0", path = "../viva-sfnc" }
+viva-pfnc = { version = "0.1.0", path = "../viva-pfnc" }
+viva-gencp = { version = "0.1.0", path = "../viva-gencp" }
+[dev-dependencies]
+viva-genapi-xml = { version = "0.1.0", path = "../viva-genapi-xml" }
+viva-fake-gige = { path = "../viva-fake-gige" }
+fastrand = "2"
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Enable Tokio's signal support for examples like `soak_bench`.
+tokio = { workspace = true, features = ["signal"] }

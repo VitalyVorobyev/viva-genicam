@@ -16,8 +16,8 @@ Cargo workspace, modular crates (GenCP, GVCP/GVSP, GenApi core), and small examp
   * ✅ Streaming (GVSP): packet reassembly, resend, MTU/packet size & delay, backpressure, stats.
   * ✅ Events & actions: message channel events; action commands (synchronization).
   * ✅ Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
-  * ✅ **Sensor service** (`genicam-service`): Zenoh bridge for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) — discovery, XML, node read/write, acquisition control, frame streaming.
-  * ✅ Integration tests against `arv-fake-gv-camera` (aravis simulator).
+  * ✅ **Sensor service** (`viva-service`): Zenoh bridge for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) — discovery, XML, node read/write, acquisition control, frame streaming.
+  * ✅ Self-contained integration tests with `viva-fake-gige` (in-process fake camera, no external tools).
   * ✅ macOS support: `Iface::from_system`, loopback discovery.
   * USB3 Vision transport (planned).
 
@@ -25,17 +25,19 @@ Cargo workspace, modular crates (GenCP, GVCP/GVSP, GenApi core), and small examp
 
 ```
 crates/
-  genicp/            # GenCP encode/decode
-  tl-gige/           # GigE Vision (GVCP/GVSP)
-  genapi-xml/        # GenICam XML loader & schema-lite parser
-  genapi-core/       # NodeMap & evaluation
-  genicam/           # Public API facade
-  genicam-service/   # Zenoh camera service for genicam-studio
-  gencamctl/         # CLI binary
-  pfnc/              # Pixel Format Naming Convention
-  sfnc/              # Standard Feature Naming Convention
-crates/genicam/examples/   # Small demos (see below)
-crates/genicam/tests/      # Integration tests (arv-fake-gv-camera)
+  viva-gencp/         # GenCP encode/decode
+  viva-gige/          # GigE Vision (GVCP/GVSP)
+  viva-genapi-xml/    # GenICam XML loader & schema-lite parser
+  viva-genapi/        # NodeMap & evaluation
+  viva-genicam/       # Public API facade
+  viva-service/       # Zenoh camera service for genicam-studio
+  viva-camctl/        # CLI binary
+  viva-pfnc/          # Pixel Format Naming Convention
+  viva-sfnc/          # Standard Feature Naming Convention
+  viva-zenoh-api/     # Shared Zenoh API payload types
+  viva-fake-gige/     # In-process fake camera for testing
+crates/viva-genicam/examples/   # Small demos (see below)
+crates/viva-genicam/tests/      # Integration tests
 ```
 
 ## Documentation
@@ -83,56 +85,56 @@ cargo doc --workspace --no-deps
 
 ## Run examples
 
-Examples live under the `genicam` crate. Run them via the facade crate target:
+Examples live under the `viva-genicam` crate. Run them via the facade crate target:
 
 - **Discover devices (GVCP broadcast):**
 
 ```bash
-cargo run -p genicam --example list_cameras
+cargo run -p viva-genicam --example list_cameras
 ```
 
 - **Fetch XML & print minimal metadata (control path):**
 
 ```bash
-cargo run -p genicam --example get_set_feature
+cargo run -p viva-genicam --example get_set_feature
 ```
 
 - **Grab frames (GVSP):**
 
 ```bash
-cargo run -p genicam --example grab_gige
+cargo run -p viva-genicam --example grab_gige
 ```
 
 - **Events:**
 
 ```bash
-cargo run -p genicam --example events_gige
+cargo run -p viva-genicam --example events_gige
 ```
 
 - **Action command (broadcast):**
 
 ```bash
-cargo run -p genicam --example action_trigger
+cargo run -p viva-genicam --example action_trigger
 ```
 
 - **Timestamp mapping:**
 
 ```bash
-cargo run -p genicam --example time_sync
+cargo run -p viva-genicam --example time_sync
 ```
 
 - **Selectors demo:**
 
 ```bash
-cargo run -p genicam --example selectors_demo
+cargo run -p viva-genicam --example selectors_demo
 ```
 
 See also: the [Tutorials](book/src/tutorials/README.md) section of the book
   for more complete, step-by-step guides.
 
-## gencamctl CLI
+## viva-camctl CLI
 
-The workspace now provides a `gencamctl` binary offering common camera control
+The workspace provides a `viva-camctl` binary offering common camera control
 operations from the command line. Enable more verbose logging with `-v` or
 `RUST_LOG`, prefer JSON output with `--json`, and use `--iface <IPv4>` to select
 the capture interface.
@@ -141,41 +143,40 @@ Examples:
 
 ```bash
 # Discover GigE Vision cameras on the network
-cargo run -p gencamctl -- list
+cargo run -p viva-camctl -- list
 
 # Inspect and configure GenApi features
-cargo run -p gencamctl -- get --ip 192.168.0.10 --name ExposureTime
-cargo run -p gencamctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
+cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
+cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
 
 # Receive a GVSP stream, auto-negotiate packet size, and save the first two frames
-cargo run -p gencamctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
+cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 
 # Configure and read GVCP events
-cargo run -p gencamctl -- events --iface 192.168.0.5 --enable FrameStart,ExposureEnd --count 5
+cargo run -p viva-camctl -- events --iface 192.168.0.5 --enable FrameStart,ExposureEnd --count 5
 
 # Toggle chunk data features
-cargo run -p gencamctl -- chunks --ip 192.168.0.10 --enable true --selectors Timestamp,ExposureTime
+cargo run -p viva-camctl -- chunks --ip 192.168.0.10 --enable true --selectors Timestamp,ExposureTime
 
 # Run a sustained streaming benchmark with a JSON report
-cargo run -p gencamctl -- bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
+cargo run -p viva-camctl -- bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
 ```
 
 For more examples and troubleshooting tips, see the
 [Discovery](book/src/tutorials/discovery.md)
 and [Streaming](book/src/tutorials/streaming.md) tutorials.
 
-## genicam-service
+## viva-service
 
-The `genicam-service` binary bridges real GigE Vision cameras to
+The `viva-service` binary bridges real GigE Vision cameras to
 [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) via Zenoh.
-It implements the Zenoh API contract defined in `genicam-studio/docs/zenoh-api.md`.
 
 ```bash
 # Start the service (discovers cameras on the specified interface)
-cargo run -p genicam-service -- --iface en0
+cargo run -p viva-service -- --iface en0
 
 # With verbose logging
-cargo run -p genicam-service -- --iface en0 -vv
+cargo run -p viva-service -- --iface en0 -vv
 ```
 
 The service automatically discovers cameras, publishes device announcements,
@@ -184,17 +185,17 @@ Zenoh when acquisition is started from genicam-studio.
 
 ## Integration testing
 
-12 integration tests validate the full stack against `arv-fake-gv-camera-0.8`
-from [Aravis](https://github.com/AravisProject/aravis) — covering discovery,
-connection, XML parsing, feature read/write, command execution, and frame
-streaming (all pass on macOS loopback).
+Integration tests use the built-in `viva-fake-gige` camera simulator -- no
+external tools or hardware required. 15 tests cover the full stack: discovery,
+connection, XML parsing, feature read/write, command execution, frame streaming,
+and the Zenoh service bridge.
 
 ```bash
-# Install aravis (macOS)
-brew install aravis
+# Run all tests (fake camera starts automatically)
+cargo test --workspace
 
-# Run integration tests (starts fake camera automatically)
-cargo test -p genicam --test fake_camera -- --ignored --test-threads=1
+# Run a self-contained demo (discovery → features → streaming)
+cargo run -p viva-genicam --example demo_fake_camera
 ```
 
 ## Troubleshooting

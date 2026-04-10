@@ -44,11 +44,11 @@ This chapter orients you in the standards and shows how they map to the crates i
 ## 4) How standards map to crates
 | Concept | Crate | Responsibility |
 |---|---|---|
-| GenCP (encode/decode, status) | `genicp` | Message formats, errors, helpers for control-path operations |
-| GVCP/GVSP (GigE Vision) | `tl-gige` | Discovery, control channel, streaming engine, resend/MTU/delay, events/actions |
-| GenApi XML loader | `genapi-xml` | Fetch XML via control path and parse schema‑lite into an internal representation |
-| NodeMap & evaluation | `genapi-core` | Node types (incl. **SwissKnife**), dependency resolution, selector routing, value get/set |
-| Public façade | `genicam` | End‑user API combining transport + NodeMap + utilities (examples live here) |
+| GenCP (encode/decode, status) | `viva-gencp` | Message formats, errors, helpers for control-path operations |
+| GVCP/GVSP (GigE Vision) | `viva-gige` | Discovery, control channel, streaming engine, resend/MTU/delay, events/actions |
+| GenApi XML loader | `viva-genapi-xml` | Fetch XML via control path and parse schema‑lite into an internal representation |
+| NodeMap & evaluation | `viva-genapi` | Node types (incl. **SwissKnife**), dependency resolution, selector routing, value get/set |
+| Public façade | `viva-genicam` | End‑user API combining transport + NodeMap + utilities (examples live here) |
 
 ## 5) USB3 Vision (preview)
 - Similar split between control and data paths, but with **USB3** transport and different discovery/endpoint mechanics. The higher‑level GenApi and NodeMap concepts remain the same.

@@ -23,39 +23,39 @@ cargo doc --workspace --no-deps
 
 ## First run: Discovery examples
 
-You can try discovery in two ways—either via the high‑level `genicam` crate example or the `gencamctl` CLI.
+You can try discovery in two ways—either via the high‑level `viva-genicam` crate example or the `viva-camctl` CLI.
 
 ### Option A: Example (genicam crate)
 
 ```bash
-# List cameras via GVCP broadcast\ n cargo run -p genicam --example list_cameras
+# List cameras via GVCP broadcast\ n cargo run -p viva-genicam --example list_cameras
 ```
 
-### Option B: CLI (gencamctl)
+### Option B: CLI (viva-camctl)
 
 ```bash
 # Discover cameras on the selected interface (IPv4 of your NIC)
-cargo run -p gencamctl -- list --iface 192.168.0.5
+cargo run -p viva-camctl -- list --iface 192.168.0.5
 ```
 
 ## Control path: read / write & XML
 
 ```bash
 # Read a feature by name
-cargo run -p gencamctl -- get --ip 192.168.0.10 --name ExposureTime
+cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
 
 # Set a feature value
-cargo run -p gencamctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
+cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
 
 # Fetch minimal XML metadata via control path (example)
-cargo run -p genicam --example get_set_feature
+cargo run -p viva-genicam --example get_set_feature
 ```
 
 ## Streaming (early GVSP)
 
 ```bash
 # Receive a GVSP stream, auto‑negotiate packet size, save first two frames
-cargo run -p gencamctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
+cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 ```
 
 ## Windows specifics

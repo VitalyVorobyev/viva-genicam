@@ -1,0 +1,22 @@
+[package]
+name = "viva-pfnc"
+version = "0.1.0"
+edition = "2021"
+description = "Pixel Format Naming Convention (PFNC) tables and helpers"
+license = "MIT"
+repository = "https://github.com/VitalyVorobyev/genicam-rs"
+readme = "README.md"
+keywords = ["genicam", "pfnc", "vision", "image"]
+categories = ["hardware-support", "science::robotics"]
+
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

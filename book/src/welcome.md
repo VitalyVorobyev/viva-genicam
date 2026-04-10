@@ -10,7 +10,7 @@
 - Device **discovery** over GigE Vision (GVCP) on a selected network interface.
 - **Control path**: reading/writing device memory via GenCP over GVCP; fetching the device’s GenApi XML.
 - **GenApi**: NodeMap with common node kinds (Integer/Float/Enum/Bool/Command/**SwissKnife**), ranges, access modes, and selector-based addressing.
-- **CLI** (`gencamctl`) for common operations: discovery, feature get/set, streaming, events, chunks, and benchmarks.
+- **CLI** (`viva-camctl`) for common operations: discovery, feature get/set, streaming, events, chunks, and benchmarks.
 - **Streaming (GVSP)**: packet reassembly, resend handling, MTU/packet sizing & delay, and stats (evolving).
 
 > Details evolve fast—check examples and release notes for the latest capabilities.

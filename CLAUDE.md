@@ -62,8 +62,10 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 **Supporting crates:**
 - `viva-pfnc` - Pixel Format Naming Convention tables
 - `viva-sfnc` - Standard Feature Naming Convention
-- `viva-camctl` - CLI binary
-- `viva-service` - Zenoh camera service for genicam-studio (depends on `viva_zenoh_api` from `../genicam-studio`)
+- `viva-zenoh-api` - Shared Zenoh wire types (no Zenoh dependency)
+- `viva-camctl` - CLI binary (not published)
+- `viva-service` - Zenoh camera service for genicam-studio
+- `viva-fake-gige` - In-process fake GigE Vision camera for testing (not published)
 
 ## Key Abstractions
 
@@ -79,24 +81,45 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 
 ## Testing
 
-Unit tests are embedded in source modules (`mod tests { }`). Integration tests use the in-process `viva-fake-gige` simulator and run automatically with `cargo test --workspace` -- no external tools required.
+Unit tests are embedded in source modules (`mod tests { }`). Integration tests use `viva-fake-gige` (in-process fake camera) and run automatically -- no external tools or hardware required.
 
 ```bash
-# Test single crate
-cargo test -p viva-genapi
+# All tests (unit + integration + service e2e)
+cargo test --workspace
 
-# Integration tests with fake camera (12/12 pass on macOS loopback)
-cargo test -p viva-genicam --test fake_camera -- --ignored --test-threads=1
+# Integration tests only (12 tests: discovery, features, streaming)
+cargo test -p viva-genicam --test fake_camera
+
+# Service end-to-end tests (3 tests: acquisition, double-start, sustained streaming)
+cargo test -p viva-service --test fake_camera_e2e
 
 # Test with logging
 RUST_LOG=debug cargo test --workspace -- --nocapture
+```
+
+### Fake camera binary
+
+For interactive testing or E2E testing with genicam-studio:
+
+```bash
+# Start fake camera (stays alive until Ctrl+C)
+cargo run -p viva-fake-gige
+cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15 --pixel-format rgb8
+
+# Use CLI to interact
+cargo run -p viva-camctl -- list --iface 127.0.0.1
+
+# E2E with studio (3 terminals)
+# T1: cargo run -p viva-fake-gige
+# T2: cargo run -p viva-service -- --iface lo0 --zenoh-config ../genicam-studio/config/zenoh-local.json5
+# T3: cd ../genicam-studio/apps/genicam-studio-tauri && cargo tauri dev
 ```
 
 ## Documentation
 
 - **mdBook**: `book/` directory - tutorials, architecture, networking cookbook
 - **API docs**: Generated via `cargo doc`, published to GitHub Pages
-- **Examples**: 16 examples in `crates/viva-genicam/examples/`
+- **Examples**: 17 examples in `crates/viva-genicam/examples/` (including `demo_fake_camera` for zero-hardware demo)
 
 ## Shared Crate API (SX handoff)
 

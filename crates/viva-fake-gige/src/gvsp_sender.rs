@@ -239,9 +239,10 @@ fn build_payload(block_id: u16, packet_id: u16, data: &[u8]) -> Vec<u8> {
     buf.put_u16(0); // status
     buf.put_u16(block_id); // block_id
     buf.put_u8(0x03); // packet_format: payload
-                      // packet_id as 3 bytes (big-endian u24)
-    buf.put_u8((packet_id >> 8) as u8);
-    buf.put_u16(packet_id);
+                      // packet_id as 3 bytes big-endian (u24): [bits 23:16, bits 15:8, bits 7:0]
+    buf.put_u8(0); // bits 23:16 (always 0 for u16 packet_id)
+    buf.put_u8((packet_id >> 8) as u8); // bits 15:8
+    buf.put_u8(packet_id as u8); // bits 7:0
 
     buf.put_slice(data);
     buf.to_vec()
@@ -255,8 +256,10 @@ fn build_trailer(block_id: u16, packet_id: u16, chunk_data: &[u8]) -> Vec<u8> {
     buf.put_u16(0); // status
     buf.put_u16(block_id); // block_id
     buf.put_u8(0x02); // packet_format: trailer
+                      // packet_id as 3 bytes big-endian (u24)
+    buf.put_u8(0);
     buf.put_u8((packet_id >> 8) as u8);
-    buf.put_u16(packet_id); // packet_id = last payload + 1
+    buf.put_u8(packet_id as u8);
 
     // Trailer payload
     buf.put_u16(0); // reserved/status

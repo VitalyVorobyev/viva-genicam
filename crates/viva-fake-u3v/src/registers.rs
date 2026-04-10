@@ -129,6 +129,24 @@ impl RegisterMap {
         result
     }
 
+    /// Current image width from the register map.
+    pub fn width(&self) -> u32 {
+        let b = self.read(REG_WIDTH, 4);
+        u32::from_be_bytes(b[..4].try_into().unwrap())
+    }
+
+    /// Current image height from the register map.
+    pub fn height(&self) -> u32 {
+        let b = self.read(REG_HEIGHT, 4);
+        u32::from_be_bytes(b[..4].try_into().unwrap())
+    }
+
+    /// Current pixel format PFNC code from the register map.
+    pub fn pixel_format_code(&self) -> u32 {
+        let b = self.read(REG_PIXEL_FORMAT, 4);
+        u32::from_be_bytes(b[..4].try_into().unwrap())
+    }
+
     pub fn write(&mut self, addr: u64, data: &[u8]) {
         // Write into existing register blocks or create new ones.
         for (i, &byte) in data.iter().enumerate() {

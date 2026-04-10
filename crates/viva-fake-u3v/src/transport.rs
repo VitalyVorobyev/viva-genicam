@@ -40,9 +40,6 @@ struct TransportState {
     pending_ack: Option<Vec<u8>>,
     /// Frame counter for stream.
     frame_count: u64,
-    width: u32,
-    height: u32,
-    pixel_format: u32,
 }
 
 // SAFETY: TransportState is protected by Mutex, single-writer access.
@@ -57,9 +54,6 @@ impl FakeU3vTransport {
                 registers: RegisterMap::new(width, height, pixel_format),
                 pending_ack: None,
                 frame_count: 0,
-                width,
-                height,
-                pixel_format,
             }),
         }
     }
@@ -168,15 +162,23 @@ fn bytes_per_pixel(pixel_format: u32) -> usize {
 
 /// Stream transfer state machine: leader → payload → trailer → leader → ...
 /// We cycle: frame_count % 3 == 0 → leader, 1 → payload, 2 → trailer.
+///
+/// Reads width/height/pixel_format from the register map on every frame so
+/// that runtime changes (e.g. from the studio) take effect immediately.
 fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Result<usize, U3vError> {
     let phase = state.frame_count % 3;
     state.frame_count += 1;
-    let bpp = bytes_per_pixel(state.pixel_format);
+
+    // Read current dimensions from register map (may have been changed via GenApi set).
+    let width = state.registers.width();
+    let height = state.registers.height();
+    let pixel_format = state.registers.pixel_format_code();
+    let bpp = bytes_per_pixel(pixel_format);
 
     match phase {
         0 => {
             // Leader
-            let leader = build_leader(state.width, state.height, state.pixel_format);
+            let leader = build_leader(width, height, pixel_format);
             let n = leader.len().min(buf.len());
             buf[..n].copy_from_slice(&leader[..n]);
             Ok(n)
@@ -184,8 +186,7 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
         1 => {
             // Payload: animated test pattern.
             let frame_idx = (state.frame_count / 3) as u16;
-            let data =
-                generate_test_pattern(state.width as usize, state.height as usize, bpp, frame_idx);
+            let data = generate_test_pattern(width as usize, height as usize, bpp, frame_idx);
             let n = data.len().min(buf.len());
             buf[..n].copy_from_slice(&data[..n]);
             Ok(n)
@@ -193,7 +194,7 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
         2 => {
             // Trailer
             let block_id = state.frame_count / 3;
-            let payload_size = (state.width as u64) * (state.height as u64) * (bpp as u64);
+            let payload_size = (width as u64) * (height as u64) * (bpp as u64);
             let trailer = build_trailer(block_id, payload_size);
             let n = trailer.len().min(buf.len());
             buf[..n].copy_from_slice(&trailer[..n]);

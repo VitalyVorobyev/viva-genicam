@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Prerequisites
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.88+ (edition 2024)
 - Windows / Linux / macOS
 - Network: allow UDP broadcast on your capture NIC for discovery. Optional: jumbo frames for high throughput.
 

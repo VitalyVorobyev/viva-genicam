@@ -133,10 +133,10 @@ pub fn parse_category(
                 }
             },
             Ok(Event::Empty(ref e)) if e.name().as_ref() == b"pFeature" => {
-                if let Some(value) = attribute_value(e, b"Name")? {
-                    if !value.is_empty() {
-                        children.push(value);
-                    }
+                if let Some(value) = attribute_value(e, b"Name")?
+                    && !value.is_empty()
+                {
+                    children.push(value);
                 }
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,

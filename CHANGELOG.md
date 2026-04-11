@@ -24,13 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- MSRV raised from 1.85 to 1.88 (resolves `time` crate security advisory RUSTSEC-2026-0009)
 - Project tagline updated from "Ethernet-first" to "GigE Vision and USB3 Vision" reflecting dual-transport support
 - `viva-service-u3v` Cargo.toml now enables `u3v-usb` feature for real USB support
+- Added `cargo deny check advisories` to CI pipeline with `deny.toml` allow-list for zenoh transitive advisories
 
 ### Fixed
 
 - GitHub Pages deployment error ("Tag v0.1.0 not allowed to deploy") by removing wildcard tag trigger from `publish-docs.yml`
 - SVG logo dot alignment and genicam text spacing for correct browser rendering
+- `time` crate DoS vulnerability (RUSTSEC-2026-0009) by upgrading to 0.3.47
+
+### Known Issues
+
+- `lz4_flex 0.10.0` (RUSTSEC-2026-0041, high) and `rsa 0.9.10` (RUSTSEC-2023-0071, medium) are transitive dependencies through `zenoh 1.9.0` and cannot be updated until zenoh releases a fix. Neither is exploitable through our usage (lz4 decompression of untrusted data, RSA timing attack). Tracked in `deny.toml`.
 
 ## [0.1.0] - 2026-04-10
 

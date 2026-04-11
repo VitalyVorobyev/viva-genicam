@@ -304,10 +304,10 @@ pub fn parse_boolean(
                     }
                 }
                 TAG_ENDIANNESS | TAG_ENDIANESS | TAG_BYTE_ORDER => {
-                    if let Some(value) = attribute_value(e, TAG_VALUE)? {
-                        if let Some(order) = ByteOrder::parse(&value) {
-                            bitfield.note_byte_order(order);
-                        }
+                    if let Some(value) = attribute_value(e, TAG_VALUE)?
+                        && let Some(order) = ByteOrder::parse(&value)
+                    {
+                        bitfield.note_byte_order(order);
                     }
                 }
                 b"Selected" => {
@@ -329,26 +329,30 @@ pub fn parse_boolean(
 
     // Addressing is optional: nodes may delegate via pValue or appear as
     // pure UI features without register backing.
-    let addr = addressing.finalize(&name, Some(4)).ok();
-    let len = addr
-        .as_ref()
-        .and_then(|a| addressing_lengths(a).first().copied())
-        .unwrap_or(4);
-    let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
-    let bitfield = if addr.is_some() {
-        match bitfield.finish(&name, &lengths) {
-            Ok(Some(field)) => Some(field),
-            Ok(None) if len == 1 => Some(BitField {
+    let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
+        let lengths = addressing_lengths(&addr);
+        let len = lengths
+            .first()
+            .copied()
+            .ok_or_else(|| XmlError::Invalid(format!("no length for Boolean node {name}")))?;
+        let bf = match bitfield.finish(&name, &lengths)? {
+            Some(field) => Some(field),
+            None if len == 1 => Some(BitField {
                 bit_offset: 0,
                 bit_length: 1,
                 byte_order: ByteOrder::Little,
             }),
-            _ => None,
-        }
+            None => {
+                return Err(XmlError::Invalid(format!(
+                    "Boolean node {name} requires explicit bitfield metadata"
+                )));
+            }
+        };
+        (Some(addr), len, bf)
     } else {
-        None
+        // No register backing (pValue delegation).
+        (None, 4, None)
     };
-    let addressing = addr;
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Boolean {

@@ -439,10 +439,10 @@ impl FrameAssemblyState {
         let pid = packet_id as usize;
 
         // Track received packets if we know the total count.
-        if let Some(ref mut bitmap) = self.bitmap {
-            if !bitmap.set(pid) {
-                return false; // Duplicate packet.
-            }
+        if let Some(ref mut bitmap) = self.bitmap
+            && !bitmap.set(pid)
+        {
+            return false; // Duplicate packet.
         }
 
         // Write data at the correct offset for zero-copy reassembly.
@@ -578,16 +578,16 @@ impl FrameStream {
     pub async fn next_frame(&mut self) -> Result<Option<Frame>, GenicamError> {
         loop {
             // Check for timeout on active frame assembly.
-            if let Some(ref active) = self.active {
-                if active.is_expired(self.frame_timeout) {
-                    let block_id = active.block_id;
-                    warn!(
-                        block_id,
-                        "frame assembly timeout, dropping incomplete frame"
-                    );
-                    self.stats.record_drop();
-                    self.active = None;
-                }
+            if let Some(ref active) = self.active
+                && active.is_expired(self.frame_timeout)
+            {
+                let block_id = active.block_id;
+                warn!(
+                    block_id,
+                    "frame assembly timeout, dropping incomplete frame"
+                );
+                self.stats.record_drop();
+                self.active = None;
             }
 
             // Receive next packet.
@@ -617,15 +617,15 @@ impl FrameStream {
                     ..
                 } => {
                     // Start new frame assembly, dropping any incomplete previous frame.
-                    if let Some(ref prev) = self.active {
-                        if prev.block_id != block_id {
-                            debug!(
-                                old_block = prev.block_id,
-                                new_block = block_id,
-                                "new leader arrived, dropping incomplete frame"
-                            );
-                            self.stats.record_drop();
-                        }
+                    if let Some(ref prev) = self.active
+                        && prev.block_id != block_id
+                    {
+                        debug!(
+                            old_block = prev.block_id,
+                            new_block = block_id,
+                            "new leader arrived, dropping incomplete frame"
+                        );
+                        self.stats.record_drop();
                     }
 
                     let pixel_format = PixelFormat::from_code(pixel_format);
@@ -647,10 +647,11 @@ impl FrameStream {
                     packet_id,
                     data,
                 } => {
-                    if let Some(ref mut active) = self.active {
-                        if active.block_id == block_id && active.ingest(packet_id, data.as_ref()) {
-                            self.stats.record_packet();
-                        }
+                    if let Some(ref mut active) = self.active
+                        && active.block_id == block_id
+                        && active.ingest(packet_id, data.as_ref())
+                    {
+                        self.stats.record_packet();
                     }
                 }
 

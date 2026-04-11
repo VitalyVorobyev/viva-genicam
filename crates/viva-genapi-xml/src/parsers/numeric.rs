@@ -224,10 +224,10 @@ pub fn parse_integer(
                     }
                 }
                 TAG_ENDIANNESS | TAG_ENDIANESS | TAG_BYTE_ORDER => {
-                    if let Some(value) = attribute_value(e, TAG_VALUE)? {
-                        if let Some(order) = ByteOrder::parse(&value) {
-                            bitfield.note_byte_order(order);
-                        }
+                    if let Some(value) = attribute_value(e, TAG_VALUE)?
+                        && let Some(order) = ByteOrder::parse(&value)
+                    {
+                        bitfield.note_byte_order(order);
                     }
                 }
                 b"Selected" => {
@@ -253,14 +253,18 @@ pub fn parse_integer(
 
     // Addressing is optional: nodes may delegate via pValue, have a static
     // Value, or appear as pure UI features without register backing.
-    let addr = addressing.finalize(&name, Some(4)).ok();
-    let len = addr
-        .as_ref()
-        .and_then(|a| addressing_lengths(a).first().copied())
-        .unwrap_or(4);
-    let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
-    let bitfield = bitfield.finish(&name, &lengths).ok().flatten();
-    let addressing = addr;
+    let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
+        let lengths = addressing_lengths(&addr);
+        let len = lengths
+            .first()
+            .copied()
+            .ok_or_else(|| XmlError::Invalid(format!("no length for Integer node {name}")))?;
+        let bf = bitfield.finish(&name, &lengths)?;
+        (Some(addr), len, bf)
+    } else {
+        // No register backing (pValue delegation, static Value, etc.)
+        (None, 4, bitfield.finish(&name, &[4]).ok().flatten())
+    };
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Integer {

@@ -83,10 +83,10 @@ pub fn parse_swissknife(
                     expr = Some(trimmed.to_string());
                 }
                 b"Output" => {
-                    if let Some(value) = attribute_value(e, TAG_VALUE)? {
-                        if let Some(kind) = SkOutput::parse(&value) {
-                            output = kind;
-                        }
+                    if let Some(value) = attribute_value(e, TAG_VALUE)?
+                        && let Some(kind) = SkOutput::parse(&value)
+                    {
+                        output = kind;
                     }
                 }
                 _ => {}

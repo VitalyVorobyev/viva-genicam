@@ -130,10 +130,10 @@ impl Iface {
     /// Resolve an interface by its primary IPv4 address.
     pub fn from_ipv4(addr: Ipv4Addr) -> io::Result<Self> {
         for iface in if_addrs::get_if_addrs()? {
-            if let IfAddr::V4(v4) = iface.addr {
-                if v4.ip == addr {
-                    return Self::from_system(&iface.name);
-                }
+            if let IfAddr::V4(v4) = iface.addr
+                && v4.ip == addr
+            {
+                return Self::from_system(&iface.name);
             }
         }
         Err(io::Error::new(
@@ -255,10 +255,10 @@ pub async fn bind_udp(
     socket.set_recv_buffer_size(recv_buffer)?;
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    if let Some(iface) = iface.as_ref() {
-        if let Err(err) = socket.bind_device(Some(iface.name().as_bytes())) {
-            warn!(name = iface.name(), error = %err, "SO_BINDTODEVICE failed");
-        }
+    if let Some(iface) = iface.as_ref()
+        && let Err(err) = socket.bind_device(Some(iface.name().as_bytes()))
+    {
+        warn!(name = iface.name(), error = %err, "SO_BINDTODEVICE failed");
     }
 
     let addr = SocketAddr::new(bind, port);

@@ -314,12 +314,12 @@ pub fn parse_string(
                 }
             },
             Ok(Event::Empty(ref e)) => {
-                if e.name().as_ref() == b"pAddress" {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            addressing.set_p_address_node(trimmed);
-                        }
+                if e.name().as_ref() == b"pAddress"
+                    && let Some(value) = attribute_value(e, b"Name")?
+                {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        addressing.set_p_address_node(trimmed);
                     }
                 }
             }

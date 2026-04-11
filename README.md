@@ -32,10 +32,19 @@
 
 ## Current status
 
-- GigE Vision: fully functional (discovery, control, streaming, events, actions, chunks, IP configuration)
-- USB3 Vision: fully functional (discovery, control, streaming, service bridge, CLI)
+This project implements the GigE Vision and USB3 Vision protocols from the ground up in pure Rust, following the published EMVA specifications. The full control and streaming pipelines are in place, backed by 190+ automated tests that run against built-in fake camera simulators.
+
+**What works today:**
+- GigE Vision: discovery, control, streaming, events, actions, chunks, IP configuration
+- USB3 Vision: discovery, control, streaming, service bridge, CLI
 - GenApi: Tier-1 + Tier-2 nodes including pValue delegation and SwissKnife expressions
-- Self-contained integration tests (no external tools or hardware)
+
+**What hasn't happened yet:**
+- Testing against a broad range of physical cameras from different manufacturers
+- Deployment in production environments
+- Interoperability validation beyond the built-in simulators
+
+The protocol implementations are spec-faithful and the architecture is designed for real-world use, but real devices have quirks that only surface with hardware in the loop. Bug reports and camera compatibility feedback are especially welcome at this stage.
 
 ## Workspace layout
 

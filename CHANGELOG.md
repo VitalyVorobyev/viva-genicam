@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `GigeRegisterIo` now wraps `block_on` in `tokio::task::block_in_place`, preventing nested-runtime panics when `Camera` methods are called from async contexts
+- `GigeRegisterIo` now detects async context via `Handle::try_current()` and wraps `block_on` in `tokio::task::block_in_place` only when inside a runtime, preventing nested-runtime panics while preserving plain synchronous usage
 
 ## [0.2.0] - 2026-04-11
 

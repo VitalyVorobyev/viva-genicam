@@ -37,9 +37,12 @@ jobs:
 
       - name: Package published crates
         run: |
+          # --no-verify: skip build-from-registry check because inter-workspace
+          # crates (e.g. viva-u3v 0.2.0) are not on crates.io yet at this point.
+          # The actual publish (publish-crates.yml) handles dependency ordering.
           for crate in viva-gencp viva-pfnc viva-sfnc viva-genapi-xml viva-genapi \
                        viva-gige viva-u3v viva-genicam viva-zenoh-api viva-service; do
-            cargo package -p "$crate" --locked
+            cargo package -p "$crate" --locked --no-verify
           done
 
       - name: Build release binaries

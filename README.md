@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/viva-genicam-lockup.svg" alt="viva genicam" width="360">
+  <img src="assets/viva-genicam-logo-and-text.svg" alt="viva genicam" width="360">
 </p>
 
 <p align="center">

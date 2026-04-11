@@ -702,9 +702,9 @@ pub struct ChunkConfig {
 /// Blocking adapter turning an asynchronous [`GigeDevice`] into a [`RegisterIo`]
 /// implementation.
 ///
-/// The adapter uses a [`tokio::runtime::Handle`] to synchronously wait on GVCP
-/// register transactions. All callers must ensure these methods are invoked
-/// from outside of the runtime context to avoid nested `block_on` panics.
+/// The adapter uses [`tokio::task::block_in_place`] combined with
+/// [`tokio::runtime::Handle::block_on`] to synchronously wait on GVCP register
+/// transactions. This is safe to call from both async and sync contexts.
 pub struct GigeRegisterIo {
     handle: tokio::runtime::Handle,
     device: Mutex<GigeDevice>,
@@ -739,15 +739,13 @@ impl GigeRegisterIo {
 impl RegisterIo for GigeRegisterIo {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
         let mut device = self.lock()?;
-        self.handle
-            .block_on(device.read_mem(addr, len))
+        tokio::task::block_in_place(|| self.handle.block_on(device.read_mem(addr, len)))
             .map_err(|err| GenApiError::Io(err.to_string()))
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
         let mut device = self.lock()?;
-        self.handle
-            .block_on(device.write_mem(addr, data))
+        tokio::task::block_in_place(|| self.handle.block_on(device.write_mem(addr, data)))
             .map_err(|err| GenApiError::Io(err.to_string()))
     }
 }

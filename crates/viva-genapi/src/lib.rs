@@ -13,7 +13,8 @@ pub use error::GenApiError;
 pub use io::{NullIo, RegisterIo};
 pub use nodemap::NodeMap;
 pub use nodes::{
-    BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, IntegerNode, Node, SkNode,
+    BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, IntegerNode, Node, NodeMeta,
+    Representation, SkNode, Visibility,
 };
 pub use viva_genapi_xml::SkOutput;
 

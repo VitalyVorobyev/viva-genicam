@@ -4,9 +4,10 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK,
-    TAG_MSB, TAG_P_ADDRESS, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
-    handle_p_selected_empty, handle_p_selected_start, handle_selected_empty, handle_selected_start,
+    NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
+    TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_VALUE, handle_addressing_empty,
+    handle_addressing_start, handle_p_selected_empty, handle_p_selected_start,
+    handle_selected_empty, handle_selected_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
@@ -41,6 +42,7 @@ pub fn parse_integer(
     let mut p_min = None;
     let mut static_value: Option<i64> = None;
     let mut selector_state = SelectorState::default();
+    let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut bitfield = BitfieldBuilder::default();
@@ -173,7 +175,11 @@ pub fn parse_integer(
                 b"Selected" => {
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
@@ -269,6 +275,7 @@ pub fn parse_integer(
 
     Ok(NodeDecl::Integer {
         name,
+        meta: meta_builder.build(),
         addressing,
         len,
         access,
@@ -311,6 +318,7 @@ pub fn parse_float(
     let mut offset = None;
     let mut pvalue = None;
     let mut selector_state = SelectorState::default();
+    let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
@@ -372,7 +380,11 @@ pub fn parse_float(
                 b"Selected" => {
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
@@ -414,6 +426,7 @@ pub fn parse_float(
 
     Ok(NodeDecl::Float {
         name,
+        meta: meta_builder.build(),
         addressing,
         access,
         min,

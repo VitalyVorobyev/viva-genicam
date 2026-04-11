@@ -96,6 +96,11 @@ impl<T: UsbTransfer> U3vDevice<T> {
         })
     }
 
+    /// Access the shared transport handle (e.g. to create additional streams).
+    pub fn transport(&self) -> Arc<T> {
+        self.control.transport().clone()
+    }
+
     /// Reference to the parsed ABRM.
     pub fn abrm(&self) -> &Abrm {
         &self.abrm

@@ -5,10 +5,10 @@ use quick_xml::events::{BytesStart, Event};
 use tracing::warn;
 
 use super::{
-    SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS,
-    TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty,
-    handle_addressing_start, handle_p_selected_empty, handle_p_selected_start,
-    handle_selected_empty, handle_selected_start,
+    NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS,
+    TAG_ENDIANNESS, TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE,
+    handle_addressing_empty, handle_addressing_start, handle_p_selected_empty,
+    handle_p_selected_start, handle_selected_empty, handle_selected_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
@@ -35,6 +35,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     let mut pvalue = None;
 
@@ -74,7 +75,11 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
                         default = Some(trimmed.to_string());
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"EnumEntry" => {
@@ -116,6 +121,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
 
     Ok(NodeDecl::Enum {
         name,
+        meta: meta_builder.build(),
         addressing,
         access,
         entries,
@@ -149,6 +155,7 @@ pub fn parse_boolean(
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
     let mut bitfield = BitfieldBuilder::default();
     let mut pending_bit_length = false;
 
@@ -250,7 +257,11 @@ pub fn parse_boolean(
                 b"Selected" => {
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
@@ -352,6 +363,7 @@ pub fn parse_boolean(
 
     Ok(NodeDecl::Boolean {
         name,
+        meta: meta_builder.build(),
         addressing,
         len,
         access,

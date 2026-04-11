@@ -11,4 +11,5 @@ pub mod time;
 
 pub use gvcp::{
     DeviceInfo, GVCP_PORT, GigeDevice, GigeError, discover, discover_all, discover_on_interface,
+    force_ip,
 };

@@ -51,12 +51,12 @@
      fill="#ffffff"
      letter-spacing="-3.5"
      id="text1">vıva</text><!-- Accent magenta dot replacing 'i' dot --><!-- cx: text start + v_advance(-3.5 spacing) + dotless_i_halfwidth --><!-- cy: baseline - i_ascent_approx (Nunito 900 104px) --><circle
-     cx="297.2356"
+     cx="304"
      cy="67.854324"
      r="7.5"
      fill="#e3215b"
      id="circle1" /><!-- genicam in Fira Code --><text
-     x="540.51062"
+     x="515"
      y="139.67836"
      text-anchor="middle"
      font-family="'Fira Code', 'Courier New', monospace"

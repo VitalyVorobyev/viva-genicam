@@ -44,6 +44,10 @@ use std::net::Ipv4Addr;
 use std::time::Instant;
 
 /// Bootstrap register addresses (GigE Vision specification).
+pub const CURRENT_IP_CONFIG: u64 = 0x0014;
+pub const PERSISTENT_IP_ADDRESS: u64 = 0x064C;
+pub const PERSISTENT_SUBNET_MASK: u64 = 0x065C;
+pub const PERSISTENT_DEFAULT_GATEWAY: u64 = 0x066C;
 pub const CCP: u64 = 0x0a00;
 pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
 pub const STREAM_CHANNEL_BASE: u64 = 0x0d00;
@@ -512,6 +516,12 @@ impl RegisterMap {
         // ── Bootstrap registers ─────────────────────────────────────────
         regs.insert(CCP, vec![0, 0, 0, 0]);
         regs.insert(HEARTBEAT_TIMEOUT, 3000u32.to_be_bytes().to_vec());
+
+        // IP configuration: DHCP + persistent + LLA = 0x07
+        regs.insert(CURRENT_IP_CONFIG, 0x0000_0005u32.to_be_bytes().to_vec());
+        regs.insert(PERSISTENT_IP_ADDRESS, vec![0, 0, 0, 0]);
+        regs.insert(PERSISTENT_SUBNET_MASK, vec![0, 0, 0, 0]);
+        regs.insert(PERSISTENT_DEFAULT_GATEWAY, vec![0, 0, 0, 0]);
 
         // Stream channel 0
         let base = STREAM_CHANNEL_BASE;

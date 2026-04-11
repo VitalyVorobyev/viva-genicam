@@ -58,6 +58,81 @@ pub enum XmlError {
     Unsupported(String),
 }
 
+/// Visibility level controlling which users see a feature.
+///
+/// GenICam defines four levels; features at a given level are visible to
+/// users at that level and above.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum Visibility {
+    /// Shown to all users (default).
+    #[default]
+    Beginner,
+    /// Shown to experienced users.
+    Expert,
+    /// Shown only to advanced integrators.
+    Guru,
+    /// Hidden from all UI presentations.
+    Invisible,
+}
+
+impl Visibility {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Beginner" => Some(Self::Beginner),
+            "Expert" => Some(Self::Expert),
+            "Guru" => Some(Self::Guru),
+            "Invisible" => Some(Self::Invisible),
+            _ => None,
+        }
+    }
+}
+
+/// Recommended UI representation for a numeric feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Representation {
+    Linear,
+    Logarithmic,
+    Boolean,
+    PureNumber,
+    HexNumber,
+    /// Display as dotted-quad IPv4 address.
+    IPV4Address,
+    /// Display as colon-separated MAC address.
+    MACAddress,
+}
+
+impl Representation {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Linear" => Some(Self::Linear),
+            "Logarithmic" => Some(Self::Logarithmic),
+            "Boolean" => Some(Self::Boolean),
+            "PureNumber" => Some(Self::PureNumber),
+            "HexNumber" => Some(Self::HexNumber),
+            "IPV4Address" => Some(Self::IPV4Address),
+            "MACAddress" => Some(Self::MACAddress),
+            _ => None,
+        }
+    }
+}
+
+/// Shared metadata present on every GenICam node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeMeta {
+    /// Visibility level (Beginner, Expert, Guru, Invisible).
+    pub visibility: Visibility,
+    /// Long-form description of the feature.
+    pub description: Option<String>,
+    /// Short tooltip text for UI hover hints.
+    pub tooltip: Option<String>,
+    /// Human-readable label (may differ from the node name).
+    pub display_name: Option<String>,
+    /// Recommended UI representation for numeric features.
+    pub representation: Option<Representation>,
+}
+
 /// Access privileges for a GenICam node as described in the XML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccessMode {
@@ -158,6 +233,8 @@ impl SkOutput {
 pub struct SwissKnifeDecl {
     /// Feature name exposed to clients.
     pub name: String,
+    /// Shared metadata.
+    pub meta: NodeMeta,
     /// Raw expression string to be parsed by the runtime.
     pub expr: String,
     /// Mapping of variables used in the expression to provider node names.
@@ -174,6 +251,8 @@ pub struct SwissKnifeDecl {
 pub struct ConverterDecl {
     /// Feature name exposed to clients.
     pub name: String,
+    /// Shared metadata.
+    pub meta: NodeMeta,
     /// Name of the node providing the raw register value.
     pub p_value: String,
     /// Expression converting raw register value to user-facing value (FROM direction).
@@ -195,6 +274,8 @@ pub struct ConverterDecl {
 pub struct IntConverterDecl {
     /// Feature name exposed to clients.
     pub name: String,
+    /// Shared metadata.
+    pub meta: NodeMeta,
     /// Name of the node providing the raw register value.
     pub p_value: String,
     /// Expression converting raw register value to user-facing value (FROM direction).
@@ -214,6 +295,8 @@ pub struct IntConverterDecl {
 pub struct StringDecl {
     /// Feature name exposed to clients.
     pub name: String,
+    /// Shared metadata.
+    pub meta: NodeMeta,
     /// Addressing metadata for the register block.
     pub addressing: Addressing,
     /// Access privileges.
@@ -227,6 +310,8 @@ pub enum NodeDecl {
     Integer {
         /// Feature name.
         name: String,
+        /// Shared metadata (visibility, description, tooltip, etc.).
+        meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
         /// Length in bytes of the register payload.
@@ -260,6 +345,7 @@ pub enum NodeDecl {
     /// or delegated via pValue.
     Float {
         name: String,
+        meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
         access: AccessMode,
@@ -278,6 +364,7 @@ pub enum NodeDecl {
     /// Enumeration feature exposing a list of named integer values.
     Enum {
         name: String,
+        meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
         access: AccessMode,
@@ -291,6 +378,7 @@ pub enum NodeDecl {
     /// Boolean feature backed by a single bit/byte register or delegated via pValue.
     Boolean {
         name: String,
+        meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
         len: u32,
@@ -308,6 +396,7 @@ pub enum NodeDecl {
     /// Command feature that triggers an action when written.
     Command {
         name: String,
+        meta: NodeMeta,
         /// Fixed register address (absent when delegated via `pvalue`).
         address: Option<u64>,
         len: u32,
@@ -317,7 +406,11 @@ pub enum NodeDecl {
         command_value: Option<i64>,
     },
     /// Category used to organise features.
-    Category { name: String, children: Vec<String> },
+    Category {
+        name: String,
+        meta: NodeMeta,
+        children: Vec<String>,
+    },
     /// Computed value backed by an arithmetic expression referencing other nodes.
     SwissKnife(SwissKnifeDecl),
     /// Converter transforming raw values to/from user-facing floating-point values.
@@ -595,7 +688,7 @@ mod tests {
         assert_eq!(model.version, "1.2.3");
         assert_eq!(model.nodes.len(), 7);
         match &model.nodes[0] {
-            NodeDecl::Category { name, children } => {
+            NodeDecl::Category { name, children, .. } => {
                 assert_eq!(name, "Root");
                 assert_eq!(
                     children,
@@ -918,6 +1011,97 @@ mod tests {
                 assert_eq!(field.byte_order, ByteOrder::Little);
                 assert_eq!(field.bit_length, 8);
                 assert_eq!(field.bit_offset, 8);
+            }
+            other => panic!("unexpected node: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_node_metadata() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Integer Name="Width">
+                    <Address>0x100</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Min>16</Min>
+                    <Max>4096</Max>
+                    <Visibility>Expert</Visibility>
+                    <Description>Image width in pixels.</Description>
+                    <ToolTip>Width of the acquired image</ToolTip>
+                    <DisplayName>Image Width</DisplayName>
+                    <Representation>Linear</Representation>
+                </Integer>
+                <Float Name="Gain">
+                    <Address>0x200</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Min>0.0</Min>
+                    <Max>48.0</Max>
+                    <Unit>dB</Unit>
+                    <Visibility>Beginner</Visibility>
+                    <Representation>Logarithmic</Representation>
+                </Float>
+                <Category Name="Root">
+                    <Visibility>Guru</Visibility>
+                    <Description>Top-level category</Description>
+                    <pFeature>Width</pFeature>
+                    <pFeature>Gain</pFeature>
+                </Category>
+                <Enumeration Name="PixelFormat">
+                    <Address>0x300</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Visibility>Beginner</Visibility>
+                    <ToolTip>Pixel format selector</ToolTip>
+                    <EnumEntry Name="Mono8" Value="0" />
+                </Enumeration>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse metadata xml");
+        assert_eq!(model.nodes.len(), 4);
+
+        // Integer with full metadata
+        match &model.nodes[0] {
+            NodeDecl::Integer { name, meta, .. } => {
+                assert_eq!(name, "Width");
+                assert_eq!(meta.visibility, Visibility::Expert);
+                assert_eq!(meta.description.as_deref(), Some("Image width in pixels."));
+                assert_eq!(meta.tooltip.as_deref(), Some("Width of the acquired image"));
+                assert_eq!(meta.display_name.as_deref(), Some("Image Width"));
+                assert_eq!(meta.representation, Some(Representation::Linear));
+            }
+            other => panic!("unexpected node: {other:?}"),
+        }
+
+        // Float with visibility + representation
+        match &model.nodes[1] {
+            NodeDecl::Float { name, meta, .. } => {
+                assert_eq!(name, "Gain");
+                assert_eq!(meta.visibility, Visibility::Beginner);
+                assert_eq!(meta.representation, Some(Representation::Logarithmic));
+                assert!(meta.description.is_none());
+            }
+            other => panic!("unexpected node: {other:?}"),
+        }
+
+        // Category with visibility + description
+        match &model.nodes[2] {
+            NodeDecl::Category { name, meta, .. } => {
+                assert_eq!(name, "Root");
+                assert_eq!(meta.visibility, Visibility::Guru);
+                assert_eq!(meta.description.as_deref(), Some("Top-level category"));
+            }
+            other => panic!("unexpected node: {other:?}"),
+        }
+
+        // Enum with visibility + tooltip
+        match &model.nodes[3] {
+            NodeDecl::Enum { name, meta, .. } => {
+                assert_eq!(name, "PixelFormat");
+                assert_eq!(meta.visibility, Visibility::Beginner);
+                assert_eq!(meta.tooltip.as_deref(), Some("Pixel format selector"));
             }
             other => panic!("unexpected node: {other:?}"),
         }

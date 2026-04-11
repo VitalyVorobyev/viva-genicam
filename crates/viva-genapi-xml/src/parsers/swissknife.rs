@@ -3,7 +3,7 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::TAG_VALUE;
+use super::{NodeMetaBuilder, TAG_VALUE};
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
 use crate::{NodeDecl, SkOutput, SwissKnifeDecl, XmlError};
 
@@ -18,6 +18,7 @@ pub fn parse_swissknife(
     let mut output = SkOutput::Float;
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -49,7 +50,11 @@ pub fn parse_swissknife(
                         output = kind;
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pVariable" => {
@@ -109,6 +114,7 @@ pub fn parse_swissknife(
 
     Ok(NodeDecl::SwissKnife(SwissKnifeDecl {
         name,
+        meta: meta_builder.build(),
         expr,
         variables,
         output,

@@ -732,6 +732,180 @@ impl FrameStream {
     }
 }
 
+// ============================================================================
+// USB3 Vision Frame Stream
+// ============================================================================
+
+/// Async frame iterator wrapping blocking USB3 Vision bulk reads.
+///
+/// Internally spawns a blocking reader thread that calls
+/// [`U3vStream::next_frame()`] in a loop and sends converted [`Frame`]
+/// values through an mpsc channel. The async consumer reads from the
+/// channel via [`next_frame()`](U3vFrameStream::next_frame).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let u3v_stream = device.open_stream(payload_size)?;
+/// let mut frames = U3vFrameStream::start(u3v_stream);
+/// while let Some(frame) = frames.next_frame().await? {
+///     println!("{}x{} frame", frame.width, frame.height);
+/// }
+/// frames.stop();
+/// ```
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub struct U3vFrameStream {
+    rx: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    _reader: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "u3v")]
+impl U3vFrameStream {
+    /// Start the frame stream from a configured [`U3vStream`].
+    ///
+    /// The reader thread runs until [`stop()`](Self::stop) is called,
+    /// the [`U3vStream`] errors, or the `U3vFrameStream` is dropped.
+    ///
+    /// [`U3vStream`]: crate::u3v::stream::U3vStream
+    pub fn start<T: crate::u3v::usb::UsbTransfer + 'static>(
+        mut stream: crate::u3v::stream::U3vStream<T>,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+        let reader = tokio::task::spawn_blocking(move || {
+            loop {
+                if *stop_rx.borrow() {
+                    break;
+                }
+                match stream.next_frame() {
+                    Ok(raw) => {
+                        let pixel_format = PixelFormat::from_code(raw.leader.pixel_format);
+                        let frame = Frame {
+                            payload: raw.payload,
+                            width: raw.leader.width,
+                            height: raw.leader.height,
+                            pixel_format,
+                            chunks: None,
+                            ts_dev: Some(raw.leader.timestamp),
+                            ts_host: None,
+                        };
+                        if tx.blocking_send(Ok(frame)).is_err() {
+                            break; // Receiver dropped.
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(GenicamError::transport(e.to_string())));
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            rx,
+            stop_tx,
+            _reader: reader,
+        }
+    }
+
+    /// Receive the next complete frame.
+    ///
+    /// Returns `Ok(None)` when the stream ends (reader stopped or errored).
+    pub async fn next_frame(&mut self) -> Result<Option<Frame>, GenicamError> {
+        match self.rx.recv().await {
+            Some(Ok(frame)) => Ok(Some(frame)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Signal the reader thread to stop.
+    pub fn stop(&self) {
+        let _ = self.stop_tx.send(true);
+    }
+}
+
+// ============================================================================
+// USB3 Vision Stream Builder
+// ============================================================================
+
+/// Builder for configuring and starting a U3V frame stream.
+///
+/// Mirrors the GigE [`StreamBuilder`] pattern but for USB3 Vision.
+/// Reads image dimensions from the camera features (or accepts explicit
+/// overrides) and opens the underlying USB bulk stream.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut camera = open_u3v_device(device)?;
+/// let frames = U3vStreamBuilder::new(&mut camera)
+///     .build()?;
+/// ```
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub struct U3vStreamBuilder<'a, T: crate::u3v::usb::UsbTransfer + 'static> {
+    camera: &'a mut crate::Camera<crate::U3vRegisterIo<T>>,
+    payload_size: Option<u64>,
+}
+
+#[cfg(feature = "u3v")]
+impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
+    /// Create a new builder bound to a camera.
+    pub fn new(camera: &'a mut crate::Camera<crate::U3vRegisterIo<T>>) -> Self {
+        Self {
+            camera,
+            payload_size: None,
+        }
+    }
+
+    /// Override the payload size (bytes per frame).
+    ///
+    /// When not set, the builder computes it from Width, Height, and
+    /// PixelFormat camera features.
+    pub fn payload_size(mut self, size: u64) -> Self {
+        self.payload_size = Some(size);
+        self
+    }
+
+    /// Finalise the builder: configure SIRM, start streaming, return
+    /// an async [`U3vFrameStream`].
+    pub fn build(self) -> Result<U3vFrameStream, GenicamError> {
+        let payload_size = match self.payload_size {
+            Some(s) => s,
+            None => {
+                let width: u64 = self
+                    .camera
+                    .get("Width")?
+                    .parse()
+                    .map_err(|e| GenicamError::parse(format!("Width: {e}")))?;
+                let height: u64 = self
+                    .camera
+                    .get("Height")?
+                    .parse()
+                    .map_err(|e| GenicamError::parse(format!("Height: {e}")))?;
+                let pf_str = self.camera.get("PixelFormat")?;
+                let bpp: u64 = match pf_str.as_str() {
+                    "RGB8Packed" | "RGB8" | "BGR8" | "BGR8Packed" => 3,
+                    "Mono16" | "BayerRG16" | "BayerGB16" | "BayerGR16" | "BayerBG16" => 2,
+                    _ => 1,
+                };
+                width * height * bpp
+            }
+        };
+
+        let mut device = self.camera.transport().lock_device()?;
+        let stream = device
+            .open_stream(payload_size)
+            .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+        Ok(U3vFrameStream::start(stream))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

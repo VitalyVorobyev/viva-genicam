@@ -105,6 +105,9 @@ pub use events::{Event, EventStream};
 pub use frame::Frame;
 pub use gige::action::{AckSummary, ActionParams};
 pub use stream::{FrameStream, Stream, StreamBuilder, StreamDest};
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub use stream::{U3vFrameStream, U3vStreamBuilder};
 pub use time::TimeSync;
 
 /// Error type produced by the high level GenICam facade.

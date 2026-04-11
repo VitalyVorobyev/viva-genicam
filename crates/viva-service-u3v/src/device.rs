@@ -2,29 +2,28 @@
 
 use std::sync::{Arc, Mutex};
 
-use viva_fake_u3v::FakeU3vTransport;
 use viva_genicam::{Camera, GenicamError, U3vRegisterIo};
 use viva_service::device::DeviceOps;
 use viva_u3v::stream::U3vStream;
+use viva_u3v::usb::UsbTransfer;
 
-/// Device handle for a USB3 Vision camera.
-#[allow(dead_code)]
-pub struct U3vDeviceHandle {
-    camera: Arc<Mutex<Camera<U3vRegisterIo<FakeU3vTransport>>>>,
+/// Device handle for a USB3 Vision camera, generic over the USB transport.
+pub struct U3vDeviceHandle<T: UsbTransfer + 'static> {
+    camera: Arc<Mutex<Camera<U3vRegisterIo<T>>>>,
     raw_xml: String,
     device_id: String,
     /// Shared transport for streaming (same Arc used by the control channel).
-    transport: Arc<FakeU3vTransport>,
+    transport: Arc<T>,
     stream_ep: Option<u8>,
 }
 
-impl U3vDeviceHandle {
+impl<T: UsbTransfer + 'static> U3vDeviceHandle<T> {
     /// Create a handle from a pre-built Camera + XML.
     pub fn new(
-        camera: Camera<U3vRegisterIo<FakeU3vTransport>>,
+        camera: Camera<U3vRegisterIo<T>>,
         xml: String,
         device_id: String,
-        transport: Arc<FakeU3vTransport>,
+        transport: Arc<T>,
         stream_ep: Option<u8>,
     ) -> Self {
         Self {
@@ -37,8 +36,7 @@ impl U3vDeviceHandle {
     }
 
     /// Open a U3V stream for frame reception.
-    #[allow(dead_code)]
-    pub fn open_stream(&self, payload_size: usize) -> Option<U3vStream<FakeU3vTransport>> {
+    pub fn open_stream(&self, payload_size: usize) -> Option<U3vStream<T>> {
         let ep = self.stream_ep?;
         Some(U3vStream::new(
             self.transport.clone(),
@@ -51,7 +49,7 @@ impl U3vDeviceHandle {
 }
 
 #[async_trait::async_trait]
-impl DeviceOps for U3vDeviceHandle {
+impl<T: UsbTransfer + 'static> DeviceOps for U3vDeviceHandle<T> {
     fn device_id(&self) -> &str {
         &self.device_id
     }

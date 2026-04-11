@@ -16,6 +16,8 @@ const GVCP_CMD_KEY: u8 = 0x42;
 
 // GVCP command opcodes
 const DISCOVERY_CMD: u16 = 0x0002;
+const FORCEIP_CMD: u16 = 0x0004;
+const FORCEIP_ACK: u16 = 0x0005;
 const READREG_CMD: u16 = 0x0080;
 const WRITEREG_CMD: u16 = 0x0082;
 const READMEM_CMD: u16 = 0x0084;
@@ -68,6 +70,9 @@ pub async fn run(
                 let resp = build_discovery_ack(request_id, bind_ip);
                 let _ = socket.send_to(&resp, peer).await;
                 debug!(%peer, "discovery response sent");
+            }
+            FORCEIP_CMD => {
+                handle_forceip(&socket, peer, request_id, payload, bind_ip).await;
             }
             READREG_CMD => {
                 handle_readreg(&socket, peer, request_id, payload, &regs).await;
@@ -285,6 +290,54 @@ async fn handle_writemem(
     let resp = build_ack(WRITEMEM_ACK, request_id, &resp_payload);
     let _ = socket.send_to(&resp, peer).await;
     trace!(%peer, addr = format!("0x{addr:x}"), len = data.len(), "WRITEMEM response");
+}
+
+async fn handle_forceip(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    request_id: u16,
+    payload: &[u8],
+    bind_ip: std::net::Ipv4Addr,
+) {
+    // FORCEIP payload: 56 bytes
+    // [0..2]   reserved
+    // [2..8]   target MAC address
+    // [8..20]  reserved
+    // [20..24] static IP
+    // [24..36] reserved
+    // [36..40] subnet mask
+    // [40..52] reserved
+    // [52..56] gateway
+    if payload.len() < 56 {
+        warn!(len = payload.len(), "FORCEIP payload too short");
+        return;
+    }
+
+    let target_mac = &payload[2..8];
+    let fake_mac: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
+    if target_mac != fake_mac {
+        debug!(
+            target = ?target_mac,
+            "FORCEIP: MAC mismatch, ignoring"
+        );
+        return;
+    }
+
+    let ip = std::net::Ipv4Addr::new(payload[20], payload[21], payload[22], payload[23]);
+    let subnet = std::net::Ipv4Addr::new(payload[36], payload[37], payload[38], payload[39]);
+    let gateway = std::net::Ipv4Addr::new(payload[52], payload[53], payload[54], payload[55]);
+
+    debug!(
+        %bind_ip,
+        %ip,
+        %subnet,
+        %gateway,
+        "FORCEIP accepted (fake camera ignores IP change)"
+    );
+
+    // Send FORCEIP_ACK (empty payload).
+    let resp = build_ack(FORCEIP_ACK, request_id, &[]);
+    let _ = socket.send_to(&resp, peer).await;
 }
 
 /// Check if a write targets an acquisition register and notify accordingly.

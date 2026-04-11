@@ -4,7 +4,9 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
-use viva_genapi_xml::{AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, NodeDecl, XmlModel};
+use viva_genapi_xml::{
+    AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, NodeDecl, Visibility, XmlModel,
+};
 
 use crate::bitops::{extract, insert};
 use crate::conversions::{
@@ -103,6 +105,18 @@ impl NodeMap {
             .collect()
     }
 
+    /// Return names of nodes visible at the given level or below.
+    ///
+    /// A node with `Visibility::Expert` is visible at level `Expert` and `Guru`,
+    /// but not at `Beginner`.
+    pub fn nodes_at_visibility(&self, level: Visibility) -> Vec<&str> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.visibility() <= level)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     /// Construct a [`NodeMap`] from an [`XmlModel`], validating SwissKnife expressions.
     pub fn try_from_xml(model: XmlModel) -> Result<Self, GenApiError> {
         let mut nodes = HashMap::new();
@@ -111,6 +125,7 @@ impl NodeMap {
             match decl {
                 NodeDecl::Integer {
                     name,
+                    meta,
                     addressing,
                     len,
                     access,
@@ -146,6 +161,7 @@ impl NodeMap {
                     }
                     let node = IntegerNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         len,
                         access,
@@ -167,6 +183,7 @@ impl NodeMap {
                 }
                 NodeDecl::Float {
                     name,
+                    meta,
                     addressing,
                     access,
                     min,
@@ -192,6 +209,7 @@ impl NodeMap {
                     }
                     let node = FloatNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         access,
                         min,
@@ -208,6 +226,7 @@ impl NodeMap {
                 }
                 NodeDecl::Enum {
                     name,
+                    meta,
                     addressing,
                     access,
                     entries,
@@ -244,6 +263,7 @@ impl NodeMap {
                     providers.sort();
                     let node = EnumNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         access,
                         pvalue,
@@ -259,6 +279,7 @@ impl NodeMap {
                 }
                 NodeDecl::Boolean {
                     name,
+                    meta,
                     addressing,
                     len,
                     access,
@@ -283,6 +304,7 @@ impl NodeMap {
                     }
                     let node = BooleanNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         len,
                         access,
@@ -299,6 +321,7 @@ impl NodeMap {
                 }
                 NodeDecl::Command {
                     name,
+                    meta,
                     address,
                     len,
                     pvalue,
@@ -309,6 +332,7 @@ impl NodeMap {
                     }
                     let node = CommandNode {
                         name: name.clone(),
+                        meta,
                         address,
                         len,
                         pvalue,
@@ -316,15 +340,21 @@ impl NodeMap {
                     };
                     nodes.insert(name, Node::Command(node));
                 }
-                NodeDecl::Category { name, children } => {
+                NodeDecl::Category {
+                    name,
+                    meta,
+                    children,
+                } => {
                     let node = CategoryNode {
                         name: name.clone(),
+                        meta,
                         children,
                     };
                     nodes.insert(name, Node::Category(node));
                 }
                 NodeDecl::SwissKnife(decl) => {
                     let name = decl.name;
+                    let meta = decl.meta;
                     let expr = decl.expr;
                     let variables = decl.variables;
                     let output = decl.output;
@@ -350,6 +380,7 @@ impl NodeMap {
                     }
                     let node = SkNode {
                         name: name.clone(),
+                        meta,
                         output,
                         ast,
                         vars: variables,
@@ -393,6 +424,7 @@ impl NodeMap {
                         .push(name.clone());
                     let node = ConverterNode {
                         name: name.clone(),
+                        meta: decl.meta,
                         p_value: decl.p_value,
                         ast_to,
                         ast_from,
@@ -438,6 +470,7 @@ impl NodeMap {
                         .push(name.clone());
                     let node = IntConverterNode {
                         name: name.clone(),
+                        meta: decl.meta,
                         p_value: decl.p_value,
                         ast_to,
                         ast_from,
@@ -453,6 +486,7 @@ impl NodeMap {
                     register_addressing_dependency(&mut dependents, &name, &decl.addressing);
                     let node = StringNode {
                         name: name.clone(),
+                        meta: decl.meta,
                         addressing: decl.addressing,
                         access: decl.access,
                         cache: std::cell::RefCell::new(None),

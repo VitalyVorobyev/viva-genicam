@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{ArgAction, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -12,6 +12,7 @@ use viva_camctl::cmd_get;
 use viva_camctl::cmd_list;
 use viva_camctl::cmd_set;
 use viva_camctl::cmd_stream::{self, StreamArgs};
+use viva_camctl::cmd_usb;
 
 #[derive(Parser, Debug)]
 #[command(name = "viva-camctl", version, about = "GenICam CLI")]
@@ -126,6 +127,24 @@ enum Cmd {
         #[arg(long)]
         json_out: Option<PathBuf>,
     },
+    /// Discover USB3 Vision cameras
+    ListUsb,
+    /// Read a feature from a USB3 Vision camera
+    GetUsb {
+        #[arg(long)]
+        index: Option<usize>,
+        #[arg(long)]
+        name: String,
+    },
+    /// Write a feature to a USB3 Vision camera
+    SetUsb {
+        #[arg(long)]
+        index: Option<usize>,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        value: String,
+    },
 }
 
 #[tokio::main]
@@ -231,6 +250,9 @@ async fn main() -> Result<()> {
             };
             cmd_bench::run(args, json).await?
         }
+        Cmd::ListUsb => cmd_usb::run_list(json)?,
+        Cmd::GetUsb { index, name } => cmd_usb::run_get(index, name, json)?,
+        Cmd::SetUsb { index, name, value } => cmd_usb::run_set(index, name, value, json)?,
     };
 
     Ok(())

@@ -1,7 +1,7 @@
 //! Parsers for Converter, IntConverter, and StringReg nodes.
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use super::TAG_P_VALUE;
 use crate::builders::AddressingBuilder;
@@ -102,7 +102,7 @@ pub fn parse_converter(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Converter node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}
@@ -224,7 +224,7 @@ pub fn parse_int_converter(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated IntConverter node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}
@@ -310,7 +310,7 @@ pub fn parse_string(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated String node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}

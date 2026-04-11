@@ -2,8 +2,8 @@ use std::env;
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 
-use viva_genicam::gige::action::{send_action, ActionParams};
 use viva_genicam::gige::GVCP_PORT;
+use viva_genicam::gige::action::{ActionParams, send_action};
 
 fn parse_u32_arg(value: &str) -> Result<u32, Box<dyn Error>> {
     let trimmed = value.trim();

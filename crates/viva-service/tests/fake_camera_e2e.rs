@@ -16,10 +16,10 @@ use viva_service::nodes;
 use viva_service::status;
 use viva_service::xml;
 
-use tokio::sync::{watch, Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use viva_fake_gige::FakeCamera;
 use viva_zenoh_api::frame_header::FrameHeader;
-use viva_zenoh_api::{keys, AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse};
+use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse, keys};
 
 // ---------------------------------------------------------------------------
 // Fake camera guard with global port lock
@@ -93,7 +93,7 @@ async fn spawn_service_tasks(
     let device_id = device.device_id().to_string();
 
     status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, &device).await;
+    nodes::publish_initial_values(&session, device.as_ref()).await;
 
     vec![
         tokio::spawn(xml::run(

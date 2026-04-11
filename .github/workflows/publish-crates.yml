@@ -1,0 +1,104 @@
+name: Publish Rust crates (crates.io)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: crates-io
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify versions match tag (vX.Y.Z)
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          WS_VER=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "
+          import sys, json
+          pkgs = json.load(sys.stdin)['packages']
+          root = next(p for p in pkgs if p['name'] == 'viva-genicam')
+          print(root['version'])
+          ")
+          echo "tag version:       $TAG"
+          echo "workspace version: $WS_VER"
+          if [ "$TAG" != "$WS_VER" ]; then
+            echo "::error::Tag version ($TAG) does not match workspace version ($WS_VER)"
+            exit 1
+          fi
+
+      - name: Guard first release (manual publish required once)
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "genicam-rs-ci/${GITHUB_RUN_ID}" \
+            "https://index.crates.io/vi/va/viva-gencp")
+
+          if [ "$STATUS" = "404" ]; then
+            echo "::error title=First release requires manual publish::None of the viva-* crates exist on crates.io yet. Trusted Publishing cannot perform the first publish. Run the publish commands locally with a scoped token, then use this workflow for subsequent tags."
+            exit 1
+          fi
+
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning title=crates.io index check skipped::Could not verify crate existence (HTTP $STATUS). Continuing; cargo will perform final validation."
+          fi
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Authenticate to crates.io via Trusted Publishing (OIDC)
+        id: cratesio
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          publish() {
+            echo "::group::Publishing $1"
+            cargo publish -p "$1" --locked
+            echo "::endgroup::"
+            echo "Waiting for crates.io index propagation..."
+            sleep 30
+          }
+
+          # Level 0: no internal dependencies
+          publish viva-gencp
+          publish viva-pfnc
+          publish viva-sfnc
+          publish viva-genapi-xml
+          publish viva-zenoh-api
+
+          # Level 1: single internal dependency
+          publish viva-genapi
+          publish viva-gige
+          publish viva-u3v
+
+          # Level 2: facade (depends on all above)
+          publish viva-genicam
+
+          # Level 3: service layer
+          publish viva-service
+
+          echo "All 10 crates published successfully."

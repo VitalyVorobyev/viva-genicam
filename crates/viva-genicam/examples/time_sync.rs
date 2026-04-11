@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 use viva_genicam::genapi::{NodeMap, RegisterIo};
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::{self, sfnc, Camera, GenicamError, GigeRegisterIo};
+use viva_genicam::{self, Camera, GenicamError, GigeRegisterIo, sfnc};
 
 #[derive(Debug)]
 struct Args {

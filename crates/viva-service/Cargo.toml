@@ -1,10 +1,12 @@
 [package]
 name = "viva-service"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 description = "Zenoh bridge exposing GenICam cameras as network-accessible services"
-license = "MIT"
-repository = "https://github.com/VitalyVorobyev/genicam-rs"
 readme = "README.md"
 keywords = ["genicam", "zenoh", "vision", "camera", "gige"]
 categories = ["hardware-support", "network-programming"]
@@ -25,12 +27,13 @@ path = "src/main.rs"
 viva-genicam = { version = "0.1.0", path = "../viva-genicam" }
 viva-zenoh-api = { version = "0.1.0", path = "../viva-zenoh-api" }
 zenoh = "1"
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "signal"] }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 viva-fake-gige = { path = "../viva-fake-gige" }

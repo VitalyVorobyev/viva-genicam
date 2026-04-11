@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tracing::{info, warn};
-use viva_zenoh_api::{keys, DeviceStatus};
+use viva_zenoh_api::{DeviceStatus, keys};
 use zenoh::Session;
 
 /// Publish a connected status for the device.

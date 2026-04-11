@@ -35,21 +35,27 @@ jobs:
       - name: Tests (release)
         run: cargo test --workspace --all-targets --all-features --release
 
-      - name: Package crates
+      - name: Package published crates
         run: |
-          cargo package -p viva-gencp --locked
-          cargo package -p viva-genapi-xml --locked
+          for crate in viva-gencp viva-pfnc viva-sfnc viva-genapi-xml viva-genapi \
+                       viva-gige viva-u3v viva-genicam viva-zenoh-api viva-service; do
+            cargo package -p "$crate" --locked
+          done
 
       - name: Build release binaries
-        run: cargo build --release --locked --bin genicam-rs
+        run: cargo build --release --locked -p viva-camctl -p viva-service
 
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          BIN_NAME="genicam-rs-${{ github.ref_name }}"
-          cp target/release/genicam-rs "dist/${BIN_NAME}"
-          tar -czf "dist/${BIN_NAME}-x86_64-unknown-linux-gnu.tar.gz" -C dist "${BIN_NAME}"
-          rm "dist/${BIN_NAME}"
+          TAG="${{ github.ref_name }}"
+          for bin in viva-camctl viva-service; do
+            cp "target/release/$bin" "dist/${bin}-${TAG}-x86_64-unknown-linux-gnu"
+          done
+          tar -czf "dist/genicam-rs-${TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            -C dist \
+            "viva-camctl-${TAG}-x86_64-unknown-linux-gnu" \
+            "viva-service-${TAG}-x86_64-unknown-linux-gnu"
           cp target/package/*.crate dist/
           sha256sum dist/* > dist/SHA256SUMS.txt
 

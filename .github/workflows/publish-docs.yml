@@ -43,7 +43,7 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: |
           cargo doc --workspace --all-features --no-deps
-          echo '<meta http-equiv="refresh" content="0; url=genicam/index.html">' > target/doc/index.html
+          echo '<meta http-equiv="refresh" content="0; url=viva_genicam/index.html">' > target/doc/index.html
           mdbook build book
 
       - name: Assemble Pages artifact

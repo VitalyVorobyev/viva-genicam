@@ -5,16 +5,16 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use viva_zenoh_api::{
-    keys, BulkReadRequest, BulkReadResponse, NodeOpResponse, NodeSetRequest, NodeValueUpdate,
+    BulkReadRequest, BulkReadResponse, NodeOpResponse, NodeSetRequest, NodeValueUpdate, keys,
 };
 use zenoh::Session;
 
-use crate::device::DeviceHandle;
+use crate::device::DeviceOps;
 
 /// Declare a queryable for node set operations.
-pub async fn run_set_queryable(
+pub async fn run_set_queryable<D: DeviceOps>(
     session: Arc<Session>,
-    device: Arc<DeviceHandle>,
+    device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let device_id = device.device_id().to_string();
@@ -110,9 +110,9 @@ pub async fn run_set_queryable(
 }
 
 /// Declare a queryable for command execution.
-pub async fn run_execute_queryable(
+pub async fn run_execute_queryable<D: DeviceOps>(
     session: Arc<Session>,
-    device: Arc<DeviceHandle>,
+    device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let device_id = device.device_id().to_string();
@@ -165,9 +165,9 @@ pub async fn run_execute_queryable(
 }
 
 /// Declare a queryable for bulk node reads.
-pub async fn run_bulk_read_queryable(
+pub async fn run_bulk_read_queryable<D: DeviceOps>(
     session: Arc<Session>,
-    device: Arc<DeviceHandle>,
+    device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let device_id = device.device_id().to_string();
@@ -239,7 +239,7 @@ pub async fn run_bulk_read_queryable(
 }
 
 /// Publish initial values for common SFNC nodes after device connection.
-pub async fn publish_initial_values(session: &Session, device: &crate::device::DeviceHandle) {
+pub async fn publish_initial_values<D: DeviceOps>(session: &Session, device: &D) {
     let device_id = device.device_id();
     // Read and publish key SFNC feature values.
     let sfnc_nodes = [

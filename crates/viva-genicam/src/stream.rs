@@ -26,12 +26,12 @@ use tokio::net::UdpSocket;
 use tracing::{debug, info, trace, warn};
 use viva_pfnc::PixelFormat;
 
+use crate::GenicamError;
 use crate::frame::Frame;
 use crate::time::TimeSync;
-use crate::GenicamError;
 use viva_gige::gvcp::{GigeDevice, StreamParams};
 use viva_gige::gvsp::{self, GvspPacket, PacketBitmap, StreamConfig};
-use viva_gige::nic::{self, Iface, McOptions, DEFAULT_RCVBUF_BYTES};
+use viva_gige::nic::{self, DEFAULT_RCVBUF_BYTES, Iface, McOptions};
 use viva_gige::stats::{StreamStats, StreamStatsAccumulator};
 
 pub use viva_gige::gvsp::StreamDest;

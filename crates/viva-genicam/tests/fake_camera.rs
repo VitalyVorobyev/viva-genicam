@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[allow(clippy::single_component_path_imports)]
 use viva_genapi_xml;
-use viva_genicam::{connect_gige, connect_gige_with_xml, gige, Camera, GigeRegisterIo};
+use viva_genicam::{Camera, GigeRegisterIo, connect_gige, connect_gige_with_xml, gige};
 
 /// Helper: discover the fake camera via loopback.
 async fn discover_fake() -> gige::DeviceInfo {

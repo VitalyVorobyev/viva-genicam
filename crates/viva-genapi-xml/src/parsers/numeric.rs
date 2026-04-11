@@ -1,15 +1,14 @@
 //! Parsers for Integer and Float nodes.
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    handle_addressing_empty, handle_addressing_start, handle_p_selected_empty,
-    handle_p_selected_start, handle_selected_empty, handle_selected_start, SelectorState, TAG_BIT,
-    TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS,
-    TAG_VALUE,
+    SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK,
+    TAG_MSB, TAG_P_ADDRESS, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
+    handle_p_selected_empty, handle_p_selected_start, handle_selected_empty, handle_selected_start,
 };
-use crate::builders::{addressing_lengths, AddressingBuilder, BitfieldBuilder};
+use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
     attribute_value, attribute_value_required, parse_f64, parse_i64, parse_scale, parse_u64,
     read_text_start, skip_element,
@@ -234,7 +233,7 @@ pub fn parse_integer(
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Integer node {name}"
-                )))
+                )));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}
@@ -389,7 +388,7 @@ pub fn parse_float(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!("unterminated Float node {name}")))
+                return Err(XmlError::Invalid(format!("unterminated Float node {name}")));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             _ => {}

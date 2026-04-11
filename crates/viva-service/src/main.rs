@@ -178,7 +178,7 @@ async fn spawn_device_tasks(
 
     // Publish connected status.
     status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, &device).await;
+    nodes::publish_initial_values(&session, device.as_ref()).await;
 
     vec![
         tokio::spawn(xml::run(
@@ -212,7 +212,7 @@ async fn spawn_device_tasks(
 }
 
 async fn publish_announce(session: &zenoh::Session, device_id: &str, model: &str) {
-    use viva_zenoh_api::{keys, DeviceAnnounce, API_VERSION};
+    use viva_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
 
     let announce = DeviceAnnounce {
         id: device_id.to_string(),

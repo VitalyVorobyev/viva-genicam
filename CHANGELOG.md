@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-04-10
 
 Initial public release of the genicam-rs workspace.
 
@@ -14,8 +14,9 @@ Initial public release of the genicam-rs workspace.
 - **viva-genicam** -- High-level facade crate with `Camera<T>`, discovery, streaming, events, and action commands
 - **viva-gige** -- GigE Vision transport layer: GVCP discovery, GenCP register I/O, GVSP streaming with resend and reassembly
 - **viva-genapi** -- In-memory GenApi node map with typed feature access (Integer, Float, Enum, Boolean, Command, SwissKnife, Converter, String)
-- **genapi-xml** -- GenICam XML parsing into an intermediate representation with async XML fetch
+- **viva-genapi-xml** -- GenICam XML parsing into an intermediate representation with async XML fetch
 - **viva-gencp** -- Transport-agnostic GenCP protocol encode/decode
+- **viva-u3v** -- USB3 Vision transport: bootstrap registers, GenCP-over-USB control, and bulk streaming
 - **viva-pfnc** -- Pixel Format Naming Convention (PFNC) tables and helpers
 - **viva-sfnc** -- Standard Feature Naming Convention (SFNC) string constants
 - **viva-zenoh-api** -- Shared Zenoh API payload types (no Zenoh dependency)
@@ -37,3 +38,6 @@ Initial public release of the genicam-rs workspace.
 ### Testing
 
 - `viva-fake-gige` -- In-process fake GigE Vision camera for self-contained integration testing (no external dependencies required)
+- `viva-fake-u3v` -- In-process fake USB3 Vision camera for testing
+
+[0.1.0]: https://github.com/VitalyVorobyev/genicam-rs/releases/tag/v0.1.0

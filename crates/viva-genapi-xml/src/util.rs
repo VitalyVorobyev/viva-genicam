@@ -1,8 +1,8 @@
 //! Low-level parsing utilities for text extraction and number conversion.
 
+use quick_xml::Reader;
 use quick_xml::events::BytesStart;
 use quick_xml::name::QName;
-use quick_xml::Reader;
 
 use crate::XmlError;
 

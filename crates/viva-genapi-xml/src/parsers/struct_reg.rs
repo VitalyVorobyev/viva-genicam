@@ -3,8 +3,8 @@
 //! Each `StructEntry` becomes a separate `NodeDecl::Integer` sharing the same
 //! register address but with unique bitfield metadata.
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use crate::util::{attribute_value_required, parse_u64, read_text_start, skip_element};
 use crate::{AccessMode, Addressing, BitField, ByteOrder, NodeDecl, XmlError};

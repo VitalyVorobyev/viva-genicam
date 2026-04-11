@@ -14,12 +14,12 @@ pub use struct_reg::parse_struct_reg;
 pub use swissknife::parse_swissknife;
 pub use symbolic::{parse_boolean, parse_enum};
 
-use quick_xml::events::BytesStart;
 use quick_xml::Reader;
+use quick_xml::events::BytesStart;
 
+use crate::XmlError;
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, parse_u64, read_text_start};
-use crate::XmlError;
 
 /// XML element name referencing another node that provides an address.
 pub const TAG_P_ADDRESS: &[u8] = b"pAddress";

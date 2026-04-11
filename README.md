@@ -1,213 +1,178 @@
-# genicam-rs
+<p align="center">
+  <img src="assets/viva-genicam-logo-and-text.svg" alt="viva genicam" width="360">
+</p>
 
-Pure Rust building blocks for **GenICam** with an **Ethernet-first (GigE Vision)** focus.  
-Cargo workspace, modular crates (GenCP, GVCP/GVSP, GenApi core), and small examples.
+<p align="center">
+  Pure Rust building blocks for <b>GenICam</b> with an <b>Ethernet-first (GigE Vision)</b> focus.
+</p>
 
-## Current status (Apr 2026)
-  * ✅ Discovery (GVCP) on selected NICs; enumerate devices. Loopback support for simulated cameras.
-  * ✅ Control path (GVCP): read/write device memory; fetch GenICam XML. Correct GVCP wire format.
-  * ✅ GenApi (Tier-1): NodeMap (Integer/Float/Enum/Bool/Command/Category), ranges, access modes.
-  * ✅ GenApi (Tier-2): Converter, IntConverter, String, IntReg, MaskedIntReg nodes.
-  * ✅ pValue delegation: Integer, Float, Enum, Boolean, Command nodes delegate to backing registers.
-  * ✅ SwissKnife: full expression support (arithmetic, comparisons, ternary, logical, bitwise, math functions, Formula alias).
-  * ✅ Selector-based address switching for common features (e.g., `GainSelector`).
-  * ✅ High-level streaming API: `FrameStream` async iterator with auto-resend.
-  * ✅ `connect_gige()` / `connect_gige_with_xml()` for camera connection with auto XML fetch.
-  * ✅ Streaming (GVSP): packet reassembly, resend, MTU/packet size & delay, backpressure, stats.
-  * ✅ Events & actions: message channel events; action commands (synchronization).
-  * ✅ Time mapping & chunks: device↔host timestamp mapping; chunk data parsing.
-  * ✅ **Sensor service** (`viva-service`): Zenoh bridge for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) — discovery, XML, node read/write, acquisition control, frame streaming.
-  * ✅ Self-contained integration tests with `viva-fake-gige` (in-process fake camera, no external tools).
-  * ✅ macOS support: `Iface::from_system`, loopback discovery.
-  * USB3 Vision transport (planned).
+<p align="center">
+  <a href="https://github.com/VitalyVorobyev/genicam-rs/actions/workflows/ci.yml"><img src="https://github.com/VitalyVorobyev/genicam-rs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/viva-genicam"><img src="https://img.shields.io/crates/v/viva-genicam.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/viva-genicam"><img src="https://docs.rs/viva-genicam/badge.svg" alt="docs.rs"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+> **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
+> Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
+> GenICam is a trademark of EMVA.
+
+---
+
+## Features
+
+- **Discovery** -- find GigE Vision cameras on any network interface via GVCP broadcast
+- **Control** -- read and write device registers and GenApi features (Integer, Float, Enum, Boolean, Command, String, SwissKnife, Converter)
+- **Streaming** -- receive image frames over GVSP with packet resend, reassembly, and backpressure
+- **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
+- **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)
+- **Service bridge** -- expose cameras over [Zenoh](https://zenoh.io/) for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio)
+- **No hardware required** -- built-in fake cameras (`viva-fake-gige`, `viva-fake-u3v`) for testing and demos
+
+## Current status
+
+- GigE Vision: fully functional (discovery, control, streaming, events, actions, chunks)
+- USB3 Vision: transport layer implemented, integration in progress
+- GenApi: Tier-1 + Tier-2 nodes including pValue delegation and SwissKnife expressions
+- Self-contained integration tests (no external tools or hardware)
 
 ## Workspace layout
 
 ```
 crates/
-  viva-gencp/         # GenCP encode/decode
-  viva-gige/          # GigE Vision (GVCP/GVSP)
-  viva-genapi-xml/    # GenICam XML loader & schema-lite parser
-  viva-genapi/        # NodeMap & evaluation
-  viva-genicam/       # Public API facade
-  viva-service/       # Zenoh camera service for genicam-studio
-  viva-camctl/        # CLI binary
-  viva-pfnc/          # Pixel Format Naming Convention
-  viva-sfnc/          # Standard Feature Naming Convention
-  viva-zenoh-api/     # Shared Zenoh API payload types
-  viva-fake-gige/     # In-process fake camera for testing
-crates/viva-genicam/examples/   # Small demos (see below)
-crates/viva-genicam/tests/      # Integration tests
+  viva-gencp/          GenCP encode/decode (transport-agnostic)
+  viva-gige/           GigE Vision transport (GVCP/GVSP)
+  viva-u3v/            USB3 Vision transport
+  viva-genapi-xml/     GenICam XML parser
+  viva-genapi/         GenApi node map & evaluation engine
+  viva-genicam/        Public API facade (start here)
+  viva-pfnc/           Pixel Format Naming Convention tables
+  viva-sfnc/           Standard Feature Naming Convention constants
+  viva-zenoh-api/      Shared Zenoh wire types (no Zenoh dependency)
+  viva-service/        Zenoh bridge: GigE cameras -> genicam-studio
+  viva-service-u3v/    Zenoh bridge: U3V cameras -> genicam-studio
+  viva-camctl/         CLI binary
+  viva-fake-gige/      Fake GigE camera for testing
+  viva-fake-u3v/       Fake U3V camera for testing
+```
+
+## Quick start
+
+```bash
+cargo add viva-genicam
+```
+
+```rust
+use viva_genicam::{gige, Camera};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Discover cameras on the network
+    let devices = gige::discover(Duration::from_secs(1)).await?;
+    println!("Found {} cameras", devices.len());
+
+    // Connect to the first camera
+    let (mut camera, _xml) = viva_genicam::connect_gige(&devices[0]).await?;
+
+    // Read and write features
+    let exposure = camera.get("ExposureTime")?;
+    println!("ExposureTime = {exposure}");
+    camera.set("ExposureTime", "5000")?;
+    Ok(())
+}
 ```
 
 ## Documentation
 
-The main user & contributor documentation lives in the **mdBook** and the
-generated **Rust API docs**.
+- **[GenICam standards introduction](doc/genicam.md)** -- what GenApi, GenCP, GVCP, SFNC, and PFNC are and how they map to crates
+- **[Book (mdBook)](https://vitalyvorobyev.github.io/genicam-rs/)** -- tutorials, architecture, networking cookbook
+- **[API reference (docs.rs)](https://docs.rs/viva-genicam)** -- generated Rust API docs
+- **[Examples](crates/viva-genicam/examples/)** -- 17 runnable examples covering discovery, streaming, events, chunks, and more
+- **[Roadmap](doc/roadmap.md)** -- what's done, what's planned
 
-- **Book (mdBook)** – sources are under [`book/`](book/).  
-  Recommended starting points:
-  - [`book/src/welcome.md`](book/src/welcome.md) – project overview.
-  - [`book/src/tutorials/README.md`](book/src/tutorials/README.md) – step-by-step tutorials
-    (discovery, registers, XML, streaming).
+## Prerequisites
 
-- **Rust API docs** – generated with:
-
-  ```bash
-  cargo doc --workspace --all-features
-
-and served locally from target/doc, or published via GitHub Pages if you
-enable that in CI.
-
-For day-to-day usage, start with the Tutorials section of the book and only
-dive into rustdoc when you need details of specific types and functions.
-
-## Prereqs
-
-  * Rust 1.75+ (pinned in `rust-toolchain.toml`)
-  * Windows / Linux / macOS (tested on recent 64-bit versions; see docs for OS-specific notes)
-  * Network:
-    * Allow UDP broadcast on your capture NIC for discovery
-    * Optional: enable jumbo frames if you plan to test high throughput
+- Rust 1.85+ (edition 2024)
+- Windows / Linux / macOS
+- Network: allow UDP broadcast on your capture NIC for discovery. Optional: jumbo frames for high throughput.
 
 ## Build & test
 
 ```bash
-# Build everything
 cargo build --workspace
-
-# Run all tests
 cargo test --workspace
-
-# Generate docs locally
-cargo doc --workspace --no-deps
+cargo doc --workspace --all-features --no-deps
 ```
 
 ## Run examples
 
-Examples live under the `viva-genicam` crate. Run them via the facade crate target:
-
-- **Discover devices (GVCP broadcast):**
-
 ```bash
+# Discover cameras
 cargo run -p viva-genicam --example list_cameras
-```
 
-- **Fetch XML & print minimal metadata (control path):**
-
-```bash
+# Read/write features
 cargo run -p viva-genicam --example get_set_feature
-```
 
-- **Grab frames (GVSP):**
-
-```bash
+# Grab frames
 cargo run -p viva-genicam --example grab_gige
+
+# Zero-hardware demo (uses built-in fake camera)
+cargo run -p viva-genicam --example demo_fake_camera
 ```
-
-- **Events:**
-
-```bash
-cargo run -p viva-genicam --example events_gige
-```
-
-- **Action command (broadcast):**
-
-```bash
-cargo run -p viva-genicam --example action_trigger
-```
-
-- **Timestamp mapping:**
-
-```bash
-cargo run -p viva-genicam --example time_sync
-```
-
-- **Selectors demo:**
-
-```bash
-cargo run -p viva-genicam --example selectors_demo
-```
-
-See also: the [Tutorials](book/src/tutorials/README.md) section of the book
-  for more complete, step-by-step guides.
 
 ## viva-camctl CLI
 
-The workspace provides a `viva-camctl` binary offering common camera control
-operations from the command line. Enable more verbose logging with `-v` or
-`RUST_LOG`, prefer JSON output with `--json`, and use `--iface <IPv4>` to select
-the capture interface.
-
-Examples:
-
 ```bash
-# Discover GigE Vision cameras on the network
+# Discover GigE Vision cameras
 cargo run -p viva-camctl -- list
 
-# Inspect and configure GenApi features
+# Read a feature
 cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
+
+# Write a feature
 cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
 
-# Receive a GVSP stream, auto-negotiate packet size, and save the first two frames
+# Stream frames with auto packet-size negotiation
 cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 
-# Configure and read GVCP events
-cargo run -p viva-camctl -- events --iface 192.168.0.5 --enable FrameStart,ExposureEnd --count 5
-
-# Toggle chunk data features
-cargo run -p viva-camctl -- chunks --ip 192.168.0.10 --enable true --selectors Timestamp,ExposureTime
-
-# Run a sustained streaming benchmark with a JSON report
+# Sustained streaming benchmark
 cargo run -p viva-camctl -- bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
 ```
 
-For more examples and troubleshooting tips, see the
-[Discovery](book/src/tutorials/discovery.md)
-and [Streaming](book/src/tutorials/streaming.md) tutorials.
-
-## viva-service
-
-The `viva-service` binary bridges real GigE Vision cameras to
-[genicam-studio](https://github.com/VitalyVorobyev/genicam-studio) via Zenoh.
+## viva-service (Zenoh bridge)
 
 ```bash
-# Start the service (discovers cameras on the specified interface)
+# Start the GigE Vision service
 cargo run -p viva-service -- --iface en0
 
-# With verbose logging
-cargo run -p viva-service -- --iface en0 -vv
+# Start the USB3 Vision service with a fake camera
+cargo run -p viva-service-u3v -- --fake
 ```
 
-The service automatically discovers cameras, publishes device announcements,
-serves GenICam XML, handles node read/write queries, and streams frames over
-Zenoh when acquisition is started from genicam-studio.
+The service discovers cameras, publishes device announcements, serves GenICam XML,
+handles node read/write, and streams frames over Zenoh for
+[genicam-studio](https://github.com/VitalyVorobyev/genicam-studio).
 
 ## Integration testing
 
 Integration tests use the built-in `viva-fake-gige` camera simulator -- no
-external tools or hardware required. 15 tests cover the full stack: discovery,
-connection, XML parsing, feature read/write, command execution, frame streaming,
-and the Zenoh service bridge.
+external tools or hardware required.
 
 ```bash
-# Run all tests (fake camera starts automatically)
+# All tests (unit + integration + service e2e)
 cargo test --workspace
 
-# Run a self-contained demo (discovery → features → streaming)
+# Run a self-contained demo
 cargo run -p viva-genicam --example demo_fake_camera
 ```
 
 ## Troubleshooting
 
-- No devices found: check NIC/interface selection and host firewall (UDP broadcast).
-- Drops at high FPS: try jumbo frames, raise `SO_RCVBUF`, and enable packet delay.
-- Windows: run as admin, allow UDP in firewall rules; jumbo frames must be enabled per NIC.
+- **No devices found** -- check NIC/interface selection and host firewall (UDP broadcast on port 3956)
+- **Frame drops at high FPS** -- enable jumbo frames, raise `SO_RCVBUF`, enable inter-packet delay
+- **Windows** -- run as admin, allow UDP in firewall rules
 
 ## License
 
-MIT — see LICENSE.
-
-## Acknowledgements
-
-Standards: GenICam/GenApi (EMVA/A3), GigE Vision. Thanks to the open-source ecosystem for prior art and inspiration.
+MIT -- see [LICENSE](LICENSE).

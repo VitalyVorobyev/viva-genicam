@@ -1,7 +1,7 @@
 //! NodeMap implementation for runtime feature access.
 
 use std::cell::Cell;
-use std::collections::{hash_map::Entry as HashMapEntry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, NodeDecl, XmlModel};
@@ -16,7 +16,7 @@ use crate::nodes::{
     IntConverterNode, IntegerNode, Node, SkNode, StringNode,
 };
 use crate::swissknife::{
-    collect_identifiers, evaluate as eval_ast, parse_expression, EvalError as SkEvalError,
+    EvalError as SkEvalError, collect_identifiers, evaluate as eval_ast, parse_expression,
 };
 use crate::{GenApiError, RegisterIo, SkOutput};
 
@@ -1101,8 +1101,8 @@ impl NodeMap {
         io: &dyn RegisterIo,
         stack: &mut HashSet<String>,
     ) -> Result<f64, GenApiError> {
-        if let Some((value, gen)) = *node.cache.borrow() {
-            if gen == self.generation.get() {
+        if let Some((value, generation)) = *node.cache.borrow() {
+            if generation == self.generation.get() {
                 return Ok(value);
             }
         }
@@ -1277,8 +1277,8 @@ impl NodeMap {
     /// Read a Converter feature value (float) using the provided transport.
     pub fn get_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<f64, GenApiError> {
         let node = self.get_converter_node(name)?;
-        if let Some((value, gen)) = *node.cache.borrow() {
-            if gen == self.generation.get() {
+        if let Some((value, generation)) = *node.cache.borrow() {
+            if generation == self.generation.get() {
                 return Ok(value);
             }
         }
@@ -1291,8 +1291,8 @@ impl NodeMap {
     /// Read an IntConverter feature value (integer) using the provided transport.
     pub fn get_int_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
         let node = self.get_int_converter_node(name)?;
-        if let Some((value, gen)) = *node.cache.borrow() {
-            if gen == self.generation.get() {
+        if let Some((value, generation)) = *node.cache.borrow() {
+            if generation == self.generation.get() {
                 return Ok(value);
             }
         }
@@ -1306,8 +1306,8 @@ impl NodeMap {
     pub fn get_string(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_string_node(name)?;
         ensure_readable(&node.access, name)?;
-        if let Some((ref value, gen)) = *node.cache.borrow() {
-            if gen == self.generation.get() {
+        if let Some((ref value, generation)) = *node.cache.borrow() {
+            if generation == self.generation.get() {
                 return Ok(value.clone());
             }
         }

@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod frame_header;
-pub use frame_header::{FrameHeader, FrameHeaderError, FRAME_MAGIC, HEADER_SIZE};
+pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 
 // ── Discovery ────────────────────────────────────────────────────────────────
 

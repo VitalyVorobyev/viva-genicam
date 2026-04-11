@@ -1,10 +1,12 @@
 [package]
 name = "viva-genapi-xml"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 description = "GenICam XML retrieval and minimal parsing (schema, features)"
-license = "MIT"
-repository = "https://github.com/VitalyVorobyev/genicam-rs"
 readme = "README.md"
 keywords = ["genicam", "genapi", "xml", "vision"]
 categories = ["hardware-support", "network-programming", "science::robotics"]

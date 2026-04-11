@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::BytesMut;
 use serde::Serialize;
 use tokio::time::{self, Instant, MissedTickBehavior};
@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use viva_genicam::gige::gvsp::{self, GvspPacket};
 use viva_genicam::pfnc::PixelFormat;
-use viva_genicam::{parse_chunk_bytes, Frame, StreamBuilder, StreamDest};
+use viva_genicam::{Frame, StreamBuilder, StreamDest, parse_chunk_bytes};
 
 use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS};
 

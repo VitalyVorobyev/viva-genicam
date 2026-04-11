@@ -2,8 +2,8 @@
 
 use std::future::Future;
 
-use crate::util::parse_u64;
 use crate::XmlError;
+use crate::util::parse_u64;
 
 /// Address of the first URL register in the GigE Vision bootstrap register map.
 /// GigE Vision spec: GevFirstURL at 0x0200 (512 bytes max).
@@ -47,11 +47,7 @@ fn first_cstring(bytes: &[u8]) -> Option<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     let slice = &bytes[..end];
     let value = String::from_utf8_lossy(slice).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// Parsed URL location variants.

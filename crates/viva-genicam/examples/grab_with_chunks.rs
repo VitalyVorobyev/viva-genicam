@@ -8,15 +8,15 @@ use bytes::BytesMut;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use viva_genicam::genapi::NodeMap;
+use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::gige::gvsp::{self, GvspPacket};
 use viva_genicam::gige::nic::Iface;
-use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::sfnc;
-use viva_genicam::{gige::stats::StreamStats, pfnc::PixelFormat};
 use viva_genicam::{
-    parse_chunk_bytes, Camera, ChunkConfig, ChunkKind, ChunkValue, Frame, GenicamError,
-    GigeRegisterIo, StreamBuilder,
+    Camera, ChunkConfig, ChunkKind, ChunkValue, Frame, GenicamError, GigeRegisterIo, StreamBuilder,
+    parse_chunk_bytes,
 };
+use viva_genicam::{gige::stats::StreamStats, pfnc::PixelFormat};
 
 #[derive(Debug, Default)]
 struct Args {

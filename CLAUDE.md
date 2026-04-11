@@ -46,7 +46,8 @@ cargo run -p viva-camctl -- list
 **Layered design (bottom to top):**
 
 ```
-viva-service            - Zenoh bridge: real cameras → genicam-studio
+viva-service            - Zenoh bridge: GigE cameras → genicam-studio
+viva-service-u3v        - Zenoh bridge: U3V cameras → genicam-studio
     ↓
 viva-genicam (facade)   - End-user API: Camera<T>, discovery, streaming
     ↓
@@ -64,8 +65,10 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 - `viva-sfnc` - Standard Feature Naming Convention
 - `viva-zenoh-api` - Shared Zenoh wire types (no Zenoh dependency)
 - `viva-camctl` - CLI binary (not published)
-- `viva-service` - Zenoh camera service for genicam-studio
+- `viva-service` - GigE Zenoh camera service for genicam-studio
+- `viva-service-u3v` - U3V Zenoh camera service for genicam-studio (supports `--fake` mode)
 - `viva-fake-gige` - In-process fake GigE Vision camera for testing (not published)
+- `viva-fake-u3v` - In-process fake USB3 Vision camera for testing (not published)
 
 ## Key Abstractions
 
@@ -109,11 +112,17 @@ cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15 --pixel-format 
 # Use CLI to interact
 cargo run -p viva-camctl -- list --iface 127.0.0.1
 
-# E2E with studio (3 terminals)
+# E2E with studio — GigE (3 terminals)
 # T1: cargo run -p viva-fake-gige
 # T2: cargo run -p viva-service -- --iface lo0 --zenoh-config ../genicam-studio/config/zenoh-local.json5
 # T3: cd ../genicam-studio/apps/genicam-studio-tauri && cargo tauri dev
+
+# E2E with studio — USB3 Vision fake camera (2 terminals)
+# T1: cargo run -p viva-service-u3v -- --fake --zenoh-config ../genicam-studio/config/zenoh-local.json5
+# T2: cd ../genicam-studio/apps/genicam-studio-tauri && cargo tauri dev
 ```
+
+**Important**: The `--zenoh-config` flag pointing to `zenoh-local.json5` is required on the **service** side (both GigE and U3V) when connecting to genicam-studio. The studio loads its own Zenoh config automatically in dev mode (`cargo tauri dev`).
 
 ## Documentation
 

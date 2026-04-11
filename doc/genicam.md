@@ -1,78 +1,100 @@
-Implementing GenICam in Rust: Research & Planning
+# GenICam Standards: A Practical Introduction
 
-Overview of the GenICam Standard
+GenICam (Generic Interface for Cameras) is a set of EMVA standards that give industrial cameras a uniform control interface regardless of the physical connection. The same code can discover a GigE Vision camera over Ethernet and a USB3 Vision camera over USB -- the features, names, and access patterns are identical.
 
-GenICam (Generic Interface for Cameras) is an industry standard that provides a plug-and-play, uniform API for controlling industrial cameras and similar devices, regardless of the interface used ￼. In practice, this means you can use the same software library to communicate with a GigE Vision camera or a USB3 Vision camera in a consistent way. Modern machine vision cameras pack complex features (on-camera image processing, I/O control, etc.), and GenICam abstracts those via a standard interface rather than requiring low-level register fiddling for each camera model ￼.
+This document covers what you need to know to use genicam-rs effectively.
 
-Key GenICam Modules: GenICam is composed of several sub-standards, each addressing a part of the ecosystem:
-	•	GenApi (Generic API): Defines how a camera’s features are described in an XML descriptor file that the camera carries. The XML follows a defined schema and lists all features (e.g. Gain, Exposure Time) with their types, min/max, units, and inter-dependencies ￼ ￼. A GenICam library uses this to create a node map of features at runtime. The GenApi reference implementation (in C++) parses this XML and provides classes to read/write feature values via the camera’s registers ￼. Essentially, GenApi is the core that enables a self-describing camera: you read the camera’s XML and automatically know how to control it. Implementing GenApi in Rust means you’ll need to parse that XML schema and create an API (likely a set of node objects or properties) to get/set values.
-	•	SFNC (Standard Features Naming Convention): This is a companion specification listing standardized feature names and definitions. It ensures that common features are named consistently across cameras ￼ ￼. For example, “ExposureTime” or “AcquisitionStart” must use those exact names and types across all compliant cameras ￼. As a developer, you’d use the SFNC as a reference so your library recognizes standard features and perhaps provides conveniences for them. (There’s also PFNC for pixel format naming, ensuring pixel format codes are standard ￼.)
-	•	GenTL (Generic Transport Layer): This defines a common low-level API for detecting devices, accessing registers, streaming images, and handling events, independent of the underlying bus ￼. In other words, GenTL abstracts the transport layer. A GenTL Producer is typically a driver or library (often provided by camera vendors) that knows how to talk to cameras on a specific bus (GigE, USB3, etc.) and provides a standardized C API (.cti file) that any GenTL Consumer (application or SDK) can use ￼. For your Rust implementation, you may or may not choose to implement a GenTL producer interface, but understanding GenTL is valuable. At minimum, your library will need to perform the same tasks that GenTL covers: enumerating cameras, opening a connection, reading/writing registers, starting image streams, and delivering asynchronous events (like exposure end, trigger alerts, etc.) ￼.
-	•	GenCP (Generic Control Protocol): A standard packet format for device control transactions ￼. Rather than each interface reinventing how to read/write registers over the wire, GenCP specifies a common command structure. Both GigE Vision and USB3 Vision use GenCP for their control channel. In practice, you’ll implement GenCP to format commands (like read memory, write memory, etc.) and parse the camera’s responses on the control link.
-	•	GenDC (Generic Data Container): A newer module for a standardized container format for image or data payloads (useful if you want to support advanced cases like 3D point clouds in a generic way) ￼. This might be a lower priority unless you specifically need to support the GenDC standard for data interchange.
-	•	Other Modules: There are a few other pieces such as CLProtocol (applying GenICam to Camera Link interfaces) ￼, and FWUpdate (a standard method for firmware update) – these are more specialized. Initially you can focus on GenApi/GenTL/GenCP for core functionality, but be aware these extensions exist if you later support Camera Link or want a firmware upgrade feature.
+## The problem GenICam solves
 
-In summary, GenICam’s goal is to decouple camera control from the physical interface: your API code remains the same whether the camera is GigE, USB3, CoaXPress, etc. ￼. This uniformity is achieved by each camera exposing an on-board GenICam XML and by transport-specific drivers adhering to GenTL/GenCP standards.
+Every camera model has hundreds of hardware registers controlling exposure, gain, pixel format, I/O lines, and more. Without a standard, each vendor invents its own register layout and SDK. GenICam eliminates this by requiring every camera to carry a self-description (an XML file) that tells the host software exactly how to read and write its features.
 
-Range of Devices and Interfaces Covered
+## Key standards
 
-GenICam was designed primarily for industrial cameras, but it covers virtually all modern machine vision interface standards. If you implement GenICam support, you are potentially covering devices on the following interfaces:
-	•	GigE Vision cameras – Ethernet-based high-performance cameras. This is often the first target (as you mentioned).
-	•	USB3 Vision cameras – High-speed USB3-based cameras.
-	•	CoaXPress cameras – Using coax cables with frame grabbers, common in high-bandwidth applications.
-	•	Camera Link / Camera Link HS cameras – Older generation (Camera Link) and newer (CLHS) framegrabber-based cameras.
-	•	Others: GenICam compliance can extend to other transport layers as well. For instance, FireWire (IEEE-1394) cameras have been made GenICam-compliant by some vendors, and even MIPI CSI-2 cameras can use GenICam (Allied Vision announced GenICam support for CSI-2 cameras) ￼. Essentially, any device that can expose a register interface and an XML description could be made to work with GenICam, even if not officially one of the big four standards.
+### GenApi -- the feature model
 
-Importantly, the major interface standards today (GigE Vision, USB3 Vision, CoaXPress, Camera Link) all mandate GenICam compliance ￼. If a camera is “GigE Vision” certified, it implies it provides a GenICam XML and supports the GenCP protocol, etc. So by supporting those, your library will cover a very wide range of cameras (area scan, line scan, etc., from various manufacturers).
+Each camera stores an XML document describing its features: names, types, register addresses, value ranges, dependencies, and formulas. A GenApi library parses this XML into a **node map** -- an in-memory graph of typed feature nodes.
 
-Beyond cameras, GenICam can abstract other device types too. The standard itself notes GenICam could be used for any register-based device ￼. For example, the OOCI extension standardizes control of optical components (like lens or lights) via GenICam ￼. But to start, focus on cameras, since that’s the primary use-case and what GigE/USB3 Vision standards target.
+Common node types:
 
-Key Reference Documentation (API & Protocol)
+| Type | Example | Description |
+|------|---------|-------------|
+| Integer | `Width`, `Height` | Integer value with min/max/increment |
+| Float | `ExposureTime`, `Gain` | Floating-point value with unit |
+| Enumeration | `PixelFormat`, `TriggerMode` | Choice from named entries |
+| Boolean | `ChunkModeActive` | On/off toggle |
+| Command | `AcquisitionStart` | Trigger an action |
+| Category | `ImageFormatControl` | Groups related features |
 
-Since the official GenICam reference implementation (the EMVA GenApi library) is not open source, you’ll need to rely on specifications and third-party resources as your guides. Here are the essential references you should gather:
-	•	GenICam Standard Documents: The EMVA provides PDFs for each module of GenICam. In particular, download the GenApi Standard Document (which describes the XML schema, node types, and maybe some usage of the API) and the GenTL Standard Document ￼ ￼. These will be invaluable to understand expected functionality. The GenICam SFNC document will list all standardized feature names/types – useful to test your implementation against real camera feature sets. Likewise, the GenCP spec will detail the control protocol format (e.g., how to form read/write commands over UDP for GigE or over USB). These docs are available via the EMVA GenICam downloads page ￼ ￼.
-	•	Interface Specific Specs: GigE Vision and USB3 Vision themselves have standard docs (from the A3/Automate AIA committee). If possible, get the GigE Vision spec and USB3 Vision spec, as they describe device discovery, packet protocols, image streaming, etc. (Note: these specs may require membership or purchase, as they are not openly published, which is why open-source support has been historically tricky ￼). If you cannot obtain these directly, the Aravis project and other open libraries can serve as a blueprint (since they clearly implemented those protocols successfully).
-	•	Aravis (Open-Source C Library): Aravis￼ is a well-known GNOME-licensed C library for GenICam cameras, supporting GigE Vision and USB3 Vision ￼. Its source code and documentation can be a great reference to understand the GigE Vision GVCP/GVSP protocols (for control and streaming respectively) and USB3 Vision protocol details. For example, Aravis implements camera discovery via UDP, XML retrieval, packet resend mechanisms, etc., all in C that you can read. It’s also used in production by many, so it’s a proven reference. (There are Rust bindings for Aravis as well ￼, but since you want a pure Rust implementation, you’d focus on the concepts rather than using the binding.)
-	•	Rust GenICam Projects: In fact, a pure-Rust GenICam effort already exists in early form – the Cameleon project￼. Cameleon is an open-source Rust library aiming to support GenICam cameras with a safe API. Currently it supports USB3 Vision and plans to add GigE Vision ￼. You might not use Cameleon directly, but studying its design can jump-start your own. Notably, their project is split into multiple crates (modules), which likely reflects a clean architecture (see next section for details) ￼ ￼. The existence of Cameleon also indicates that implementing GenICam in Rust is feasible; you might even consider contributing instead of reinventing, or at least avoid pitfalls they discovered.
-	•	Camera SDK Documentation: It can be insightful to read the API documentation of established SDKs (like Basler’s Pylon, FLIR Spinnaker, or Allied Vision Vimba) to see how they expose GenICam features to users. For example, Basler/FLIR docs show classes like INodeMap, CIntegerPtr for integer features, etc. This isn’t to copy their APIs, but to ensure your library’s API is familiar and ergonomic. GenICam’s conceptual API to users typically revolves around grabbing a node map from a camera and then getting/setting feature nodes by name or via generated code. For instance, Spinnaker’s C++ API has camera->GetNodeMap()->GetNode("ExposureTime") etc., and then you cast to a number type and set a value. In Rust, you might design something more type-safe, but it’s useful to know how others present it.
-	•	Standard Feature Definitions: Keep the SFNC reference handy. When testing with real cameras, their GenICam XMLs will contain hundreds of features. The SFNC will tell you what each is supposed to do. This helps verify that your XML parser and node implementation are correct (e.g., that ExposureTime is a float in microseconds, usually with certain min/max). It also ensures your library doesn’t use conflicting names or types.
+Features can reference each other. A `SwissKnife` node computes values from formulas. A `Converter` applies linear or polynomial transforms. `pValue` delegation lets a high-level feature (e.g. `ExposureTime`) read from a raw register node transparently.
 
-In summary, arm yourself with the GenICam official PDFs (GenApi, GenTL, GenCP, SFNC) and use Aravis (C) and Cameleon (Rust) as concrete implementation references. These resources will serve as your unofficial API reference in lieu of the closed GenICam reference implementation. Be aware that implementing the full GenICam support is a non-trivial task – as one developer quipped, “vendors have used GenICam XML documents as a sort of domain specific programming language… the effort is comparable to implementing a web-browser from scratch” ￼. This highlights the importance of thoroughly understanding the specifications before diving in.
+**In genicam-rs:** `viva-genapi-xml` parses the XML, `viva-genapi` builds the node map and evaluates features.
 
-Project Organization and Design in Rust
+### GenCP -- the control protocol
 
-Designing a GenICam library requires careful modularization. Based on both the structure of the standard and successful projects (like the aforementioned Cameleon), a good organization would be:
-	•	Core GenICam Module (GenApi Parser): One part of your project should focus on the GenApi XML parsing and representation. This could be a crate (e.g. genicam-genapi) that knows how to load the camera’s XML (usually retrieved at runtime from the device) and parse it into an in-memory node graph. It would implement all the GenICam node types (Integer, Float, Enumeration, Boolean, Command, Category, etc.) and the logic tying them (for example, handling formula evaluation, conditional visibility, feature dependencies like Feature X is only writeable if Feature Y = true, etc.). This is arguably the most complex piece, as it’s effectively an interpreter for the camera’s feature model. Aim to get a basic parser running that can handle simple features, then gradually add support for advanced node features (like register formulas, concatenated register addresses, LUTs, etc.) as needed for the devices you target. This module should be written in pure Rust (e.g. using quick-xml or similar crate for XML) and be independent of any particular transport. In Cameleon, this role is filled by a cameleon-genapi crate ￼.
-	•	Transport Layer Modules: You will need separate components for each physical interface (GigE Vision, USB3 Vision, etc.). For example, you might have a gige module (or crate) and a u3v (USB3 Vision) module. Each implements the device discovery, connection, and I/O for that interface:
-	•	GigE Vision: Implement the GVCP (GigE Vision Control Protocol) over UDP – this includes device discovery (sending out a broadcast discovery packet and listening for camera replies), reading/writing registers via GenCP packets over UDP (usually on port 3956), and managing IP configuration (LLA, DHCP, etc., if needed). You’ll also implement GVSP (GigE Vision Streaming Protocol) over UDP for image data: this involves receiving image packets on a dedicated port, handling packet ordering and resend requests (cameras support resend if packets drop). This part can be tricky due to performance and packet loss handling, but since Rust is performant and has good networking support, it’s doable. You might use raw UDP sockets (and possibly multiple threads or async IO for receiving high-throughput image data).
-	•	USB3 Vision: Implement the USB3 Vision control protocol (which also uses GenCP, but over USB device endpoints) and the bulk data streaming. USB3 Vision cameras appear as USB devices with vendor-specific interfaces; typically you’ll use libusb (via the Rust rusb crate) to communicate. The control channel is usually a pair of bulk endpoints for GenCP commands and responses, and the image stream is another bulk or isochronous endpoint. Cameleon’s documentation notes that it uses libusb for U3V ￼. You’ll need to enumerate USB3 Vision devices (matching the USB Vision class GUIDs), claim interfaces, and then you can send GenCP commands to retrieve the XML, etc.
-	•	Future Transports: If you plan to extend to CoaXPress or Camera Link, be aware those typically involve hardware frame grabbers. CoaXPress frame grabbers often come with their own SDKs; implementing CoaXPress in software might require an interface card API or a substantial specification. That said, if you design your library with a common trait for transport (say, a trait that defines list_devices(), read_reg(), write_reg(), start_stream(), etc.), you can later plug in support for CoaXPress or others by writing a new backend that implements that trait. GenTL’s notion of abstract Interface/Device/Stream modules can guide you here – it formalizes the idea that each transport has a Factory (interface), Device, and Data Stream object with standard operations ￼.
-	•	High-Level API Module: On top of the GenApi core and transport modules, provide a user-facing API that ties it together. For example, you might have a Camera struct in Rust that encapsulates a specific device. The Camera would contain a handle to the device’s transport (for low-level reads/writes) and the GenApi node map (parsed from that camera’s XML). When a user calls something like camera.set("ExposureTime", 5000.0), your library would find the ExposureTime node in the node map, validate and convert the value, then use the transport module to write the corresponding register(s) in the camera. Similarly, a camera.start_acquisition() might internally start the stream and spawn a thread or async task to fetch images. Aim to make the high-level API ergonomic and rustic – for instance, you could expose strongly-typed getters/setters for known common features, or even generate Rust structs from the XML (though that’s an advanced idea).
-	•	GenTL Producer (Optional): If you want your library to be usable by external GenICam applications (like MATLAB, OpenCV, or vendor-agnostic viewers), you can implement a GenTL Producer C API and ship a .cti file. This essentially turns your library into a driver that any GenTL consumer can load ￼. Cameleon has a cameleon-gentl crate that does exactly this – providing a C-compatible GenTL implementation on top of its Rust code ￼. This is optional, but it’s a smart way to immediately support a wide range of existing tools (since GenTL is a well-defined interface). It does add complexity (you have to implement the GenTL API functions and manage cross-ABI details), so perhaps consider this after you have a working Rust API.
-	•	Utilities and Internal Crates: In Cameleon’s design, they also have cameleon-impl and cameleon-impl-macros for internal sharing of code and some proc macros ￼ ￼. You may similarly create internal modules for things like common structures (e.g., GenCP packet encoding/decoding could be shared by both GigE and USB modules) and code generation helpers (maybe macros to simplify defining nodes or features). Organizing into multiple crates isn’t strictly necessary, but it can help enforce boundaries (e.g. your core GenApi parser can be independent and tested in isolation).
+GenCP defines how read/write commands are sent to a camera over any transport. It specifies a simple packet format with four operations:
 
-Project Layout Example: The Cameleon project provides a real-world example of a clean separation of concerns. It consists of multiple crates each handling a part of the puzzle – a primary high-level API crate, a GenApi parser crate, a device/transport crate, etc ￼ ￼. Following a similar layout could help manage the complexity:
-	•	Primary crate – end-user API to control cameras (e.g., open camera, set features, get images).
-	•	GenApi crate – parses XML and provides feature node abstractions.
-	•	Device crate – handles raw communication for each protocol (GigE, USB3, etc., possibly with sub-modules or feature flags per protocol).
-	•	GenTL crate – (optional) exposes a GenTL C interface for compatibility.
-	•	Internal/macro crates – (optional) for sharing code and automating boilerplate within the library.
+- `ReadRegister` / `WriteRegister` -- access 32-bit registers
+- `ReadMem` / `WriteMem` -- access arbitrary memory blocks
 
-By organizing this way, you ensure that adding a new interface (say CoaXPress) mostly means adding code in the device layer, with minimal changes to your GenApi or high-level API logic.
+Both GigE Vision and USB3 Vision use GenCP for their control channels.
 
-Additional Considerations and Tips
-	•	XML Handling & Performance: Camera description XML files can be large (hundreds of KB) and complex. You’ll need to parse them at runtime (often the first thing after connecting). Consider efficiency and robust error handling here. C++ GenApi uses caching and lazy evaluation; in Rust, ensure your parser doesn’t become a startup bottleneck. Also be prepared to handle multiple schema versions (the GenICam schema has evolved, but cameras usually embed the schema version they use).
-	•	Testing with Real Cameras: Plan to test early with at least one GigE Vision camera and one USB3 Vision camera. Each vendor may have quirks in their GenICam XML or protocol handling. For example, some cameras might not support certain GenCP commands (like pending acknowledgments or extended chunk data) – you’ll discover these details only by testing. If you don’t have hardware readily, consider using emulators or recorded data. (Notably, Cameleon mentions providing emulators in their device crate ￼, and Aravis has a fake camera for testing.)
-	•	Concurrency and Thread Safety: GenICam features often can be accessed from multiple threads (especially in high-performance setups). The GenApi reference implementation uses locking to ensure thread-safe access to the node map. In Rust, you’ll want to ensure that your Camera object and its nodes can be safely shared or locked as needed (perhaps by using Arc<Mutex<...>> for the node map, or by funneling all register access through a single thread/event loop). Also consider using Rust’s async features for streaming image acquisition, which can simplify waiting for packets or events.
-	•	Licensing and Community: Since you aim for a fully open solution, choose a permissive license for your library to encourage adoption. There is clearly community interest in an open GenICam (as evidenced by questions on forums and the creation of projects like Aravis and Cameleon). You might find collaborators or at least users who can help by reporting issues on different cameras. Keep an eye on the Rust community (e.g., Reddit or users.rust-lang.org) for GenICam discussions; for instance, the announcement of Cameleon’s release gathered attention ￼.
-	•	Long-Term Scope: Once GigE and USB3 are working, you can evaluate supporting CoaXPress (which would likely involve interfacing with a frame grabber’s SDK or implementing the CoaXPress over PCIe protocol if documentation is available) and Camera Link HS. These are less common except in high-end systems, so it’s reasonable to defer them. Camera Link (traditional) can actually be supported via CLProtocol (GenICam over Camera Link serial comms) ￼ if someone uses a Camera Link framegrabber that offers GenICam access – again, a niche case.
+**In genicam-rs:** `viva-gencp` provides transport-agnostic encode/decode for GenCP packets.
 
-In conclusion, use the official GenICam and interface specs as your primary blueprint, and learn from existing implementations to guide your Rust design. Organize your project into clear layers (feature model vs. transport logic vs. user API), so you maintain the “generic interface for cameras” philosophy throughout the code. This separation will give you full control and make the library maintainable as it grows. Good luck – implementing GenICam is a challenging but rewarding project that will empower Rust developers to work with a wide range of vision hardware without proprietary SDKs. With the right planning and references in hand, you’ll be well-prepared to start this journey!
+### GVCP / GVSP -- GigE Vision protocols
 
-Sources:
-	•	EMVA GenICam Standard Introduction ￼ ￼ ￼ (overview of GenICam goals and modules)
-	•	Allied Vision GenICam White Paper ￼ ￼ (interfaces supported and GenTL explanation)
-	•	Cameleon (Rust GenICam library) README ￼ ￼ (project structure and current capabilities)
-	•	Stack Overflow discussion ￼ (notes on GenICam complexity and common practice)
-	•	GenICam Standard Features Naming Convention (SFNC) and GenApi Spec – EMVA Downloads ￼ ￼ (standardized feature definitions and schema references)
-	•	Aravis project documentation ￼ (example of an open-source GenICam implementation in C for GigE/USB3 Vision).
+GigE Vision adds two protocols on top of GenCP:
+
+- **GVCP** (Control Protocol) -- UDP-based device discovery, register access, event delivery, and action commands. Cameras listen on port 3956.
+- **GVSP** (Streaming Protocol) -- UDP-based image transfer with packet reassembly and resend support.
+
+**In genicam-rs:** `viva-gige` implements both protocols.
+
+### USB3 Vision
+
+USB3 Vision cameras use USB bulk endpoints: one pair for GenCP control, another for image data. Device discovery uses standard USB enumeration with U3V class descriptors. Bootstrap registers (ABRM, SBRM, SIRM) configure the device.
+
+**In genicam-rs:** `viva-u3v` implements the transport layer.
+
+### SFNC -- standard feature names
+
+The Standard Features Naming Convention ensures that common features use the same name across all cameras. `ExposureTime` is always `ExposureTime`, not `Exposure` or `ShutterTime`.
+
+**In genicam-rs:** `viva-sfnc` provides these names as string constants.
+
+### PFNC -- standard pixel formats
+
+The Pixel Format Naming Convention assigns numeric codes to pixel formats. `Mono8` is `0x01080001`, `RGB8` is `0x02180014`, etc.
+
+**In genicam-rs:** `viva-pfnc` provides the `PixelFormat` enum with code-to-name conversion.
+
+## How it fits together
+
+```
+Application
+    |
+    v
+viva-genicam (facade)     -- Camera<T>, discovery, streaming, events
+    |
+    +-- viva-genapi        -- NodeMap, feature evaluation
+    |     +-- viva-genapi-xml  -- XML parsing
+    |
+    +-- viva-gige          -- GigE Vision (GVCP + GVSP)
+    |     +-- viva-gencp   -- GenCP packets
+    |
+    +-- viva-u3v           -- USB3 Vision
+    |     +-- viva-gencp   -- GenCP packets (shared)
+    |
+    +-- viva-sfnc          -- Feature name constants
+    +-- viva-pfnc          -- Pixel format tables
+```
+
+1. **Discover** -- find cameras on the network (GVCP broadcast) or USB bus
+2. **Connect** -- claim control, fetch the GenICam XML, build the node map
+3. **Configure** -- read and write features via the node map (which translates to register I/O)
+4. **Stream** -- receive image frames (GVSP over UDP or USB bulk transfers)
+
+## Further reading
+
+- [EMVA GenICam website](https://www.emva.org/standards-technology/genicam/) -- official standard documents
+- [genicam-rs book](https://vitalyvorobyev.github.io/genicam-rs/) -- tutorials and architecture guide
+- [genicam-rs API reference](https://docs.rs/viva-genicam) -- Rust API documentation

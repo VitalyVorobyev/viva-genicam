@@ -3302,6 +3302,7 @@ dependencies = [
  "tracing-subscriber",
  "viva-fake-u3v",
  "viva-genicam",
+ "viva-pfnc",
  "viva-service",
  "viva-u3v",
  "viva-zenoh-api",

@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Found {} cameras", devices.len());
 
     // Connect to the first camera
-    let (mut camera, _xml) = viva_genicam::connect_gige(&devices[0]).await?;
+    let mut camera = viva_genicam::connect_gige(&devices[0]).await?;
 
     // Read and write features
     let exposure = camera.get("ExposureTime")?;

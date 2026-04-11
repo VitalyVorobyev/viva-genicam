@@ -24,7 +24,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::conversions::{bytes_to_i64, i64_to_bytes};
-    use crate::{GenApiError, NodeMap, RegisterIo};
+    use crate::{GenApiError, NodeMap, RegisterIo, Visibility};
 
     const FIXTURE: &str = r#"
         <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="2" SchemaSubMinorVersion="3">
@@ -690,5 +690,94 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // nodes_at_visibility
+    // -----------------------------------------------------------------------
+
+    const VISIBILITY_FIXTURE: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+            <Integer Name="BeginnerNode">
+                <Address>0x6000</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Visibility>Beginner</Visibility>
+                <Min>0</Min>
+                <Max>100</Max>
+            </Integer>
+            <Integer Name="ExpertNode">
+                <Address>0x6010</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Visibility>Expert</Visibility>
+                <Min>0</Min>
+                <Max>100</Max>
+            </Integer>
+            <Integer Name="GuruNode">
+                <Address>0x6020</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Visibility>Guru</Visibility>
+                <Min>0</Min>
+                <Max>100</Max>
+            </Integer>
+            <Integer Name="InvisibleNode">
+                <Address>0x6030</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Visibility>Invisible</Visibility>
+                <Min>0</Min>
+                <Max>100</Max>
+            </Integer>
+        </RegisterDescription>
+    "#;
+
+    #[test]
+    fn nodes_at_visibility_beginner_returns_only_beginner() {
+        let model = viva_genapi_xml::parse(VISIBILITY_FIXTURE).expect("parse visibility fixture");
+        let nodemap = NodeMap::from(model);
+
+        let visible = nodemap.nodes_at_visibility(Visibility::Beginner);
+        assert!(
+            visible.contains(&"BeginnerNode"),
+            "Beginner node must be visible at Beginner level"
+        );
+        assert!(
+            !visible.contains(&"ExpertNode"),
+            "Expert node must NOT be visible at Beginner level"
+        );
+        assert!(
+            !visible.contains(&"GuruNode"),
+            "Guru node must NOT be visible at Beginner level"
+        );
+        assert!(
+            !visible.contains(&"InvisibleNode"),
+            "Invisible node must NOT be visible at Beginner level"
+        );
+    }
+
+    #[test]
+    fn nodes_at_visibility_guru_includes_beginner_and_expert_but_not_invisible() {
+        let model = viva_genapi_xml::parse(VISIBILITY_FIXTURE).expect("parse visibility fixture");
+        let nodemap = NodeMap::from(model);
+
+        let visible = nodemap.nodes_at_visibility(Visibility::Guru);
+        assert!(
+            visible.contains(&"BeginnerNode"),
+            "Beginner node must be visible at Guru level"
+        );
+        assert!(
+            visible.contains(&"ExpertNode"),
+            "Expert node must be visible at Guru level"
+        );
+        assert!(
+            visible.contains(&"GuruNode"),
+            "Guru node must be visible at Guru level"
+        );
+        assert!(
+            !visible.contains(&"InvisibleNode"),
+            "Invisible node must NOT be visible at Guru level"
+        );
     }
 }

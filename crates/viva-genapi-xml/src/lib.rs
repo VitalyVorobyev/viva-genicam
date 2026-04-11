@@ -65,6 +65,7 @@ pub enum XmlError {
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
+#[non_exhaustive]
 pub enum Visibility {
     /// Shown to all users (default).
     #[default]
@@ -91,6 +92,7 @@ impl Visibility {
 
 /// Recommended UI representation for a numeric feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Representation {
     Linear,
     Logarithmic,
@@ -542,6 +544,10 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 b"StructReg" => {
                     let entries = parse_struct_reg(&mut reader, e.clone())?;
                     nodes.extend(entries);
+                }
+                b"Group" => {
+                    // Group is a transparent container wrapping feature nodes;
+                    // let child events surface in the next loop iterations.
                 }
                 b"Port" => {
                     // Port nodes are transport-level abstractions; skip them.

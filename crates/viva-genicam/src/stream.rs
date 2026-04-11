@@ -739,7 +739,7 @@ impl FrameStream {
 /// Async frame iterator wrapping blocking USB3 Vision bulk reads.
 ///
 /// Internally spawns a blocking reader thread that calls
-/// [`U3vStream::next_frame()`] in a loop and sends converted [`Frame`]
+/// `U3vStream::next_frame()` in a loop and sends converted [`Frame`]
 /// values through an mpsc channel. The async consumer reads from the
 /// channel via [`next_frame()`](U3vFrameStream::next_frame).
 ///
@@ -888,11 +888,9 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
                     .parse()
                     .map_err(|e| GenicamError::parse(format!("Height: {e}")))?;
                 let pf_str = self.camera.get("PixelFormat")?;
-                let bpp: u64 = match pf_str.as_str() {
-                    "RGB8Packed" | "RGB8" | "BGR8" | "BGR8Packed" => 3,
-                    "Mono16" | "BayerRG16" | "BayerGB16" | "BayerGR16" | "BayerBG16" => 2,
-                    _ => 1,
-                };
+                let bpp = PixelFormat::from_name(&pf_str)
+                    .bytes_per_pixel()
+                    .unwrap_or(1) as u64;
                 width * height * bpp
             }
         };

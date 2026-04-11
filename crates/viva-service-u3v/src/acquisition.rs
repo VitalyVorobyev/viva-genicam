@@ -12,6 +12,7 @@ use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpRespon
 use zenoh::Session;
 
 use crate::device::U3vDeviceHandle;
+use viva_pfnc::PixelFormat;
 use viva_u3v::usb::UsbTransfer;
 
 /// Run the acquisition control queryable for a U3V device.
@@ -122,10 +123,9 @@ async fn handle_start<T: UsbTransfer + 'static>(
         .get_feature("PixelFormat")
         .await
         .unwrap_or_else(|_| "Mono8".to_string());
-    let bpp: usize = match pf_str.as_str() {
-        "RGB8Packed" | "RGB8" | "BGR8" | "BGR8Packed" => 3,
-        _ => 1,
-    };
+    let bpp: usize = PixelFormat::from_name(&pf_str)
+        .bytes_per_pixel()
+        .unwrap_or(1);
     let payload_size = (width as usize) * (height as usize) * bpp;
 
     // Open U3V stream.

@@ -251,26 +251,16 @@ pub fn parse_integer(
     let min = min.unwrap_or(i64::MIN);
     let max = max.unwrap_or(i64::MAX);
 
-    // When pValue or static Value is set, addressing is optional.
-    let (addressing, len, bitfield) = if pvalue.is_some() || static_value.is_some() {
-        let addr = addressing.finalize(&name, Some(4)).ok();
-        let len = addr
-            .as_ref()
-            .and_then(|a| addressing_lengths(a).first().copied())
-            .unwrap_or(4);
-        let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
-        let bf = bitfield.finish(&name, &lengths).ok().flatten();
-        (addr, len, bf)
-    } else {
-        let addr = addressing.finalize(&name, Some(4))?;
-        let lengths = addressing_lengths(&addr);
-        let len = lengths
-            .first()
-            .copied()
-            .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
-        let bf = bitfield.finish(&name, &lengths)?;
-        (Some(addr), len, bf)
-    };
+    // Addressing is optional: nodes may delegate via pValue, have a static
+    // Value, or appear as pure UI features without register backing.
+    let addr = addressing.finalize(&name, Some(4)).ok();
+    let len = addr
+        .as_ref()
+        .and_then(|a| addressing_lengths(a).first().copied())
+        .unwrap_or(4);
+    let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
+    let bitfield = bitfield.finish(&name, &lengths).ok().flatten();
+    let addressing = addr;
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Integer {
@@ -417,11 +407,7 @@ pub fn parse_float(
         _ => None,
     };
 
-    let addressing = if pvalue.is_some() {
-        addressing.finalize(&name, Some(8)).ok()
-    } else {
-        Some(addressing.finalize(&name, Some(8))?)
-    };
+    let addressing = addressing.finalize(&name, Some(8)).ok();
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Float {

@@ -58,7 +58,7 @@ The initial release covers the full GigE Vision workflow end-to-end, plus USB3 V
 ### Testing & tooling
 
 - In-process fake GigE and U3V cameras (no hardware required)
-- 175+ tests across the workspace
+- 190+ tests across the workspace
 - CLI tool (viva-camctl) for discovery, feature control, streaming, benchmarking
 
 ---

@@ -15,6 +15,10 @@ pub enum PixelFormat {
     BayerGB8 = 0x0108_000A,
     BayerBG8 = 0x0108_000B,
     BayerGR8 = 0x0108_0008,
+    BayerGR16 = 0x0110_000E,
+    BayerRG16 = 0x0110_000F,
+    BayerGB16 = 0x0110_0010,
+    BayerBG16 = 0x0110_0011,
     RGB8Packed = 0x0218_0014,
     BGR8Packed = 0x0218_0015,
     /// Unknown PFNC code reported by the device.
@@ -31,6 +35,10 @@ impl PixelFormat {
             0x0108_000A => PixelFormat::BayerGB8,
             0x0108_000B => PixelFormat::BayerBG8,
             0x0108_0008 => PixelFormat::BayerGR8,
+            0x0110_000E => PixelFormat::BayerGR16,
+            0x0110_000F => PixelFormat::BayerRG16,
+            0x0110_0010 => PixelFormat::BayerGB16,
+            0x0110_0011 => PixelFormat::BayerBG16,
             0x0218_0014 => PixelFormat::RGB8Packed,
             0x0218_0015 => PixelFormat::BGR8Packed,
             other => PixelFormat::Unknown(other),
@@ -46,6 +54,10 @@ impl PixelFormat {
             PixelFormat::BayerGB8 => 0x0108_000A,
             PixelFormat::BayerBG8 => 0x0108_000B,
             PixelFormat::BayerGR8 => 0x0108_0008,
+            PixelFormat::BayerGR16 => 0x0110_000E,
+            PixelFormat::BayerRG16 => 0x0110_000F,
+            PixelFormat::BayerGB16 => 0x0110_0010,
+            PixelFormat::BayerBG16 => 0x0110_0011,
             PixelFormat::RGB8Packed => 0x0218_0014,
             PixelFormat::BGR8Packed => 0x0218_0015,
             PixelFormat::Unknown(code) => code,
@@ -62,7 +74,32 @@ impl PixelFormat {
             | PixelFormat::BayerGB8
             | PixelFormat::BayerBG8
             | PixelFormat::BayerGR8 => Some(1),
+            PixelFormat::BayerGR16
+            | PixelFormat::BayerRG16
+            | PixelFormat::BayerGB16
+            | PixelFormat::BayerBG16 => Some(2),
             PixelFormat::Unknown(_) => None,
+        }
+    }
+
+    /// Convert a PFNC name string to a [`PixelFormat`].
+    ///
+    /// Returns `PixelFormat::Unknown(0)` for unrecognised names.
+    pub fn from_name(name: &str) -> PixelFormat {
+        match name {
+            "Mono8" => PixelFormat::Mono8,
+            "Mono16" => PixelFormat::Mono16,
+            "BayerRG8" => PixelFormat::BayerRG8,
+            "BayerGB8" => PixelFormat::BayerGB8,
+            "BayerBG8" => PixelFormat::BayerBG8,
+            "BayerGR8" => PixelFormat::BayerGR8,
+            "BayerGR16" => PixelFormat::BayerGR16,
+            "BayerRG16" => PixelFormat::BayerRG16,
+            "BayerGB16" => PixelFormat::BayerGB16,
+            "BayerBG16" => PixelFormat::BayerBG16,
+            "RGB8Packed" | "RGB8" => PixelFormat::RGB8Packed,
+            "BGR8Packed" | "BGR8" => PixelFormat::BGR8Packed,
+            _ => PixelFormat::Unknown(0),
         }
     }
 
@@ -74,6 +111,10 @@ impl PixelFormat {
                 | PixelFormat::BayerGB8
                 | PixelFormat::BayerBG8
                 | PixelFormat::BayerGR8
+                | PixelFormat::BayerGR16
+                | PixelFormat::BayerRG16
+                | PixelFormat::BayerGB16
+                | PixelFormat::BayerBG16
         )
     }
 
@@ -102,6 +143,10 @@ impl fmt::Display for PixelFormat {
             PixelFormat::BayerGB8 => f.write_str("BayerGB8"),
             PixelFormat::BayerBG8 => f.write_str("BayerBG8"),
             PixelFormat::BayerGR8 => f.write_str("BayerGR8"),
+            PixelFormat::BayerGR16 => f.write_str("BayerGR16"),
+            PixelFormat::BayerRG16 => f.write_str("BayerRG16"),
+            PixelFormat::BayerGB16 => f.write_str("BayerGB16"),
+            PixelFormat::BayerBG16 => f.write_str("BayerBG16"),
             PixelFormat::RGB8Packed => f.write_str("RGB8Packed"),
             PixelFormat::BGR8Packed => f.write_str("BGR8Packed"),
             PixelFormat::Unknown(code) => write!(f, "Unknown(0x{code:08X})"),
@@ -122,6 +167,10 @@ mod tests {
             PixelFormat::BayerGB8,
             PixelFormat::BayerBG8,
             PixelFormat::BayerGR8,
+            PixelFormat::BayerGR16,
+            PixelFormat::BayerRG16,
+            PixelFormat::BayerGB16,
+            PixelFormat::BayerBG16,
             PixelFormat::RGB8Packed,
             PixelFormat::BGR8Packed,
         ];
@@ -146,6 +195,8 @@ mod tests {
         assert_eq!(PixelFormat::Mono16.bytes_per_pixel(), Some(2));
         assert_eq!(PixelFormat::RGB8Packed.bytes_per_pixel(), Some(3));
         assert_eq!(PixelFormat::BayerRG8.bytes_per_pixel(), Some(1));
+        assert_eq!(PixelFormat::BayerRG16.bytes_per_pixel(), Some(2));
+        assert_eq!(PixelFormat::BayerGR16.bytes_per_pixel(), Some(2));
         assert_eq!(PixelFormat::Unknown(0).bytes_per_pixel(), None);
     }
 

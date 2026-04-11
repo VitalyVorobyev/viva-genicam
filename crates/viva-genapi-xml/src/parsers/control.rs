@@ -66,11 +66,8 @@ pub fn parse_command(
         buf.clear();
     }
 
-    if address.is_none() && pvalue.is_none() {
-        return Err(XmlError::Invalid(format!(
-            "Command node {name} is missing both <Address> and <pValue>"
-        )));
-    }
+    // Commands may lack both <Address> and <pValue> in real-world XML
+    // (e.g. SFNC standard features without register backing).
     let length = length.unwrap_or(4);
 
     Ok(NodeDecl::Command {

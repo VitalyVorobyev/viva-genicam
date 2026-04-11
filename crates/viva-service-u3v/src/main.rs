@@ -14,6 +14,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use viva_service::device::DeviceOps;
 use viva_service::{nodes, status, xml};
+use viva_u3v::usb::UsbTransfer;
 use viva_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
 
 use crate::device::U3vDeviceHandle;
@@ -102,43 +103,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn run_fake_camera(
+/// Spawn Zenoh service tasks shared by both fake and real camera paths.
+///
+/// Publishes connected status and initial feature values, then spawns XML,
+/// node-set, node-execute, bulk-read, and acquisition queryables, and a
+/// periodic announce loop.
+async fn spawn_service_tasks<T: UsbTransfer + 'static>(
     session: Arc<zenoh::Session>,
-    width: u32,
-    height: u32,
-    pixel_format: u32,
+    handle: Arc<U3vDeviceHandle<T>>,
+    device_id: String,
+    name: String,
+    model: String,
+    serial: String,
     shutdown: watch::Receiver<bool>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use viva_genicam::open_u3v_device;
-
-    let fake_transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(
-        width,
-        height,
-        pixel_format,
-    ));
-
-    let device =
-        viva_u3v::device::U3vDevice::open(fake_transport.clone(), 0x81, 0x01, Some(0x82), None)?;
-
-    let (camera, xml) = open_u3v_device(device)?;
-
-    let device_id = "cam-fake-u3v".to_string();
-    let handle = Arc::new(U3vDeviceHandle::new(
-        camera,
-        xml,
-        device_id.clone(),
-        fake_transport,
-        Some(0x82),
-    ));
-
+) {
     // Publish connected status and initial values.
     status::publish_connected(&session, &device_id).await;
     nodes::publish_initial_values(&session, handle.as_ref()).await;
 
-    info!(
-        device_id,
-        "fake U3V camera connected, spawning service tasks"
-    );
+    info!(device_id, "U3V camera connected, spawning service tasks");
 
     // Spawn shared Zenoh queryables.
     tokio::spawn(xml::run(
@@ -176,13 +159,16 @@ async fn run_fake_camera(
     tokio::spawn(async move {
         let announce = DeviceAnnounce {
             id: announce_device_id.clone(),
-            name: "FakeU3V".to_string(),
-            model: "FakeU3V".to_string(),
-            serial: "FAKE-001".to_string(),
+            name,
+            model,
+            serial,
             api_version: Some(API_VERSION),
         };
         let key = keys::announce(&announce_device_id);
-        let payload = serde_json::to_vec(&announce).unwrap();
+        let Ok(payload) = serde_json::to_vec(&announce) else {
+            tracing::error!("serialize announce");
+            return;
+        };
         loop {
             let _ = announce_session.put(&key, payload.clone()).await;
             tokio::select! {
@@ -194,10 +180,50 @@ async fn run_fake_camera(
         }
     });
 
-    info!(
+    info!(device_id, "U3V service tasks spawned");
+}
+
+async fn run_fake_camera(
+    session: Arc<zenoh::Session>,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use viva_genicam::open_u3v_device;
+
+    let fake_transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(
+        width,
+        height,
+        pixel_format,
+    ));
+
+    let device =
+        viva_u3v::device::U3vDevice::open(fake_transport.clone(), 0x81, 0x01, Some(0x82), None)?;
+
+    let (camera, xml) = open_u3v_device(device)?;
+
+    let device_id = "cam-fake-u3v".to_string();
+    let handle = Arc::new(U3vDeviceHandle::new(
+        camera,
+        xml,
+        device_id.clone(),
+        fake_transport,
+        Some(0x82),
+    ));
+
+    spawn_service_tasks(
+        session,
+        handle,
         device_id,
-        "U3V service tasks spawned (use genicam-studio to connect)"
-    );
+        "FakeU3V".to_string(),
+        "FakeU3V".to_string(),
+        "FAKE-001".to_string(),
+        shutdown,
+    )
+    .await;
+
+    info!("fake U3V camera service ready (use genicam-studio to connect)");
     Ok(())
 }
 
@@ -243,81 +269,21 @@ async fn run_real_camera(
         stream_ep,
     ));
 
-    // Publish connected status and initial values.
-    status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, handle.as_ref()).await;
-
-    info!(
-        device_id,
-        "USB3 Vision camera connected, spawning service tasks"
-    );
-
-    // Spawn shared Zenoh queryables.
-    tokio::spawn(xml::run(
-        session.clone(),
-        device_id.clone(),
-        handle.raw_xml().to_string(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_set_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_execute_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_bulk_read_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(acquisition::run(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-
-    // Periodic announce.
-    let announce_session = session.clone();
-    let announce_device_id = device_id.clone();
-    let announce_name = device_info
+    let name = device_info
         .model
         .clone()
         .unwrap_or_else(|| "U3V Camera".to_string());
-    let announce_model = device_info
+    let model = device_info
         .model
         .clone()
         .unwrap_or_else(|| "Unknown".to_string());
-    let announce_serial = device_info
+    let serial = device_info
         .serial
         .clone()
         .unwrap_or_else(|| "N/A".to_string());
-    let mut announce_shutdown = shutdown;
-    tokio::spawn(async move {
-        let announce = DeviceAnnounce {
-            id: announce_device_id.clone(),
-            name: announce_name,
-            model: announce_model,
-            serial: announce_serial,
-            api_version: Some(API_VERSION),
-        };
-        let key = keys::announce(&announce_device_id);
-        let payload = serde_json::to_vec(&announce).unwrap();
-        loop {
-            let _ = announce_session.put(&key, payload.clone()).await;
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                _ = announce_shutdown.changed() => {
-                    if *announce_shutdown.borrow() { break; }
-                }
-            }
-        }
-    });
 
-    info!(device_id, "U3V service tasks spawned");
+    spawn_service_tasks(session, handle, device_id, name, model, serial, shutdown).await;
+
     Ok(())
 }
 

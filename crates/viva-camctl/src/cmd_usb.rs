@@ -161,11 +161,9 @@ pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64)
     let pf_str = camera
         .get("PixelFormat")
         .unwrap_or_else(|_| "Mono8".to_string());
-    let bpp: usize = match pf_str.as_str() {
-        "RGB8Packed" | "RGB8" | "BGR8" | "BGR8Packed" => 3,
-        "Mono16" => 2,
-        _ => 1,
-    };
+    let bpp: usize = PixelFormat::from_name(&pf_str)
+        .bytes_per_pixel()
+        .unwrap_or(1);
     let payload_size = (width as usize) * (height as usize) * bpp;
 
     info!(

@@ -3,7 +3,6 @@ name: Publish Rust Docs
 on:
   push:
     branches: [ main ]
-    tags: [ '*' ]        # also publish on tag push
   workflow_dispatch:     # allow manual trigger
 
 permissions:

@@ -4,7 +4,9 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
-use viva_genapi_xml::{AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, NodeDecl, XmlModel};
+use viva_genapi_xml::{
+    AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, NodeDecl, Visibility, XmlModel,
+};
 
 use crate::bitops::{extract, insert};
 use crate::conversions::{
@@ -103,6 +105,18 @@ impl NodeMap {
             .collect()
     }
 
+    /// Return names of nodes visible at the given level or below.
+    ///
+    /// A node with `Visibility::Expert` is visible at level `Expert` and `Guru`,
+    /// but not at `Beginner`.
+    pub fn nodes_at_visibility(&self, level: Visibility) -> Vec<&str> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.visibility() <= level)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     /// Construct a [`NodeMap`] from an [`XmlModel`], validating SwissKnife expressions.
     pub fn try_from_xml(model: XmlModel) -> Result<Self, GenApiError> {
         let mut nodes = HashMap::new();
@@ -111,6 +125,7 @@ impl NodeMap {
             match decl {
                 NodeDecl::Integer {
                     name,
+                    meta,
                     addressing,
                     len,
                     access,
@@ -146,6 +161,7 @@ impl NodeMap {
                     }
                     let node = IntegerNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         len,
                         access,
@@ -167,6 +183,7 @@ impl NodeMap {
                 }
                 NodeDecl::Float {
                     name,
+                    meta,
                     addressing,
                     access,
                     min,
@@ -192,6 +209,7 @@ impl NodeMap {
                     }
                     let node = FloatNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         access,
                         min,
@@ -208,6 +226,7 @@ impl NodeMap {
                 }
                 NodeDecl::Enum {
                     name,
+                    meta,
                     addressing,
                     access,
                     entries,
@@ -244,6 +263,7 @@ impl NodeMap {
                     providers.sort();
                     let node = EnumNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         access,
                         pvalue,
@@ -259,6 +279,7 @@ impl NodeMap {
                 }
                 NodeDecl::Boolean {
                     name,
+                    meta,
                     addressing,
                     len,
                     access,
@@ -283,6 +304,7 @@ impl NodeMap {
                     }
                     let node = BooleanNode {
                         name: name.clone(),
+                        meta,
                         addressing,
                         len,
                         access,
@@ -299,6 +321,7 @@ impl NodeMap {
                 }
                 NodeDecl::Command {
                     name,
+                    meta,
                     address,
                     len,
                     pvalue,
@@ -309,6 +332,7 @@ impl NodeMap {
                     }
                     let node = CommandNode {
                         name: name.clone(),
+                        meta,
                         address,
                         len,
                         pvalue,
@@ -316,15 +340,21 @@ impl NodeMap {
                     };
                     nodes.insert(name, Node::Command(node));
                 }
-                NodeDecl::Category { name, children } => {
+                NodeDecl::Category {
+                    name,
+                    meta,
+                    children,
+                } => {
                     let node = CategoryNode {
                         name: name.clone(),
+                        meta,
                         children,
                     };
                     nodes.insert(name, Node::Category(node));
                 }
                 NodeDecl::SwissKnife(decl) => {
                     let name = decl.name;
+                    let meta = decl.meta;
                     let expr = decl.expr;
                     let variables = decl.variables;
                     let output = decl.output;
@@ -350,6 +380,7 @@ impl NodeMap {
                     }
                     let node = SkNode {
                         name: name.clone(),
+                        meta,
                         output,
                         ast,
                         vars: variables,
@@ -393,6 +424,7 @@ impl NodeMap {
                         .push(name.clone());
                     let node = ConverterNode {
                         name: name.clone(),
+                        meta: decl.meta,
                         p_value: decl.p_value,
                         ast_to,
                         ast_from,
@@ -438,6 +470,7 @@ impl NodeMap {
                         .push(name.clone());
                     let node = IntConverterNode {
                         name: name.clone(),
+                        meta: decl.meta,
                         p_value: decl.p_value,
                         ast_to,
                         ast_from,
@@ -453,6 +486,7 @@ impl NodeMap {
                     register_addressing_dependency(&mut dependents, &name, &decl.addressing);
                     let node = StringNode {
                         name: name.clone(),
+                        meta: decl.meta,
                         addressing: decl.addressing,
                         access: decl.access,
                         cache: std::cell::RefCell::new(None),
@@ -547,10 +581,11 @@ impl NodeMap {
         if value < node.min || value > node.max {
             return Err(GenApiError::Range(name.to_string()));
         }
-        if let Some(inc) = node.inc {
-            if inc != 0 && (value - node.min) % inc != 0 {
-                return Err(GenApiError::Range(name.to_string()));
-            }
+        if let Some(inc) = node.inc
+            && inc != 0
+            && (value - node.min) % inc != 0
+        {
+            return Err(GenApiError::Range(name.to_string()));
         }
         if let Some(bitfield) = node.bitfield {
             let encoded = encode_bitfield_value(name, value, bitfield.bit_length, node.min < 0)?;
@@ -940,16 +975,16 @@ impl NodeMap {
             if cache.is_none() {
                 *cache = Some(self.build_enum_mapping(node, io)?);
             }
-            if let Some(mapping) = cache.as_ref() {
-                if let Some(entry) = mapping.by_value.get(&raw_value) {
-                    return Ok(entry.clone());
-                }
+            if let Some(mapping) = cache.as_ref()
+                && let Some(entry) = mapping.by_value.get(&raw_value)
+            {
+                return Ok(entry.clone());
             }
             *cache = Some(self.build_enum_mapping(node, io)?);
-            if let Some(mapping) = cache.as_ref() {
-                if let Some(entry) = mapping.by_value.get(&raw_value) {
-                    return Ok(entry.clone());
-                }
+            if let Some(mapping) = cache.as_ref()
+                && let Some(entry) = mapping.by_value.get(&raw_value)
+            {
+                return Ok(entry.clone());
             }
         }
         Err(GenApiError::EnumValueUnknown {
@@ -1101,10 +1136,10 @@ impl NodeMap {
         io: &dyn RegisterIo,
         stack: &mut HashSet<String>,
     ) -> Result<f64, GenApiError> {
-        if let Some((value, generation)) = *node.cache.borrow() {
-            if generation == self.generation.get() {
-                return Ok(value);
-            }
+        if let Some((value, generation)) = *node.cache.borrow()
+            && generation == self.generation.get()
+        {
+            return Ok(value);
         }
         if !stack.insert(node.name.clone()) {
             stack.remove(&node.name);
@@ -1205,10 +1240,10 @@ impl NodeMap {
             if mapping.is_none() {
                 *mapping = Some(self.build_enum_mapping(node, io)?);
             }
-            if let Some(map) = mapping.as_ref() {
-                if let Some(value) = map.by_name.get(&entry) {
-                    return Ok(*value);
-                }
+            if let Some(map) = mapping.as_ref()
+                && let Some(value) = map.by_name.get(&entry)
+            {
+                return Ok(*value);
             }
         }
         Err(GenApiError::EnumNoSuchEntry {
@@ -1277,10 +1312,10 @@ impl NodeMap {
     /// Read a Converter feature value (float) using the provided transport.
     pub fn get_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<f64, GenApiError> {
         let node = self.get_converter_node(name)?;
-        if let Some((value, generation)) = *node.cache.borrow() {
-            if generation == self.generation.get() {
-                return Ok(value);
-            }
+        if let Some((value, generation)) = *node.cache.borrow()
+            && generation == self.generation.get()
+        {
+            return Ok(value);
         }
         let mut stack = HashSet::new();
         let value = self.evaluate_converter(node, io, &mut stack)?;
@@ -1291,10 +1326,10 @@ impl NodeMap {
     /// Read an IntConverter feature value (integer) using the provided transport.
     pub fn get_int_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
         let node = self.get_int_converter_node(name)?;
-        if let Some((value, generation)) = *node.cache.borrow() {
-            if generation == self.generation.get() {
-                return Ok(value);
-            }
+        if let Some((value, generation)) = *node.cache.borrow()
+            && generation == self.generation.get()
+        {
+            return Ok(value);
         }
         let mut stack = HashSet::new();
         let value = self.evaluate_int_converter(node, io, &mut stack)?;
@@ -1306,10 +1341,10 @@ impl NodeMap {
     pub fn get_string(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_string_node(name)?;
         ensure_readable(&node.access, name)?;
-        if let Some((ref value, generation)) = *node.cache.borrow() {
-            if generation == self.generation.get() {
-                return Ok(value.clone());
-            }
+        if let Some((ref value, generation)) = *node.cache.borrow()
+            && generation == self.generation.get()
+        {
+            return Ok(value.clone());
         }
         let (address, len) = self.resolve_address(name, &node.addressing, io)?;
         let raw = io.read(address, len as usize)?;

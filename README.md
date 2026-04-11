@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/viva-genicam-logo-and-text.svg" alt="viva genicam" width="360">
+  <img src="assets/viva-genicam-logo-and-text_opt.svg" alt="viva genicam" width="360">
 </p>
 
 <p align="center">
-  Pure Rust building blocks for <b>GenICam</b> with an <b>Ethernet-first (GigE Vision)</b> focus.
+  Pure Rust building blocks for <b>GenICam</b>: <b>GigE Vision</b> and <b>USB3 Vision</b>.
 </p>
 
 <p align="center">
@@ -21,9 +21,10 @@
 
 ## Features
 
-- **Discovery** -- find GigE Vision cameras on any network interface via GVCP broadcast
+- **Discovery** -- find GigE Vision cameras via GVCP broadcast; USB3 Vision cameras via USB enumeration
 - **Control** -- read and write device registers and GenApi features (Integer, Float, Enum, Boolean, Command, String, SwissKnife, Converter)
-- **Streaming** -- receive image frames over GVSP with packet resend, reassembly, and backpressure
+- **Streaming** -- GigE: GVSP with packet resend, reassembly, and backpressure; U3V: async frame iterator over USB bulk reads
+- **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
 - **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)
 - **Service bridge** -- expose cameras over [Zenoh](https://zenoh.io/) for [genicam-studio](https://github.com/VitalyVorobyev/genicam-studio)
@@ -31,10 +32,19 @@
 
 ## Current status
 
-- GigE Vision: fully functional (discovery, control, streaming, events, actions, chunks)
-- USB3 Vision: transport layer implemented, integration in progress
+This project implements the GigE Vision and USB3 Vision protocols from the ground up in pure Rust, following the published EMVA specifications. The full control and streaming pipelines are in place, backed by 190+ automated tests that run against built-in fake camera simulators.
+
+**What works today:**
+- GigE Vision: discovery, control, streaming, events, actions, chunks, IP configuration
+- USB3 Vision: discovery, control, streaming, service bridge, CLI
 - GenApi: Tier-1 + Tier-2 nodes including pValue delegation and SwissKnife expressions
-- Self-contained integration tests (no external tools or hardware)
+
+**What hasn't happened yet:**
+- Testing against a broad range of physical cameras from different manufacturers
+- Deployment in production environments
+- Interoperability validation beyond the built-in simulators
+
+The protocol implementations are spec-faithful and the architecture is designed for real-world use, but real devices have quirks that only surface with hardware in the loop. Bug reports and camera compatibility feedback are especially welcome at this stage.
 
 ## Workspace layout
 
@@ -73,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Found {} cameras", devices.len());
 
     // Connect to the first camera
-    let (mut camera, _xml) = viva_genicam::connect_gige(&devices[0]).await?;
+    let mut camera = viva_genicam::connect_gige(&devices[0]).await?;
 
     // Read and write features
     let exposure = camera.get("ExposureTime")?;
@@ -93,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Prerequisites
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.88+ (edition 2024)
 - Windows / Linux / macOS
 - Network: allow UDP broadcast on your capture NIC for discovery. Optional: jumbo frames for high throughput.
 
@@ -138,6 +148,16 @@ cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto 
 
 # Sustained streaming benchmark
 cargo run -p viva-camctl -- bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
+
+# Assign temporary IP via FORCEIP
+cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force
+
+# Configure persistent IP
+cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
+
+# USB3 Vision: discover, read/write features, stream
+cargo run -p viva-camctl -- list-usb
+cargo run -p viva-camctl -- stream-usb --save 3
 ```
 
 ## viva-service (Zenoh bridge)
@@ -145,6 +165,9 @@ cargo run -p viva-camctl -- bench --ip 192.168.0.10 --duration-s 60 --json-out b
 ```bash
 # Start the GigE Vision service
 cargo run -p viva-service -- --iface en0
+
+# Start the USB3 Vision service (real camera)
+cargo run -p viva-service-u3v
 
 # Start the USB3 Vision service with a fake camera
 cargo run -p viva-service-u3v -- --fake

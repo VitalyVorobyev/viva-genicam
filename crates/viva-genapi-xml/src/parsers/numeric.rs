@@ -4,9 +4,10 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB, TAG_MASK,
-    TAG_MSB, TAG_P_ADDRESS, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
-    handle_p_selected_empty, handle_p_selected_start, handle_selected_empty, handle_selected_start,
+    NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
+    TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_VALUE, handle_addressing_empty,
+    handle_addressing_start, handle_p_selected_empty, handle_p_selected_start,
+    handle_selected_empty, handle_selected_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
@@ -41,6 +42,7 @@ pub fn parse_integer(
     let mut p_min = None;
     let mut static_value: Option<i64> = None;
     let mut selector_state = SelectorState::default();
+    let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut bitfield = BitfieldBuilder::default();
@@ -173,7 +175,11 @@ pub fn parse_integer(
                 b"Selected" => {
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
@@ -218,10 +224,10 @@ pub fn parse_integer(
                     }
                 }
                 TAG_ENDIANNESS | TAG_ENDIANESS | TAG_BYTE_ORDER => {
-                    if let Some(value) = attribute_value(e, TAG_VALUE)? {
-                        if let Some(order) = ByteOrder::parse(&value) {
-                            bitfield.note_byte_order(order);
-                        }
+                    if let Some(value) = attribute_value(e, TAG_VALUE)?
+                        && let Some(order) = ByteOrder::parse(&value)
+                    {
+                        bitfield.note_byte_order(order);
                     }
                 }
                 b"Selected" => {
@@ -245,30 +251,25 @@ pub fn parse_integer(
     let min = min.unwrap_or(i64::MIN);
     let max = max.unwrap_or(i64::MAX);
 
-    // When pValue or static Value is set, addressing is optional.
-    let (addressing, len, bitfield) = if pvalue.is_some() || static_value.is_some() {
-        let addr = addressing.finalize(&name, Some(4)).ok();
-        let len = addr
-            .as_ref()
-            .and_then(|a| addressing_lengths(a).first().copied())
-            .unwrap_or(4);
-        let lengths = addr.as_ref().map(addressing_lengths).unwrap_or_default();
-        let bf = bitfield.finish(&name, &lengths).ok().flatten();
-        (addr, len, bf)
-    } else {
-        let addr = addressing.finalize(&name, Some(4))?;
+    // Addressing is optional: nodes may delegate via pValue, have a static
+    // Value, or appear as pure UI features without register backing.
+    let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
         let lengths = addressing_lengths(&addr);
         let len = lengths
             .first()
             .copied()
-            .ok_or_else(|| XmlError::Invalid(format!("node {name} is missing <Length>")))?;
+            .ok_or_else(|| XmlError::Invalid(format!("no length for Integer node {name}")))?;
         let bf = bitfield.finish(&name, &lengths)?;
         (Some(addr), len, bf)
+    } else {
+        // No register backing (pValue delegation, static Value, etc.)
+        (None, 4, bitfield.finish(&name, &[4]).ok().flatten())
     };
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Integer {
         name,
+        meta: meta_builder.build(),
         addressing,
         len,
         access,
@@ -311,6 +312,7 @@ pub fn parse_float(
     let mut offset = None;
     let mut pvalue = None;
     let mut selector_state = SelectorState::default();
+    let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
@@ -372,7 +374,11 @@ pub fn parse_float(
                 b"Selected" => {
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"pSelected" => {
@@ -405,15 +411,12 @@ pub fn parse_float(
         _ => None,
     };
 
-    let addressing = if pvalue.is_some() {
-        addressing.finalize(&name, Some(8)).ok()
-    } else {
-        Some(addressing.finalize(&name, Some(8))?)
-    };
+    let addressing = addressing.finalize(&name, Some(8)).ok();
     let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Float {
         name,
+        meta: meta_builder.build(),
         addressing,
         access,
         min,

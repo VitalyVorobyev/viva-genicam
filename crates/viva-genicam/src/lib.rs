@@ -105,6 +105,9 @@ pub use events::{Event, EventStream};
 pub use frame::Frame;
 pub use gige::action::{AckSummary, ActionParams};
 pub use stream::{FrameStream, Stream, StreamBuilder, StreamDest};
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub use stream::{U3vFrameStream, U3vStreamBuilder};
 pub use time::TimeSync;
 
 /// Error type produced by the high level GenICam facade.
@@ -378,18 +381,15 @@ impl<T: RegisterIo> Camera<T> {
             }
         }
 
-        if freq_hz.is_none() {
-            if let (Some((first_ticks, first_host)), Some((last_ticks, last_host))) =
+        if freq_hz.is_none()
+            && let (Some((first_ticks, first_host)), Some((last_ticks, last_host))) =
                 (first_sample, last_sample)
-            {
-                if last_ticks > first_ticks {
-                    if let Some(delta) = last_host.checked_duration_since(first_host) {
-                        let secs = delta.as_secs_f64();
-                        if secs > 0.0 {
-                            freq_hz = Some((last_ticks - first_ticks) as f64 / secs);
-                        }
-                    }
-                }
+            && last_ticks > first_ticks
+            && let Some(delta) = last_host.checked_duration_since(first_host)
+        {
+            let secs = delta.as_secs_f64();
+            if secs > 0.0 {
+                freq_hz = Some((last_ticks - first_ticks) as f64 / secs);
             }
         }
 

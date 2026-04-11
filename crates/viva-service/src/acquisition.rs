@@ -127,14 +127,14 @@ async fn handle_start(
     // deliver GVSP until the control channel is reopened. Immediate-start
     // cases can still work with the existing control channel, so a refresh
     // timeout falls back to the current connection instead of failing start.
-    if cfg!(target_os = "macos") {
-        if let Err(e) = device.refresh_connection().await {
-            warn!(
-                device_id,
-                error = %e,
-                "camera reconnect before acquisition failed; continuing with existing control connection"
-            );
-        }
+    if cfg!(target_os = "macos")
+        && let Err(e) = device.refresh_connection().await
+    {
+        warn!(
+            device_id,
+            error = %e,
+            "camera reconnect before acquisition failed; continuing with existing control connection"
+        );
     }
 
     // 1. Resolve the network interface for GVSP reception.

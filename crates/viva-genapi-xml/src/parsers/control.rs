@@ -3,10 +3,11 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
+use super::NodeMetaBuilder;
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
-use crate::{NodeDecl, XmlError};
+use crate::{NodeDecl, NodeMeta, XmlError};
 
 /// Parse a `<Command>` element into a [`NodeDecl::Command`].
 pub fn parse_command(
@@ -20,6 +21,7 @@ pub fn parse_command(
     let mut command_value = None;
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -46,7 +48,11 @@ pub fn parse_command(
                     let text = read_text_start(reader, e)?;
                     command_value = Some(parse_i64(&text)?);
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
             Ok(Event::Eof) => {
@@ -60,15 +66,13 @@ pub fn parse_command(
         buf.clear();
     }
 
-    if address.is_none() && pvalue.is_none() {
-        return Err(XmlError::Invalid(format!(
-            "Command node {name} is missing both <Address> and <pValue>"
-        )));
-    }
+    // Commands may lack both <Address> and <pValue> in real-world XML
+    // (e.g. SFNC standard features without register backing).
     let length = length.unwrap_or(4);
 
     Ok(NodeDecl::Command {
         name,
+        meta: meta_builder.build(),
         address,
         len: length,
         pvalue,
@@ -93,6 +97,7 @@ pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError>
     };
     Ok(NodeDecl::Command {
         name,
+        meta: NodeMeta::default(),
         address,
         len: length,
         pvalue: None,
@@ -109,6 +114,7 @@ pub fn parse_category(
     let node_name = start.name().as_ref().to_vec();
     let mut children = Vec::new();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -120,13 +126,17 @@ pub fn parse_category(
                         children.push(trimmed.to_string());
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) if e.name().as_ref() == b"pFeature" => {
-                if let Some(value) = attribute_value(e, b"Name")? {
-                    if !value.is_empty() {
-                        children.push(value);
-                    }
+                if let Some(value) = attribute_value(e, b"Name")?
+                    && !value.is_empty()
+                {
+                    children.push(value);
                 }
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
@@ -141,7 +151,11 @@ pub fn parse_category(
         buf.clear();
     }
 
-    Ok(NodeDecl::Category { name, children })
+    Ok(NodeDecl::Category {
+        name,
+        meta: meta_builder.build(),
+        children,
+    })
 }
 
 /// Parse an empty `<Category />` element.
@@ -149,6 +163,7 @@ pub fn parse_category_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError
     let name = attribute_value_required(start, b"Name")?;
     Ok(NodeDecl::Category {
         name,
+        meta: NodeMeta::default(),
         children: Vec::new(),
     })
 }

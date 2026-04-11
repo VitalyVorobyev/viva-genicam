@@ -234,10 +234,10 @@ pub fn get_raw_or_read(
     len: u32,
 ) -> Result<Vec<u8>, GenApiError> {
     let cached = cache.borrow().clone();
-    if let Some(bytes) = cached {
-        if bytes.len() == len as usize {
-            return Ok(bytes);
-        }
+    if let Some(bytes) = cached
+        && bytes.len() == len as usize
+    {
+        return Ok(bytes);
     }
     io.read(address, len as usize).map_err(|err| match err {
         GenApiError::Io(_) => err,

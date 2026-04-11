@@ -618,10 +618,10 @@ impl Reassembler {
 
     /// Insert a packet belonging to the active block.
     pub fn push_packet(&mut self, packet_id: usize, payload: &[u8]) {
-        if let Some(assembly) = self.active.as_mut() {
-            if assembly.ingest(packet_id, payload) {
-                self.stats.record_packet();
-            }
+        if let Some(assembly) = self.active.as_mut()
+            && assembly.ingest(packet_id, payload)
+        {
+            self.stats.record_packet();
         }
     }
 

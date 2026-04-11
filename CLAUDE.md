@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-genicam-rs is a pure Rust implementation of GenICam ecosystem building blocks with an Ethernet-first focus (GigE Vision). It provides libraries and CLI tools for camera discovery, control, streaming, and feature access.
+genicam-rs is a pure Rust implementation of GenICam ecosystem building blocks supporting GigE Vision and USB3 Vision. It provides libraries and CLI tools for camera discovery, control, streaming, and feature access.
 
 We do not maintain backward compatibility at this early development stage. The priority is clear design and structure.
 
@@ -55,7 +55,7 @@ viva-genapi             - GenApi engine: NodeMap, node evaluation, caching
     ↓
 viva-genapi-xml         - XML parsing: GenICam XML → XmlModel IR
     ↓
-viva-gige / viva-u3v    - Transport: GVCP/GVSP for GigE, USB3 Vision (planned)
+viva-gige / viva-u3v    - Transport: GVCP/GVSP for GigE, USB3 Vision
     ↓
 viva-gencp              - Protocol primitives: GenCP encode/decode
 ```
@@ -66,7 +66,7 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 - `viva-zenoh-api` - Shared Zenoh wire types (no Zenoh dependency)
 - `viva-camctl` - CLI binary (not published)
 - `viva-service` - GigE Zenoh camera service for genicam-studio
-- `viva-service-u3v` - U3V Zenoh camera service for genicam-studio (supports `--fake` mode)
+- `viva-service-u3v` - U3V Zenoh camera service for genicam-studio (supports `--fake` mode and real USB)
 - `viva-fake-gige` - In-process fake GigE Vision camera for testing (not published)
 - `viva-fake-u3v` - In-process fake USB3 Vision camera for testing (not published)
 
@@ -80,7 +80,11 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 
 **`GigeDevice`** (`viva-gige`): Async UDP wrapper for GVCP discovery/control and GVSP streaming. Uses proper GVCP wire format (0x42 key byte, 4-byte addresses).
 
-**`DeviceHandle`** (`viva-service`): Wraps `Camera<GigeRegisterIo>` with `spawn_blocking` for async-safe access from Zenoh queryable handlers.
+**`U3vFrameStream`** (`viva-genicam`): Async frame iterator wrapping blocking USB bulk reads via `spawn_blocking` + mpsc channel. Created via `U3vStreamBuilder` or `U3vFrameStream::start()`.
+
+**`U3vDeviceHandle<T>`** (`viva-service-u3v`): Generic over `T: UsbTransfer`, works with both `FakeU3vTransport` and `RusbTransfer`.
+
+**`DeviceHandle`** (`viva-service`): Wraps `Camera<GigeRegisterIo>` with `spawn_blocking` for async-safe access from Zenoh queryable handlers. Includes reconnection with exponential backoff.
 
 ## Testing
 
@@ -90,8 +94,11 @@ Unit tests are embedded in source modules (`mod tests { }`). Integration tests u
 # All tests (unit + integration + service e2e)
 cargo test --workspace
 
-# Integration tests only (12 tests: discovery, features, streaming)
+# GigE integration tests (12 tests: discovery, features, streaming)
 cargo test -p viva-genicam --test fake_camera
+
+# U3V integration tests (5 tests: open, features, streaming, pixel formats)
+cargo test -p viva-genicam --test fake_u3v_camera
 
 # Service end-to-end tests (3 tests: acquisition, double-start, sustained streaming)
 cargo test -p viva-service --test fake_camera_e2e
@@ -120,6 +127,16 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 # E2E with studio — USB3 Vision fake camera (2 terminals)
 # T1: cargo run -p viva-service-u3v -- --fake --zenoh-config ../genicam-studio/config/zenoh-local.json5
 # T2: cd ../genicam-studio/apps/genicam-studio-tauri && cargo tauri dev
+```
+
+```bash
+# Test FORCEIP with fake GigE camera (2 terminals)
+# T1: cargo run -p viva-fake-gige
+# T2: cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force --iface 127.0.0.1
+
+# Test persistent IP with fake GigE camera (2 terminals)
+# T1: cargo run -p viva-fake-gige
+# T2: cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --iface 127.0.0.1
 ```
 
 **Important**: The `--zenoh-config` flag pointing to `zenoh-local.json5` is required on the **service** side (both GigE and U3V) when connecting to genicam-studio. The studio loads its own Zenoh config automatically in dev mode (`cargo tauri dev`).

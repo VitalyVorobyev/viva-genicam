@@ -11,6 +11,7 @@ use viva_camctl::cmd_events;
 use viva_camctl::cmd_get;
 use viva_camctl::cmd_list;
 use viva_camctl::cmd_set;
+use viva_camctl::cmd_set_ip;
 use viva_camctl::cmd_stream::{self, StreamArgs};
 use viva_camctl::cmd_usb;
 
@@ -127,6 +128,24 @@ enum Cmd {
         #[arg(long)]
         json_out: Option<PathBuf>,
     },
+    /// Configure IP address of a GigE camera
+    SetIp {
+        /// MAC address (e.g. DE:AD:BE:EF:CA:FE)
+        #[arg(long)]
+        mac: String,
+        /// IP address to assign
+        #[arg(long)]
+        ip: Ipv4Addr,
+        /// Subnet mask
+        #[arg(long, default_value = "255.255.255.0")]
+        subnet: Ipv4Addr,
+        /// Default gateway
+        #[arg(long, default_value = "0.0.0.0")]
+        gateway: Ipv4Addr,
+        /// Use FORCEIP (temporary) instead of persistent registers
+        #[arg(long)]
+        force: bool,
+    },
     /// Discover USB3 Vision cameras
     ListUsb,
     /// Read a feature from a USB3 Vision camera
@@ -144,6 +163,20 @@ enum Cmd {
         name: String,
         #[arg(long)]
         value: String,
+    },
+    /// Stream frames from a USB3 Vision camera
+    StreamUsb {
+        #[arg(long)]
+        index: Option<usize>,
+        /// Number of frames to save to disk
+        #[arg(long, default_value_t = 1)]
+        save: usize,
+        /// Convert saved frames to RGB
+        #[arg(long)]
+        rgb: bool,
+        /// Stop after this many seconds (0 = unlimited)
+        #[arg(long, default_value_t = 0)]
+        duration_s: u64,
     },
 }
 
@@ -250,9 +283,22 @@ async fn main() -> Result<()> {
             };
             cmd_bench::run(args, json).await?
         }
+        Cmd::SetIp {
+            mac,
+            ip,
+            subnet,
+            gateway,
+            force,
+        } => cmd_set_ip::run(&mac, ip, subnet, gateway, force, iface).await?,
         Cmd::ListUsb => cmd_usb::run_list(json)?,
         Cmd::GetUsb { index, name } => cmd_usb::run_get(index, name, json)?,
         Cmd::SetUsb { index, name, value } => cmd_usb::run_set(index, name, value, json)?,
+        Cmd::StreamUsb {
+            index,
+            save,
+            rgb,
+            duration_s,
+        } => cmd_usb::run_stream(index, save, rgb, duration_s)?,
     };
 
     Ok(())

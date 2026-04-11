@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-pub use viva_genapi_xml::SkOutput;
 use viva_genapi_xml::{AccessMode, Addressing, BitField, EnumEntryDecl};
+pub use viva_genapi_xml::{NodeMeta, Representation, SkOutput, Visibility};
 
 use crate::swissknife::AstNode;
 
@@ -82,6 +82,47 @@ impl Node {
         }
     }
 
+    /// Return the shared metadata for this node.
+    pub fn meta(&self) -> &NodeMeta {
+        match self {
+            Node::Integer(n) => &n.meta,
+            Node::Float(n) => &n.meta,
+            Node::Enum(n) => &n.meta,
+            Node::Boolean(n) => &n.meta,
+            Node::Command(n) => &n.meta,
+            Node::Category(n) => &n.meta,
+            Node::SwissKnife(n) => &n.meta,
+            Node::Converter(n) => &n.meta,
+            Node::IntConverter(n) => &n.meta,
+            Node::String(n) => &n.meta,
+        }
+    }
+
+    /// Return the visibility level of this node.
+    pub fn visibility(&self) -> Visibility {
+        self.meta().visibility
+    }
+
+    /// Return the description of this node, if any.
+    pub fn description(&self) -> Option<&str> {
+        self.meta().description.as_deref()
+    }
+
+    /// Return the tooltip of this node, if any.
+    pub fn tooltip(&self) -> Option<&str> {
+        self.meta().tooltip.as_deref()
+    }
+
+    /// Return the display name of this node, if any.
+    pub fn display_name(&self) -> Option<&str> {
+        self.meta().display_name.as_deref()
+    }
+
+    /// Return the recommended representation for this node, if any.
+    pub fn representation(&self) -> Option<Representation> {
+        self.meta().representation
+    }
+
     pub(crate) fn invalidate_cache(&self) {
         match self {
             Node::Integer(node) => {
@@ -118,6 +159,8 @@ impl Node {
 pub struct IntegerNode {
     /// Unique feature name.
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Register addressing metadata (absent when delegated via `pvalue`).
     pub addressing: Option<Addressing>,
     /// Nominal register length in bytes.
@@ -154,6 +197,8 @@ pub struct IntegerNode {
 #[derive(Debug)]
 pub struct FloatNode {
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Register addressing metadata (absent when delegated via `pvalue`).
     pub addressing: Option<Addressing>,
     pub access: AccessMode,
@@ -175,6 +220,8 @@ pub struct FloatNode {
 #[derive(Debug)]
 pub struct EnumNode {
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Register addressing metadata (absent when delegated via `pvalue`).
     pub addressing: Option<Addressing>,
     pub access: AccessMode,
@@ -206,6 +253,8 @@ impl EnumNode {
 #[derive(Debug)]
 pub struct BooleanNode {
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Register addressing metadata (absent when delegated via `pvalue`).
     pub addressing: Option<Addressing>,
     pub len: u32,
@@ -232,6 +281,8 @@ pub struct BooleanNode {
 pub struct SkNode {
     /// Unique feature name.
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Desired output type as declared in the XML.
     pub output: SkOutput,
     /// Parsed expression AST.
@@ -246,6 +297,8 @@ pub struct SkNode {
 #[derive(Debug)]
 pub struct CommandNode {
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Fixed register address (absent when delegated via `pvalue`).
     pub address: Option<u64>,
     pub len: u32,
@@ -259,6 +312,8 @@ pub struct CommandNode {
 #[derive(Debug)]
 pub struct CategoryNode {
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     pub children: Vec<String>,
 }
 
@@ -271,6 +326,8 @@ pub struct CategoryNode {
 pub struct ConverterNode {
     /// Unique feature name.
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Name of the node providing the raw register value.
     pub p_value: String,
     /// Parsed AST for the formula converting raw → user value.
@@ -294,6 +351,8 @@ pub struct ConverterNode {
 pub struct IntConverterNode {
     /// Unique feature name.
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Name of the node providing the raw register value.
     pub p_value: String,
     /// Parsed AST for the formula converting raw → user value.
@@ -315,6 +374,8 @@ pub struct IntConverterNode {
 pub struct StringNode {
     /// Unique feature name.
     pub name: String,
+    /// Shared metadata (visibility, description, tooltip, etc.).
+    pub meta: NodeMeta,
     /// Register addressing metadata.
     pub addressing: Addressing,
     /// Declared access rights.

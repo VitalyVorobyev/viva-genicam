@@ -1,10 +1,10 @@
 # genicam-rs Development Roadmap
 
-> **Last updated:** April 2026
+> **Last updated:** April 11, 2026
 
 ## What Ships in 0.1.0
 
-The initial release covers the full GigE Vision workflow end-to-end, plus USB3 Vision device control.
+The initial release covers the full GigE Vision workflow end-to-end, plus USB3 Vision device control and streaming.
 
 ### GigE Vision (complete)
 
@@ -18,6 +18,9 @@ The initial release covers the full GigE Vision workflow end-to-end, plus USB3 V
 - Chunk data parsing (timestamp, exposure, gain, line status)
 - Extended ID support (64-bit block IDs, 32-bit packet IDs)
 - CCP (Control Channel Privilege) claim/release
+- FORCEIP command for temporary IP assignment
+- Persistent IP configuration (read/write/enable)
+- CLI IP configuration (`viva-camctl set-ip`)
 
 ### GenApi (complete)
 
@@ -29,69 +32,86 @@ The initial release covers the full GigE Vision workflow end-to-end, plus USB3 V
 - IntReg, MaskedIntReg, StructReg with bitfields
 - pValue delegation for Integer, Float, Enum, Boolean, Command
 - Selector-based address switching
+- Node metadata: Visibility, Description, ToolTip, DisplayName, Representation
+- Visibility filtering (`nodes_at_visibility`)
 - NullIo for offline XML browsing
 - WASM compatible (wasm32-unknown-unknown)
 
-### USB3 Vision (control path complete)
+### USB3 Vision (complete)
 
 - Bootstrap register parsing (ABRM, SBRM, SIRM)
 - GenCP-over-USB register read/write
 - Device discovery via rusb
 - Low-level bulk-endpoint streaming (`U3vStream`)
+- Async frame iterator (`U3vFrameStream`) wrapping blocking bulk reads
+- Stream builder (`U3vStreamBuilder`) for configuring U3V streams
+- Real USB camera support in `viva-service-u3v`
+- CLI streaming command (`viva-camctl stream-usb`)
 - Fake U3V camera for testing
 
-### Service layer (complete for GigE)
+### Service layer (complete)
 
 - Zenoh bridge for genicam-studio (discovery, XML, node control, acquisition, frame streaming)
 - Shared wire types crate (viva-zenoh-api, no Zenoh dependency)
+- Reconnection with exponential backoff (GigE)
 
 ### Testing & tooling
 
 - In-process fake GigE and U3V cameras (no hardware required)
-- 175+ tests across the workspace
+- 190+ tests across the workspace
 - CLI tool (viva-camctl) for discovery, feature control, streaming, benchmarking
 
 ---
 
-## Planned for 0.2.0
+## Shipped in 0.2.0
 
 ### USB3 Vision integration
 
-The U3V transport layer works, but it's not yet wired into the high-level APIs.
-
-| Item | Description |
-|------|-------------|
-| `U3vFrameStream` | Async frame iterator wrapping blocking USB bulk reads via `spawn_blocking` |
-| `StreamBuilder` for U3V | Configure and start U3V streams through the same API as GigE |
-| `viva-service-u3v` real USB | Wire real USB discovery into the service (currently `--fake` only) |
-| `viva-camctl stream-usb` | CLI streaming command for USB3 Vision cameras |
+| Item | Status |
+|------|--------|
+| `U3vFrameStream` | done |
+| `U3vStreamBuilder` | done |
+| `viva-service-u3v` real USB | done |
+| `viva-camctl stream-usb` | done |
 
 ### GigE Vision: IP configuration
 
-| Item | Description |
-|------|-------------|
-| FORCEIP command | GVCP opcode 0x0004 for temporary IP assignment (broadcast, targets device by MAC) |
-| Persistent IP registers | Read/write bootstrap registers for persistent IP, subnet, gateway |
-| `viva-camctl set-ip` | CLI command for IP configuration |
+| Item | Status |
+|------|--------|
+| FORCEIP command (opcode 0x0004) | done |
+| Persistent IP registers | done |
+| `viva-camctl set-ip` | done |
 
 ### Service hardening
 
-| Item | Description |
-|------|-------------|
-| Heartbeat watchdog | Periodic register read to detect device loss |
-| Reconnection | Automatic reconnect with backoff on transport errors |
+| Item | Status |
+|------|--------|
+| Heartbeat watchdog | done (0.1.0) |
+| Reconnection with backoff | done |
+
+---
+
+## Shipped in 0.2.1
+
+### GenApi metadata
+
+| Item | Status |
+|------|--------|
+| Visibility filtering (Beginner / Expert / Guru / Invisible) | done |
+| Description & tooltip parsing | done |
+| DisplayName parsing | done |
+| Representation hints (Linear, Logarithmic, HexNumber, etc.) | done |
+| `NodeMap::nodes_at_visibility(level)` filtering | done |
 
 ---
 
 ## Future
 
-| Item | Priority | Notes |
-|------|----------|-------|
-| GenApi visibility filtering | P2 | Beginner / Expert / Guru levels |
-| GenApi description & tooltip hints | P2 | Representation, unit, description attributes |
-| GenTL producer (.cti) | P3 | C-compatible plugin for third-party GenICam consumers |
-| CoaXPress transport | P3 | Requires frame grabber SDK integration |
-| IPv6 support | P3 | |
+| Item | Notes |
+|------|-------|
+| GenTL producer (.cti) | C-compatible plugin for third-party GenICam consumers |
+| CoaXPress transport | Requires frame grabber SDK integration |
+| IPv6 support | |
 
 ---
 

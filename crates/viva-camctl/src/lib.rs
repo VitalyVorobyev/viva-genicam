@@ -4,6 +4,7 @@ pub mod cmd_events;
 pub mod cmd_get;
 pub mod cmd_list;
 pub mod cmd_set;
+pub mod cmd_set_ip;
 pub mod cmd_stream;
 pub mod cmd_usb;
 pub mod common;

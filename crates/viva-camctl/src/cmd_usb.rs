@@ -1,10 +1,13 @@
 //! USB3 Vision CLI commands.
 
+use std::path::PathBuf;
+
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tracing::info;
 
 use viva_genicam::{Camera, U3vRegisterIo, connect_u3v};
+use viva_pfnc::PixelFormat;
 use viva_u3v::discovery::{U3vDeviceInfo, discover};
 use viva_u3v::usb::RusbTransfer;
 
@@ -141,6 +144,117 @@ pub fn run_set(index: Option<usize>, name: String, value: String, json: bool) ->
     } else {
         println!("OK");
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// stream-usb
+// ---------------------------------------------------------------------------
+
+pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64) -> Result<()> {
+    let mut camera = open_usb_camera(index)?;
+
+    // Read image dimensions from camera features.
+    let width: u32 = camera.get("Width")?.parse().unwrap_or(640);
+    let height: u32 = camera.get("Height")?.parse().unwrap_or(480);
+    let pf_str = camera
+        .get("PixelFormat")
+        .unwrap_or_else(|_| "Mono8".to_string());
+    let bpp: usize = PixelFormat::from_name(&pf_str)
+        .bytes_per_pixel()
+        .unwrap_or(1);
+    let payload_size = (width as usize) * (height as usize) * bpp;
+
+    info!(
+        width,
+        height,
+        pixel_format = pf_str,
+        payload_size,
+        "opening U3V stream"
+    );
+
+    // Open stream through the transport.
+    let mut device = camera.transport().lock_device()?;
+    let mut stream = device
+        .open_stream(payload_size as u64)
+        .map_err(|e| anyhow!("open stream failed: {e}"))?;
+
+    // Start acquisition.
+    drop(device); // Release lock before camera feature access.
+    camera.set("AcquisitionStart", "1")?;
+
+    let deadline = if duration_s > 0 {
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(duration_s))
+    } else {
+        None
+    };
+
+    let mut frame_count: u64 = 0;
+    let mut saved: usize = 0;
+    let t0 = std::time::Instant::now();
+
+    loop {
+        if let Some(deadline) = deadline
+            && std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+
+        let raw = match stream.next_frame() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("stream error: {e}");
+                break;
+            }
+        };
+
+        frame_count += 1;
+        let elapsed = t0.elapsed().as_secs_f64();
+        let fps = frame_count as f64 / elapsed.max(0.001);
+
+        let pixel_format = PixelFormat::from_code(raw.leader.pixel_format);
+        println!(
+            "frame #{frame_count}: {}x{} {pixel_format} block={} ({fps:.1} fps)",
+            raw.leader.width, raw.leader.height, raw.trailer.block_id,
+        );
+
+        // Save frames if requested.
+        if saved < save {
+            let payload = raw.payload.as_ref();
+            let path = if rgb {
+                let frame = viva_genicam::frame::Frame {
+                    payload: raw.payload.clone(),
+                    width: raw.leader.width,
+                    height: raw.leader.height,
+                    pixel_format,
+                    chunks: None,
+                    ts_dev: None,
+                    ts_host: None,
+                };
+                let rgb_data = frame
+                    .to_rgb8()
+                    .map_err(|e| anyhow!("RGB conversion: {e}"))?;
+                let path = PathBuf::from(format!("frame_{saved}.ppm"));
+                let encoded = common::encode_ppm(raw.leader.width, raw.leader.height, &rgb_data)?;
+                common::save_image(&encoded, &path)?;
+                path
+            } else {
+                let path = PathBuf::from(format!("frame_{saved}.pgm"));
+                let encoded = common::encode_pgm(raw.leader.width, raw.leader.height, payload)?;
+                common::save_image(&encoded, &path)?;
+                path
+            };
+            println!("  saved -> {}", path.display());
+            saved += 1;
+        }
+    }
+
+    println!(
+        "\n{frame_count} frames in {:.2}s ({:.1} fps)",
+        t0.elapsed().as_secs_f64(),
+        frame_count as f64 / t0.elapsed().as_secs_f64().max(0.001),
+    );
 
     Ok(())
 }

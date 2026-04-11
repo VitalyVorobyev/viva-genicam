@@ -3,7 +3,7 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::TAG_P_VALUE;
+use super::{NodeMetaBuilder, TAG_P_VALUE};
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
 use crate::{
@@ -25,6 +25,7 @@ pub fn parse_converter(
     let mut output = SkOutput::Float;
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -76,7 +77,11 @@ pub fn parse_converter(
                         output = kind;
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 TAG_P_VALUE => {
@@ -130,6 +135,7 @@ pub fn parse_converter(
 
     Ok(NodeDecl::Converter(ConverterDecl {
         name,
+        meta: meta_builder.build(),
         p_value,
         formula_to,
         formula_from,
@@ -154,6 +160,7 @@ pub fn parse_int_converter(
     let mut unit: Option<String> = None;
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -198,7 +205,11 @@ pub fn parse_int_converter(
                         unit = Some(trimmed.to_string());
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 TAG_P_VALUE => {
@@ -247,6 +258,7 @@ pub fn parse_int_converter(
 
     Ok(NodeDecl::IntConverter(IntConverterDecl {
         name,
+        meta: meta_builder.build(),
         p_value,
         formula_to,
         formula_from,
@@ -266,6 +278,7 @@ pub fn parse_string(
     let mut access = AccessMode::RO;
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
+    let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -294,15 +307,19 @@ pub fn parse_string(
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta_builder.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => {
-                if e.name().as_ref() == b"pAddress" {
-                    if let Some(value) = attribute_value(e, b"Name")? {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            addressing.set_p_address_node(trimmed);
-                        }
+                if e.name().as_ref() == b"pAddress"
+                    && let Some(value) = attribute_value(e, b"Name")?
+                {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        addressing.set_p_address_node(trimmed);
                     }
                 }
             }
@@ -322,6 +339,7 @@ pub fn parse_string(
 
     Ok(NodeDecl::String(StringDecl {
         name,
+        meta: meta_builder.build(),
         addressing,
         access,
     }))

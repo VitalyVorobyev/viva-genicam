@@ -2,8 +2,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use viva_genicam::gige::gvcp::consts as gvcp_consts;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
@@ -138,6 +139,10 @@ impl DeviceHandle {
     /// connection claims it, so the old heartbeat would retry for up to 2 s
     /// and starve the new connection's CCP timer).
     pub async fn refresh_connection(&self) -> Result<(), GenicamError> {
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY: Duration = Duration::from_millis(500);
+        const MAX_DELAY: Duration = Duration::from_secs(16);
+
         // 1. Pause heartbeat so it does not contend for the mutex on the
         //    old (now CCP-revoked) socket while we create the new connection.
         self.pause_heartbeat();
@@ -146,11 +151,40 @@ impl DeviceHandle {
             "heartbeat paused for connection refresh"
         );
 
-        let result = connect_gige_with_xml(&self.info).await;
+        // 2. Retry connection with exponential backoff.
+        let mut attempt = 0u32;
+        let result = loop {
+            attempt += 1;
+            match connect_gige_with_xml(&self.info).await {
+                Ok(pair) => break Ok(pair),
+                Err(e) if attempt >= MAX_RETRIES => {
+                    warn!(
+                        device_id = self.device_id,
+                        error = %e,
+                        attempt,
+                        "reconnect failed, giving up"
+                    );
+                    break Err(e);
+                }
+                Err(e) => {
+                    let delay = BASE_DELAY
+                        .saturating_mul(1 << (attempt - 1).min(5))
+                        .min(MAX_DELAY);
+                    warn!(
+                        device_id = self.device_id,
+                        error = %e,
+                        attempt,
+                        ?delay,
+                        "reconnect failed, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        };
 
         match result {
             Ok((camera, _xml)) => {
-                // 2. Swap the camera handle.
+                // 3. Swap the camera handle.
                 {
                     let mut slot = self
                         .camera
@@ -159,7 +193,7 @@ impl DeviceHandle {
                     *slot = camera;
                 }
 
-                // 3. Send an immediate heartbeat on the new socket to reset
+                // 4. Send an immediate heartbeat on the new socket to reset
                 //    the camera's CCP timer before any other operations.
                 if let Err(e) = self.heartbeat_ping().await {
                     info!(
@@ -169,7 +203,7 @@ impl DeviceHandle {
                     );
                 }
 
-                // 4. Resume heartbeat loop.
+                // 5. Resume heartbeat loop.
                 self.resume_heartbeat();
                 info!(
                     device_id = self.device_id,

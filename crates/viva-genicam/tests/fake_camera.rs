@@ -426,3 +426,56 @@ async fn test_full_lifecycle() {
     drop(frame_stream);
     drop(camera);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: IP management
+// ---------------------------------------------------------------------------
+
+/// Helper: open a `GigeDevice` control connection to the fake camera.
+async fn open_fake_device(device_info: &gige::DeviceInfo) -> gige::GigeDevice {
+    use std::net::{IpAddr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(device_info.ip), gige::GVCP_PORT);
+    gige::GigeDevice::open(addr).await.expect("open GigeDevice")
+}
+
+#[tokio::test]
+async fn test_persistent_ip_roundtrip() {
+    let _cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+
+    let mut device = open_fake_device(&device_info).await;
+    device.claim_control().await.expect("claim control");
+
+    let ip: std::net::Ipv4Addr = "192.168.10.50".parse().unwrap();
+    let subnet: std::net::Ipv4Addr = "255.255.255.0".parse().unwrap();
+    let gateway: std::net::Ipv4Addr = "192.168.10.1".parse().unwrap();
+
+    device
+        .write_persistent_ip(ip, subnet, gateway)
+        .await
+        .expect("write_persistent_ip");
+
+    let (read_ip, read_subnet, read_gateway) = device
+        .read_persistent_ip()
+        .await
+        .expect("read_persistent_ip");
+
+    assert_eq!(read_ip, ip, "persistent IP roundtrip mismatch");
+    assert_eq!(read_subnet, subnet, "persistent subnet roundtrip mismatch");
+    assert_eq!(
+        read_gateway, gateway,
+        "persistent gateway roundtrip mismatch"
+    );
+
+    device
+        .enable_persistent_ip()
+        .await
+        .expect("enable_persistent_ip");
+
+    device.release_control().await.expect("release control");
+}
+
+// NOTE: FORCEIP integration test removed -- UDP broadcast from a loopback-bound
+// socket does not reliably reach the fake camera across platforms (fails on macOS
+// outright, times out on some Linux CI runners). The FORCEIP payload encoding is
+// validated by the unit test `forceip_payload_encoding` in viva-gige/src/gvcp.rs.

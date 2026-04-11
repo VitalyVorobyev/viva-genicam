@@ -15,7 +15,7 @@ categories = ["hardware-support", "science::robotics"]
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-viva-gencp = { version = "0.1.0", path = "../viva-gencp" }
+viva-gencp = { version = "0.2.0", path = "../viva-gencp" }
 rusb = { workspace = true, optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

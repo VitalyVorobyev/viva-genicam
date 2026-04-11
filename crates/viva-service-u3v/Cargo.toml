@@ -1,6 +1,6 @@
 [package]
 name = "viva-service-u3v"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,11 +12,12 @@ name = "viva-service-u3v"
 path = "src/main.rs"
 
 [dependencies]
-viva-service = { version = "0.1.0", path = "../viva-service" }
-viva-genicam = { version = "0.1.0", path = "../viva-genicam", features = ["u3v"] }
-viva-u3v = { version = "0.1.0", path = "../viva-u3v" }
+viva-service = { version = "0.2.0", path = "../viva-service" }
+viva-genicam = { version = "0.2.0", path = "../viva-genicam", features = ["u3v-usb"] }
+viva-u3v = { version = "0.2.0", path = "../viva-u3v", features = ["usb"] }
 viva-fake-u3v = { path = "../viva-fake-u3v" }
-viva-zenoh-api = { version = "0.1.0", path = "../viva-zenoh-api" }
+viva-zenoh-api = { version = "0.2.0", path = "../viva-zenoh-api" }
+viva-pfnc = { version = "0.2.0", path = "../viva-pfnc" }
 zenoh = "1"
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "signal"] }

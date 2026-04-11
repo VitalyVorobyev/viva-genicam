@@ -17,9 +17,9 @@ pub use symbolic::{parse_boolean, parse_enum};
 use quick_xml::Reader;
 use quick_xml::events::BytesStart;
 
-use crate::XmlError;
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, parse_u64, read_text_start};
+use crate::{NodeMeta, Representation, Visibility, XmlError};
 
 /// XML element name referencing another node that provides an address.
 pub const TAG_P_ADDRESS: &[u8] = b"pAddress";
@@ -27,8 +27,16 @@ pub const TAG_P_ADDRESS: &[u8] = b"pAddress";
 pub const TAG_VALUE: &[u8] = b"Value";
 /// XML element referencing another node supplying the value at runtime.
 pub const TAG_P_VALUE: &[u8] = b"pValue";
-/// XML element specifying a user friendly label for an enum entry.
+/// XML element specifying a user friendly label.
 pub const TAG_DISPLAY_NAME: &[u8] = b"DisplayName";
+/// XML element for node visibility level.
+pub const TAG_VISIBILITY: &[u8] = b"Visibility";
+/// XML element for the long-form description.
+pub const TAG_DESCRIPTION: &[u8] = b"Description";
+/// XML element for short tooltip text.
+pub const TAG_TOOLTIP: &[u8] = b"ToolTip";
+/// XML element for the recommended numeric representation.
+pub const TAG_REPRESENTATION: &[u8] = b"Representation";
 /// XML element describing the least significant bit of a bitfield.
 pub const TAG_LSB: &[u8] = b"Lsb";
 /// XML element describing the most significant bit of a bitfield.
@@ -219,6 +227,76 @@ pub fn handle_addressing_start(
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+/// Accumulates metadata fields during node parsing.
+#[derive(Debug, Default)]
+pub struct NodeMetaBuilder {
+    pub visibility: Option<Visibility>,
+    pub description: Option<String>,
+    pub tooltip: Option<String>,
+    pub display_name: Option<String>,
+    pub representation: Option<Representation>,
+}
+
+impl NodeMetaBuilder {
+    /// Try to handle a start element as a metadata tag.
+    ///
+    /// Returns `true` if the tag was consumed, `false` otherwise.
+    pub fn handle_start(
+        &mut self,
+        reader: &mut Reader<&[u8]>,
+        event: &BytesStart<'_>,
+    ) -> Result<bool, XmlError> {
+        match event.name().as_ref() {
+            TAG_VISIBILITY => {
+                let text = read_text_start(reader, event)?;
+                self.visibility = Visibility::parse(&text);
+                Ok(true)
+            }
+            TAG_DESCRIPTION => {
+                let text = read_text_start(reader, event)?;
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.description = Some(trimmed.to_string());
+                }
+                Ok(true)
+            }
+            TAG_TOOLTIP => {
+                let text = read_text_start(reader, event)?;
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.tooltip = Some(trimmed.to_string());
+                }
+                Ok(true)
+            }
+            TAG_DISPLAY_NAME => {
+                let text = read_text_start(reader, event)?;
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.display_name = Some(trimmed.to_string());
+                }
+                Ok(true)
+            }
+            TAG_REPRESENTATION => {
+                let text = read_text_start(reader, event)?;
+                self.representation = Representation::parse(&text);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Build the final [`NodeMeta`].
+    pub fn build(self) -> NodeMeta {
+        NodeMeta {
+            visibility: self.visibility.unwrap_or_default(),
+            description: self.description,
+            tooltip: self.tooltip,
+            display_name: self.display_name,
+            representation: self.representation,
+        }
     }
 }
 

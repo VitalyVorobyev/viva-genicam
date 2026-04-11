@@ -14,6 +14,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use viva_service::device::DeviceOps;
 use viva_service::{nodes, status, xml};
+use viva_u3v::usb::UsbTransfer;
 use viva_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
 
 use crate::device::U3vDeviceHandle;
@@ -86,10 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .await?;
     } else {
-        error!(
-            "Real USB3 Vision discovery not yet integrated into the service. Use --fake for testing."
-        );
-        return Ok(());
+        run_real_camera(session.clone(), shutdown_rx.clone()).await?;
     }
 
     // Wait for CTRL+C.
@@ -105,43 +103,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn run_fake_camera(
+/// Spawn Zenoh service tasks shared by both fake and real camera paths.
+///
+/// Publishes connected status and initial feature values, then spawns XML,
+/// node-set, node-execute, bulk-read, and acquisition queryables, and a
+/// periodic announce loop.
+async fn spawn_service_tasks<T: UsbTransfer + 'static>(
     session: Arc<zenoh::Session>,
-    width: u32,
-    height: u32,
-    pixel_format: u32,
+    handle: Arc<U3vDeviceHandle<T>>,
+    device_id: String,
+    name: String,
+    model: String,
+    serial: String,
     shutdown: watch::Receiver<bool>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use viva_genicam::open_u3v_device;
-
-    let fake_transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(
-        width,
-        height,
-        pixel_format,
-    ));
-
-    let device =
-        viva_u3v::device::U3vDevice::open(fake_transport.clone(), 0x81, 0x01, Some(0x82), None)?;
-
-    let (camera, xml) = open_u3v_device(device)?;
-
-    let device_id = "cam-fake-u3v".to_string();
-    let handle = Arc::new(U3vDeviceHandle::new(
-        camera,
-        xml,
-        device_id.clone(),
-        fake_transport,
-        Some(0x82),
-    ));
-
+) {
     // Publish connected status and initial values.
     status::publish_connected(&session, &device_id).await;
     nodes::publish_initial_values(&session, handle.as_ref()).await;
 
-    info!(
-        device_id,
-        "fake U3V camera connected, spawning service tasks"
-    );
+    info!(device_id, "U3V camera connected, spawning service tasks");
 
     // Spawn shared Zenoh queryables.
     tokio::spawn(xml::run(
@@ -179,13 +159,16 @@ async fn run_fake_camera(
     tokio::spawn(async move {
         let announce = DeviceAnnounce {
             id: announce_device_id.clone(),
-            name: "FakeU3V".to_string(),
-            model: "FakeU3V".to_string(),
-            serial: "FAKE-001".to_string(),
+            name,
+            model,
+            serial,
             api_version: Some(API_VERSION),
         };
         let key = keys::announce(&announce_device_id);
-        let payload = serde_json::to_vec(&announce).unwrap();
+        let Ok(payload) = serde_json::to_vec(&announce) else {
+            tracing::error!("serialize announce");
+            return;
+        };
         loop {
             let _ = announce_session.put(&key, payload.clone()).await;
             tokio::select! {
@@ -197,10 +180,110 @@ async fn run_fake_camera(
         }
     });
 
-    info!(
+    info!(device_id, "U3V service tasks spawned");
+}
+
+async fn run_fake_camera(
+    session: Arc<zenoh::Session>,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use viva_genicam::open_u3v_device;
+
+    let fake_transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(
+        width,
+        height,
+        pixel_format,
+    ));
+
+    let device =
+        viva_u3v::device::U3vDevice::open(fake_transport.clone(), 0x81, 0x01, Some(0x82), None)?;
+
+    let (camera, xml) = open_u3v_device(device)?;
+
+    let device_id = "cam-fake-u3v".to_string();
+    let handle = Arc::new(U3vDeviceHandle::new(
+        camera,
+        xml,
+        device_id.clone(),
+        fake_transport,
+        Some(0x82),
+    ));
+
+    spawn_service_tasks(
+        session,
+        handle,
         device_id,
-        "U3V service tasks spawned (use genicam-studio to connect)"
+        "FakeU3V".to_string(),
+        "FakeU3V".to_string(),
+        "FAKE-001".to_string(),
+        shutdown,
+    )
+    .await;
+
+    info!("fake U3V camera service ready (use genicam-studio to connect)");
+    Ok(())
+}
+
+async fn run_real_camera(
+    session: Arc<zenoh::Session>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use viva_genicam::connect_u3v_with_xml;
+    use viva_u3v::discovery;
+
+    let devices = discovery::discover().map_err(|e| format!("USB discovery failed: {e}"))?;
+    if devices.is_empty() {
+        error!("No USB3 Vision cameras found. Use --fake for testing.");
+        return Ok(());
+    }
+
+    let device_info = &devices[0];
+    info!(
+        vendor = format!("{:04x}", device_info.vendor_id),
+        product = format!("{:04x}", device_info.product_id),
+        model = device_info.model.as_deref().unwrap_or("unknown"),
+        "connecting to USB3 Vision camera"
     );
+
+    let (camera, xml) = connect_u3v_with_xml(device_info)?;
+
+    // To get the transport Arc and stream endpoint, we need to peek at the
+    // RegisterIo's inner device. Since `connect_u3v_with_xml` consumes
+    // the device, we reconstruct the transport from the RegisterIo.
+    let transport = camera.transport().lock_device()?.transport();
+    let stream_ep = camera.transport().lock_device()?.stream_ep();
+
+    let device_id = format!(
+        "cam-u3v-{:04x}{:04x}",
+        device_info.vendor_id, device_info.product_id
+    );
+
+    let handle = Arc::new(U3vDeviceHandle::new(
+        camera,
+        xml,
+        device_id.clone(),
+        transport,
+        stream_ep,
+    ));
+
+    let name = device_info
+        .model
+        .clone()
+        .unwrap_or_else(|| "U3V Camera".to_string());
+    let model = device_info
+        .model
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
+    let serial = device_info
+        .serial
+        .clone()
+        .unwrap_or_else(|| "N/A".to_string());
+
+    spawn_service_tasks(session, handle, device_id, name, model, serial, shutdown).await;
+
     Ok(())
 }
 

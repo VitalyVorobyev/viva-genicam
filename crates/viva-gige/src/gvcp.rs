@@ -27,10 +27,26 @@ pub mod consts {
     pub const DISCOVERY_COMMAND: u16 = 0x0002;
     /// Opcode of the discovery acknowledgement.
     pub const DISCOVERY_ACK: u16 = 0x0003;
+    /// Opcode of the FORCEIP command.
+    pub const FORCEIP_COMMAND: u16 = 0x0004;
+    /// Opcode of the FORCEIP acknowledgement.
+    pub const FORCEIP_ACK: u16 = 0x0005;
     /// Opcode for requesting packet resends.
     pub const PACKET_RESEND_COMMAND: u16 = 0x0040;
     /// Opcode of the packet resend acknowledgement.
     pub const PACKET_RESEND_ACK: u16 = 0x0041;
+
+    /// Current IP configuration flags register.
+    ///
+    /// Bit 2 = DHCP, bit 1 = persistent IP, bit 0 = LLA.
+    pub const CURRENT_IP_CONFIG: u64 = 0x0014;
+
+    /// Persistent IP address register (4 bytes at the end of a 16-byte block).
+    pub const PERSISTENT_IP_ADDRESS: u64 = 0x064C;
+    /// Persistent subnet mask register.
+    pub const PERSISTENT_SUBNET_MASK: u64 = 0x065C;
+    /// Persistent default gateway register.
+    pub const PERSISTENT_DEFAULT_GATEWAY: u64 = 0x066C;
 
     /// Address of the Control Channel Privilege (CCP) register.
     ///
@@ -220,6 +236,106 @@ pub async fn discover_all(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeErro
     discover_impl(timeout, None, true).await
 }
 
+/// Send a FORCEIP command to temporarily assign an IP address to a device.
+///
+/// FORCEIP is a broadcast command that targets a device by its MAC address.
+/// The assigned IP is temporary — it does not survive a power cycle. Use
+/// [`GigeDevice::write_persistent_ip`] + [`GigeDevice::enable_persistent_ip`]
+/// for permanent configuration.
+///
+/// FORCEIP payload layout (56 bytes, big-endian):
+/// ```text
+/// [0..2]   reserved
+/// [2..8]   target MAC address (6 bytes)
+/// [8..20]  reserved
+/// [20..24] static IP address
+/// [24..36] reserved
+/// [36..40] subnet mask
+/// [40..52] reserved
+/// [52..56] gateway
+/// ```
+pub async fn force_ip(
+    mac: [u8; 6],
+    ip: Ipv4Addr,
+    subnet: Ipv4Addr,
+    gateway: Ipv4Addr,
+    iface: Option<&Iface>,
+) -> Result<(), GigeError> {
+    // Build the 56-byte FORCEIP payload.
+    let payload = encode_forceip_payload(mac, ip, subnet, gateway);
+
+    let local_ip = match iface {
+        Some(iface) => iface
+            .ipv4()
+            .ok_or_else(|| GigeError::Protocol("interface lacks IPv4 address".into()))?,
+        None => Ipv4Addr::UNSPECIFIED,
+    };
+
+    let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(local_ip), 0)).await?;
+    socket.set_broadcast(true)?;
+    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), consts::PORT);
+
+    let header = GvcpRequestHeader {
+        flags: CommandFlags::ACK_REQUIRED | CommandFlags::BROADCAST,
+        command: consts::FORCEIP_COMMAND,
+        length: payload.len() as u16,
+        request_id: 1,
+    };
+    let packet = header.encode(&payload);
+    info!(mac = ?mac, %ip, %subnet, %gateway, "sending FORCEIP command");
+    socket.send_to(&packet, dest).await?;
+
+    // Wait for FORCEIP_ACK.
+    let mut buf = vec![0u8; consts::DISCOVERY_BUFFER];
+    match time::timeout(consts::CONTROL_TIMEOUT, socket.recv_from(&mut buf)).await {
+        Ok(Ok((len, _src))) => {
+            if len < viva_gencp::HEADER_SIZE {
+                return Err(GigeError::Protocol("FORCEIP ack too short".into()));
+            }
+            let mut cursor = &buf[..];
+            let status = cursor.get_u16();
+            let command = cursor.get_u16();
+            if command != consts::FORCEIP_ACK {
+                return Err(GigeError::Protocol(format!(
+                    "unexpected FORCEIP ack opcode {command:#06x}"
+                )));
+            }
+            if status != 0 {
+                return Err(GigeError::Protocol(format!(
+                    "FORCEIP returned status {status:#06x}"
+                )));
+            }
+            info!(%ip, "FORCEIP accepted");
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(GigeError::Timeout),
+    }
+}
+
+/// Encode the 56-byte FORCEIP payload.
+fn encode_forceip_payload(
+    mac: [u8; 6],
+    ip: Ipv4Addr,
+    subnet: Ipv4Addr,
+    gateway: Ipv4Addr,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 56];
+    // [0..2]   reserved
+    // [2..8]   MAC address
+    buf[2..8].copy_from_slice(&mac);
+    // [8..20]  reserved
+    // [20..24] IP address
+    buf[20..24].copy_from_slice(&ip.octets());
+    // [24..36] reserved
+    // [36..40] subnet mask
+    buf[36..40].copy_from_slice(&subnet.octets());
+    // [40..52] reserved
+    // [52..56] gateway
+    buf[52..56].copy_from_slice(&gateway.octets());
+    buf
+}
+
 async fn discover_impl(
     timeout: Duration,
     iface_filter: Option<&str>,
@@ -233,10 +349,10 @@ async fn discover_impl(
         if !include_loopback && v4.ip.is_loopback() {
             continue;
         }
-        if let Some(filter) = iface_filter {
-            if iface.name != filter {
-                continue;
-            }
+        if let Some(filter) = iface_filter
+            && iface.name != filter
+        {
+            continue;
         }
         interfaces.push((iface.name, v4));
     }
@@ -825,6 +941,59 @@ impl GigeDevice {
         Ok(())
     }
 
+    /// Read the persistent IP configuration from the device.
+    ///
+    /// Returns `(ip, subnet, gateway)`.
+    pub async fn read_persistent_ip(
+        &mut self,
+    ) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr), GigeError> {
+        let ip = Ipv4Addr::from(
+            self.read_register(consts::PERSISTENT_IP_ADDRESS as u32)
+                .await?,
+        );
+        let subnet = Ipv4Addr::from(
+            self.read_register(consts::PERSISTENT_SUBNET_MASK as u32)
+                .await?,
+        );
+        let gateway = Ipv4Addr::from(
+            self.read_register(consts::PERSISTENT_DEFAULT_GATEWAY as u32)
+                .await?,
+        );
+        Ok((ip, subnet, gateway))
+    }
+
+    /// Write the persistent IP configuration to the device.
+    pub async fn write_persistent_ip(
+        &mut self,
+        ip: Ipv4Addr,
+        subnet: Ipv4Addr,
+        gateway: Ipv4Addr,
+    ) -> Result<(), GigeError> {
+        self.write_register(consts::PERSISTENT_IP_ADDRESS as u32, u32::from(ip))
+            .await?;
+        self.write_register(consts::PERSISTENT_SUBNET_MASK as u32, u32::from(subnet))
+            .await?;
+        self.write_register(
+            consts::PERSISTENT_DEFAULT_GATEWAY as u32,
+            u32::from(gateway),
+        )
+        .await?;
+        info!(%ip, %subnet, %gateway, "wrote persistent IP configuration");
+        Ok(())
+    }
+
+    /// Enable persistent IP mode in the device configuration flags.
+    ///
+    /// Sets bit 1 (persistent IP) in the `CurrentIPConfiguration` register.
+    pub async fn enable_persistent_ip(&mut self) -> Result<(), GigeError> {
+        let current = self.read_register(consts::CURRENT_IP_CONFIG as u32).await?;
+        let updated = current | 0x02; // bit 1 = persistent IP
+        self.write_register(consts::CURRENT_IP_CONFIG as u32, updated)
+            .await?;
+        info!(config = format!("0x{updated:08x}"), "enabled persistent IP");
+        Ok(())
+    }
+
     /// Request resend of a packet range for the provided block identifier.
     pub async fn request_resend(
         &mut self,
@@ -904,6 +1073,29 @@ mod tests {
         assert_eq!(&encoded[4..6], &header.length.to_be_bytes());
         assert_eq!(&encoded[6..8], &header.request_id.to_be_bytes());
         assert_eq!(&encoded[8..], &payload);
+    }
+
+    #[test]
+    fn forceip_payload_encoding() {
+        let mac = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
+        let ip = Ipv4Addr::new(192, 168, 1, 100);
+        let subnet = Ipv4Addr::new(255, 255, 255, 0);
+        let gateway = Ipv4Addr::new(192, 168, 1, 1);
+        let payload = encode_forceip_payload(mac, ip, subnet, gateway);
+        assert_eq!(payload.len(), 56);
+        // MAC at offset 2..8
+        assert_eq!(&payload[2..8], &mac);
+        // IP at offset 20..24
+        assert_eq!(&payload[20..24], &ip.octets());
+        // Subnet at offset 36..40
+        assert_eq!(&payload[36..40], &subnet.octets());
+        // Gateway at offset 52..56
+        assert_eq!(&payload[52..56], &gateway.octets());
+        // Reserved bytes should be zero
+        assert_eq!(&payload[0..2], &[0, 0]);
+        assert_eq!(&payload[8..20], &[0u8; 12]);
+        assert_eq!(&payload[24..36], &[0u8; 12]);
+        assert_eq!(&payload[40..52], &[0u8; 12]);
     }
 
     #[test]

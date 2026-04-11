@@ -21,9 +21,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-deny
+        if: runner.os == 'Linux'
         run: cargo install cargo-deny --locked
 
       - name: Cargo deny (advisories)
+        if: runner.os == 'Linux'
         run: cargo deny check advisories
 
       - name: Cargo fmt

@@ -197,7 +197,7 @@ async fn handle_readreg(
     regs: &Mutex<RegisterMap>,
 ) {
     // READREG payload: one or more 4-byte addresses
-    if payload.len() < 4 || payload.len() % 4 != 0 {
+    if payload.len() < 4 || !payload.len().is_multiple_of(4) {
         return;
     }
     let store = regs.lock().await;
@@ -222,7 +222,7 @@ async fn handle_writereg(
     acq_stop_flag: &AtomicBool,
 ) {
     // WRITEREG payload: pairs of (address: u32, value: u32)
-    if payload.len() < 8 || payload.len() % 8 != 0 {
+    if payload.len() < 8 || !payload.len().is_multiple_of(8) {
         return;
     }
     let mut store = regs.lock().await;

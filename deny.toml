@@ -1,0 +1,16 @@
+# cargo-deny configuration
+# Run: cargo deny check advisories
+
+[advisories]
+# Advisories we accept because they come from zenoh 1.9.0 transitive
+# dependencies and cannot be resolved without an upstream zenoh release.
+ignore = [
+    # lz4_flex 0.10.0 -- zenoh-transport pins "0.10", fix is in 0.11.6
+    "RUSTSEC-2026-0041",
+    # rsa 0.9.10 -- no patched version exists; zenoh-transport depends on it
+    "RUSTSEC-2023-0071",
+    # paste 1.0.15 -- unmaintained; zenoh-keyexpr -> token-cell -> paste
+    "RUSTSEC-2024-0436",
+    # rustls-pemfile 2.2.0 -- unmaintained; zenoh-link-commons depends on it
+    "RUSTSEC-2025-0134",
+]

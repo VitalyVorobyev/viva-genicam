@@ -195,10 +195,10 @@ pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64)
     let t0 = std::time::Instant::now();
 
     loop {
-        if let Some(deadline) = deadline {
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
+        if let Some(deadline) = deadline
+            && std::time::Instant::now() >= deadline
+        {
+            break;
         }
 
         let raw = match stream.next_frame() {

@@ -110,11 +110,11 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        if let Some(deadline) = end_deadline {
-            if Instant::now() >= deadline {
-                info!("stream duration elapsed");
-                break;
-            }
+        if let Some(deadline) = end_deadline
+            && Instant::now() >= deadline
+        {
+            info!("stream duration elapsed");
+            break;
         }
 
         tokio::select! {
@@ -162,11 +162,10 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                         });
                     }
                     GvspPacket::Payload { block_id, data, .. } => {
-                        if let Some(active) = state.as_mut() {
-                            if active.block_id == block_id {
+                        if let Some(active) = state.as_mut()
+                            && active.block_id == block_id {
                                 active.payload.extend_from_slice(data.as_ref());
                             }
-                        }
                     }
                     GvspPacket::Trailer { block_id, status, chunk_data, .. } => {
                         let Some(active) = state.take() else { continue };

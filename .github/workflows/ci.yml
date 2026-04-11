@@ -20,6 +20,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Cargo deny (advisories)
+        run: cargo deny check advisories
+
       - name: Cargo fmt
         run: cargo fmt --all --check
 

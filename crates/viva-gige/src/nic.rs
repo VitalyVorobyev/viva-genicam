@@ -130,10 +130,10 @@ impl Iface {
     /// Resolve an interface by its primary IPv4 address.
     pub fn from_ipv4(addr: Ipv4Addr) -> io::Result<Self> {
         for iface in if_addrs::get_if_addrs()? {
-            if let IfAddr::V4(v4) = iface.addr {
-                if v4.ip == addr {
-                    return Self::from_system(&iface.name);
-                }
+            if let IfAddr::V4(v4) = iface.addr
+                && v4.ip == addr
+            {
+                return Self::from_system(&iface.name);
             }
         }
         Err(io::Error::new(

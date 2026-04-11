@@ -349,10 +349,10 @@ async fn discover_impl(
         if !include_loopback && v4.ip.is_loopback() {
             continue;
         }
-        if let Some(filter) = iface_filter {
-            if iface.name != filter {
-                continue;
-            }
+        if let Some(filter) = iface_filter
+            && iface.name != filter
+        {
+            continue;
         }
         interfaces.push((iface.name, v4));
     }

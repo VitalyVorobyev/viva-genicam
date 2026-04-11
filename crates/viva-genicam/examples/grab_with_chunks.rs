@@ -213,10 +213,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 });
             }
             GvspPacket::Payload { block_id, data, .. } => {
-                if let Some(active) = state.as_mut() {
-                    if active.block_id == block_id {
-                        active.payload.extend_from_slice(data.as_ref());
-                    }
+                if let Some(active) = state.as_mut()
+                    && active.block_id == block_id
+                {
+                    active.payload.extend_from_slice(data.as_ref());
                 }
             }
             GvspPacket::Trailer {

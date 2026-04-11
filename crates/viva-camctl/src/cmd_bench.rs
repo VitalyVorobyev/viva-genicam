@@ -161,11 +161,10 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
                         });
                     }
                     GvspPacket::Payload { block_id, data, .. } => {
-                        if let Some(active) = state.as_mut() {
-                            if active.block_id == block_id {
+                        if let Some(active) = state.as_mut()
+                            && active.block_id == block_id {
                                 active.payload.extend_from_slice(data.as_ref());
                             }
-                        }
                     }
                     GvspPacket::Trailer { block_id, status, chunk_data, .. } => {
                         let Some(active) = state.take() else { continue };
@@ -175,11 +174,10 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
                         if status != 0 {
                             warn!(block_id, status, "trailer reported non-zero status");
                         }
-                        if !chunk_data.is_empty() {
-                            if let Err(err) = parse_chunk_bytes(chunk_data.as_ref()) {
+                        if !chunk_data.is_empty()
+                            && let Err(err) = parse_chunk_bytes(chunk_data.as_ref()) {
                                 warn!(block_id, error = %err, "failed to decode chunk payload");
                             }
-                        }
                         let frame = Frame {
                             payload: active.payload.freeze(),
                             width: active.width,

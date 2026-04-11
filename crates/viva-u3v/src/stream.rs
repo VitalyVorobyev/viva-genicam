@@ -145,12 +145,15 @@ impl<T: UsbTransfer> U3vStream<T> {
             )?;
             if n == 0 {
                 return Err(U3vError::Protocol(format!(
-                    "zero-length bulk read at payload offset {offset}/{}", self.payload_size
+                    "zero-length bulk read at payload offset {offset}/{}",
+                    self.payload_size
                 )));
             }
             offset += n;
         }
-        Ok(Bytes::copy_from_slice(&self.payload_buf[..self.payload_size]))
+        Ok(Bytes::copy_from_slice(
+            &self.payload_buf[..self.payload_size],
+        ))
     }
 
     fn read_trailer(&mut self) -> Result<Trailer, U3vError> {
@@ -445,7 +448,9 @@ mod tests {
         for chunk in 0..4u8 {
             let start = chunk as usize * 256;
             assert!(
-                frame.payload[start..start + 256].iter().all(|&b| b == chunk),
+                frame.payload[start..start + 256]
+                    .iter()
+                    .all(|&b| b == chunk),
                 "chunk {chunk} has wrong data"
             );
         }

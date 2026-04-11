@@ -1,107 +1,116 @@
 # genicam-rs Development Roadmap
 
-> **Last Updated:** April 2026
-> **Target Hardware:** GigE Vision cameras (tested with aravis fake camera)
+> **Last updated:** April 2026
 
-## Current State
+## What Ships in 0.1.0
 
-**Production Readiness Score: 9/10**
+The initial release covers the full GigE Vision workflow end-to-end, plus USB3 Vision device control.
 
-All core functionality works end-to-end: discovery, connection with CCP, XML fetch and parse, feature read/write with pValue delegation, GVSP frame streaming, and a Zenoh-based sensor service for genicam-studio integration. 12/12 integration tests pass against `arv-fake-gv-camera` on macOS loopback.
+### GigE Vision (complete)
 
-## Completed Phases
+- GVCP discovery (broadcast / unicast / loopback)
+- GenCP register I/O with retry and backoff
+- GVSP streaming with frame reassembly, packet resend, and backpressure
+- Automatic packet-size negotiation from MTU
+- Multicast stream support (IGMP join/leave)
+- Event channel with timestamp mapping
+- Action commands with scheduled execution
+- Chunk data parsing (timestamp, exposure, gain, line status)
+- Extended ID support (64-bit block IDs, 32-bit packet IDs)
+- CCP (Control Channel Privilege) claim/release
 
-### Phase 1: High-Level Streaming API
-- `FrameStream` async iterator with auto-resend
-- `connect_gige()` / `connect_gige_with_xml()` one-liner connection
-- StreamBuilder for stream configuration
+### GenApi (complete)
 
-### Phase 2: Basler Camera Support
-- Converter, IntConverter, String nodes
-- SwissKnife: full expression support (arithmetic, comparisons, ternary, logical, bitwise, 20+ math functions)
+- XML parsing into typed intermediate representation
+- NodeMap with dependency tracking and cache invalidation
+- All standard node types: Integer, Float, Enum, Boolean, Command, Category, String
+- SwissKnife / IntSwissKnife with full expression support
+- Converter / IntConverter
+- IntReg, MaskedIntReg, StructReg with bitfields
+- pValue delegation for Integer, Float, Enum, Boolean, Command
+- Selector-based address switching
+- NullIo for offline XML browsing
+- WASM compatible (wasm32-unknown-unknown)
 
-### Phase 3: GVCP Protocol Compliance (Apr 2026)
-- GVCP header format (0x42 key byte + flags byte)
-- Discovery payload parsing (correct field offsets)
-- ReadMem/WriteMem with 4-byte GVCP addresses
-- CCP (Control Channel Privilege) — `claim_control()`/`release_control()`
-- Stream channel registers at bootstrap offsets (0x0d00 base)
-- macOS support: `Iface::from_system` via `libc::if_nametoindex`
-- Loopback discovery (`discover_all()`) for simulated cameras
+### USB3 Vision (control path complete)
 
-### Phase 4: GVSP Parser Fix (Apr 2026)
-- Correct header layout (format byte at offset 4)
-- Leader payload format (reserved + payload_type before timestamp)
-- Payload/trailer format code swap (0x02=trailer, 0x03=payload)
+- Bootstrap register parsing (ABRM, SBRM, SIRM)
+- GenCP-over-USB register read/write
+- Device discovery via rusb
+- Low-level bulk-endpoint streaming (`U3vStream`)
+- Fake U3V camera for testing
 
-### Phase 5: XML Parser Completeness (Apr 2026)
-- pValue delegation: Integer, Float, Boolean, Enum, Command nodes
-- IntReg, MaskedIntReg parsed as Integer nodes
-- IntSwissKnife with hex literal support and Formula tag
-- StructReg with StructEntry → Integer nodes with bitfields
-- Port node recognition (skipped as transport-level)
-- XML entity decoding (`&amp;` → `&`)
-- Optional Min/Max (defaults to full range)
-- Static `<Value>` constants
-- `<pMax>`/`<pMin>` dynamic constraints
-- Case-insensitive URL scheme, GenICam standard URL format
+### Service layer (complete for GigE)
 
-### Phase 6: Sensor Service (Apr 2026)
-- `viva-service` crate: Zenoh bridge for genicam-studio
-- Discovery loop with DeviceAnnounce publishing
-- XML, node set/execute/bulk-read queryables
-- Acquisition control with FrameStream → FrameHeader → Zenoh publish
-- FPS tracking in AcquisitionStatus
-- Device-lost detection and cleanup
-- Pixel format conversion (pfnc → zenoh_api)
-- Initial SFNC node value publishing on connect
+- Zenoh bridge for genicam-studio (discovery, XML, node control, acquisition, frame streaming)
+- Shared wire types crate (viva-zenoh-api, no Zenoh dependency)
 
-### Phase 7: Shared Crate API (SX Handoff, Apr 2026)
-- Serde derives on all genapi-xml public types
-- Introspection API: `node_names()`, `dependents()`, `categories()`, `kind_name()`, `access_mode()`, `name()`
-- `NullIo` for offline XML browsing
-- WASM compatibility verified (wasm32-unknown-unknown)
-- `fetch_and_load_xml` behind `fetch` feature flag
+### Testing & tooling
 
-### Integration Testing
-- 12/12 tests pass against `arv-fake-gv-camera` on macOS loopback
-- Tests cover: discovery, connection, XML, feature read/write, command execution, frame streaming, dimension validation, full lifecycle
+- In-process fake GigE and U3V cameras (no hardware required)
+- 175+ tests across the workspace
+- CLI tool (viva-camctl) for discovery, feature control, streaming, benchmarking
 
-## Remaining Items
+---
 
-### P1: Service Hardening (deferred)
-- Watchdog heartbeat (periodic register read)
-- Reconnection on transport error with backoff
+## Planned for 0.2.0
 
-### P2: Extended GenAPI Attributes
-- Visibility (Beginner/Expert/Guru) filtering
-- Description, Tooltip, Representation hints
+### USB3 Vision integration
 
-### P3: Documentation
-- Complete mdBook tutorials (streaming, troubleshooting)
-- FAQ content
+The U3V transport layer works, but it's not yet wired into the high-level APIs.
 
-### Future
-- USB3 Vision transport (skeleton exists in `tl-u3v`)
-- GenTL producer (.cti)
-- IPv6 support
+| Item | Description |
+|------|-------------|
+| `U3vFrameStream` | Async frame iterator wrapping blocking USB bulk reads via `spawn_blocking` |
+| `StreamBuilder` for U3V | Configure and start U3V streams through the same API as GigE |
+| `viva-service-u3v` real USB | Wire real USB discovery into the service (currently `--fake` only) |
+| `viva-camctl stream-usb` | CLI streaming command for USB3 Vision cameras |
+
+### GigE Vision: IP configuration
+
+| Item | Description |
+|------|-------------|
+| FORCEIP command | GVCP opcode 0x0004 for temporary IP assignment (broadcast, targets device by MAC) |
+| Persistent IP registers | Read/write bootstrap registers for persistent IP, subnet, gateway |
+| `viva-camctl set-ip` | CLI command for IP configuration |
+
+### Service hardening
+
+| Item | Description |
+|------|-------------|
+| Heartbeat watchdog | Periodic register read to detect device loss |
+| Reconnection | Automatic reconnect with backoff on transport errors |
+
+---
+
+## Future
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| GenApi visibility filtering | P2 | Beginner / Expert / Guru levels |
+| GenApi description & tooltip hints | P2 | Representation, unit, description attributes |
+| GenTL producer (.cti) | P3 | C-compatible plugin for third-party GenICam consumers |
+| CoaXPress transport | P3 | Requires frame grabber SDK integration |
+| IPv6 support | P3 | |
+
+---
 
 ## Supported Node Types
 
 | Node Type | XML Parsing | Runtime Evaluation | Notes |
-|-----------|------------|-------------------|-------|
-| Integer | ✅ | ✅ | pValue, pMax/pMin, static Value, bitfields, selectors |
-| Float | ✅ | ✅ | pValue, scale/offset |
-| Enumeration | ✅ | ✅ | pValue, pValue providers |
-| Boolean | ✅ | ✅ | pValue, OnValue/OffValue, bitfields |
-| Command | ✅ | ✅ | pValue, CommandValue |
-| Category | ✅ | ✅ | |
-| SwissKnife | ✅ | ✅ | Full expression + hex literals |
-| IntSwissKnife | ✅ | ✅ | Via SwissKnife with Formula tag |
-| Converter | ✅ | ✅ | FormulaTo/FormulaFrom |
-| IntConverter | ✅ | ✅ | |
-| String | ✅ | ✅ | |
-| IntReg | ✅ | ✅ | Parsed as Integer |
-| MaskedIntReg | ✅ | ✅ | Parsed as Integer |
-| StructReg | ✅ | ✅ | StructEntry → Integer with bitfield |
-| Port | ✅ (skip) | N/A | Transport-level, not evaluated |
+|-----------|:-----------:|:------------------:|-------|
+| Integer | yes | yes | pValue, pMax/pMin, static Value, bitfields, selectors |
+| Float | yes | yes | pValue, scale/offset |
+| Enumeration | yes | yes | pValue |
+| Boolean | yes | yes | pValue, OnValue/OffValue, bitfields |
+| Command | yes | yes | pValue, CommandValue |
+| Category | yes | yes | |
+| SwissKnife | yes | yes | Full expression + hex literals |
+| IntSwissKnife | yes | yes | Via SwissKnife with Formula tag |
+| Converter | yes | yes | FormulaTo / FormulaFrom |
+| IntConverter | yes | yes | |
+| String | yes | yes | |
+| IntReg | yes | yes | Parsed as Integer |
+| MaskedIntReg | yes | yes | Parsed as Integer |
+| StructReg | yes | yes | StructEntry -> Integer with bitfield |
+| Port | yes | N/A | Transport-level, not evaluated |

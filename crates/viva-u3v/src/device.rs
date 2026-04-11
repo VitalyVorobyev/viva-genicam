@@ -3,12 +3,37 @@
 //! [`U3vDevice`] combines a control channel with parsed bootstrap registers
 //! to provide register I/O, XML fetching, and stream configuration.
 
+use std::io::Read;
 use std::sync::Arc;
 
 use crate::U3vError;
 use crate::bootstrap::{Abrm, ManifestEntry, Sbrm, Sirm};
 use crate::control::ControlChannel;
 use crate::usb::UsbTransfer;
+
+/// ZIP local file header magic: `PK\x03\x04`.
+const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
+
+/// If `data` starts with a ZIP signature, extract the first file's contents.
+/// Otherwise return `data` unchanged.
+fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, U3vError> {
+    if data.len() < 4 || &data[..4] != ZIP_MAGIC {
+        return Ok(data);
+    }
+    let cursor = std::io::Cursor::new(&data);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| U3vError::Protocol(format!("bad ZIP: {e}")))?;
+    if archive.is_empty() {
+        return Err(U3vError::Protocol("ZIP archive is empty".into()));
+    }
+    let mut file = archive
+        .by_index(0)
+        .map_err(|e| U3vError::Protocol(format!("cannot read ZIP entry: {e}")))?;
+    let mut xml = Vec::with_capacity(file.size() as usize);
+    file.read_to_end(&mut xml)
+        .map_err(|e| U3vError::Protocol(format!("ZIP decompression failed: {e}")))?;
+    Ok(xml)
+}
 
 /// Default maximum command/ack transfer size used before reading SBRM.
 ///
@@ -98,15 +123,15 @@ impl<T: UsbTransfer> U3vDevice<T> {
 
     /// Fetch the GenICam XML descriptor from the device's manifest table.
     ///
-    /// Returns the raw XML as a string. The XML may be zipped; callers
-    /// should check the first bytes for a ZIP signature and decompress
-    /// if needed (handled at a higher layer).
+    /// If the manifest payload is ZIP-compressed (starts with `PK\x03\x04`),
+    /// it is decompressed transparently. Returns the XML as a UTF-8 string.
     pub fn fetch_xml(&mut self) -> Result<String, U3vError> {
         let entry = ManifestEntry::read_first(&mut self.control, self.abrm.manifest_table_address)?;
         let raw = self
             .control
             .read_mem(entry.file_address, entry.file_size as usize)?;
-        String::from_utf8(raw)
+        let xml_bytes = decompress_if_zip(raw)?;
+        String::from_utf8(xml_bytes)
             .map_err(|e| U3vError::Protocol(format!("XML is not valid UTF-8: {e}")))
     }
 

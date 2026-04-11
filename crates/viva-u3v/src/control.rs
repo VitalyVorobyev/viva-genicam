@@ -119,6 +119,13 @@ impl<T: UsbTransfer> ControlChannel<T> {
             payload.put_u16(0); // reserved
             payload.put_u16(chunk as u16);
             let ack = self.transact(OpCode::ReadMem, &payload)?;
+            if ack.len() != chunk {
+                return Err(U3vError::Protocol(format!(
+                    "ReadMem ACK length mismatch at offset {offset}: \
+                     requested {chunk} bytes, got {}",
+                    ack.len()
+                )));
+            }
             result.extend_from_slice(&ack);
             offset += chunk;
         }

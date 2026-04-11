@@ -74,19 +74,24 @@ pub struct U3vStream<T: UsbTransfer> {
     leader_buf: Vec<u8>,
     trailer_buf: Vec<u8>,
     payload_buf: Vec<u8>,
+    /// Configured payload size per frame (from SIRM). The device sends
+    /// exactly this many bytes of payload data, potentially across
+    /// multiple USB bulk transfers.
+    payload_size: usize,
 }
 
 impl<T: UsbTransfer> U3vStream<T> {
     /// Create a new stream receiver.
     ///
-    /// `max_leader_size`, `max_trailer_size` and `max_payload_size` come
-    /// from the SIRM registers and determine buffer allocation.
+    /// `max_leader_size`, `max_trailer_size` and `payload_size` come
+    /// from the SIRM registers. `payload_size` is the exact number of
+    /// payload bytes per frame (configured in the SIRM).
     pub fn new(
         transport: Arc<T>,
         ep_in: u8,
         max_leader_size: usize,
         max_trailer_size: usize,
-        max_payload_size: usize,
+        payload_size: usize,
     ) -> Self {
         Self {
             transport,
@@ -94,7 +99,8 @@ impl<T: UsbTransfer> U3vStream<T> {
             timeout: STREAM_TIMEOUT,
             leader_buf: vec![0u8; max_leader_size],
             trailer_buf: vec![0u8; max_trailer_size],
-            payload_buf: vec![0u8; max_payload_size],
+            payload_buf: vec![0u8; payload_size],
+            payload_size,
         }
     }
 
@@ -127,11 +133,24 @@ impl<T: UsbTransfer> U3vStream<T> {
         parse_leader(&self.leader_buf[..n])
     }
 
+    /// Read the full payload, looping over multiple USB bulk transfers
+    /// if the payload is larger than a single transfer.
     fn read_payload(&mut self) -> Result<Bytes, U3vError> {
-        let n = self
-            .transport
-            .bulk_read(self.ep_in, &mut self.payload_buf, self.timeout)?;
-        Ok(Bytes::copy_from_slice(&self.payload_buf[..n]))
+        let mut offset = 0;
+        while offset < self.payload_size {
+            let n = self.transport.bulk_read(
+                self.ep_in,
+                &mut self.payload_buf[offset..self.payload_size],
+                self.timeout,
+            )?;
+            if n == 0 {
+                return Err(U3vError::Protocol(format!(
+                    "zero-length bulk read at payload offset {offset}/{}", self.payload_size
+                )));
+            }
+            offset += n;
+        }
+        Ok(Bytes::copy_from_slice(&self.payload_buf[..self.payload_size]))
     }
 
     fn read_trailer(&mut self) -> Result<Trailer, U3vError> {
@@ -401,6 +420,34 @@ mod tests {
             let frame = stream.next_frame().unwrap();
             assert_eq!(frame.trailer.block_id, i);
             assert_eq!(frame.leader.timestamp, i * 1000);
+        }
+    }
+
+    /// Payload split across multiple USB bulk transfers should be reassembled.
+    #[test]
+    fn stream_multi_transfer_payload() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        let ep_in = 0x82;
+        let payload_size = 1024usize;
+
+        mock.enqueue_read(ep_in, build_leader(32, 32, 0x0108_0001, 42));
+        // Split payload into 4 chunks of 256 bytes each.
+        for chunk in 0..4u8 {
+            mock.enqueue_read(ep_in, vec![chunk; 256]);
+        }
+        mock.enqueue_read(ep_in, build_trailer(0, 1, payload_size as u64));
+
+        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, 64, 64, payload_size);
+        let frame = stream.next_frame().unwrap();
+
+        assert_eq!(frame.payload.len(), payload_size);
+        // Verify each 256-byte chunk has the correct fill byte.
+        for chunk in 0..4u8 {
+            let start = chunk as usize * 256;
+            assert!(
+                frame.payload[start..start + 256].iter().all(|&b| b == chunk),
+                "chunk {chunk} has wrong data"
+            );
         }
     }
 }

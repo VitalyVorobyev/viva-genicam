@@ -21,7 +21,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 if-addrs = { workspace = true }
 bytes = { workspace = true }
-viva-gencp = { version = "0.2.0", path = "../viva-gencp" }
+viva-gencp = { version = "0.2", path = "../viva-gencp" }
 tokio = { workspace = true, features = ["macros", "net", "time"] }
 fastrand = "2"
 async-trait = { workspace = true }

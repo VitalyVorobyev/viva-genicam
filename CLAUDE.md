@@ -72,7 +72,7 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 
 ## Key Abstractions
 
-**`RegisterIo` trait** (`viva-genapi`): Core abstraction for register read/write. Implemented by `GigeDevice` (via async adapter), `MockIo` for tests, and `NullIo` for offline browsing.
+**`RegisterIo` trait** (`viva-genapi`): Core abstraction for register read/write. Implemented by `GigeRegisterIo` (async-to-sync adapter using `block_in_place` + `block_on`, safe from both async and sync contexts), `MockIo` for tests, and `NullIo` for offline browsing.
 
 **`NodeMap`** (`viva-genapi`): Parsed from XML, stores nodes by name, tracks dependency graph for cache invalidation. Supports `pValue` delegation (Integer/Float/Enum/Boolean/Command nodes can delegate to IntReg or other backing nodes).
 

@@ -16,7 +16,13 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 /// Increment this constant when making breaking changes to the Zenoh wire
 /// protocol.  The service publishes this value; clients check it on discovery
 /// and emit warnings when versions differ.
-pub const API_VERSION: u32 = 1;
+///
+/// ## Version history
+/// - `1` — initial `NodeValueUpdate` contract with optional `min`/`max`/`inc`.
+/// - `2` — adds [`FeatureState`] / [`NumericRange`] / [`CommandResult`] for
+///   live introspection. `NodeValueUpdate` stays wire-compatible; readers that
+///   understand the new types can consume the new queryables and payloads.
+pub const API_VERSION: u32 = 2;
 
 /// Periodic announcement published by the camera service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +61,11 @@ pub struct DeviceXmlResponse {
 /// `min`, `max`, and `inc` are optional runtime constraint hints.
 /// When present, the UI can tighten slider ranges without re-parsing XML.
 /// Services that do not implement constraint propagation may omit them.
+///
+/// **Legacy payload.** New code should publish [`FeatureState`] instead — it
+/// carries the same information plus runtime introspection (access mode, kind,
+/// implementation/availability, available enum entries). `NodeValueUpdate`
+/// stays in the wire contract so older services/clients keep working.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeValueUpdate {
     pub value: serde_json::Value,
@@ -68,6 +79,116 @@ pub struct NodeValueUpdate {
     /// Optional increment (step) for this node's value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inc: Option<f64>,
+}
+
+// ── FeatureState (live introspection) ────────────────────────────────────────
+
+/// Numeric range for an Integer or Float feature at the current camera state.
+///
+/// `min`/`max` are resolved from the XML's static declaration, from `pMin`/`pMax`
+/// references when present, or from selector-dependent rules. Services that
+/// cannot resolve the range must omit [`FeatureState::numeric`] entirely rather
+/// than invent defaults like `i64::MIN..=i64::MAX` (the UI renders "range
+/// unknown" in that case).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NumericRange {
+    pub min: f64,
+    pub max: f64,
+    /// Optional increment (step). Omitted when the feature has no grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inc: Option<f64>,
+}
+
+/// Live state of a GenICam feature at a single point in time.
+///
+/// Replaces [`NodeValueUpdate`] as the authoritative snapshot consumed by the
+/// UI. Every field reflects what the device reports *now*, not what the XML
+/// declares statically.
+///
+/// # Design notes
+///
+/// - `kind` is a plain string matching `viva_genapi::Node::kind_name` values
+///   ("Integer", "Float", "Enumeration", "Boolean", "Command", "Category",
+///   "SwissKnife", "Converter", "IntConverter", "StringReg"). Clients should
+///   tolerate unknown kinds.
+/// - `access_mode` uses GenICam spelling: `"RO"`, `"RW"`, `"WO"`, `"NA"`.
+/// - `is_implemented` and `is_available` default to `true` for deserialization
+///   from services that do not evaluate these predicates yet.
+/// - `numeric` is `Some` only for Integer/Float nodes with a resolvable range.
+/// - `enum_available` is `Some` only for Enumeration nodes. When the service
+///   cannot filter by IsAvailable it SHOULD still populate this with the full
+///   entry list so the UI stops falling back to static XML.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureState {
+    /// Current feature value, typed according to `kind`.
+    pub value: serde_json::Value,
+    /// Live access mode.
+    pub access_mode: String,
+    /// GenICam node kind.
+    pub kind: String,
+    /// Whether the node is implemented by the device.
+    #[serde(default = "default_true")]
+    pub is_implemented: bool,
+    /// Whether the node is currently accessible (selector gating etc).
+    #[serde(default = "default_true")]
+    pub is_available: bool,
+    /// Range for Integer/Float nodes, when resolvable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numeric: Option<NumericRange>,
+    /// Available enum entries for Enumeration nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_available: Option<Vec<String>>,
+    /// Engineering unit copied from node metadata (e.g. `"us"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl FeatureState {
+    /// Project this state into the legacy [`NodeValueUpdate`] shape so callers
+    /// that still speak the old contract keep working during migration.
+    pub fn to_node_value_update(&self) -> NodeValueUpdate {
+        let (min, max, inc) = match &self.numeric {
+            Some(r) => (Some(r.min), Some(r.max), r.inc),
+            None => (None, None, None),
+        };
+        NodeValueUpdate {
+            value: self.value.clone(),
+            access_mode: self.access_mode.clone(),
+            min,
+            max,
+            inc,
+        }
+    }
+}
+
+impl From<&FeatureState> for NodeValueUpdate {
+    fn from(s: &FeatureState) -> Self {
+        s.to_node_value_update()
+    }
+}
+
+// ── CommandResult ────────────────────────────────────────────────────────────
+
+/// Response from an `execute` queryable.
+///
+/// Like [`NodeOpResponse`] but also returns the post-execution state of any
+/// nodes whose value is likely to have changed. For example, executing
+/// `AcquisitionStart` populates `affected_states` with the refreshed state of
+/// `AcquisitionStatus`, etc. The UI uses these to update badges / form inputs
+/// without a second round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Map of node name -> refreshed state for nodes affected by this command.
+    /// Empty when the service cannot determine side effects.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub affected_states: std::collections::HashMap<String, FeatureState>,
 }
 
 /// Request payload for the `nodes/{name}/set` queryable.
@@ -234,10 +355,24 @@ pub mod keys {
         format!("genicam/devices/{device_id}/nodes/{node_name}/execute")
     }
 
+    /// Key expression for a single-node [`super::FeatureState`] queryable.
+    /// Direction: App -> Service (queryable GET). Reply payload is a
+    /// [`super::FeatureState`] JSON object.
+    pub fn node_introspect(device_id: &str, node_name: &str) -> String {
+        format!("genicam/devices/{device_id}/nodes/{node_name}/state")
+    }
+
     /// Key expression for the bulk node read queryable.
     /// Direction: App -> Service (queryable GET).
     pub fn nodes_bulk_read(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/nodes/bulk/read")
+    }
+
+    /// Key expression for the bulk [`super::FeatureState`] queryable.
+    /// Direction: App -> Service (queryable GET). Reply payload is a
+    /// `HashMap<String, FeatureState>` JSON object.
+    pub fn nodes_bulk_state(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/nodes/bulk/state")
     }
 
     pub fn acquisition_control(device_id: &str) -> String {
@@ -368,5 +503,153 @@ mod tests {
         assert!(d.max.is_none());
         assert!(d.inc.is_none());
         assert_eq!(d.access_mode, "RW");
+    }
+
+    // ── FeatureState ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_feature_state_minimal_roundtrip() {
+        let s = FeatureState {
+            value: serde_json::json!(1920),
+            access_mode: "RW".to_string(),
+            kind: "Integer".to_string(),
+            is_implemented: true,
+            is_available: true,
+            numeric: None,
+            enum_available: None,
+            unit: None,
+        };
+        let j = serde_json::to_string(&s).expect("serialize");
+        // Optional fields should be skipped.
+        assert!(!j.contains("\"numeric\""), "numeric should be absent: {j}");
+        assert!(
+            !j.contains("\"enum_available\""),
+            "enum_available absent: {j}"
+        );
+        assert!(!j.contains("\"unit\""), "unit absent: {j}");
+        let d: FeatureState = serde_json::from_str(&j).expect("deserialize");
+        assert_eq!(d, s);
+    }
+
+    #[test]
+    fn test_feature_state_defaults_when_fields_missing() {
+        // A service that does not yet populate is_implemented/is_available
+        // must still deserialize into a usable state.
+        let legacy = r#"{"value":1920,"access_mode":"RW","kind":"Integer"}"#;
+        let d: FeatureState = serde_json::from_str(legacy).expect("deserialize");
+        assert!(d.is_implemented, "is_implemented defaults to true");
+        assert!(d.is_available, "is_available defaults to true");
+    }
+
+    #[test]
+    fn test_feature_state_integer_with_range() {
+        let s = FeatureState {
+            value: serde_json::json!(512),
+            access_mode: "RW".to_string(),
+            kind: "Integer".to_string(),
+            is_implemented: true,
+            is_available: true,
+            numeric: Some(NumericRange {
+                min: 16.0,
+                max: 4096.0,
+                inc: Some(8.0),
+            }),
+            enum_available: None,
+            unit: Some("px".to_string()),
+        };
+        let j = serde_json::to_string(&s).expect("serialize");
+        let d: FeatureState = serde_json::from_str(&j).expect("deserialize");
+        assert_eq!(d, s);
+    }
+
+    #[test]
+    fn test_feature_state_to_node_value_update() {
+        let s = FeatureState {
+            value: serde_json::json!(512),
+            access_mode: "RW".to_string(),
+            kind: "Integer".to_string(),
+            is_implemented: true,
+            is_available: true,
+            numeric: Some(NumericRange {
+                min: 16.0,
+                max: 4096.0,
+                inc: Some(8.0),
+            }),
+            enum_available: None,
+            unit: None,
+        };
+        let u: NodeValueUpdate = (&s).into();
+        assert_eq!(u.value, serde_json::json!(512));
+        assert_eq!(u.access_mode, "RW");
+        assert_eq!(u.min, Some(16.0));
+        assert_eq!(u.max, Some(4096.0));
+        assert_eq!(u.inc, Some(8.0));
+    }
+
+    #[test]
+    fn test_feature_state_enumeration() {
+        let s = FeatureState {
+            value: serde_json::json!("Once"),
+            access_mode: "RW".to_string(),
+            kind: "Enumeration".to_string(),
+            is_implemented: true,
+            is_available: true,
+            numeric: None,
+            enum_available: Some(vec!["Off".to_string(), "Once".to_string()]),
+            unit: None,
+        };
+        let j = serde_json::to_string(&s).expect("serialize");
+        assert!(j.contains("\"enum_available\""));
+        let d: FeatureState = serde_json::from_str(&j).expect("deserialize");
+        assert_eq!(
+            d.enum_available.as_deref(),
+            Some(&["Off".to_string(), "Once".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_command_result_ok_empty() {
+        let r = CommandResult {
+            ok: true,
+            error: None,
+            affected_states: std::collections::HashMap::new(),
+        };
+        let j = serde_json::to_string(&r).expect("serialize");
+        assert!(
+            !j.contains("\"affected_states\""),
+            "empty affected_states should be skipped: {j}"
+        );
+        assert!(
+            !j.contains("\"error\""),
+            "none error should be skipped: {j}"
+        );
+    }
+
+    #[test]
+    fn test_command_result_with_affected_states() {
+        let mut affected = std::collections::HashMap::new();
+        affected.insert(
+            "AcquisitionStatus".to_string(),
+            FeatureState {
+                value: serde_json::json!(true),
+                access_mode: "RO".to_string(),
+                kind: "Boolean".to_string(),
+                is_implemented: true,
+                is_available: true,
+                numeric: None,
+                enum_available: None,
+                unit: None,
+            },
+        );
+        let r = CommandResult {
+            ok: true,
+            error: None,
+            affected_states: affected,
+        };
+        let j = serde_json::to_string(&r).expect("serialize");
+        let d: CommandResult = serde_json::from_str(&j).expect("deserialize");
+        assert!(d.ok);
+        assert_eq!(d.affected_states.len(), 1);
+        assert!(d.affected_states.contains_key("AcquisitionStatus"));
     }
 }

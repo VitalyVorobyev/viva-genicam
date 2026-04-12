@@ -145,6 +145,16 @@ async fn spawn_service_tasks<T: UsbTransfer + 'static>(
         handle.clone(),
         shutdown.clone(),
     ));
+    tokio::spawn(nodes::run_introspect_queryable(
+        session.clone(),
+        handle.clone(),
+        shutdown.clone(),
+    ));
+    tokio::spawn(nodes::run_bulk_state_queryable(
+        session.clone(),
+        handle.clone(),
+        shutdown.clone(),
+    ));
     tokio::spawn(acquisition::run(
         session.clone(),
         handle.clone(),

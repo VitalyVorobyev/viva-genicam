@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use viva_zenoh_api::{
-    BulkReadRequest, BulkReadResponse, NodeOpResponse, NodeSetRequest, NodeValueUpdate, keys,
+    BulkReadRequest, BulkReadResponse, FeatureState, NodeOpResponse, NodeSetRequest,
+    NodeValueUpdate, keys,
 };
 use zenoh::Session;
 
@@ -56,15 +57,18 @@ pub async fn run_set_queryable<D: DeviceOps>(
                                             match device.set_feature(&node_name, value_str).await {
                                                 Ok(()) => {
                                                     debug!(device_id, node_name, "node set ok");
-                                                    // Publish updated value.
-                                                    if let Ok(new_val) =
-                                                        device.get_feature(&node_name).await
+                                                    // Publish refreshed state (both legacy value
+                                                    // and new introspect key) so subscribers see
+                                                    // the post-write confirmation.
+                                                    if let Ok(state) = device
+                                                        .get_feature_state(&node_name)
+                                                        .await
                                                     {
-                                                        publish_node_value(
+                                                        publish_node_state(
                                                             &session,
                                                             &device_id,
                                                             &node_name,
-                                                            &new_val,
+                                                            &state,
                                                         )
                                                         .await;
                                                     }
@@ -164,6 +168,131 @@ pub async fn run_execute_queryable<D: DeviceOps>(
     }
 }
 
+/// Declare a queryable for single-node [`FeatureState`] introspection.
+///
+/// Reply is a full `FeatureState` JSON object produced by
+/// [`DeviceOps::get_feature_state`]. Clients (e.g. the Studio UI) use this to
+/// drive slider ranges, enum dropdowns, and access-gating without falling
+/// back to static XML defaults.
+pub async fn run_introspect_queryable<D: DeviceOps>(
+    session: Arc<Session>,
+    device: Arc<D>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let device_id = device.device_id().to_string();
+    let key = keys::node_introspect(&device_id, "*");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            warn!(device_id, error = %e, "failed to declare introspect queryable");
+            return;
+        }
+    };
+    info!(device_id, key, "introspect queryable ready");
+
+    loop {
+        tokio::select! {
+            query = queryable.recv_async() => {
+                match query {
+                    Ok(query) => {
+                        let key_expr = query.key_expr().as_str();
+                        let node_name = keys::extract_node_name(key_expr)
+                            .unwrap_or_default()
+                            .to_string();
+
+                        let reply_key = keys::node_introspect(&device_id, &node_name);
+                        let payload_bytes = match device.get_feature_state(&node_name).await {
+                            Ok(state) => match serde_json::to_vec(&state) {
+                                Ok(b) => Some(b),
+                                Err(e) => {
+                                    warn!(device_id, node_name, error = %e, "failed to serialize FeatureState");
+                                    None
+                                }
+                            },
+                            Err(e) => {
+                                warn!(device_id, node_name, error = %e, "introspect failed");
+                                None
+                            }
+                        };
+                        if let Some(payload) = payload_bytes {
+                            let _ = query.reply(&reply_key, payload).await;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+        }
+    }
+}
+
+/// Declare a queryable for bulk [`FeatureState`] introspection.
+///
+/// Reply is a `HashMap<String, FeatureState>` JSON object. Reuses the same
+/// `BulkReadRequest` payload shape as `nodes/bulk/read` so existing
+/// producer/consumer patterns apply.
+pub async fn run_bulk_state_queryable<D: DeviceOps>(
+    session: Arc<Session>,
+    device: Arc<D>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let device_id = device.device_id().to_string();
+    let key = keys::nodes_bulk_state(&device_id);
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            warn!(device_id, error = %e, "failed to declare bulk state queryable");
+            return;
+        }
+    };
+    info!(device_id, key, "bulk state queryable ready");
+
+    loop {
+        tokio::select! {
+            query = queryable.recv_async() => {
+                match query {
+                    Ok(query) => {
+                        let values = match query.payload() {
+                            Some(payload) => {
+                                match serde_json::from_slice::<BulkReadRequest>(
+                                    &payload.to_bytes(),
+                                ) {
+                                    Ok(req) => {
+                                        let mut out = std::collections::HashMap::new();
+                                        for name in &req.names {
+                                            if let Ok(state) = device.get_feature_state(name).await {
+                                                out.insert(name.clone(), state);
+                                            }
+                                        }
+                                        out
+                                    }
+                                    Err(e) => {
+                                        warn!(device_id, error = %e, "invalid bulk state request");
+                                        std::collections::HashMap::new()
+                                    }
+                                }
+                            }
+                            None => std::collections::HashMap::new(),
+                        };
+
+                        let Ok(payload) = serde_json::to_vec(&values) else {
+                            tracing::error!("failed to serialize bulk state response");
+                            continue;
+                        };
+                        let _ = query.reply(&key, payload).await;
+                    }
+                    Err(_) => break,
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+        }
+    }
+}
+
 /// Declare a queryable for bulk node reads.
 pub async fn run_bulk_read_queryable<D: DeviceOps>(
     session: Arc<Session>,
@@ -192,18 +321,18 @@ pub async fn run_bulk_read_queryable<D: DeviceOps>(
                                     &payload.to_bytes(),
                                 ) {
                                     Ok(req) => {
+                                        // Populate the legacy `NodeValueUpdate` shape from the
+                                        // rich `FeatureState` so existing clients receive real
+                                        // `access_mode` + range info (ZA-06) instead of
+                                        // hardcoded `"RW"` / `None`. Clients that understand
+                                        // the new contract should query `nodes/bulk/state`.
                                         let mut values = std::collections::HashMap::new();
                                         for name in &req.names {
-                                            if let Ok(val) = device.get_feature(name).await {
+                                            if let Ok(state) = device.get_feature_state(name).await
+                                            {
                                                 values.insert(
                                                     name.clone(),
-                                                    NodeValueUpdate {
-                                                        value: serde_json::Value::String(val),
-                                                        access_mode: "RW".to_string(),
-                                                        min: None,
-                                                        max: None,
-                                                        inc: None,
-                                                    },
+                                                    state.to_node_value_update(),
                                                 );
                                             }
                                         }
@@ -263,24 +392,27 @@ pub async fn publish_initial_values<D: DeviceOps>(session: &Session, device: &D)
     ];
 
     for name in &sfnc_nodes {
-        if let Ok(value) = device.get_feature(name).await {
-            publish_node_value(session, device_id, name, &value).await;
+        if let Ok(state) = device.get_feature_state(name).await {
+            publish_node_state(session, device_id, name, &state).await;
         }
     }
     info!(device_id, "published initial node values");
 }
 
-/// Publish a single node value update.
-async fn publish_node_value(session: &Session, device_id: &str, name: &str, value: &str) {
-    let update = NodeValueUpdate {
-        value: serde_json::Value::String(value.to_string()),
-        access_mode: "RW".to_string(),
-        min: None,
-        max: None,
-        inc: None,
-    };
-    let key = keys::node_value(device_id, name);
+/// Publish a single node value + legacy update payload.
+///
+/// Writes the legacy [`NodeValueUpdate`] to `nodes/{name}/value` (backward
+/// compatibility) and also publishes the richer [`FeatureState`] to
+/// `nodes/{name}/state` so introspection-aware clients get full fidelity on
+/// the subscription stream as well as the queryable.
+async fn publish_node_state(session: &Session, device_id: &str, name: &str, state: &FeatureState) {
+    let update: NodeValueUpdate = state.into();
+    let value_key = keys::node_value(device_id, name);
     if let Ok(payload) = serde_json::to_vec(&update) {
-        let _ = session.put(&key, payload).await;
+        let _ = session.put(&value_key, payload).await;
+    }
+    let state_key = keys::node_introspect(device_id, name);
+    if let Ok(payload) = serde_json::to_vec(state) {
+        let _ = session.put(&state_key, payload).await;
     }
 }

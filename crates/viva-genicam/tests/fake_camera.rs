@@ -190,7 +190,53 @@ async fn test_read_exposure_time() {
         .expect("read ExposureTime");
 
     let v: f64 = exp.parse().expect("ExposureTime should be a float");
-    assert!(v > 0.0, "ExposureTime should be positive, got {v}");
+    // Fake camera seeds ExposureTime at 5000.0 µs as IEEE 754 f64.
+    // Prior to the Float-encoding fix this came back as `4662219572839973000`
+    // (the f64 bit pattern of 5000.0 interpreted as i64).
+    assert!(
+        (v - 5000.0).abs() < 1.0,
+        "ExposureTime should be ≈ 5000.0 µs, got {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_read_acquisition_frame_rate() {
+    let _cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    let rate = blocking_get(&camera, "AcquisitionFrameRate")
+        .await
+        .expect("read AcquisitionFrameRate");
+
+    let v: f64 = rate
+        .parse()
+        .expect("AcquisitionFrameRate should be a float");
+    // Fake camera seeds AcquisitionFrameRate at 30.0 fps as IEEE 754 f32.
+    // Prior to the Float-encoding fix this came back as `1106247680`.
+    assert!(
+        (v - 30.0).abs() < 1e-3,
+        "AcquisitionFrameRate should be ≈ 30.0 fps, got {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_exposure_time_roundtrip() {
+    let _cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    blocking_set(&camera, "ExposureTime", "7500.0")
+        .await
+        .expect("set ExposureTime");
+
+    let exp = blocking_get(&camera, "ExposureTime")
+        .await
+        .expect("read ExposureTime");
+    let v: f64 = exp.parse().expect("ExposureTime should be a float");
+    assert!((v - 7500.0).abs() < 1.0, "got {v}");
+
+    blocking_set(&camera, "ExposureTime", "5000.0")
+        .await
+        .expect("restore ExposureTime");
 }
 
 #[tokio::test]

@@ -3,9 +3,9 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{NodeMetaBuilder, TAG_VALUE};
+use super::{NodeMetaBuilder, TAG_VALUE, handle_predicate_start};
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
-use crate::{NodeDecl, SkOutput, SwissKnifeDecl, XmlError};
+use crate::{NodeDecl, PredicateRefs, SkOutput, SwissKnifeDecl, XmlError};
 
 /// Parse a `<SwissKnife>` element into a [`NodeDecl::SwissKnife`].
 pub fn parse_swissknife(
@@ -16,6 +16,7 @@ pub fn parse_swissknife(
     let mut expr: Option<String> = None;
     let mut variables: Vec<(String, String)> = Vec::new();
     let mut output = SkOutput::Float;
+    let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -51,7 +52,9 @@ pub fn parse_swissknife(
                     }
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -118,5 +121,6 @@ pub fn parse_swissknife(
         expr,
         variables,
         output,
+        predicates,
     }))
 }

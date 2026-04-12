@@ -34,6 +34,58 @@ pub enum EnumValueSrc {
     FromNode(String),
 }
 
+/// References to predicate provider nodes used for runtime gating.
+///
+/// GenICam's `pIsImplemented`, `pIsAvailable` and `pIsLocked` each point at
+/// another node (typically an Integer, Boolean or IntSwissKnife) whose current
+/// value gates whether a feature is implemented, accessible, or writable.
+/// These three references are shared by most node variants, so we collect them
+/// into one struct to keep the variant fields small.
+///
+/// All three fields are optional; a node with no predicates has
+/// [`PredicateRefs::default()`]. Serde fields use the GenICam XML spelling so
+/// round-trip JSON matches the XML attribute names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PredicateRefs {
+    /// Name of a node evaluating to non-zero iff the feature is implemented.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pIsImplemented"
+    )]
+    pub p_is_implemented: Option<String>,
+    /// Name of a node evaluating to non-zero iff the feature is accessible now.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pIsAvailable"
+    )]
+    pub p_is_available: Option<String>,
+    /// Name of a node evaluating to non-zero iff the feature is locked (RW→RO).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "pIsLocked")]
+    pub p_is_locked: Option<String>,
+}
+
+impl PredicateRefs {
+    /// Iterate over all referenced node names (for dependency-graph walks).
+    pub fn references(&self) -> impl Iterator<Item = &str> {
+        [
+            self.p_is_implemented.as_deref(),
+            self.p_is_available.as_deref(),
+            self.p_is_locked.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// `true` when every field is `None`.
+    pub fn is_empty(&self) -> bool {
+        self.p_is_implemented.is_none()
+            && self.p_is_available.is_none()
+            && self.p_is_locked.is_none()
+    }
+}
+
 /// Declaration for a single enumeration entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumEntryDecl {
@@ -43,6 +95,9 @@ pub struct EnumEntryDecl {
     pub value: EnumValueSrc,
     /// Optional user facing label.
     pub display_name: Option<String>,
+    /// Predicate refs controlling whether this entry is implemented / available.
+    #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+    pub predicates: PredicateRefs,
 }
 
 #[derive(Debug, Error)]
@@ -197,6 +252,10 @@ impl ByteOrder {
     }
 }
 
+fn default_big_endian() -> ByteOrder {
+    ByteOrder::Big
+}
+
 /// Bitfield metadata describing a sub-range of a register payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitField {
@@ -206,6 +265,29 @@ pub struct BitField {
     pub bit_length: u16,
     /// Byte order used when interpreting the enclosing register.
     pub byte_order: ByteOrder,
+}
+
+/// Byte-level encoding of the payload behind a `<Float>` / `<FloatReg>` node.
+///
+/// GenICam's XSD lets a float feature be backed by either:
+///
+/// - a native IEEE 754 register — a `<FloatReg>` element, or a `<Float>` whose
+///   addressing reads exactly 4 or 8 bytes and carries no `<Scale>`/`<Offset>`;
+/// - a scaled integer register — a `<Float>` that declares `<Scale>` and/or
+///   `<Offset>` and reads the register bytes as a signed integer.
+///
+/// Prior to this field, `get_float`/`set_float` always used the scaled-integer
+/// codec. That returned the bit pattern of the IEEE 754 value decoded as i64
+/// for fields such as `AcquisitionFrameRate` (e.g. `1106247680` for 30.0) —
+/// see `doc/2026-04-12-genapi-numeric-type-dispatch.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FloatEncoding {
+    /// Register bytes are an IEEE 754 value (4 bytes → f32, 8 bytes → f64).
+    Ieee754,
+    /// Register bytes are a signed integer; `Scale` and `Offset` map to the
+    /// user-facing value.
+    #[default]
+    ScaledInteger,
 }
 
 /// Output type of a SwissKnife expression node.
@@ -243,6 +325,9 @@ pub struct SwissKnifeDecl {
     pub variables: Vec<(String, String)>,
     /// Desired output type (integer or float).
     pub output: SkOutput,
+    /// Predicate refs gating implementation / availability.
+    #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+    pub predicates: PredicateRefs,
 }
 
 /// Declaration of a Converter node for bidirectional value transformation.
@@ -269,6 +354,9 @@ pub struct ConverterDecl {
     pub unit: Option<String>,
     /// Desired output type.
     pub output: SkOutput,
+    /// Predicate refs gating implementation / availability / lock state.
+    #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+    pub predicates: PredicateRefs,
 }
 
 /// Declaration of an IntConverter node for integer-specific bidirectional conversion.
@@ -290,6 +378,9 @@ pub struct IntConverterDecl {
     pub variables_from: Vec<(String, String)>,
     /// Engineering unit (if provided).
     pub unit: Option<String>,
+    /// Predicate refs gating implementation / availability / lock state.
+    #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+    pub predicates: PredicateRefs,
 }
 
 /// Declaration of a StringReg node for string-typed register access.
@@ -303,6 +394,9 @@ pub struct StringDecl {
     pub addressing: Addressing,
     /// Access privileges.
     pub access: AccessMode,
+    /// Predicate refs gating implementation / availability / lock state.
+    #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+    pub predicates: PredicateRefs,
 }
 
 /// Declaration of a node extracted from the GenICam XML description.
@@ -342,9 +436,12 @@ pub enum NodeDecl {
         p_min: Option<String>,
         /// Static value (for constant integer nodes with `<Value>`).
         value: Option<i64>,
+        /// Predicate refs gating implementation / availability / lock state.
+        #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+        predicates: PredicateRefs,
     },
-    /// Floating point feature backed by an integer register with scaling
-    /// or delegated via pValue.
+    /// Floating point feature backed by an integer register with scaling,
+    /// a native IEEE 754 register, or delegated via pValue.
     Float {
         name: String,
         meta: NodeMeta,
@@ -362,6 +459,18 @@ pub enum NodeDecl {
         selected_if: Vec<(String, Vec<String>)>,
         /// Node providing the value (delegates read/write to another node).
         pvalue: Option<String>,
+        /// How the register payload should be interpreted — native IEEE 754
+        /// or scaled integer. Defaults to [`FloatEncoding::ScaledInteger`] to
+        /// preserve existing behaviour for XML that relied on it.
+        #[serde(default)]
+        encoding: FloatEncoding,
+        /// Byte order of the register payload. Defaults to [`ByteOrder::Big`]
+        /// (the GenICam default).
+        #[serde(default = "default_big_endian")]
+        byte_order: ByteOrder,
+        /// Predicate refs gating implementation / availability / lock state.
+        #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+        predicates: PredicateRefs,
     },
     /// Enumeration feature exposing a list of named integer values.
     Enum {
@@ -376,6 +485,9 @@ pub enum NodeDecl {
         selected_if: Vec<(String, Vec<String>)>,
         /// Node providing the integer value (delegates register read/write).
         pvalue: Option<String>,
+        /// Predicate refs gating implementation / availability / lock state.
+        #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+        predicates: PredicateRefs,
     },
     /// Boolean feature backed by a single bit/byte register or delegated via pValue.
     Boolean {
@@ -394,6 +506,9 @@ pub enum NodeDecl {
         on_value: Option<i64>,
         /// Off value for pValue-backed booleans.
         off_value: Option<i64>,
+        /// Predicate refs gating implementation / availability / lock state.
+        #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+        predicates: PredicateRefs,
     },
     /// Command feature that triggers an action when written.
     Command {
@@ -406,12 +521,18 @@ pub enum NodeDecl {
         pvalue: Option<String>,
         /// Value to write when executing the command.
         command_value: Option<i64>,
+        /// Predicate refs gating implementation / availability / lock state.
+        #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+        predicates: PredicateRefs,
     },
     /// Category used to organise features.
     Category {
         name: String,
         meta: NodeMeta,
         children: Vec<String>,
+        /// Predicate refs gating implementation / availability.
+        #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
+        predicates: PredicateRefs,
     },
     /// Computed value backed by an arithmetic expression referencing other nodes.
     SwissKnife(SwissKnifeDecl),
@@ -933,6 +1054,50 @@ mod tests {
                 }
             }
             other => panic!("unexpected node: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_indirect_float_is_scaled_integer() {
+        // Regression test: indirect <Float> with Length=4 and no
+        // <Scale>/<Offset> must NOT be reclassified as IEEE 754. Pointer-
+        // backed float features on real cameras are almost always scaled
+        // integer registers; silently decoding their bytes as IEEE 754
+        // corrupts the value.
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Integer Name="RegAddr">
+                    <Address>0x2000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                </Integer>
+                <Float Name="Exposure">
+                    <pAddress>RegAddr</pAddress>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                </Float>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse indirect float");
+        let float = model
+            .nodes
+            .iter()
+            .find(|n| matches!(n, NodeDecl::Float { name, .. } if name == "Exposure"))
+            .expect("Exposure node");
+        match float {
+            NodeDecl::Float {
+                encoding,
+                addressing,
+                ..
+            } => {
+                assert!(
+                    matches!(addressing, Some(Addressing::Indirect { .. })),
+                    "expected indirect addressing"
+                );
+                assert_eq!(*encoding, FloatEncoding::ScaledInteger);
+            }
+            _ => unreachable!(),
         }
     }
 

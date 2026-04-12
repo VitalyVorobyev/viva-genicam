@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-04-12
+
+### Added
+
+- **Zenoh API v2 `FeatureState` contract** -- new `FeatureState`, `NumericRange`, and `CommandResult` wire types expose live feature introspection (is_implemented / is_available / access_mode / numeric range / enum_available) per node; `introspect` queryable wired into `viva-service` and `viva-service-u3v`. Legacy `NodeValueUpdate` stays wire-compatible. See ADR-010.
+- **GenApi predicate evaluation** -- `NodeMap::is_implemented`, `is_available`, `effective_access_mode`, and `available_enum_entries` evaluate `pIsImplemented` / `pIsAvailable` / `pIsLocked` / per-enum-entry predicates via the existing `resolve_numeric` machinery (Integer / Boolean / SwissKnife / IntConverter / Converter / Enum providers all supported, with cycle detection)
+- **Predicate refs on every `NodeDecl` variant** -- `PredicateRefs` (`p_is_implemented` / `p_is_available` / `p_is_locked`) parsed from `<pIsImplemented>` / `<pIsAvailable>` / `<pIsLocked>` and plumbed through `NodeMap::try_from_xml` with proper dependency registration; `Node::predicates()` exposes the refs for external evaluators
+- **Realistic predicate wiring in the fake GigE camera** -- `ExposureTime.pIsLocked` ← `ExposureAuto != Off`, `Gain.pIsLocked` ← `GainAuto != Off`, `AcquisitionFrameRate.pIsAvailable` ← new `AcquisitionFrameRateEnable` Boolean, `PixelFormat` entries gated by a new `SensorType` enum (Monochrome / BayerRG / Color)
+
+### Changed
+
+- **`DeviceHandle::get_feature_state`** now reports live `is_implemented` / `is_available` / `access_mode` / `enum_available` from the predicate evaluators instead of hardcoded permissive defaults; each predicate call is guarded so a single bad formula doesn't break the whole feature snapshot
+
+### Fixed
+
+- **Float bit-pattern bug** -- `<FloatReg>` and bare `<Float>` with `Length in {4, 8}` and no `<Scale>`/`<Offset>` now auto-infer IEEE 754 encoding. Before this fix, `AcquisitionFrameRate` came back as `1106247680` (the f32 bit pattern of 30.0) and `ExposureTime` as `4662219572839973000` because float registers were always read as scaled i64. New `FloatEncoding` (Ieee754 / ScaledInteger) + `byte_order` on `NodeDecl::Float`; `get_float` / `set_float` dispatch on encoding.
+
 ## [0.2.2] - 2026-04-12
 
 ### Changed
@@ -96,6 +113,8 @@ Initial public release of the viva-genicam workspace.
 - `viva-fake-gige` -- In-process fake GigE Vision camera for self-contained integration testing (no external dependencies required)
 - `viva-fake-u3v` -- In-process fake USB3 Vision camera for testing
 
+[0.2.3]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.3
+[0.2.2]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.2
 [0.2.1]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.1
 [0.2.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.0
 [0.1.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.1.0

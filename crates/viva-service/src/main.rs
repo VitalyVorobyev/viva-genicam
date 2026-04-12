@@ -202,6 +202,16 @@ async fn spawn_device_tasks(
             device.clone(),
             shutdown.clone(),
         )),
+        tokio::spawn(nodes::run_introspect_queryable(
+            session.clone(),
+            device.clone(),
+            shutdown.clone(),
+        )),
+        tokio::spawn(nodes::run_bulk_state_queryable(
+            session.clone(),
+            device.clone(),
+            shutdown.clone(),
+        )),
         tokio::spawn(acquisition::run(
             session.clone(),
             device.clone(),

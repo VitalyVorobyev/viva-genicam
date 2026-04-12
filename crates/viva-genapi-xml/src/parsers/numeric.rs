@@ -7,14 +7,14 @@ use super::{
     NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
     TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_VALUE, handle_addressing_empty,
     handle_addressing_start, handle_p_selected_empty, handle_p_selected_start,
-    handle_selected_empty, handle_selected_start,
+    handle_predicate_start, handle_selected_empty, handle_selected_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
     attribute_value, attribute_value_required, parse_f64, parse_i64, parse_scale, parse_u64,
     read_text_start, skip_element,
 };
-use crate::{AccessMode, ByteOrder, NodeDecl, XmlError};
+use crate::{AccessMode, ByteOrder, FloatEncoding, NodeDecl, PredicateRefs, XmlError};
 
 /// Parse an `<Integer>` element into a [`NodeDecl::Integer`].
 pub fn parse_integer(
@@ -41,6 +41,7 @@ pub fn parse_integer(
     let mut p_max = None;
     let mut p_min = None;
     let mut static_value: Option<i64> = None;
+    let mut predicates = PredicateRefs::default();
     let mut selector_state = SelectorState::default();
     let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_vec();
@@ -176,7 +177,9 @@ pub fn parse_integer(
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -284,15 +287,24 @@ pub fn parse_integer(
         p_max,
         p_min,
         value: static_value,
+        predicates,
     })
 }
 
-/// Parse a `<Float>` element into a [`NodeDecl::Float`].
+/// Parse a `<Float>` or `<FloatReg>` element into a [`NodeDecl::Float`].
+///
+/// `<FloatReg>` forces [`FloatEncoding::Ieee754`]. `<Float>` infers the
+/// encoding: IEEE 754 when there is direct addressing with `Length ∈ {4, 8}`
+/// and no `<Scale>`/`<Offset>`; otherwise scaled-integer (the historical
+/// default, which preserves compatibility with XMLs that rely on scale-only
+/// semantics).
 pub fn parse_float(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, b"Name")?;
+    let node_name = start.name().as_ref().to_vec();
+    let is_float_reg = node_name.as_slice() == b"FloatReg";
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, b"Address")? {
         addressing.set_fixed_address(parse_u64(&addr)?);
@@ -311,9 +323,10 @@ pub fn parse_float(
     let mut scale_den: Option<i64> = None;
     let mut offset = None;
     let mut pvalue = None;
+    let mut byte_order: Option<ByteOrder> = None;
+    let mut predicates = PredicateRefs::default();
     let mut selector_state = SelectorState::default();
     let mut meta_builder = NodeMetaBuilder::default();
-    let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
     loop {
@@ -368,6 +381,12 @@ pub fn parse_float(
                     let text = read_text_start(reader, e)?;
                     offset = Some(parse_f64(&text)?);
                 }
+                TAG_ENDIANNESS | TAG_ENDIANESS | TAG_BYTE_ORDER => {
+                    let text = read_text_start(reader, e)?;
+                    if let Some(order) = ByteOrder::parse(&text) {
+                        byte_order = Some(order);
+                    }
+                }
                 b"pSelected" => {
                     handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
                 }
@@ -375,7 +394,9 @@ pub fn parse_float(
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -414,6 +435,17 @@ pub fn parse_float(
     let addressing = addressing.finalize(&name, Some(8)).ok();
     let (selectors, selected_if) = selector_state.into_parts();
 
+    let has_scale_or_offset = scale.is_some() || offset.is_some();
+    let length = addressing.as_ref().and_then(addressing_primary_length);
+    let native_ieee754 =
+        is_float_reg || (!has_scale_or_offset && matches!(length, Some(4) | Some(8)));
+    let encoding = if native_ieee754 {
+        FloatEncoding::Ieee754
+    } else {
+        FloatEncoding::ScaledInteger
+    };
+    let byte_order = byte_order.unwrap_or(ByteOrder::Big);
+
     Ok(NodeDecl::Float {
         name,
         meta: meta_builder.build(),
@@ -427,5 +459,31 @@ pub fn parse_float(
         selectors,
         selected_if,
         pvalue,
+        encoding,
+        byte_order,
+        predicates,
     })
+}
+
+/// Return the payload length of an [`Addressing`] value when it is single-valued.
+///
+/// Returns `None` for `Indirect` addressing (still single-valued but we'd
+/// rather opt out of the auto-detection — pointer-backed `<Float>` nodes with
+/// no `<Scale>`/`<Offset>` are almost always scaled-integer registers on real
+/// cameras, and silently decoding their bytes as IEEE 754 would corrupt the
+/// value) or for `BySelector` whose branches disagree on length.
+fn addressing_primary_length(addr: &crate::Addressing) -> Option<u32> {
+    match addr {
+        crate::Addressing::Fixed { len, .. } => Some(*len),
+        crate::Addressing::Indirect { .. } => None,
+        crate::Addressing::BySelector { map, .. } => {
+            let mut iter = map.iter().map(|(_, (_, len))| *len);
+            let first = iter.next()?;
+            if iter.all(|l| l == first) {
+                Some(first)
+            } else {
+                None
+            }
+        }
+    }
 }

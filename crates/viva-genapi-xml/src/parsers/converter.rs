@@ -3,11 +3,12 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{NodeMetaBuilder, TAG_P_VALUE};
+use super::{NodeMetaBuilder, TAG_P_VALUE, handle_predicate_start};
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
 use crate::{
-    AccessMode, ConverterDecl, IntConverterDecl, NodeDecl, SkOutput, StringDecl, XmlError,
+    AccessMode, ConverterDecl, IntConverterDecl, NodeDecl, PredicateRefs, SkOutput, StringDecl,
+    XmlError,
 };
 
 /// Parse a `<Converter>` element into a [`NodeDecl::Converter`].
@@ -23,6 +24,7 @@ pub fn parse_converter(
     let mut variables_from: Vec<(String, String)> = Vec::new();
     let mut unit: Option<String> = None;
     let mut output = SkOutput::Float;
+    let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -78,7 +80,9 @@ pub fn parse_converter(
                     }
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -143,6 +147,7 @@ pub fn parse_converter(
         variables_from,
         unit,
         output,
+        predicates,
     }))
 }
 
@@ -158,6 +163,7 @@ pub fn parse_int_converter(
     let mut variables_to: Vec<(String, String)> = Vec::new();
     let mut variables_from: Vec<(String, String)> = Vec::new();
     let mut unit: Option<String> = None;
+    let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -206,7 +212,9 @@ pub fn parse_int_converter(
                     }
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -265,6 +273,7 @@ pub fn parse_int_converter(
         variables_to,
         variables_from,
         unit,
+        predicates,
     }))
 }
 
@@ -276,6 +285,7 @@ pub fn parse_string(
     let name = attribute_value_required(&start, b"Name")?;
     let mut addressing = AddressingBuilder::new(&name);
     let mut access = AccessMode::RO;
+    let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -308,7 +318,9 @@ pub fn parse_string(
                     access = AccessMode::parse(&text)?;
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -342,5 +354,6 @@ pub fn parse_string(
         meta: meta_builder.build(),
         addressing,
         access,
+        predicates,
     }))
 }

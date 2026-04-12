@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use viva_service::acquisition;
-use viva_service::device::DeviceHandle;
+use viva_service::device::{DeviceHandle, DeviceOps};
 use viva_service::nodes;
 use viva_service::status;
 use viva_service::xml;
@@ -386,4 +386,114 @@ async fn e2e_sustained_streaming() {
     for task in tasks {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
+}
+
+/// Verify that `DeviceHandle::get_feature_state` drives `is_implemented`,
+/// `is_available`, `access_mode`, and `enum_available` off live predicates
+/// rather than hardcoded defaults. This is the service-layer counterpart of
+/// `crates/viva-genicam/tests/predicates.rs` — what flips here is the wire
+/// contract the UI consumes, driven by the same realistic predicates:
+/// `ExposureAuto` locks `ExposureTime`, `AcquisitionFrameRateEnable` gates
+/// `AcquisitionFrameRate` availability, and `SensorType` filters
+/// `PixelFormat` entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_feature_state_reflects_predicates() {
+    let _cam = TestCamera::start().await;
+
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+
+    let handle = DeviceHandle::connect(dev_info, Some(loopback_iface_name()))
+        .await
+        .expect("connect failed");
+
+    // --- ExposureTime unlocked ---------------------------------------------
+    handle.set_feature("ExposureAuto", "Off").await.unwrap();
+    let state = handle
+        .get_feature_state("ExposureTime")
+        .await
+        .expect("get_feature_state failed");
+    assert!(state.is_implemented);
+    assert!(state.is_available);
+    assert_eq!(state.access_mode, "RW", "ExposureAuto=Off → RW");
+
+    // --- ExposureTime locked by auto-exposure ------------------------------
+    handle
+        .set_feature("ExposureAuto", "Continuous")
+        .await
+        .unwrap();
+    let state = handle
+        .get_feature_state("ExposureTime")
+        .await
+        .expect("get_feature_state failed");
+    assert!(state.is_implemented);
+    assert!(state.is_available);
+    assert_eq!(
+        state.access_mode, "RO",
+        "ExposureAuto=Continuous → pIsLocked downgrades RW to RO"
+    );
+
+    // --- AcquisitionFrameRate availability toggled by enable ---------------
+    handle
+        .set_feature("AcquisitionFrameRateEnable", "0")
+        .await
+        .unwrap();
+    let state = handle
+        .get_feature_state("AcquisitionFrameRate")
+        .await
+        .expect("get_feature_state failed");
+    assert!(
+        !state.is_available,
+        "AcquisitionFrameRateEnable=0 → unavailable"
+    );
+    assert_eq!(
+        state.access_mode, "RO",
+        "unavailable feature surfaces as RO"
+    );
+
+    handle
+        .set_feature("AcquisitionFrameRateEnable", "1")
+        .await
+        .unwrap();
+    let state = handle
+        .get_feature_state("AcquisitionFrameRate")
+        .await
+        .expect("get_feature_state failed");
+    assert!(
+        state.is_available,
+        "AcquisitionFrameRateEnable=1 → available"
+    );
+    assert_eq!(state.access_mode, "RW");
+
+    // --- PixelFormat entries filtered by SensorType ------------------------
+    handle
+        .set_feature("SensorType", "Monochrome")
+        .await
+        .unwrap();
+    let state = handle
+        .get_feature_state("PixelFormat")
+        .await
+        .expect("get_feature_state failed");
+    let entries = state
+        .enum_available
+        .expect("PixelFormat enum_available should be populated");
+    assert!(entries.contains(&"Mono8".to_string()));
+    assert!(entries.contains(&"Mono16".to_string()));
+    assert!(!entries.contains(&"BayerRG8".to_string()));
+    assert!(!entries.contains(&"RGB8".to_string()));
+
+    handle.set_feature("SensorType", "Color").await.unwrap();
+    let state = handle
+        .get_feature_state("PixelFormat")
+        .await
+        .expect("get_feature_state failed");
+    let entries = state
+        .enum_available
+        .expect("PixelFormat enum_available should be populated");
+    assert_eq!(entries, vec!["RGB8".to_string()]);
 }

@@ -97,6 +97,17 @@ pub const REG_CHUNK_MODE_ACTIVE: u64 = 0x20080;
 pub const REG_CHUNK_SELECTOR: u64 = 0x20084;
 pub const REG_CHUNK_ENABLE: u64 = 0x20088;
 
+/// Test-harness registers for predicate gating (pIsImplemented / pIsAvailable /
+/// pIsLocked). `REG_TEST_CTRL` is a bitfield read by hand-written
+/// [`IntSwissKnife`] expressions in the XML; toggling its bits flips the
+/// reported state of `TestGatedFeature` and gates individual `PixelFormat`
+/// entries. The register is exposed at a fixed address so integration tests
+/// can write it directly via the NodeMap.
+pub const REG_TEST_CTRL: u64 = 0x29000;
+/// Register backing `TestGatedFeature` — only readable/writable when
+/// [`REG_TEST_CTRL`] bit 0 is set.
+pub const REG_TEST_GATED: u64 = 0x29100;
+
 /// Limit registers.
 pub const REG_WIDTH_MIN: u64 = 0x20100;
 pub const REG_WIDTH_MAX: u64 = 0x20104;
@@ -322,13 +333,33 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Enumeration Name="PixelFormat" NameSpace="Standard">
     <ToolTip>Format of the pixel data</ToolTip>
-    <EnumEntry Name="Mono8" NameSpace="Standard"><Value>0x01080001</Value></EnumEntry>
+    <EnumEntry Name="Mono8" NameSpace="Standard">
+      <Value>0x01080001</Value>
+      <pIsImplemented>PfMono8Impl</pIsImplemented>
+    </EnumEntry>
     <EnumEntry Name="Mono16" NameSpace="Standard"><Value>0x01100007</Value></EnumEntry>
     <EnumEntry Name="RGB8" NameSpace="Standard"><Value>0x02180014</Value></EnumEntry>
-    <EnumEntry Name="BayerRG8" NameSpace="Standard"><Value>0x01080009</Value></EnumEntry>
+    <EnumEntry Name="BayerRG8" NameSpace="Standard">
+      <Value>0x01080009</Value>
+      <pIsImplemented>PfBayerRG8Impl</pIsImplemented>
+    </EnumEntry>
     <pValue>PixelFormatReg</pValue>
   </Enumeration>
   <IntReg Name="PixelFormatReg"><Address>0x20008</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <!-- Bit-gated predicates driven by TestControlReg (see TestControlReg below).
+       bit 4 → Mono8 implemented, bit 5 → BayerRG8 implemented. Other entries
+       are always implemented so the dropdown never goes empty. -->
+  <IntSwissKnife Name="PfMono8Impl">
+    <Formula>(CTRL &amp; 16) / 16</Formula>
+    <pVariable Name="CTRL">TestControlReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
+  <IntSwissKnife Name="PfBayerRG8Impl">
+    <Formula>(CTRL &amp; 32) / 32</Formula>
+    <pVariable Name="CTRL">TestControlReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Acquisition Control Features
@@ -490,6 +521,54 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
 
+  <!-- ════════════════════════════════════════════════════════════════════
+       Test Harness Features (Predicate gating)
+       ════════════════════════════════════════════════════════════════════
+
+       These features exist purely so integration tests can exercise the
+       `pIsImplemented` / `pIsAvailable` / `pIsLocked` code paths without
+       depending on a specific real camera's quirks. Tests flip bits of
+       `TestControlReg` and observe how predicate-gated features react.
+
+       Bit layout of TestControlReg:
+         bit 0 → TestGatedFeature is implemented
+         bit 1 → TestGatedFeature is locked (RW → RO)
+         bit 4 → PixelFormat.Mono8 is implemented
+         bit 5 → PixelFormat.BayerRG8 is implemented
+  -->
+  <IntReg Name="TestControlReg">
+    <ToolTip>Bitmask controlling predicate gates — see module docs</ToolTip>
+    <Address>0x29000</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </IntReg>
+
+  <IntSwissKnife Name="TestGateImplemented">
+    <Formula>CTRL &amp; 1</Formula>
+    <pVariable Name="CTRL">TestControlReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
+  <IntSwissKnife Name="TestGateLocked">
+    <Formula>(CTRL &amp; 2) / 2</Formula>
+    <pVariable Name="CTRL">TestControlReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
+
+  <Integer Name="TestGatedFeature">
+    <ToolTip>Test-only register gated by TestControlReg</ToolTip>
+    <Address>0x29100</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <Min>0</Min>
+    <Max>255</Max>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+    <pIsImplemented>TestGateImplemented</pIsImplemented>
+    <pIsLocked>TestGateLocked</pIsLocked>
+  </Integer>
+
 </RegisterDescription>
 "#;
 
@@ -574,6 +653,12 @@ impl RegisterMap {
         regs.insert(REG_CHUNK_MODE_ACTIVE, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_CHUNK_SELECTOR, 1u32.to_be_bytes().to_vec()); // Timestamp
         regs.insert(REG_CHUNK_ENABLE, 0u32.to_be_bytes().to_vec());
+
+        // ── Test-harness predicate registers ────────────────────────────
+        // Boot with every gate enabled so default camera behaviour shows
+        // all features; tests flip bits off to exercise the negative cases.
+        regs.insert(REG_TEST_CTRL, 0b0011_0011u32.to_be_bytes().to_vec());
+        regs.insert(REG_TEST_GATED, 0u32.to_be_bytes().to_vec());
 
         // ── XML URL register ────────────────────────────────────────────
         let xml_blob = FAKE_XML.as_bytes().to_vec();

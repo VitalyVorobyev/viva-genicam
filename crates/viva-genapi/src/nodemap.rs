@@ -5,13 +5,14 @@ use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
-    AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, NodeDecl, Visibility, XmlModel,
+    AccessMode, Addressing, EnumEntryDecl, EnumValueSrc, FloatEncoding, NodeDecl, PredicateRefs,
+    Visibility, XmlModel,
 };
 
 use crate::bitops::{extract, insert};
 use crate::conversions::{
-    apply_scale, bytes_to_i64, encode_bitfield_value, encode_float, get_raw_or_read, i64_to_bytes,
-    interpret_bitfield_value, map_bitops_error, round_to_i64,
+    apply_scale, bytes_to_i64, decode_ieee754, encode_bitfield_value, encode_float, encode_ieee754,
+    get_raw_or_read, i64_to_bytes, interpret_bitfield_value, map_bitops_error, round_to_i64,
 };
 use crate::nodes::{
     BooleanNode, CategoryNode, CommandNode, ConverterNode, EnumMapping, EnumNode, FloatNode,
@@ -51,6 +52,19 @@ fn register_addressing_dependency(
                 .or_default()
                 .push(node_name.to_string());
         }
+    }
+}
+
+fn register_predicate_dependencies(
+    dependents: &mut HashMap<String, Vec<String>>,
+    node_name: &str,
+    predicates: &PredicateRefs,
+) {
+    for provider in predicates.references() {
+        dependents
+            .entry(provider.to_string())
+            .or_default()
+            .push(node_name.to_string());
     }
 }
 
@@ -140,6 +154,7 @@ impl NodeMap {
                     p_max,
                     p_min,
                     value,
+                    predicates,
                 } => {
                     if let Some(ref addr) = addressing {
                         register_addressing_dependency(&mut dependents, &name, addr);
@@ -159,6 +174,7 @@ impl NodeMap {
                             .or_default()
                             .push(name.clone());
                     }
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let node = IntegerNode {
                         name: name.clone(),
                         meta,
@@ -176,6 +192,7 @@ impl NodeMap {
                         p_max,
                         p_min,
                         value,
+                        predicates,
                         cache: std::cell::RefCell::new(None),
                         raw_cache: std::cell::RefCell::new(None),
                     };
@@ -194,6 +211,9 @@ impl NodeMap {
                     selectors,
                     selected_if,
                     pvalue,
+                    encoding,
+                    byte_order,
+                    predicates,
                 } => {
                     if let Some(ref addr) = addressing {
                         register_addressing_dependency(&mut dependents, &name, addr);
@@ -207,6 +227,7 @@ impl NodeMap {
                             .or_default()
                             .push(name.clone());
                     }
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let node = FloatNode {
                         name: name.clone(),
                         meta,
@@ -220,6 +241,9 @@ impl NodeMap {
                         selectors,
                         selected_if,
                         pvalue,
+                        encoding,
+                        byte_order,
+                        predicates,
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::Float(node));
@@ -234,6 +258,7 @@ impl NodeMap {
                     selectors,
                     selected_if,
                     pvalue,
+                    predicates,
                 } => {
                     if let Some(ref addr) = addressing {
                         register_addressing_dependency(&mut dependents, &name, addr);
@@ -247,6 +272,7 @@ impl NodeMap {
                             .or_default()
                             .push(name.clone());
                     }
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let mut providers = Vec::new();
                     let mut provider_set = HashSet::new();
                     for entry in &entries {
@@ -259,6 +285,7 @@ impl NodeMap {
                                 providers.push(node_name.clone());
                             }
                         }
+                        register_predicate_dependencies(&mut dependents, &name, &entry.predicates);
                     }
                     providers.sort();
                     let node = EnumNode {
@@ -272,6 +299,7 @@ impl NodeMap {
                         selectors,
                         selected_if,
                         providers,
+                        predicates,
                         value_cache: std::cell::RefCell::new(None),
                         mapping_cache: std::cell::RefCell::new(None),
                     };
@@ -289,6 +317,7 @@ impl NodeMap {
                     pvalue,
                     on_value,
                     off_value,
+                    predicates,
                 } => {
                     if let Some(ref addr) = addressing {
                         register_addressing_dependency(&mut dependents, &name, addr);
@@ -302,6 +331,7 @@ impl NodeMap {
                             .or_default()
                             .push(name.clone());
                     }
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let node = BooleanNode {
                         name: name.clone(),
                         meta,
@@ -314,6 +344,7 @@ impl NodeMap {
                         pvalue,
                         on_value,
                         off_value,
+                        predicates,
                         cache: std::cell::RefCell::new(None),
                         raw_cache: std::cell::RefCell::new(None),
                     };
@@ -326,10 +357,12 @@ impl NodeMap {
                     len,
                     pvalue,
                     command_value,
+                    predicates,
                 } => {
                     if let Some(ref pv) = pvalue {
                         dependents.entry(pv.clone()).or_default().push(name.clone());
                     }
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let node = CommandNode {
                         name: name.clone(),
                         meta,
@@ -337,6 +370,7 @@ impl NodeMap {
                         len,
                         pvalue,
                         command_value,
+                        predicates,
                     };
                     nodes.insert(name, Node::Command(node));
                 }
@@ -344,11 +378,14 @@ impl NodeMap {
                     name,
                     meta,
                     children,
+                    predicates,
                 } => {
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let node = CategoryNode {
                         name: name.clone(),
                         meta,
                         children,
+                        predicates,
                     };
                     nodes.insert(name, Node::Category(node));
                 }
@@ -358,6 +395,7 @@ impl NodeMap {
                     let expr = decl.expr;
                     let variables = decl.variables;
                     let output = decl.output;
+                    let predicates = decl.predicates;
                     let ast = parse_expression(&expr).map_err(|err| GenApiError::ExprParse {
                         name: name.clone(),
                         msg: err.to_string(),
@@ -378,12 +416,14 @@ impl NodeMap {
                             .or_default()
                             .push(name.clone());
                     }
+                    register_predicate_dependencies(&mut dependents, &name, &predicates);
                     let node = SkNode {
                         name: name.clone(),
                         meta,
                         output,
                         ast,
                         vars: variables,
+                        predicates,
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::SwissKnife(node));
@@ -422,6 +462,7 @@ impl NodeMap {
                         .entry(decl.p_value.clone())
                         .or_default()
                         .push(name.clone());
+                    register_predicate_dependencies(&mut dependents, &name, &decl.predicates);
                     let node = ConverterNode {
                         name: name.clone(),
                         meta: decl.meta,
@@ -432,6 +473,7 @@ impl NodeMap {
                         vars_from: decl.variables_from,
                         unit: decl.unit,
                         output: decl.output,
+                        predicates: decl.predicates,
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::Converter(node));
@@ -468,6 +510,7 @@ impl NodeMap {
                         .entry(decl.p_value.clone())
                         .or_default()
                         .push(name.clone());
+                    register_predicate_dependencies(&mut dependents, &name, &decl.predicates);
                     let node = IntConverterNode {
                         name: name.clone(),
                         meta: decl.meta,
@@ -477,6 +520,7 @@ impl NodeMap {
                         vars_to: decl.variables_to,
                         vars_from: decl.variables_from,
                         unit: decl.unit,
+                        predicates: decl.predicates,
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::IntConverter(node));
@@ -484,11 +528,13 @@ impl NodeMap {
                 NodeDecl::String(decl) => {
                     let name = decl.name;
                     register_addressing_dependency(&mut dependents, &name, &decl.addressing);
+                    register_predicate_dependencies(&mut dependents, &name, &decl.predicates);
                     let node = StringNode {
                         name: name.clone(),
                         meta: decl.meta,
                         addressing: decl.addressing,
                         access: decl.access,
+                        predicates: decl.predicates,
                         cache: std::cell::RefCell::new(None),
                     };
                     nodes.insert(name, Node::String(node));
@@ -650,9 +696,19 @@ impl NodeMap {
             GenApiError::Io(_) => err,
             other => other,
         })?;
-        let raw_value = bytes_to_i64(name, &raw)?;
-        let value = apply_scale(node, raw_value as f64);
-        debug!(node = %name, raw = raw_value, value, "read float feature");
+        let value = match node.encoding {
+            FloatEncoding::Ieee754 => {
+                let v = decode_ieee754(name, &raw, node.byte_order)?;
+                debug!(node = %name, value = v, "read float feature (ieee754)");
+                v
+            }
+            FloatEncoding::ScaledInteger => {
+                let raw_value = bytes_to_i64(name, &raw)?;
+                let v = apply_scale(node, raw_value as f64);
+                debug!(node = %name, raw = raw_value, value = v, "read float feature (scaled)");
+                v
+            }
+        };
         node.cache.replace(Some(value));
         Ok(value)
     }
@@ -679,9 +735,19 @@ impl NodeMap {
         if value < node.min || value > node.max {
             return Err(GenApiError::Range(name.to_string()));
         }
-        let raw = encode_float(node, value)?;
-        let bytes = i64_to_bytes(name, raw, len)?;
-        debug!(node = %name, raw, value, "write float feature");
+        let bytes = match node.encoding {
+            FloatEncoding::Ieee754 => {
+                let bytes = encode_ieee754(name, value, len, node.byte_order)?;
+                debug!(node = %name, value, "write float feature (ieee754)");
+                bytes
+            }
+            FloatEncoding::ScaledInteger => {
+                let raw = encode_float(node, value)?;
+                let bytes = i64_to_bytes(name, raw, len)?;
+                debug!(node = %name, raw, value, "write float feature (scaled)");
+                bytes
+            }
+        };
         io.write(address, &bytes).map_err(|err| match err {
             GenApiError::Io(_) => err,
             other => other,
@@ -798,6 +864,182 @@ impl NodeMap {
         names.sort();
         names.dedup();
         Ok(names)
+    }
+
+    /// Evaluate `pIsImplemented` for `name`, returning `true` when the feature
+    /// is implemented by the device.
+    ///
+    /// Absent `pIsImplemented` defaults to `true` (matching the GenICam spec:
+    /// an undeclared predicate means "always implemented"). Evaluation errors
+    /// propagate to the caller so bad XML is visible rather than silently
+    /// reported as implemented.
+    pub fn is_implemented(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
+        let prefs = self.predicate_refs(name)?;
+        match &prefs.p_is_implemented {
+            None => Ok(true),
+            Some(provider) => self.eval_predicate_ref(name, provider, io),
+        }
+    }
+
+    /// Evaluate `pIsAvailable` plus selector gating for `name`.
+    ///
+    /// Returns `false` when the feature is not implemented, when
+    /// `pIsAvailable` evaluates to zero, or when any `selected_if` rule is
+    /// violated by the current selector value. Callers that want pure XML
+    /// gating without selector checks should use [`NodeMap::is_implemented`]
+    /// instead.
+    pub fn is_available(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
+        if !self.is_implemented(name, io)? {
+            return Ok(false);
+        }
+        let prefs = self.predicate_refs(name)?;
+        if let Some(provider) = &prefs.p_is_available
+            && !self.eval_predicate_ref(name, provider, io)?
+        {
+            return Ok(false);
+        }
+        let selected_if = self
+            .nodes
+            .get(name)
+            .and_then(Self::selected_if_slice)
+            .unwrap_or(&[]);
+        self.selectors_allow(selected_if, io)
+    }
+
+    /// Return the effective [`AccessMode`] for `name` given the current
+    /// device state.
+    ///
+    /// - If the feature is unavailable (see [`NodeMap::is_available`]), the
+    ///   function returns `AccessMode::RO` — we cannot report "NA" without
+    ///   introducing a new variant, and Studio's wire protocol carries the
+    ///   availability flag separately.
+    /// - If `pIsLocked` evaluates truthy, `RW` downgrades to `RO`; `RO` and
+    ///   `WO` are unaffected.
+    /// - Otherwise the statically declared access mode applies.
+    pub fn effective_access_mode(
+        &self,
+        name: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<AccessMode, GenApiError> {
+        let node = self
+            .nodes
+            .get(name)
+            .ok_or_else(|| GenApiError::NodeNotFound(name.to_string()))?;
+        let base = node.access_mode().unwrap_or(AccessMode::RO);
+        if !self.is_available(name, io)? {
+            return Ok(AccessMode::RO);
+        }
+        let prefs = self.predicate_refs(name)?;
+        if let Some(provider) = &prefs.p_is_locked
+            && self.eval_predicate_ref(name, provider, io)?
+        {
+            return Ok(match base {
+                AccessMode::RW => AccessMode::RO,
+                other => other,
+            });
+        }
+        Ok(base)
+    }
+
+    /// Return the subset of enum entries currently reported as available by
+    /// the device, or the full static list when no entry declares an
+    /// `pIsImplemented`/`pIsAvailable`.
+    ///
+    /// Falling back to the full list preserves current behaviour for XMLs
+    /// that don't gate individual entries, so callers stop seeing the stale
+    /// static list when the new predicates are added and otherwise behave as
+    /// before.
+    pub fn available_enum_entries(
+        &self,
+        name: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<Vec<String>, GenApiError> {
+        let node = self.get_enum_node(name)?;
+        let any_entry_predicate = node.entries.iter().any(|e| !e.predicates.is_empty());
+        if !any_entry_predicate {
+            return self.enum_entries(name);
+        }
+        let mut out = Vec::new();
+        for entry in &node.entries {
+            if let Some(provider) = &entry.predicates.p_is_implemented
+                && !self.eval_predicate_ref(name, provider, io)?
+            {
+                continue;
+            }
+            if let Some(provider) = &entry.predicates.p_is_available
+                && !self.eval_predicate_ref(name, provider, io)?
+            {
+                continue;
+            }
+            out.push(entry.name.clone());
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    fn predicate_refs(&self, name: &str) -> Result<&PredicateRefs, GenApiError> {
+        self.nodes
+            .get(name)
+            .map(Node::predicates)
+            .ok_or_else(|| GenApiError::NodeNotFound(name.to_string()))
+    }
+
+    /// Evaluate a `pIs*` reference by reading the target node as an integer
+    /// truthy value.
+    ///
+    /// `ctx` is the node that owns the predicate; it is used for diagnostics
+    /// and cycle detection so a predicate that accidentally resolves back to
+    /// its own owner fails fast rather than recursing. Providers can be any
+    /// numeric-resolvable node: Integer, Boolean, Enum (integer form),
+    /// SwissKnife, or a Converter.
+    fn eval_predicate_ref(
+        &self,
+        ctx: &str,
+        provider: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<bool, GenApiError> {
+        if provider == ctx {
+            return Err(GenApiError::ExprEval {
+                name: ctx.to_string(),
+                msg: "predicate references the node it gates".into(),
+            });
+        }
+        let mut stack = HashSet::new();
+        stack.insert(ctx.to_string());
+        let value = self.resolve_numeric(provider, io, &mut stack)?;
+        trace!(node = %ctx, provider, value, "predicate eval");
+        Ok(value != 0.0)
+    }
+
+    /// Non-erroring cousin of [`NodeMap::ensure_selectors`] — returns `Ok(false)`
+    /// when a selector gating rule rejects the current state, rather than
+    /// converting that into a [`GenApiError::Unavailable`].
+    fn selectors_allow(
+        &self,
+        rules: &[(String, Vec<String>)],
+        io: &dyn RegisterIo,
+    ) -> Result<bool, GenApiError> {
+        for (selector, allowed) in rules {
+            if allowed.is_empty() {
+                continue;
+            }
+            let current = self.get_selector_value(selector, io)?;
+            if !allowed.iter().any(|v| v == &current) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn selected_if_slice(node: &Node) -> Option<&[(String, Vec<String>)]> {
+        match node {
+            Node::Integer(n) => Some(&n.selected_if),
+            Node::Float(n) => Some(&n.selected_if),
+            Node::Enum(n) => Some(&n.selected_if),
+            Node::Boolean(n) => Some(&n.selected_if),
+            _ => None,
+        }
     }
 
     /// Read a boolean feature.

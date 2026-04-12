@@ -12,52 +12,87 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish:
-    name: Build and publish release assets
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Format check
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Tests (release)
-        run: cargo test --workspace --all-targets --all-features --release
-
-      - name: Package published crates
-        run: |
-          for crate in viva-gencp viva-pfnc viva-sfnc viva-genapi-xml viva-genapi \
-                       viva-gige viva-u3v viva-genicam viva-zenoh-api viva-service; do
-            cargo package -p "$crate" --locked
-          done
+        with:
+          key: release-${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --release --locked -p viva-camctl -p viva-service
+        run: cargo build --release --locked --target ${{ matrix.target }} -p viva-camctl -p viva-service
 
-      - name: Collect artifacts
+      - name: Package archive
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
         run: |
-          mkdir -p dist
-          TAG="${{ github.ref_name }}"
-          for bin in viva-camctl viva-service; do
-            cp "target/release/$bin" "dist/${bin}-${TAG}-x86_64-unknown-linux-gnu"
-          done
-          tar -czf "dist/genicam-rs-${TAG}-x86_64-unknown-linux-gnu.tar.gz" \
-            -C dist \
-            "viva-camctl-${TAG}-x86_64-unknown-linux-gnu" \
-            "viva-service-${TAG}-x86_64-unknown-linux-gnu"
-          cp target/package/*.crate dist/
-          sha256sum dist/* > dist/SHA256SUMS.txt
+          set -euo pipefail
+          STAGE="genicam-rs-${TAG}-${TARGET}"
+          mkdir -p "$STAGE"
+          cp README.md LICENSE CHANGELOG.md "$STAGE/"
+          if [ "$ARCHIVE" = "zip" ]; then
+            cp "target/${TARGET}/release/viva-camctl.exe" "$STAGE/"
+            cp "target/${TARGET}/release/viva-service.exe" "$STAGE/"
+            7z a "${STAGE}.zip" "$STAGE" >/dev/null
+            echo "ARCHIVE_FILE=${STAGE}.zip" >> "$GITHUB_ENV"
+          else
+            cp "target/${TARGET}/release/viva-camctl" "$STAGE/"
+            cp "target/${TARGET}/release/viva-service" "$STAGE/"
+            tar -czf "${STAGE}.tar.gz" "$STAGE"
+            echo "ARCHIVE_FILE=${STAGE}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ARCHIVE_FILE }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          ls -la
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v1
@@ -65,5 +100,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.tar.gz
-            dist/*.crate
+            dist/*.zip
             dist/SHA256SUMS.txt

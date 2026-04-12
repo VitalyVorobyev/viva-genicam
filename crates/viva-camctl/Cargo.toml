@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 description = "CLI tool for GenICam camera discovery, feature control, and streaming"
-publish = false
+readme = "README.md"
+keywords = ["genicam", "vision", "gige", "u3v", "cli"]
+categories = ["hardware-support", "command-line-utilities"]
 
 [dependencies]
 clap = { workspace = true }

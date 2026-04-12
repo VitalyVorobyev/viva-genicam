@@ -64,7 +64,7 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 - `viva-pfnc` - Pixel Format Naming Convention tables
 - `viva-sfnc` - Standard Feature Naming Convention
 - `viva-zenoh-api` - Shared Zenoh wire types (no Zenoh dependency)
-- `viva-camctl` - CLI binary (not published)
+- `viva-camctl` - CLI binary (published to crates.io and as prebuilt release binaries)
 - `viva-service` - GigE Zenoh camera service for genicam-studio
 - `viva-service-u3v` - U3V Zenoh camera service for genicam-studio (supports `--fake` mode and real USB)
 - `viva-fake-gige` - In-process fake GigE Vision camera for testing (not published)

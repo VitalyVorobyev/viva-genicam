@@ -32,8 +32,9 @@ pub trait DeviceOps: Send + Sync + 'static {
 
     /// Read the full live state of a feature: value, access mode, kind, range,
     /// available enum entries, unit. Default implementation projects from
-    /// [`get_feature`] with `kind: "Unknown"` and no range/enum data; GigE's
-    /// [`DeviceHandle`] overrides with typed reads against the NodeMap.
+    /// [`DeviceOps::get_feature`] with `kind: "Unknown"` and no range/enum
+    /// data; GigE's [`DeviceHandle`] overrides with typed reads against the
+    /// NodeMap.
     ///
     /// Transports that cannot introspect (e.g. remote Zenoh relays) keep the
     /// default implementation — the UI renders "range unknown" / falls back to

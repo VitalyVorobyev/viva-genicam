@@ -101,4 +101,7 @@ jobs:
           # Level 3: service layer
           publish viva-service
 
-          echo "All 10 crates published successfully."
+          # Level 4: CLI (depends on all libraries)
+          publish viva-camctl
+
+          echo "All 11 crates published successfully."

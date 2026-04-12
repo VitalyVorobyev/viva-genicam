@@ -22,10 +22,11 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
-          - os: macos-14
+          # macOS is Apple Silicon only -- GitHub retired the Intel
+          # (macos-13) runners. An x86_64 (Intel) Mac binary could be
+          # added later via cross-compile + vendored libusb, or as a
+          # lipo universal binary.
+          - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
           - os: windows-latest

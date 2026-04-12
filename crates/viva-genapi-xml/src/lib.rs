@@ -1058,6 +1058,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_indirect_float_is_scaled_integer() {
+        // Regression test: indirect <Float> with Length=4 and no
+        // <Scale>/<Offset> must NOT be reclassified as IEEE 754. Pointer-
+        // backed float features on real cameras are almost always scaled
+        // integer registers; silently decoding their bytes as IEEE 754
+        // corrupts the value.
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Integer Name="RegAddr">
+                    <Address>0x2000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                </Integer>
+                <Float Name="Exposure">
+                    <pAddress>RegAddr</pAddress>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                </Float>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse indirect float");
+        let float = model
+            .nodes
+            .iter()
+            .find(|n| matches!(n, NodeDecl::Float { name, .. } if name == "Exposure"))
+            .expect("Exposure node");
+        match float {
+            NodeDecl::Float {
+                encoding,
+                addressing,
+                ..
+            } => {
+                assert!(
+                    matches!(addressing, Some(Addressing::Indirect { .. })),
+                    "expected indirect addressing"
+                );
+                assert_eq!(*encoding, FloatEncoding::ScaledInteger);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn parse_integer_bitfield_big_endian() {
         const XML: &str = r#"
             <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">

@@ -468,12 +468,14 @@ pub fn parse_float(
 /// Return the payload length of an [`Addressing`] value when it is single-valued.
 ///
 /// Returns `None` for `Indirect` addressing (still single-valued but we'd
-/// rather opt out of the auto-detection) or for `BySelector` whose branches
-/// disagree on length.
+/// rather opt out of the auto-detection — pointer-backed `<Float>` nodes with
+/// no `<Scale>`/`<Offset>` are almost always scaled-integer registers on real
+/// cameras, and silently decoding their bytes as IEEE 754 would corrupt the
+/// value) or for `BySelector` whose branches disagree on length.
 fn addressing_primary_length(addr: &crate::Addressing) -> Option<u32> {
     match addr {
         crate::Addressing::Fixed { len, .. } => Some(*len),
-        crate::Addressing::Indirect { len, .. } => Some(*len),
+        crate::Addressing::Indirect { .. } => None,
         crate::Addressing::BySelector { map, .. } => {
             let mut iter = map.iter().map(|(_, (_, len))| *len);
             let first = iter.next()?;

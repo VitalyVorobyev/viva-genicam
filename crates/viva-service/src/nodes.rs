@@ -201,21 +201,22 @@ pub async fn run_introspect_queryable<D: DeviceOps>(
                             .to_string();
 
                         let reply_key = keys::node_introspect(&device_id, &node_name);
-                        let payload_bytes = match device.get_feature_state(&node_name).await {
+                        match device.get_feature_state(&node_name).await {
                             Ok(state) => match serde_json::to_vec(&state) {
-                                Ok(b) => Some(b),
+                                Ok(payload) => {
+                                    let _ = query.reply(&reply_key, payload).await;
+                                }
                                 Err(e) => {
                                     warn!(device_id, node_name, error = %e, "failed to serialize FeatureState");
-                                    None
+                                    let _ = query
+                                        .reply_err(format!("serialize error: {e}"))
+                                        .await;
                                 }
                             },
                             Err(e) => {
                                 warn!(device_id, node_name, error = %e, "introspect failed");
-                                None
+                                let _ = query.reply_err(e.to_string()).await;
                             }
-                        };
-                        if let Some(payload) = payload_bytes {
-                            let _ = query.reply(&reply_key, payload).await;
                         }
                     }
                     Err(_) => break,

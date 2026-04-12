@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use viva_genapi_xml::{AccessMode, Addressing, BitField, EnumEntryDecl};
-pub use viva_genapi_xml::{NodeMeta, Representation, SkOutput, Visibility};
+use viva_genapi_xml::{AccessMode, Addressing, BitField, ByteOrder, EnumEntryDecl, FloatEncoding};
+pub use viva_genapi_xml::{NodeMeta, PredicateRefs, Representation, SkOutput, Visibility};
 
 use crate::swissknife::AstNode;
 
@@ -123,6 +123,23 @@ impl Node {
         self.meta().representation
     }
 
+    /// Return the predicate references (`pIsImplemented`, `pIsAvailable`,
+    /// `pIsLocked`) declared on this node.
+    pub fn predicates(&self) -> &PredicateRefs {
+        match self {
+            Node::Integer(n) => &n.predicates,
+            Node::Float(n) => &n.predicates,
+            Node::Enum(n) => &n.predicates,
+            Node::Boolean(n) => &n.predicates,
+            Node::Command(n) => &n.predicates,
+            Node::Category(n) => &n.predicates,
+            Node::SwissKnife(n) => &n.predicates,
+            Node::Converter(n) => &n.predicates,
+            Node::IntConverter(n) => &n.predicates,
+            Node::String(n) => &n.predicates,
+        }
+    }
+
     pub(crate) fn invalidate_cache(&self) {
         match self {
             Node::Integer(node) => {
@@ -189,6 +206,8 @@ pub struct IntegerNode {
     pub p_min: Option<String>,
     /// Static value for constant nodes.
     pub value: Option<i64>,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<i64>>,
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
 }
@@ -213,6 +232,12 @@ pub struct FloatNode {
     pub selected_if: Vec<(String, Vec<String>)>,
     /// Node providing the value (delegates read/write).
     pub pvalue: Option<String>,
+    /// How the register payload is encoded (IEEE 754 or scaled integer).
+    pub encoding: FloatEncoding,
+    /// Byte order of the register payload.
+    pub byte_order: ByteOrder,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<f64>>,
 }
 
@@ -232,6 +257,8 @@ pub struct EnumNode {
     pub selectors: Vec<String>,
     pub selected_if: Vec<(String, Vec<String>)>,
     pub providers: Vec<String>,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     pub(crate) value_cache: RefCell<Option<String>>,
     pub(crate) mapping_cache: RefCell<Option<EnumMapping>>,
 }
@@ -269,6 +296,8 @@ pub struct BooleanNode {
     pub on_value: Option<i64>,
     /// Off value for pValue-backed booleans.
     pub off_value: Option<i64>,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<bool>>,
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
 }
@@ -289,6 +318,8 @@ pub struct SkNode {
     pub ast: AstNode,
     /// Mapping of variable identifiers to provider node names.
     pub vars: Vec<(String, String)>,
+    /// Predicate refs gating implementation / availability.
+    pub predicates: PredicateRefs,
     /// Cached value alongside the generation it was computed in.
     pub cache: RefCell<Option<(f64, u64)>>,
 }
@@ -306,6 +337,8 @@ pub struct CommandNode {
     pub pvalue: Option<String>,
     /// Value to write when executing the command.
     pub command_value: Option<i64>,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
 }
 
 /// Category node describing child feature names.
@@ -315,6 +348,8 @@ pub struct CategoryNode {
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
     pub children: Vec<String>,
+    /// Predicate refs gating implementation / availability.
+    pub predicates: PredicateRefs,
 }
 
 /// Converter node transforming raw values to/from float values via formulas.
@@ -342,6 +377,8 @@ pub struct ConverterNode {
     pub unit: Option<String>,
     /// Desired output type.
     pub output: SkOutput,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     /// Cached user-facing value alongside the generation it was computed in.
     pub cache: RefCell<Option<(f64, u64)>>,
 }
@@ -365,6 +402,8 @@ pub struct IntConverterNode {
     pub vars_from: Vec<(String, String)>,
     /// Optional engineering unit.
     pub unit: Option<String>,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     /// Cached user-facing value alongside the generation it was computed in.
     pub cache: RefCell<Option<(i64, u64)>>,
 }
@@ -380,6 +419,8 @@ pub struct StringNode {
     pub addressing: Addressing,
     /// Declared access rights.
     pub access: AccessMode,
+    /// Predicate refs gating implementation / availability / lock state.
+    pub predicates: PredicateRefs,
     /// Cached string value alongside the generation it was computed in.
     pub cache: RefCell<Option<(String, u64)>>,
 }

@@ -8,13 +8,15 @@ use super::{
     NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS,
     TAG_ENDIANNESS, TAG_LSB, TAG_MASK, TAG_MSB, TAG_P_ADDRESS, TAG_P_VALUE, TAG_VALUE,
     handle_addressing_empty, handle_addressing_start, handle_p_selected_empty,
-    handle_p_selected_start, handle_selected_empty, handle_selected_start,
+    handle_p_selected_start, handle_predicate_start, handle_selected_empty, handle_selected_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
-use crate::{AccessMode, BitField, ByteOrder, EnumEntryDecl, EnumValueSrc, NodeDecl, XmlError};
+use crate::{
+    AccessMode, BitField, ByteOrder, EnumEntryDecl, EnumValueSrc, NodeDecl, PredicateRefs, XmlError,
+};
 
 /// Parse an `<Enumeration>` element into a [`NodeDecl::Enum`].
 pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeDecl, XmlError> {
@@ -32,6 +34,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     let mut access = AccessMode::RW;
     let mut entries = Vec::new();
     let mut default = None;
+    let mut predicates = PredicateRefs::default();
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
@@ -76,7 +79,9 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
                     }
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -127,6 +132,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
         selectors,
         selected_if,
         pvalue,
+        predicates,
     })
 }
 
@@ -150,6 +156,7 @@ pub fn parse_boolean(
     let mut pvalue = None;
     let mut on_value = None;
     let mut off_value = None;
+    let mut predicates = PredicateRefs::default();
     let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
@@ -256,7 +263,9 @@ pub fn parse_boolean(
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -367,6 +376,7 @@ pub fn parse_boolean(
         pvalue,
         on_value,
         off_value,
+        predicates,
     })
 }
 
@@ -379,6 +389,7 @@ fn parse_enum_entry(
     let mut literal = attribute_value(&start, TAG_VALUE)?;
     let mut provider = attribute_value(&start, TAG_P_VALUE)?;
     let mut display_name = attribute_value(&start, TAG_DISPLAY_NAME)?;
+    let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
 
@@ -413,7 +424,11 @@ fn parse_enum_entry(
                         name = trimmed.to_string();
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !handle_predicate_start(reader, e, &mut predicates)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
             Ok(Event::Eof) => {
@@ -425,7 +440,7 @@ fn parse_enum_entry(
         buf.clear();
     }
 
-    build_enum_entry(name, literal, provider, display_name)
+    build_enum_entry(name, literal, provider, display_name, predicates)
 }
 
 /// Parse an empty `<EnumEntry />` element.
@@ -434,7 +449,13 @@ fn parse_enum_entry_empty(start: &BytesStart<'_>) -> Result<EnumEntryDecl, XmlEr
     let literal = attribute_value(start, TAG_VALUE)?;
     let provider = attribute_value(start, TAG_P_VALUE)?;
     let display_name = attribute_value(start, TAG_DISPLAY_NAME)?;
-    build_enum_entry(name, literal, provider, display_name)
+    build_enum_entry(
+        name,
+        literal,
+        provider,
+        display_name,
+        PredicateRefs::default(),
+    )
 }
 
 /// Build an [`EnumEntryDecl`] from parsed components.
@@ -443,6 +464,7 @@ fn build_enum_entry(
     literal: Option<String>,
     provider: Option<String>,
     display_name: Option<String>,
+    predicates: PredicateRefs,
 ) -> Result<EnumEntryDecl, XmlError> {
     let literal = literal.and_then(|value| {
         let trimmed = value.trim();
@@ -482,5 +504,6 @@ fn build_enum_entry(
         name,
         value,
         display_name,
+        predicates,
     })
 }

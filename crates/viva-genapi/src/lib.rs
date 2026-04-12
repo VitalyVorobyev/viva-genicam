@@ -16,7 +16,7 @@ pub use nodes::{
     BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, IntegerNode, Node, NodeMeta,
     Representation, SkNode, Visibility,
 };
-pub use viva_genapi_xml::SkOutput;
+pub use viva_genapi_xml::{AccessMode, SkOutput};
 
 #[cfg(test)]
 mod tests {
@@ -24,7 +24,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::conversions::{bytes_to_i64, i64_to_bytes};
-    use crate::{GenApiError, NodeMap, RegisterIo, Visibility};
+    use crate::{AccessMode, GenApiError, NodeMap, RegisterIo, Visibility};
 
     const FIXTURE: &str = r#"
         <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="2" SchemaSubMinorVersion="3">
@@ -162,6 +162,7 @@ mod tests {
                 <AccessMode>RW</AccessMode>
                 <Min>-100.0</Min>
                 <Max>100.0</Max>
+                <Scale>1</Scale>
             </Float>
             <Integer Name="B">
                 <Address>0x3010</Address>
@@ -284,6 +285,241 @@ mod tests {
             .expect("read updated width");
         assert_eq!(width, 1030);
         assert_eq!(io.read_count(0x100), 1, "write should update cache");
+    }
+
+    const IEEE754_FIXTURE: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+            <FloatReg Name="FrameRate">
+                <Address>0x100</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>0.0</Min>
+                <Max>1000.0</Max>
+                <Endianess>BigEndian</Endianess>
+            </FloatReg>
+            <Float Name="ExposureUs">
+                <Address>0x110</Address>
+                <Length>8</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>0.0</Min>
+                <Max>1000000.0</Max>
+                <Endianess>BigEndian</Endianess>
+            </Float>
+        </RegisterDescription>
+    "#;
+
+    fn build_ieee754_nodemap() -> NodeMap {
+        NodeMap::from(viva_genapi_xml::parse(IEEE754_FIXTURE).expect("parse ieee754"))
+    }
+
+    #[test]
+    fn float_ieee754_f32_roundtrip() {
+        let mut nodemap = build_ieee754_nodemap();
+        let io = MockIo::with_registers(&[(0x100, 30.0f32.to_be_bytes().to_vec())]);
+        let v = nodemap.get_float("FrameRate", &io).expect("read rate");
+        assert!((v - 30.0).abs() < 1e-3, "got {v}");
+
+        nodemap
+            .set_float("FrameRate", 42.5, &io)
+            .expect("write rate");
+        let raw = io.read(0x100, 4).expect("read back");
+        assert_eq!(raw, 42.5f32.to_be_bytes());
+    }
+
+    #[test]
+    fn float_ieee754_f64_heuristic_roundtrip() {
+        let mut nodemap = build_ieee754_nodemap();
+        let io = MockIo::with_registers(&[(0x110, 6000.0f64.to_be_bytes().to_vec())]);
+        let v = nodemap.get_float("ExposureUs", &io).expect("read exposure");
+        assert!((v - 6000.0).abs() < 1e-9, "got {v}");
+
+        nodemap
+            .set_float("ExposureUs", 5000.0, &io)
+            .expect("write exposure");
+        let raw = io.read(0x110, 8).expect("read back");
+        assert_eq!(raw, 5000.0f64.to_be_bytes());
+    }
+
+    #[test]
+    fn float_scaled_integer_preserved() {
+        // The classic fixture's ExposureTime uses <Scale>1/1000</Scale>,
+        // so it must stay on the scaled-integer path even after the heuristic.
+        let nodemap = build_nodemap();
+        let raw = 50_000i64;
+        let io = MockIo::with_registers(&[(0x200, i64_to_bytes("ExposureTime", raw, 4).unwrap())]);
+        let exposure = nodemap
+            .get_float("ExposureTime", &io)
+            .expect("read exposure");
+        assert!((exposure - 50.0).abs() < 1e-6);
+    }
+
+    const PREDICATE_FIXTURE: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+            <IntReg Name="CtrlReg">
+                <Address>0x400</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntSwissKnife Name="GateImplemented">
+                <Formula>CTRL &amp; 1</Formula>
+                <pVariable Name="CTRL">CtrlReg</pVariable>
+                <Output>Integer</Output>
+            </IntSwissKnife>
+            <IntSwissKnife Name="GateLocked">
+                <Formula>(CTRL &amp; 2) / 2</Formula>
+                <pVariable Name="CTRL">CtrlReg</pVariable>
+                <Output>Integer</Output>
+            </IntSwissKnife>
+            <IntSwissKnife Name="Entry8Implemented">
+                <Formula>(CTRL &amp; 4) / 4</Formula>
+                <pVariable Name="CTRL">CtrlReg</pVariable>
+                <Output>Integer</Output>
+            </IntSwissKnife>
+            <Integer Name="Gated">
+                <Address>0x410</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>0</Min>
+                <Max>255</Max>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+                <pIsImplemented>GateImplemented</pIsImplemented>
+                <pIsLocked>GateLocked</pIsLocked>
+            </Integer>
+            <Enumeration Name="PixelFormat">
+                <EnumEntry Name="Mono8"><Value>1</Value></EnumEntry>
+                <EnumEntry Name="Mono16">
+                    <Value>2</Value>
+                    <pIsImplemented>Entry8Implemented</pIsImplemented>
+                </EnumEntry>
+                <pValue>PixelFormatReg</pValue>
+            </Enumeration>
+            <IntReg Name="PixelFormatReg">
+                <Address>0x420</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+
+    fn build_predicate_nodemap() -> NodeMap {
+        NodeMap::from(viva_genapi_xml::parse(PREDICATE_FIXTURE).expect("parse predicate fixture"))
+    }
+
+    fn predicate_io(ctrl: u32) -> MockIo {
+        MockIo::with_registers(&[
+            (0x400, ctrl.to_be_bytes().to_vec()),
+            (0x410, 0u32.to_be_bytes().to_vec()),
+            (0x420, 1u32.to_be_bytes().to_vec()),
+        ])
+    }
+
+    #[test]
+    fn predicate_is_implemented_defaults_true() {
+        let nodemap = build_predicate_nodemap();
+        let io = predicate_io(0);
+        // CtrlReg itself has no pIsImplemented → always implemented.
+        assert!(nodemap.is_implemented("CtrlReg", &io).unwrap());
+    }
+
+    #[test]
+    fn predicate_is_implemented_follows_gate() {
+        let nm0 = build_predicate_nodemap();
+        let io0 = predicate_io(0);
+        assert!(!nm0.is_implemented("Gated", &io0).unwrap());
+        let nm1 = build_predicate_nodemap();
+        let io1 = predicate_io(1);
+        assert!(nm1.is_implemented("Gated", &io1).unwrap());
+    }
+
+    #[test]
+    fn predicate_is_available_chains_implemented() {
+        let nm0 = build_predicate_nodemap();
+        let io0 = predicate_io(0);
+        assert!(!nm0.is_available("Gated", &io0).unwrap());
+        let nm1 = build_predicate_nodemap();
+        let io1 = predicate_io(1);
+        assert!(nm1.is_available("Gated", &io1).unwrap());
+    }
+
+    #[test]
+    fn predicate_effective_access_mode_locked_downgrade() {
+        let nodemap = build_predicate_nodemap();
+        // bit 0 set (implemented), bit 1 set (locked) → RW → RO
+        let io = predicate_io(0b11);
+        let mode = nodemap.effective_access_mode("Gated", &io).unwrap();
+        assert_eq!(mode, AccessMode::RO);
+    }
+
+    #[test]
+    fn predicate_effective_access_mode_rw_when_unlocked() {
+        let nodemap = build_predicate_nodemap();
+        // implemented, unlocked → base RW
+        let io = predicate_io(0b01);
+        let mode = nodemap.effective_access_mode("Gated", &io).unwrap();
+        assert_eq!(mode, AccessMode::RW);
+    }
+
+    #[test]
+    fn predicate_effective_access_mode_na_for_unavailable() {
+        let nodemap = build_predicate_nodemap();
+        // not implemented → effective access reported as RO (we don't model NA).
+        let io = predicate_io(0);
+        let mode = nodemap.effective_access_mode("Gated", &io).unwrap();
+        assert_eq!(mode, AccessMode::RO);
+    }
+
+    #[test]
+    fn predicate_available_enum_entries_filters() {
+        let nodemap = build_predicate_nodemap();
+        // bit 2 clear → Mono16 gated out; Mono8 has no predicate so it stays.
+        let io = predicate_io(0);
+        let entries = nodemap
+            .available_enum_entries("PixelFormat", &io)
+            .expect("enum entries");
+        assert_eq!(entries, vec!["Mono8".to_string()]);
+    }
+
+    #[test]
+    fn predicate_available_enum_entries_full_when_allowed() {
+        let nodemap = build_predicate_nodemap();
+        // bit 2 set → Mono16 available.
+        let io = predicate_io(0b100);
+        let mut entries = nodemap
+            .available_enum_entries("PixelFormat", &io)
+            .expect("enum entries");
+        entries.sort();
+        assert_eq!(entries, vec!["Mono16".to_string(), "Mono8".to_string()]);
+    }
+
+    #[test]
+    fn predicate_available_enum_entries_fallback_to_static() {
+        // CtrlReg itself isn't an enum; use an enum without entry predicates.
+        let xml = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Enumeration Name="Mode">
+                    <EnumEntry Name="A"><Value>0</Value></EnumEntry>
+                    <EnumEntry Name="B"><Value>1</Value></EnumEntry>
+                    <pValue>ModeReg</pValue>
+                </Enumeration>
+                <IntReg Name="ModeReg">
+                    <Address>0x500</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let nodemap = NodeMap::from(viva_genapi_xml::parse(xml).unwrap());
+        let io = MockIo::with_registers(&[(0x500, 0u32.to_be_bytes().to_vec())]);
+        let mut entries = nodemap.available_enum_entries("Mode", &io).unwrap();
+        entries.sort();
+        assert_eq!(entries, vec!["A".to_string(), "B".to_string()]);
     }
 
     #[test]

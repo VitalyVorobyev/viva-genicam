@@ -7,7 +7,9 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::util::{attribute_value_required, parse_u64, read_text_start, skip_element};
-use crate::{AccessMode, Addressing, BitField, ByteOrder, NodeDecl, NodeMeta, XmlError};
+use crate::{
+    AccessMode, Addressing, BitField, ByteOrder, NodeDecl, NodeMeta, PredicateRefs, XmlError,
+};
 
 /// Parse a `<StructReg>` element, producing one `NodeDecl::Integer` per `<StructEntry>`.
 pub fn parse_struct_reg(
@@ -85,6 +87,7 @@ pub fn parse_struct_reg(
             p_max: None,
             p_min: None,
             value: None,
+            predicates: PredicateRefs::default(),
         })
         .collect();
 

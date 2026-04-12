@@ -19,7 +19,7 @@ use quick_xml::events::BytesStart;
 
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, parse_u64, read_text_start};
-use crate::{NodeMeta, Representation, Visibility, XmlError};
+use crate::{NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
 
 /// XML element name referencing another node that provides an address.
 pub const TAG_P_ADDRESS: &[u8] = b"pAddress";
@@ -51,6 +51,40 @@ pub const TAG_ENDIANNESS: &[u8] = b"Endianness";
 pub const TAG_ENDIANESS: &[u8] = b"Endianess";
 /// XML element providing the register byte order (PFNC style).
 pub const TAG_BYTE_ORDER: &[u8] = b"ByteOrder";
+/// XML element referencing a node whose value gates feature implementation.
+pub const TAG_P_IS_IMPLEMENTED: &[u8] = b"pIsImplemented";
+/// XML element referencing a node whose value gates feature availability.
+pub const TAG_P_IS_AVAILABLE: &[u8] = b"pIsAvailable";
+/// XML element referencing a node whose value locks the feature (RW→RO).
+pub const TAG_P_IS_LOCKED: &[u8] = b"pIsLocked";
+
+/// Handle a `<pIsImplemented>` / `<pIsAvailable>` / `<pIsLocked>` element.
+///
+/// Returns `true` when the element was consumed (caller should continue),
+/// `false` when the element name does not match and the caller should fall
+/// through to its own handling (typically `skip_element`).
+///
+/// The element text is a single node reference; empty text is treated as
+/// absent so that vendor XMLs with placeholder empty tags do not fabricate
+/// references to a node named "".
+pub fn handle_predicate_start(
+    reader: &mut Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    prefs: &mut PredicateRefs,
+) -> Result<bool, XmlError> {
+    let slot: &mut Option<String> = match event.name().as_ref() {
+        TAG_P_IS_IMPLEMENTED => &mut prefs.p_is_implemented,
+        TAG_P_IS_AVAILABLE => &mut prefs.p_is_available,
+        TAG_P_IS_LOCKED => &mut prefs.p_is_locked,
+        _ => return Ok(false),
+    };
+    let text = read_text_start(reader, event)?;
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        *slot = Some(trimmed.to_string());
+    }
+    Ok(true)
+}
 
 /// Tracks selector state during node parsing.
 ///

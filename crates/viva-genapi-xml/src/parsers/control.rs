@@ -3,11 +3,11 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::NodeMetaBuilder;
+use super::{NodeMetaBuilder, handle_predicate_start};
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
-use crate::{NodeDecl, NodeMeta, XmlError};
+use crate::{NodeDecl, NodeMeta, PredicateRefs, XmlError};
 
 /// Parse a `<Command>` element into a [`NodeDecl::Command`].
 pub fn parse_command(
@@ -19,6 +19,7 @@ pub fn parse_command(
     let mut length = None;
     let mut pvalue = None;
     let mut command_value = None;
+    let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_vec();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -49,7 +50,9 @@ pub fn parse_command(
                     command_value = Some(parse_i64(&text)?);
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -77,6 +80,7 @@ pub fn parse_command(
         len: length,
         pvalue,
         command_value,
+        predicates,
     })
 }
 
@@ -102,6 +106,7 @@ pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError>
         len: length,
         pvalue: None,
         command_value: None,
+        predicates: PredicateRefs::default(),
     })
 }
 
@@ -113,6 +118,7 @@ pub fn parse_category(
     let name = attribute_value_required(&start, b"Name")?;
     let node_name = start.name().as_ref().to_vec();
     let mut children = Vec::new();
+    let mut predicates = PredicateRefs::default();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
 
@@ -127,7 +133,9 @@ pub fn parse_category(
                     }
                 }
                 _ => {
-                    if !meta_builder.handle_start(reader, e)? {
+                    if handle_predicate_start(reader, e, &mut predicates)? {
+                        // handled
+                    } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
                 }
@@ -155,6 +163,7 @@ pub fn parse_category(
         name,
         meta: meta_builder.build(),
         children,
+        predicates,
     })
 }
 
@@ -165,5 +174,6 @@ pub fn parse_category_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError
         name,
         meta: NodeMeta::default(),
         children: Vec::new(),
+        predicates: PredicateRefs::default(),
     })
 }

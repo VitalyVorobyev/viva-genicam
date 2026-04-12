@@ -1,5 +1,7 @@
 //! Numeric conversion utilities for register values and bitfields.
 
+use viva_genapi_xml::ByteOrder;
+
 use crate::GenApiError;
 use crate::bitops::BitOpsError;
 use crate::nodes::FloatNode;
@@ -194,6 +196,72 @@ pub fn encode_float(node: &FloatNode, value: f64) -> Result<i64, GenApiError> {
     }
     let raw_i64 = rounded as i64;
     Ok(raw_i64)
+}
+
+/// Decode an IEEE 754 payload into an `f64`.
+///
+/// `bytes.len()` must be 4 (f32) or 8 (f64). Other widths are rejected because
+/// the GenICam Float schema has no other native encodings.
+pub fn decode_ieee754(name: &str, bytes: &[u8], order: ByteOrder) -> Result<f64, GenApiError> {
+    match bytes.len() {
+        4 => {
+            let b: [u8; 4] = bytes.try_into().expect("len checked");
+            let v = match order {
+                ByteOrder::Big => f32::from_be_bytes(b),
+                ByteOrder::Little => f32::from_le_bytes(b),
+            };
+            Ok(v as f64)
+        }
+        8 => {
+            let b: [u8; 8] = bytes.try_into().expect("len checked");
+            Ok(match order {
+                ByteOrder::Big => f64::from_be_bytes(b),
+                ByteOrder::Little => f64::from_le_bytes(b),
+            })
+        }
+        other => Err(GenApiError::Parse(format!(
+            "node {name} unsupported IEEE-754 width {other}"
+        ))),
+    }
+}
+
+/// Encode an `f64` as IEEE 754 bytes for a register of width `len` (4 or 8).
+///
+/// Rejects non-finite inputs and f32 overflow so the caller gets a typed
+/// `GenApiError::Range` rather than a silent inf write.
+pub fn encode_ieee754(
+    name: &str,
+    value: f64,
+    len: u32,
+    order: ByteOrder,
+) -> Result<Vec<u8>, GenApiError> {
+    match len {
+        4 => {
+            if !value.is_finite() {
+                return Err(GenApiError::Range(name.to_string()));
+            }
+            if value < f32::MIN as f64 || value > f32::MAX as f64 {
+                return Err(GenApiError::Range(name.to_string()));
+            }
+            let v = value as f32;
+            Ok(match order {
+                ByteOrder::Big => v.to_be_bytes().to_vec(),
+                ByteOrder::Little => v.to_le_bytes().to_vec(),
+            })
+        }
+        8 => {
+            if !value.is_finite() {
+                return Err(GenApiError::Range(name.to_string()));
+            }
+            Ok(match order {
+                ByteOrder::Big => value.to_be_bytes().to_vec(),
+                ByteOrder::Little => value.to_le_bytes().to_vec(),
+            })
+        }
+        other => Err(GenApiError::Parse(format!(
+            "node {name} unsupported IEEE-754 width {other}"
+        ))),
+    }
 }
 
 /// Map a bitops error to a GenApiError with node context.

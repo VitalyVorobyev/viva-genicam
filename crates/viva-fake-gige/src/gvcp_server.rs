@@ -154,7 +154,7 @@ fn build_discovery_ack(request_id: u16, ip: std::net::Ipv4Addr) -> Vec<u8> {
     buf.put_slice(&[0, 0, 0, 0]);
 
     // Manufacturer name (32 bytes)
-    put_fixed_string(&mut buf, "genicam-rs", 32);
+    put_fixed_string(&mut buf, "viva-genicam", 32);
     // Model name (32 bytes)
     put_fixed_string(&mut buf, "FakeGigE", 32);
     // Device version (32 bytes)

@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/VitalyVorobyev/genicam-rs/actions/workflows/ci.yml"><img src="https://github.com/VitalyVorobyev/genicam-rs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/VitalyVorobyev/viva-genicam/actions/workflows/ci.yml"><img src="https://github.com/VitalyVorobyev/viva-genicam/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/viva-genicam"><img src="https://img.shields.io/crates/v/viva-genicam.svg" alt="crates.io"></a>
   <a href="https://docs.rs/viva-genicam"><img src="https://docs.rs/viva-genicam/badge.svg" alt="docs.rs"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Documentation
 
 - **[GenICam standards introduction](doc/genicam.md)** -- what GenApi, GenCP, GVCP, SFNC, and PFNC are and how they map to crates
-- **[Book (mdBook)](https://vitalyvorobyev.github.io/genicam-rs/)** -- tutorials, architecture, networking cookbook
+- **[Book (mdBook)](https://vitalyvorobyev.github.io/viva-genicam/)** -- tutorials, architecture, networking cookbook
 - **[API reference (docs.rs)](https://docs.rs/viva-genicam)** -- generated Rust API docs
 - **[Examples](crates/viva-genicam/examples/)** -- 17 runnable examples covering discovery, streaming, events, chunks, and more
 - **[Roadmap](doc/roadmap.md)** -- what's done, what's planned

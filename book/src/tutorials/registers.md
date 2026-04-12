@@ -43,7 +43,7 @@ hide most of the low-level details.
 
 ## Step 1 – Inspect features with `viva-camctl`
 
-The `viva-camctl` CLI exposes basic feature access via `get` and `set` subcommands.  [oai_citation:0‡GitHub](https://github.com/VitalyVorobyev/genicam-rs)  
+The `viva-camctl` CLI exposes basic feature access via `get` and `set` subcommands.  [oai_citation:0‡GitHub](https://github.com/VitalyVorobyev/viva-genicam)  
 
 You need:
 

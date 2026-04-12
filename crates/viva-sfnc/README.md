@@ -37,4 +37,4 @@ let gain = camera.get(GAIN)?;
 
 [API reference (docs.rs)](https://docs.rs/viva-sfnc)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
-            -A "genicam-rs-ci/${GITHUB_RUN_ID}" \
+            -A "viva-genicam-ci/${GITHUB_RUN_ID}" \
             "https://index.crates.io/vi/va/viva-gencp")
 
           if [ "$STATUS" = "404" ]; then

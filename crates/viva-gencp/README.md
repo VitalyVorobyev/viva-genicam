@@ -42,4 +42,4 @@ let bytes = encode_cmd(&cmd);
 
 [API reference (docs.rs)](https://docs.rs/viva-gencp)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

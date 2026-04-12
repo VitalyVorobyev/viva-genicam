@@ -1,4 +1,4 @@
-//! Pixel format conversion between genicam-rs (pfnc) and genicam_zenoh_api types.
+//! Pixel format conversion between viva-genicam (pfnc) and genicam_zenoh_api types.
 
 use viva_genicam::pfnc;
 use viva_zenoh_api::PixelFormat as ZenohPixelFormat;

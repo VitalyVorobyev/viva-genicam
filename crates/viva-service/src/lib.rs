@@ -1,4 +1,4 @@
-//! GenICam camera service library — bridges genicam-rs to Zenoh for genicam-studio.
+//! GenICam camera service library — bridges viva-genicam to Zenoh for genicam-studio.
 //!
 //! The binary entrypoint lives in `main.rs`; this module re-exports the core
 //! components so that integration tests can drive the service in-process.

@@ -1,6 +1,6 @@
 # Welcome & Goals
 
-**genicam-rs** provides *pure Rust* building blocks for the GenICam ecosystem supporting **GigE Vision** and **USB3 Vision**, with first-class support for Windows, Linux, and macOS.
+**viva-genicam** provides *pure Rust* building blocks for the GenICam ecosystem supporting **GigE Vision** and **USB3 Vision**, with first-class support for Windows, Linux, and macOS.
 
 ## Who is this book for?
 - **End-users** building camera applications who want a practical high-level API and copy-pasteable examples.

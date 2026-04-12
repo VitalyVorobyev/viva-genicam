@@ -34,4 +34,4 @@ assert_eq!(key, "viva-genicam/devices/camera-01/nodes/ExposureTime/value");
 
 [API reference (docs.rs)](https://docs.rs/viva-zenoh-api)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

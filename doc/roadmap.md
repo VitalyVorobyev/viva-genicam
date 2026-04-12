@@ -1,4 +1,4 @@
-# genicam-rs Development Roadmap
+# viva-genicam Development Roadmap
 
 > **Last updated:** April 11, 2026
 

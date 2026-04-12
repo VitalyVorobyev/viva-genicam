@@ -40,4 +40,4 @@ assert_eq!(fmt.bytes_per_pixel(), Some(1));
 
 [API reference (docs.rs)](https://docs.rs/viva-pfnc)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

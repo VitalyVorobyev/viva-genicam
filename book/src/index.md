@@ -1,6 +1,6 @@
-# genicam-rs
+# viva-genicam
 
-Welcome to the genicam-rs workspace. This project provides Rust building blocks
+Welcome to the viva-genicam workspace. This project provides Rust building blocks
 for GenICam-compatible transports, control, and feature access with a focus on
 GigE Vision.
 
@@ -18,5 +18,5 @@ GigE Vision.
 - `viva-gige`: GigE Vision transport utilities.
 - `viva-genicam`: Facade re-export combining the workspace crates.
 
-See the main [README](https://github.com/VitalyVorobyev/genicam-rs/blob/main/README.md)
+See the main [README](https://github.com/VitalyVorobyev/viva-genicam/blob/main/README.md)
 for status updates and roadmap details.

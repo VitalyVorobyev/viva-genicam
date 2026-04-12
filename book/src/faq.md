@@ -1,7 +1,7 @@
 # FAQ
 
 This page collects short answers to questions that come up often when using
-`genicam-rs` or bringing up a new camera.
+`viva-genicam` or bringing up a new camera.
 
 If you are stuck, also check:
 
@@ -44,7 +44,7 @@ See also: [Discovery tutorial](./tutorials/discovery.md) and
 
 ⸻
 
-## “The vendor viewer works but genicam-rs doesn’t. Why?”
+## “The vendor viewer works but viva-genicam doesn’t. Why?”
 
 Common causes:
 - Different NIC / interface:
@@ -52,7 +52,7 @@ Common causes:
     - Compare which local IP it uses and pass that as --iface to viva-camctl.
 - Different stream destination:
     - The camera might be configured to stream to a specific IP/port.
-    - Ensure genicam-rs uses the same host IP and port, or reset the camera
+    - Ensure viva-genicam uses the same host IP and port, or reset the camera
 configuration to defaults.
 - Different MTU / packet size / packet delay:
 	- Vendor tools sometimes auto-tune these.

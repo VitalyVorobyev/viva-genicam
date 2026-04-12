@@ -20,7 +20,7 @@ Starting fake GigE Vision camera on 127.0.0.1:3956 ...
 
 Discovering cameras (2 s timeout) ...
   Found 1 device(s):
-    IP: 127.0.0.1  Model: FakeGigE  Manufacturer: genicam-rs
+    IP: 127.0.0.1  Model: FakeGigE  Manufacturer: viva-genicam
 
 Connecting to 127.0.0.1 ...
   Connected. GenApi XML: 5788 bytes, 20 features.
@@ -78,7 +78,7 @@ Add `viva-fake-gige` as a dev-dependency:
 
 ```toml
 [dev-dependencies]
-viva-fake-gige = { git = "https://github.com/VitalyVorobyev/genicam-rs" }
+viva-fake-gige = { git = "https://github.com/VitalyVorobyev/viva-genicam" }
 ```
 
 Start a fake camera in your test:

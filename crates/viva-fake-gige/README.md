@@ -33,4 +33,4 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 
 This crate is not published to crates.io.
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

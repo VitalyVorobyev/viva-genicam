@@ -5,11 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
+use viva_genicam::genapi::{AccessMode, Node, SkOutput};
 use viva_genicam::gige::gvcp::consts as gvcp_consts;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
     Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
 };
+use viva_zenoh_api::{FeatureState, NumericRange};
 
 /// Transport-agnostic device operations used by shared Zenoh queryable handlers.
 ///
@@ -27,6 +29,28 @@ pub trait DeviceOps: Send + Sync + 'static {
     async fn set_feature(&self, name: &str, value: &str) -> Result<(), GenicamError>;
     /// Execute a command node.
     async fn exec_command(&self, name: &str) -> Result<(), GenicamError>;
+
+    /// Read the full live state of a feature: value, access mode, kind, range,
+    /// available enum entries, unit. Default implementation projects from
+    /// [`get_feature`] with `kind: "Unknown"` and no range/enum data; GigE's
+    /// [`DeviceHandle`] overrides with typed reads against the NodeMap.
+    ///
+    /// Transports that cannot introspect (e.g. remote Zenoh relays) keep the
+    /// default implementation — the UI renders "range unknown" / falls back to
+    /// static XML in that case rather than showing invented defaults.
+    async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
+        let value = self.get_feature(name).await.map_err(|e| format!("{e}"))?;
+        Ok(FeatureState {
+            value: serde_json::Value::String(value),
+            access_mode: "RW".to_string(),
+            kind: "Unknown".to_string(),
+            is_implemented: true,
+            is_available: true,
+            numeric: None,
+            enum_available: None,
+            unit: None,
+        })
+    }
 }
 
 /// GigE Vision device handle wrapping `Camera<GigeRegisterIo>`.
@@ -329,4 +353,169 @@ impl DeviceOps for DeviceHandle {
     async fn exec_command(&self, name: &str) -> Result<(), GenicamError> {
         DeviceHandle::exec_command(self, name).await
     }
+
+    /// Rich introspection for GigE devices: typed reads against the NodeMap
+    /// populate the full [`FeatureState`] tuple. This is what lets remote-mode
+    /// UIs show live ranges, filter enum dropdowns, and gate Apply/Execute on
+    /// the actual device access mode rather than the hardcoded `"RW"` the
+    /// default implementation returned.
+    async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
+        let cam = self.camera.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let cam = cam
+                .lock()
+                .map_err(|_| "camera mutex poisoned".to_string())?;
+            build_feature_state(&cam, &name)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
+
+/// Build a [`FeatureState`] snapshot using typed NodeMap reads.
+///
+/// Shared between GigE (`DeviceHandle`) and any other transport that wraps
+/// [`Camera<GigeRegisterIo>`]. The service's Zenoh queryables call this to
+/// produce the authoritative snapshot the UI consumes.
+fn build_feature_state(
+    camera: &Camera<GigeRegisterIo>,
+    name: &str,
+) -> Result<FeatureState, String> {
+    let nodemap = camera.nodemap();
+    let node = nodemap
+        .node(name)
+        .ok_or_else(|| format!("Node '{name}' not found"))?;
+
+    let kind = node.kind_name().to_string();
+    let transport = camera.transport();
+
+    // Resolve the live implementation/availability/access state. Each call
+    // degrades to a permissive default on evaluation error so a single bad
+    // predicate doesn't break the whole feature snapshot for the UI.
+    let is_implemented = nodemap.is_implemented(name, transport).unwrap_or_else(|e| {
+        tracing::warn!(%name, error = %e, "is_implemented eval failed");
+        true
+    });
+    let is_available = nodemap.is_available(name, transport).unwrap_or_else(|e| {
+        tracing::warn!(%name, error = %e, "is_available eval failed");
+        true
+    });
+    let effective = nodemap.effective_access_mode(name, transport).ok();
+    let access_mode = match effective.or_else(|| node.access_mode()) {
+        Some(AccessMode::RO) => "RO".to_string(),
+        Some(AccessMode::RW) => "RW".to_string(),
+        Some(AccessMode::WO) => "WO".to_string(),
+        None => "NA".to_string(),
+    };
+
+    let value = match node {
+        Node::Integer(_) => nodemap
+            .get_integer(name, transport)
+            .map(|v| serde_json::Value::Number(v.into()))
+            .map_err(|e| format!("Failed to read integer '{name}': {e}"))?,
+        Node::Float(_) => nodemap
+            .get_float(name, transport)
+            .map(f64_to_json)
+            .map_err(|e| format!("Failed to read float '{name}': {e}"))?,
+        Node::Enum(_) => nodemap
+            .get_enum(name, transport)
+            .map(serde_json::Value::String)
+            .map_err(|e| format!("Failed to read enum '{name}': {e}"))?,
+        Node::Boolean(_) => nodemap
+            .get_bool(name, transport)
+            .map(serde_json::Value::Bool)
+            .map_err(|e| format!("Failed to read bool '{name}': {e}"))?,
+        Node::String(_) => nodemap
+            .get_string(name, transport)
+            .map(serde_json::Value::String)
+            .map_err(|e| format!("Failed to read string '{name}': {e}"))?,
+        Node::SwissKnife(sk) => match sk.output {
+            SkOutput::Float => nodemap
+                .get_float(name, transport)
+                .map(f64_to_json)
+                .map_err(|e| format!("Failed to eval SwissKnife '{name}': {e}"))?,
+            SkOutput::Integer => nodemap
+                .get_integer(name, transport)
+                .map(|v| serde_json::Value::Number(v.into()))
+                .map_err(|e| format!("Failed to eval SwissKnife '{name}': {e}"))?,
+        },
+        Node::Converter(_) => nodemap
+            .get_converter(name, transport)
+            .map(f64_to_json)
+            .map_err(|e| format!("Failed to eval Converter '{name}': {e}"))?,
+        Node::IntConverter(_) => nodemap
+            .get_int_converter(name, transport)
+            .map(|v| serde_json::Value::Number(v.into()))
+            .map_err(|e| format!("Failed to eval IntConverter '{name}': {e}"))?,
+        Node::Command(_) | Node::Category(_) => serde_json::Value::Null,
+    };
+
+    let (numeric, unit) = match node {
+        Node::Integer(n) => {
+            // When the XML defers bounds to runtime registers (`<pMin>` /
+            // `<pMax>`), `n.min` / `n.max` are `i64::MIN` / `i64::MAX`
+            // sentinels. Resolve the referenced nodes' current values so the
+            // UI can render a real range. A failed pMin/pMax read falls back
+            // to the static bound — the UI suppresses sentinel bleed-through.
+            let resolved_min = n
+                .p_min
+                .as_deref()
+                .and_then(|pm| nodemap.get_integer(pm, transport).ok())
+                .unwrap_or(n.min);
+            let resolved_max = n
+                .p_max
+                .as_deref()
+                .and_then(|pm| nodemap.get_integer(pm, transport).ok())
+                .unwrap_or(n.max);
+            (
+                Some(NumericRange {
+                    min: resolved_min as f64,
+                    max: resolved_max as f64,
+                    inc: n.inc.map(|i| i as f64),
+                }),
+                n.unit.clone(),
+            )
+        }
+        Node::Float(n) => (
+            Some(NumericRange {
+                min: n.min,
+                max: n.max,
+                inc: None,
+            }),
+            n.unit.clone(),
+        ),
+        _ => (None, None),
+    };
+
+    let enum_available = if matches!(node, Node::Enum(_)) {
+        // Prefer the live predicate-filtered list; fall back to the static
+        // entries if the predicates error out.
+        nodemap
+            .available_enum_entries(name, transport)
+            .or_else(|e| {
+                tracing::warn!(%name, error = %e, "available_enum_entries eval failed");
+                camera.enum_entries(name).map_err(|e| format!("{e}"))
+            })
+            .ok()
+    } else {
+        None
+    };
+
+    Ok(FeatureState {
+        value,
+        access_mode,
+        kind,
+        is_implemented,
+        is_available,
+        numeric,
+        enum_available,
+        unit,
+    })
+}
+
+fn f64_to_json(v: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(v)
+        .map(serde_json::Value::Number)
+        .unwrap_or_else(|| serde_json::Value::String(v.to_string()))
 }

@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use viva_service::acquisition;
-use viva_service::device::DeviceHandle;
+use viva_service::device::{DeviceHandle, DeviceOps};
 use viva_service::nodes;
 use viva_service::status;
 use viva_service::xml;
@@ -386,4 +386,87 @@ async fn e2e_sustained_streaming() {
     for task in tasks {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
+}
+
+/// Verify that `DeviceHandle::get_feature_state` drives `is_implemented`,
+/// `is_available`, `access_mode`, and `enum_available` off live predicates
+/// rather than hardcoded defaults. This is the service-layer counterpart of
+/// `crates/viva-genicam/tests/predicates.rs` — what flips here is the wire
+/// contract the UI consumes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_feature_state_reflects_predicates() {
+    let _cam = TestCamera::start().await;
+
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+
+    let handle = DeviceHandle::connect(dev_info, Some(loopback_iface_name()))
+        .await
+        .expect("connect failed");
+
+    // --- Not implemented, unlocked ------------------------------------------
+    handle.set_feature("TestControlReg", "0").await.unwrap();
+    let state = handle
+        .get_feature_state("TestGatedFeature")
+        .await
+        .expect("get_feature_state failed");
+    assert!(
+        !state.is_implemented,
+        "bit 0 clear → is_implemented must be false"
+    );
+    assert!(
+        !state.is_available,
+        "not implemented → is_available must be false"
+    );
+    assert_eq!(
+        state.access_mode, "RO",
+        "unavailable feature surfaces as RO"
+    );
+
+    // --- Implemented, unlocked ----------------------------------------------
+    handle.set_feature("TestControlReg", "1").await.unwrap();
+    let state = handle
+        .get_feature_state("TestGatedFeature")
+        .await
+        .expect("get_feature_state failed");
+    assert!(state.is_implemented, "bit 0 set → implemented");
+    assert!(state.is_available, "implemented → available");
+    assert_eq!(state.access_mode, "RW", "unlocked base is RW");
+
+    // --- Implemented, locked ------------------------------------------------
+    handle.set_feature("TestControlReg", "3").await.unwrap();
+    let state = handle
+        .get_feature_state("TestGatedFeature")
+        .await
+        .expect("get_feature_state failed");
+    assert!(state.is_implemented);
+    assert!(state.is_available);
+    assert_eq!(state.access_mode, "RO", "pIsLocked=1 downgrades RW → RO");
+
+    // --- Enum filtering -----------------------------------------------------
+    // Clear Mono8/BayerRG8 gate bits but keep bit 0 so harness state is
+    // coherent.
+    handle.set_feature("TestControlReg", "1").await.unwrap();
+    let state = handle
+        .get_feature_state("PixelFormat")
+        .await
+        .expect("get_feature_state failed");
+    let entries = state
+        .enum_available
+        .expect("PixelFormat enum_available should be populated");
+    assert!(entries.contains(&"Mono16".to_string()));
+    assert!(entries.contains(&"RGB8".to_string()));
+    assert!(
+        !entries.contains(&"Mono8".to_string()),
+        "Mono8 should be gated out by bit 4"
+    );
+    assert!(
+        !entries.contains(&"BayerRG8".to_string()),
+        "BayerRG8 should be gated out by bit 5"
+    );
 }

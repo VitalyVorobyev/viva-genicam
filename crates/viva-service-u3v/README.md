@@ -25,4 +25,4 @@ The service exposes U3V cameras over Zenoh using the same API as `viva-service`,
 
 This binary is not published to crates.io.
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

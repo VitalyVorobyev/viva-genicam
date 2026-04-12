@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-genicam-rs is a pure Rust implementation of GenICam ecosystem building blocks with an Ethernet-first focus (GigE Vision). It provides libraries and CLI tools for camera discovery, control, streaming, and feature access.
+viva-genicam is a pure Rust implementation of GenICam ecosystem building blocks with an Ethernet-first focus (GigE Vision). It provides libraries and CLI tools for camera discovery, control, streaming, and feature access.
 
 We do not maintain backward compatibility at this early development stage. The priority is clear design and structure.
 

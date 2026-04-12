@@ -1,4 +1,4 @@
-//! GenICam camera service — bridges genicam-rs to Zenoh for genicam-studio.
+//! GenICam camera service — bridges viva-genicam to Zenoh for genicam-studio.
 
 use std::collections::HashMap;
 use std::sync::Arc;

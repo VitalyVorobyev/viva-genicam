@@ -10,4 +10,4 @@ Provides a `FakeU3vTransport` that implements the `UsbTransfer` trait with an in
 
 This crate is not published to crates.io. It is used as a dev-dependency by other workspace crates.
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

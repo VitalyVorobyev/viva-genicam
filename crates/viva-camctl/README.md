@@ -52,4 +52,4 @@ viva-camctl bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
 - `--json` -- output in JSON format
 - `--iface <IPv4>` -- preferred network interface
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

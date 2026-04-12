@@ -44,4 +44,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 [API reference (docs.rs)](https://docs.rs/viva-gige)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

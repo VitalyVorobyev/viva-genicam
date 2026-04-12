@@ -2,7 +2,7 @@
 
 High-level GenICam facade: camera discovery, feature control, image streaming, events, and action commands.
 
-This is the main entry point for the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace. It re-exports the lower-level crates and provides convenience wrappers so you can get started with a single dependency.
+This is the main entry point for the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace. It re-exports the lower-level crates and provides convenience wrappers so you can get started with a single dependency.
 
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Documentation
 
 - [API reference (docs.rs)](https://docs.rs/viva-genicam)
-- [Book & tutorials](https://vitalyvorobyev.github.io/genicam-rs/)
-- [Examples](https://github.com/VitalyVorobyev/genicam-rs/tree/main/crates/viva-genicam/examples)
+- [Book & tutorials](https://vitalyvorobyev.github.io/viva-genicam/)
+- [Examples](https://github.com/VitalyVorobyev/viva-genicam/tree/main/crates/viva-genicam/examples)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

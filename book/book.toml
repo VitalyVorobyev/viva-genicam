@@ -1,6 +1,6 @@
 [book]
-title = "genicam-rs Book"
-authors = ["The genicam-rs contributors"]
+title = "viva-genicam Book"
+authors = ["The viva-genicam contributors"]
 language = "en"
 src = "src"
 
@@ -8,9 +8,9 @@ src = "src"
 create-missing = true
 
 [output.html]
-# Single-site: host the book at the site root (e.g. /genicam-rs/ on GitHub Pages)
-site-url = "/genicam-rs/"
-git-repository-url = "https://github.com/VitalyVorobyev/genicam-rs"
+# Single-site: host the book at the site root (e.g. /viva-genicam/ on GitHub Pages)
+site-url = "/viva-genicam/"
+git-repository-url = "https://github.com/VitalyVorobyev/viva-genicam"
 # Add a navbar link to the API reference (generated rustdoc) that you'll place under /api/
 additional-css = []
 additional-js = []

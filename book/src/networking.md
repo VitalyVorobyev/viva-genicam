@@ -276,7 +276,7 @@ See also the troubleshooting section in Discovery￼.
     - Better NIC / driver.
     - Moving processing off to another thread / core.
 
-### 7.3. Vendor tool works, genicam-rs does not
+### 7.3. Vendor tool works, viva-genicam does not
 Compare:
 - Which NIC / IP the vendor tool uses.
    - The camera’s configured stream destination (IP/port).

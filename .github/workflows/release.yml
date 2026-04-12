@@ -56,7 +56,7 @@ jobs:
           ARCHIVE: ${{ matrix.archive }}
         run: |
           set -euo pipefail
-          STAGE="genicam-rs-${TAG}-${TARGET}"
+          STAGE="viva-genicam-${TAG}-${TARGET}"
           mkdir -p "$STAGE"
           cp README.md LICENSE CHANGELOG.md "$STAGE/"
           if [ "$ARCHIVE" = "zip" ]; then

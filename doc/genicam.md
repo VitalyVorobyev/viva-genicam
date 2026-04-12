@@ -2,7 +2,7 @@
 
 GenICam (Generic Interface for Cameras) is a set of EMVA standards that give industrial cameras a uniform control interface regardless of the physical connection. The same code can discover a GigE Vision camera over Ethernet and a USB3 Vision camera over USB -- the features, names, and access patterns are identical.
 
-This document covers what you need to know to use genicam-rs effectively.
+This document covers what you need to know to use viva-genicam effectively.
 
 ## The problem GenICam solves
 
@@ -27,7 +27,7 @@ Common node types:
 
 Features can reference each other. A `SwissKnife` node computes values from formulas. A `Converter` applies linear or polynomial transforms. `pValue` delegation lets a high-level feature (e.g. `ExposureTime`) read from a raw register node transparently.
 
-**In genicam-rs:** `viva-genapi-xml` parses the XML, `viva-genapi` builds the node map and evaluates features.
+**In viva-genicam:** `viva-genapi-xml` parses the XML, `viva-genapi` builds the node map and evaluates features.
 
 ### GenCP -- the control protocol
 
@@ -38,7 +38,7 @@ GenCP defines how read/write commands are sent to a camera over any transport. I
 
 Both GigE Vision and USB3 Vision use GenCP for their control channels.
 
-**In genicam-rs:** `viva-gencp` provides transport-agnostic encode/decode for GenCP packets.
+**In viva-genicam:** `viva-gencp` provides transport-agnostic encode/decode for GenCP packets.
 
 ### GVCP / GVSP -- GigE Vision protocols
 
@@ -47,25 +47,25 @@ GigE Vision adds two protocols on top of GenCP:
 - **GVCP** (Control Protocol) -- UDP-based device discovery, register access, event delivery, and action commands. Cameras listen on port 3956.
 - **GVSP** (Streaming Protocol) -- UDP-based image transfer with packet reassembly and resend support.
 
-**In genicam-rs:** `viva-gige` implements both protocols.
+**In viva-genicam:** `viva-gige` implements both protocols.
 
 ### USB3 Vision
 
 USB3 Vision cameras use USB bulk endpoints: one pair for GenCP control, another for image data. Device discovery uses standard USB enumeration with U3V class descriptors. Bootstrap registers (ABRM, SBRM, SIRM) configure the device.
 
-**In genicam-rs:** `viva-u3v` implements the transport layer.
+**In viva-genicam:** `viva-u3v` implements the transport layer.
 
 ### SFNC -- standard feature names
 
 The Standard Features Naming Convention ensures that common features use the same name across all cameras. `ExposureTime` is always `ExposureTime`, not `Exposure` or `ShutterTime`.
 
-**In genicam-rs:** `viva-sfnc` provides these names as string constants.
+**In viva-genicam:** `viva-sfnc` provides these names as string constants.
 
 ### PFNC -- standard pixel formats
 
 The Pixel Format Naming Convention assigns numeric codes to pixel formats. `Mono8` is `0x01080001`, `RGB8` is `0x02180014`, etc.
 
-**In genicam-rs:** `viva-pfnc` provides the `PixelFormat` enum with code-to-name conversion.
+**In viva-genicam:** `viva-pfnc` provides the `PixelFormat` enum with code-to-name conversion.
 
 ## How it fits together
 
@@ -96,5 +96,5 @@ viva-genicam (facade)     -- Camera<T>, discovery, streaming, events
 ## Further reading
 
 - [EMVA GenICam website](https://www.emva.org/standards-technology/genicam/) -- official standard documents
-- [genicam-rs book](https://vitalyvorobyev.github.io/genicam-rs/) -- tutorials and architecture guide
-- [genicam-rs API reference](https://docs.rs/viva-genicam) -- Rust API documentation
+- [viva-genicam book](https://vitalyvorobyev.github.io/viva-genicam/) -- tutorials and architecture guide
+- [viva-genicam API reference](https://docs.rs/viva-genicam) -- Rust API documentation

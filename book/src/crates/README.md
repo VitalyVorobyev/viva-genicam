@@ -1,6 +1,6 @@
 # Crates overview
 
-The `genicam-rs` workspace is split into small crates that mirror the structure of
+The `viva-genicam` workspace is split into small crates that mirror the structure of
 the GenICam ecosystem:
 
 - **Protocols & transport** (GenCP, GVCP/GVSP)

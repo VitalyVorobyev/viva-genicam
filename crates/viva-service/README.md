@@ -48,4 +48,4 @@ Wire types are defined in [`viva-zenoh-api`](https://crates.io/crates/viva-zenoh
 
 [API reference (docs.rs)](https://docs.rs/viva-service)
 
-Part of the [genicam-rs](https://github.com/VitalyVorobyev/genicam-rs) workspace.
+Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

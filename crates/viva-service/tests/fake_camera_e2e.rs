@@ -392,7 +392,10 @@ async fn e2e_sustained_streaming() {
 /// `is_available`, `access_mode`, and `enum_available` off live predicates
 /// rather than hardcoded defaults. This is the service-layer counterpart of
 /// `crates/viva-genicam/tests/predicates.rs` — what flips here is the wire
-/// contract the UI consumes.
+/// contract the UI consumes, driven by the same realistic predicates:
+/// `ExposureAuto` locks `ExposureTime`, `AcquisitionFrameRateEnable` gates
+/// `AcquisitionFrameRate` availability, and `SensorType` filters
+/// `PixelFormat` entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_feature_state_reflects_predicates() {
     let _cam = TestCamera::start().await;
@@ -409,49 +412,69 @@ async fn e2e_feature_state_reflects_predicates() {
         .await
         .expect("connect failed");
 
-    // --- Not implemented, unlocked ------------------------------------------
-    handle.set_feature("TestControlReg", "0").await.unwrap();
+    // --- ExposureTime unlocked ---------------------------------------------
+    handle.set_feature("ExposureAuto", "Off").await.unwrap();
     let state = handle
-        .get_feature_state("TestGatedFeature")
+        .get_feature_state("ExposureTime")
+        .await
+        .expect("get_feature_state failed");
+    assert!(state.is_implemented);
+    assert!(state.is_available);
+    assert_eq!(state.access_mode, "RW", "ExposureAuto=Off → RW");
+
+    // --- ExposureTime locked by auto-exposure ------------------------------
+    handle
+        .set_feature("ExposureAuto", "Continuous")
+        .await
+        .unwrap();
+    let state = handle
+        .get_feature_state("ExposureTime")
+        .await
+        .expect("get_feature_state failed");
+    assert!(state.is_implemented);
+    assert!(state.is_available);
+    assert_eq!(
+        state.access_mode, "RO",
+        "ExposureAuto=Continuous → pIsLocked downgrades RW to RO"
+    );
+
+    // --- AcquisitionFrameRate availability toggled by enable ---------------
+    handle
+        .set_feature("AcquisitionFrameRateEnable", "0")
+        .await
+        .unwrap();
+    let state = handle
+        .get_feature_state("AcquisitionFrameRate")
         .await
         .expect("get_feature_state failed");
     assert!(
-        !state.is_implemented,
-        "bit 0 clear → is_implemented must be false"
-    );
-    assert!(
         !state.is_available,
-        "not implemented → is_available must be false"
+        "AcquisitionFrameRateEnable=0 → unavailable"
     );
     assert_eq!(
         state.access_mode, "RO",
         "unavailable feature surfaces as RO"
     );
 
-    // --- Implemented, unlocked ----------------------------------------------
-    handle.set_feature("TestControlReg", "1").await.unwrap();
+    handle
+        .set_feature("AcquisitionFrameRateEnable", "1")
+        .await
+        .unwrap();
     let state = handle
-        .get_feature_state("TestGatedFeature")
+        .get_feature_state("AcquisitionFrameRate")
         .await
         .expect("get_feature_state failed");
-    assert!(state.is_implemented, "bit 0 set → implemented");
-    assert!(state.is_available, "implemented → available");
-    assert_eq!(state.access_mode, "RW", "unlocked base is RW");
+    assert!(
+        state.is_available,
+        "AcquisitionFrameRateEnable=1 → available"
+    );
+    assert_eq!(state.access_mode, "RW");
 
-    // --- Implemented, locked ------------------------------------------------
-    handle.set_feature("TestControlReg", "3").await.unwrap();
-    let state = handle
-        .get_feature_state("TestGatedFeature")
+    // --- PixelFormat entries filtered by SensorType ------------------------
+    handle
+        .set_feature("SensorType", "Monochrome")
         .await
-        .expect("get_feature_state failed");
-    assert!(state.is_implemented);
-    assert!(state.is_available);
-    assert_eq!(state.access_mode, "RO", "pIsLocked=1 downgrades RW → RO");
-
-    // --- Enum filtering -----------------------------------------------------
-    // Clear Mono8/BayerRG8 gate bits but keep bit 0 so harness state is
-    // coherent.
-    handle.set_feature("TestControlReg", "1").await.unwrap();
+        .unwrap();
     let state = handle
         .get_feature_state("PixelFormat")
         .await
@@ -459,14 +482,18 @@ async fn e2e_feature_state_reflects_predicates() {
     let entries = state
         .enum_available
         .expect("PixelFormat enum_available should be populated");
+    assert!(entries.contains(&"Mono8".to_string()));
     assert!(entries.contains(&"Mono16".to_string()));
-    assert!(entries.contains(&"RGB8".to_string()));
-    assert!(
-        !entries.contains(&"Mono8".to_string()),
-        "Mono8 should be gated out by bit 4"
-    );
-    assert!(
-        !entries.contains(&"BayerRG8".to_string()),
-        "BayerRG8 should be gated out by bit 5"
-    );
+    assert!(!entries.contains(&"BayerRG8".to_string()));
+    assert!(!entries.contains(&"RGB8".to_string()));
+
+    handle.set_feature("SensorType", "Color").await.unwrap();
+    let state = handle
+        .get_feature_state("PixelFormat")
+        .await
+        .expect("get_feature_state failed");
+    let entries = state
+        .enum_available
+        .expect("PixelFormat enum_available should be populated");
+    assert_eq!(entries, vec!["RGB8".to_string()]);
 }

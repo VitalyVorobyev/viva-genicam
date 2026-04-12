@@ -23,6 +23,8 @@
 //! | `0x20040`   | 8      | Gain                            | f64 BE   |
 //! | `0x20048`   | 4      | GainAuto                        | u32 BE   |
 //! | `0x20050`   | 4      | BlackLevel                      | u32 BE   |
+//! | `0x20054`   | 4      | AcquisitionFrameRateEnable      | u32 BE   |
+//! | `0x20058`   | 4      | SensorType                      | u32 BE   |
 //! | `0x20060`   | 4      | GevTimestampTickFrequency (RO)  | u32 BE   |
 //! | `0x20068`   | 8      | GevTimestampValue (RO)          | u64 BE   |
 //! | `0x20070`   | 4      | TimestampLatch (command)        | u32 BE   |
@@ -87,6 +89,17 @@ pub const REG_GAIN: u64 = 0x20040;
 pub const REG_GAIN_AUTO: u64 = 0x20048;
 pub const REG_BLACK_LEVEL: u64 = 0x20050;
 
+/// Predicate-gating registers driving realistic feature behaviour.
+///
+/// `REG_ACQ_FRAME_RATE_ENABLE` backs the SFNC `AcquisitionFrameRateEnable`
+/// Boolean and gates `AcquisitionFrameRate` via `pIsAvailable`.
+/// `REG_SENSOR_TYPE` backs a `SensorType` enumeration (Monochrome / BayerRG /
+/// Color) that gates `PixelFormat` entries via `pIsImplemented`. On real
+/// hardware `SensorType` would be read-only sensor metadata, but exposing it
+/// as RW here keeps the fake camera a configurable simulator.
+pub const REG_ACQ_FRAME_RATE_ENABLE: u64 = 0x20054;
+pub const REG_SENSOR_TYPE: u64 = 0x20058;
+
 /// Timestamp registers.
 pub const REG_TIMESTAMP_FREQ: u64 = 0x20060;
 pub const REG_TIMESTAMP_VALUE: u64 = 0x20068;
@@ -96,17 +109,6 @@ pub const REG_TIMESTAMP_LATCH: u64 = 0x20070;
 pub const REG_CHUNK_MODE_ACTIVE: u64 = 0x20080;
 pub const REG_CHUNK_SELECTOR: u64 = 0x20084;
 pub const REG_CHUNK_ENABLE: u64 = 0x20088;
-
-/// Test-harness registers for predicate gating (pIsImplemented / pIsAvailable /
-/// pIsLocked). `REG_TEST_CTRL` is a bitfield read by hand-written
-/// [`IntSwissKnife`] expressions in the XML; toggling its bits flips the
-/// reported state of `TestGatedFeature` and gates individual `PixelFormat`
-/// entries. The register is exposed at a fixed address so integration tests
-/// can write it directly via the NodeMap.
-pub const REG_TEST_CTRL: u64 = 0x29000;
-/// Register backing `TestGatedFeature` — only readable/writable when
-/// [`REG_TEST_CTRL`] bit 0 is set.
-pub const REG_TEST_GATED: u64 = 0x29100;
 
 /// Limit registers.
 pub const REG_WIDTH_MIN: u64 = 0x20100;
@@ -178,6 +180,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Category Name="ImageFormatControl">
     <DisplayName>Image Format Control</DisplayName>
+    <pFeature>SensorType</pFeature>
     <pFeature>SensorWidth</pFeature>
     <pFeature>SensorHeight</pFeature>
     <pFeature>Width</pFeature>
@@ -192,6 +195,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>AcquisitionMode</pFeature>
     <pFeature>AcquisitionStart</pFeature>
     <pFeature>AcquisitionStop</pFeature>
+    <pFeature>AcquisitionFrameRateEnable</pFeature>
     <pFeature>AcquisitionFrameRate</pFeature>
     <pFeature>ExposureTime</pFeature>
     <pFeature>ExposureAuto</pFeature>
@@ -331,33 +335,59 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
 
+  <Enumeration Name="SensorType" NameSpace="Standard">
+    <ToolTip>Sensor variant (Monochrome / BayerRG / Color). On real hardware this would be read-only sensor metadata; here it is RW so tests can reconfigure the simulator.</ToolTip>
+    <EnumEntry Name="Monochrome"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="BayerRG"><Value>1</Value></EnumEntry>
+    <EnumEntry Name="Color"><Value>2</Value></EnumEntry>
+    <pValue>SensorTypeReg</pValue>
+  </Enumeration>
+  <IntReg Name="SensorTypeReg"><Address>0x20058</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
   <Enumeration Name="PixelFormat" NameSpace="Standard">
-    <ToolTip>Format of the pixel data</ToolTip>
+    <ToolTip>Format of the pixel data — entries are gated by SensorType</ToolTip>
     <EnumEntry Name="Mono8" NameSpace="Standard">
       <Value>0x01080001</Value>
-      <pIsImplemented>PfMono8Impl</pIsImplemented>
+      <pIsImplemented>PfMono8Avail</pIsImplemented>
     </EnumEntry>
-    <EnumEntry Name="Mono16" NameSpace="Standard"><Value>0x01100007</Value></EnumEntry>
-    <EnumEntry Name="RGB8" NameSpace="Standard"><Value>0x02180014</Value></EnumEntry>
+    <EnumEntry Name="Mono16" NameSpace="Standard">
+      <Value>0x01100007</Value>
+      <pIsImplemented>PfMono16Avail</pIsImplemented>
+    </EnumEntry>
+    <EnumEntry Name="RGB8" NameSpace="Standard">
+      <Value>0x02180014</Value>
+      <pIsImplemented>PfRGB8Avail</pIsImplemented>
+    </EnumEntry>
     <EnumEntry Name="BayerRG8" NameSpace="Standard">
       <Value>0x01080009</Value>
-      <pIsImplemented>PfBayerRG8Impl</pIsImplemented>
+      <pIsImplemented>PfBayerRG8Avail</pIsImplemented>
     </EnumEntry>
     <pValue>PixelFormatReg</pValue>
   </Enumeration>
   <IntReg Name="PixelFormatReg"><Address>0x20008</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
-  <!-- Bit-gated predicates driven by TestControlReg (see TestControlReg below).
-       bit 4 → Mono8 implemented, bit 5 → BayerRG8 implemented. Other entries
-       are always implemented so the dropdown never goes empty. -->
-  <IntSwissKnife Name="PfMono8Impl">
-    <Formula>(CTRL &amp; 16) / 16</Formula>
-    <pVariable Name="CTRL">TestControlReg</pVariable>
+  <!-- PixelFormat entry availability driven by SensorType:
+         Monochrome (0) → Mono8, Mono16
+         BayerRG    (1) → BayerRG8
+         Color      (2) → RGB8 -->
+  <IntSwissKnife Name="PfMono8Avail">
+    <Formula>ST == 0</Formula>
+    <pVariable Name="ST">SensorTypeReg</pVariable>
     <Output>Integer</Output>
   </IntSwissKnife>
-  <IntSwissKnife Name="PfBayerRG8Impl">
-    <Formula>(CTRL &amp; 32) / 32</Formula>
-    <pVariable Name="CTRL">TestControlReg</pVariable>
+  <IntSwissKnife Name="PfMono16Avail">
+    <Formula>ST == 0</Formula>
+    <pVariable Name="ST">SensorTypeReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
+  <IntSwissKnife Name="PfBayerRG8Avail">
+    <Formula>ST == 1</Formula>
+    <pVariable Name="ST">SensorTypeReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
+  <IntSwissKnife Name="PfRGB8Avail">
+    <Formula>ST == 2</Formula>
+    <pVariable Name="ST">SensorTypeReg</pVariable>
     <Output>Integer</Output>
   </IntSwissKnife>
 
@@ -392,6 +422,12 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Command>
 
+  <Boolean Name="AcquisitionFrameRateEnable" NameSpace="Standard">
+    <ToolTip>Enable manual control of AcquisitionFrameRate. When false, the frame rate is unavailable for read/write.</ToolTip>
+    <pValue>AcquisitionFrameRateEnableReg</pValue>
+  </Boolean>
+  <IntReg Name="AcquisitionFrameRateEnableReg"><Address>0x20054</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
   <Float Name="AcquisitionFrameRate" NameSpace="Standard">
     <ToolTip>Target frame rate in Hz</ToolTip>
     <Address>0x2002c</Address>
@@ -400,16 +436,18 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Min>1.0</Min>
     <Max>120.0</Max>
     <Endianess>BigEndian</Endianess>
+    <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
   </Float>
 
   <Float Name="ExposureTime" NameSpace="Standard">
-    <ToolTip>Exposure time in microseconds</ToolTip>
+    <ToolTip>Exposure time in microseconds — locked to RO when ExposureAuto is not Off</ToolTip>
     <Address>0x20030</Address>
     <Length>8</Length>
     <AccessMode>RW</AccessMode>
     <Min>10.0</Min>
     <Max>1000000.0</Max>
     <Endianess>BigEndian</Endianess>
+    <pIsLocked>ExposureAutoActive</pIsLocked>
   </Float>
 
   <Enumeration Name="ExposureAuto" NameSpace="Standard">
@@ -421,18 +459,25 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Enumeration>
   <IntReg Name="ExposureAutoReg"><Address>0x20038</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
+  <IntSwissKnife Name="ExposureAutoActive">
+    <Formula>EA != 0</Formula>
+    <pVariable Name="EA">ExposureAutoReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
+
   <!-- ════════════════════════════════════════════════════════════════════
        Analog Control Features
        ════════════════════════════════════════════════════════════════════ -->
 
   <Float Name="Gain" NameSpace="Standard">
-    <ToolTip>Gain applied to the image in dB</ToolTip>
+    <ToolTip>Gain applied to the image in dB — locked to RO when GainAuto is not Off</ToolTip>
     <Address>0x20040</Address>
     <Length>8</Length>
     <AccessMode>RW</AccessMode>
     <Min>0.0</Min>
     <Max>48.0</Max>
     <Endianess>BigEndian</Endianess>
+    <pIsLocked>GainAutoActive</pIsLocked>
   </Float>
 
   <Enumeration Name="GainAuto" NameSpace="Standard">
@@ -443,6 +488,12 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pValue>GainAutoReg</pValue>
   </Enumeration>
   <IntReg Name="GainAutoReg"><Address>0x20048</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <IntSwissKnife Name="GainAutoActive">
+    <Formula>GA != 0</Formula>
+    <pVariable Name="GA">GainAutoReg</pVariable>
+    <Output>Integer</Output>
+  </IntSwissKnife>
 
   <Integer Name="BlackLevel" NameSpace="Standard">
     <ToolTip>Analog black level offset</ToolTip>
@@ -521,54 +572,6 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
 
-  <!-- ════════════════════════════════════════════════════════════════════
-       Test Harness Features (Predicate gating)
-       ════════════════════════════════════════════════════════════════════
-
-       These features exist purely so integration tests can exercise the
-       `pIsImplemented` / `pIsAvailable` / `pIsLocked` code paths without
-       depending on a specific real camera's quirks. Tests flip bits of
-       `TestControlReg` and observe how predicate-gated features react.
-
-       Bit layout of TestControlReg:
-         bit 0 → TestGatedFeature is implemented
-         bit 1 → TestGatedFeature is locked (RW → RO)
-         bit 4 → PixelFormat.Mono8 is implemented
-         bit 5 → PixelFormat.BayerRG8 is implemented
-  -->
-  <IntReg Name="TestControlReg">
-    <ToolTip>Bitmask controlling predicate gates — see module docs</ToolTip>
-    <Address>0x29000</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
-  </IntReg>
-
-  <IntSwissKnife Name="TestGateImplemented">
-    <Formula>CTRL &amp; 1</Formula>
-    <pVariable Name="CTRL">TestControlReg</pVariable>
-    <Output>Integer</Output>
-  </IntSwissKnife>
-  <IntSwissKnife Name="TestGateLocked">
-    <Formula>(CTRL &amp; 2) / 2</Formula>
-    <pVariable Name="CTRL">TestControlReg</pVariable>
-    <Output>Integer</Output>
-  </IntSwissKnife>
-
-  <Integer Name="TestGatedFeature">
-    <ToolTip>Test-only register gated by TestControlReg</ToolTip>
-    <Address>0x29100</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
-    <Min>0</Min>
-    <Max>255</Max>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
-    <pIsImplemented>TestGateImplemented</pIsImplemented>
-    <pIsLocked>TestGateLocked</pIsLocked>
-  </Integer>
-
 </RegisterDescription>
 "#;
 
@@ -644,6 +647,13 @@ impl RegisterMap {
         regs.insert(REG_GAIN_AUTO, 0u32.to_be_bytes().to_vec()); // Off
         regs.insert(REG_BLACK_LEVEL, 0u32.to_be_bytes().to_vec());
 
+        // ── Predicate gating ────────────────────────────────────────────
+        // Frame rate manually controllable by default; sensor boots as a
+        // monochrome sensor so Mono8/Mono16 PixelFormat entries are
+        // available at boot.
+        regs.insert(REG_ACQ_FRAME_RATE_ENABLE, 1u32.to_be_bytes().to_vec());
+        regs.insert(REG_SENSOR_TYPE, 0u32.to_be_bytes().to_vec());
+
         // ── Timestamp (1 GHz tick frequency) ────────────────────────────
         regs.insert(REG_TIMESTAMP_FREQ, 1_000_000_000u32.to_be_bytes().to_vec());
         regs.insert(REG_TIMESTAMP_VALUE, vec![0u8; 8]);
@@ -653,12 +663,6 @@ impl RegisterMap {
         regs.insert(REG_CHUNK_MODE_ACTIVE, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_CHUNK_SELECTOR, 1u32.to_be_bytes().to_vec()); // Timestamp
         regs.insert(REG_CHUNK_ENABLE, 0u32.to_be_bytes().to_vec());
-
-        // ── Test-harness predicate registers ────────────────────────────
-        // Boot with every gate enabled so default camera behaviour shows
-        // all features; tests flip bits off to exercise the negative cases.
-        regs.insert(REG_TEST_CTRL, 0b0011_0011u32.to_be_bytes().to_vec());
-        regs.insert(REG_TEST_GATED, 0u32.to_be_bytes().to_vec());
 
         // ── XML URL register ────────────────────────────────────────────
         let xml_blob = FAKE_XML.as_bytes().to_vec();

@@ -2,10 +2,15 @@
 //! `effective_access_mode` / `available_enum_entries` against the in-process
 //! fake GigE Vision camera.
 //!
-//! The fake camera's XML includes a `TestControlReg` bitfield whose bits
-//! toggle predicate outcomes (see `crates/viva-fake-gige/src/registers.rs`).
-//! These tests flip bits via `set_integer` and verify the predicates reflect
-//! the new state.
+//! The fake camera's XML wires realistic predicates on real features:
+//!   * `ExposureTime.pIsLocked` ← `ExposureAuto != Off`
+//!   * `Gain.pIsLocked` ← `GainAuto != Off`
+//!   * `AcquisitionFrameRate.pIsAvailable` ← `AcquisitionFrameRateEnable`
+//!   * `PixelFormat` entry `pIsImplemented` ← `SensorType` (Monochrome /
+//!     BayerRG / Color)
+//!
+//! Each test flips one driver feature via `Camera::set` and verifies the
+//! NodeMap predicate methods reflect the new state end-to-end.
 
 mod common;
 
@@ -31,12 +36,16 @@ async fn connect_fake() -> Arc<Mutex<Camera<GigeRegisterIo>>> {
     Arc::new(Mutex::new(camera))
 }
 
-async fn set_test_ctrl(camera: &Arc<Mutex<Camera<GigeRegisterIo>>>, value: i64) {
+async fn set_feature(
+    camera: &Arc<Mutex<Camera<GigeRegisterIo>>>,
+    name: &'static str,
+    value: String,
+) {
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
         let mut cam = cam.lock().unwrap();
-        cam.set("TestControlReg", &value.to_string())
-            .expect("set TestControlReg");
+        cam.set(name, &value)
+            .unwrap_or_else(|e| panic!("set {name}: {e}"));
     })
     .await
     .unwrap();
@@ -57,91 +66,95 @@ where
 }
 
 #[tokio::test]
-async fn test_is_implemented_reflects_gate_bit() {
+async fn test_exposure_time_locked_by_exposure_auto() {
     let _cam = common::TestCamera::start().await;
     let camera = connect_fake().await;
 
-    // Bit 0 cleared → TestGatedFeature not implemented.
-    set_test_ctrl(&camera, 0).await;
-    let implemented = read_predicate(&camera, |cam| {
+    // ExposureAuto=Off → ExposureTime is RW.
+    set_feature(&camera, "ExposureAuto", "Off".into()).await;
+    let mode = read_predicate(&camera, |cam| {
         cam.nodemap()
-            .is_implemented("TestGatedFeature", cam.transport())
+            .effective_access_mode("ExposureTime", cam.transport())
             .unwrap()
     })
     .await;
-    assert!(!implemented, "bit 0 clear → not implemented");
+    assert_eq!(mode, AccessMode::RW, "ExposureAuto=Off → RW");
 
-    // Bit 0 set → TestGatedFeature implemented.
-    set_test_ctrl(&camera, 0b0001).await;
-    let implemented = read_predicate(&camera, |cam| {
+    // ExposureAuto=Continuous → pIsLocked truthy → RW downgrades to RO.
+    set_feature(&camera, "ExposureAuto", "Continuous".into()).await;
+    let mode = read_predicate(&camera, |cam| {
         cam.nodemap()
-            .is_implemented("TestGatedFeature", cam.transport())
+            .effective_access_mode("ExposureTime", cam.transport())
             .unwrap()
     })
     .await;
-    assert!(implemented, "bit 0 set → implemented");
+    assert_eq!(mode, AccessMode::RO, "ExposureAuto=Continuous → RO");
 }
 
 #[tokio::test]
-async fn test_effective_access_mode_locked_downgrades() {
+async fn test_gain_locked_by_gain_auto() {
     let _cam = common::TestCamera::start().await;
     let camera = connect_fake().await;
 
-    // Bit 0 set, bit 1 clear → implemented and unlocked → RW.
-    set_test_ctrl(&camera, 0b0001).await;
+    set_feature(&camera, "GainAuto", "Off".into()).await;
     let mode = read_predicate(&camera, |cam| {
         cam.nodemap()
-            .effective_access_mode("TestGatedFeature", cam.transport())
+            .effective_access_mode("Gain", cam.transport())
             .unwrap()
     })
     .await;
-    assert_eq!(mode, AccessMode::RW);
+    assert_eq!(mode, AccessMode::RW, "GainAuto=Off → RW");
 
-    // Bit 0 and bit 1 both set → implemented but locked → RO.
-    set_test_ctrl(&camera, 0b0011).await;
+    set_feature(&camera, "GainAuto", "Continuous".into()).await;
     let mode = read_predicate(&camera, |cam| {
         cam.nodemap()
-            .effective_access_mode("TestGatedFeature", cam.transport())
+            .effective_access_mode("Gain", cam.transport())
             .unwrap()
     })
     .await;
-    assert_eq!(mode, AccessMode::RO);
+    assert_eq!(mode, AccessMode::RO, "GainAuto=Continuous → RO");
 }
 
 #[tokio::test]
-async fn test_available_enum_entries_filters_pixel_format() {
+async fn test_acquisition_frame_rate_gated_by_enable() {
     let _cam = common::TestCamera::start().await;
     let camera = connect_fake().await;
 
-    // Clear the Mono8/BayerRG8 gate bits but leave Mono16/RGB8 alone.
-    // Default boot value is 0x33 (all bits set).
-    set_test_ctrl(&camera, 0b0011).await;
-
-    let entries = read_predicate(&camera, |cam| {
+    // Enabled at boot.
+    let available = read_predicate(&camera, |cam| {
         cam.nodemap()
-            .available_enum_entries("PixelFormat", cam.transport())
+            .is_available("AcquisitionFrameRate", cam.transport())
             .unwrap()
     })
     .await;
-    assert!(
-        entries.contains(&"Mono16".to_string()),
-        "always-available entry present"
-    );
-    assert!(
-        entries.contains(&"RGB8".to_string()),
-        "always-available entry present"
-    );
-    assert!(
-        !entries.contains(&"Mono8".to_string()),
-        "gated-out entry hidden"
-    );
-    assert!(
-        !entries.contains(&"BayerRG8".to_string()),
-        "gated-out entry hidden"
-    );
+    assert!(available, "AcquisitionFrameRateEnable=1 → available");
 
-    // Flip bit 4 back on → Mono8 returns.
-    set_test_ctrl(&camera, 0b0001_0011).await;
+    set_feature(&camera, "AcquisitionFrameRateEnable", "0".into()).await;
+    let available = read_predicate(&camera, |cam| {
+        cam.nodemap()
+            .is_available("AcquisitionFrameRate", cam.transport())
+            .unwrap()
+    })
+    .await;
+    assert!(!available, "AcquisitionFrameRateEnable=0 → unavailable");
+
+    set_feature(&camera, "AcquisitionFrameRateEnable", "1".into()).await;
+    let available = read_predicate(&camera, |cam| {
+        cam.nodemap()
+            .is_available("AcquisitionFrameRate", cam.transport())
+            .unwrap()
+    })
+    .await;
+    assert!(available, "re-enabled → available again");
+}
+
+#[tokio::test]
+async fn test_available_enum_entries_filters_pixel_format_by_sensor_type() {
+    let _cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    // Monochrome sensor → Mono8 + Mono16 only.
+    set_feature(&camera, "SensorType", "Monochrome".into()).await;
     let entries = read_predicate(&camera, |cam| {
         cam.nodemap()
             .available_enum_entries("PixelFormat", cam.transport())
@@ -149,4 +162,27 @@ async fn test_available_enum_entries_filters_pixel_format() {
     })
     .await;
     assert!(entries.contains(&"Mono8".to_string()));
+    assert!(entries.contains(&"Mono16".to_string()));
+    assert!(!entries.contains(&"BayerRG8".to_string()));
+    assert!(!entries.contains(&"RGB8".to_string()));
+
+    // Bayer sensor → only BayerRG8.
+    set_feature(&camera, "SensorType", "BayerRG".into()).await;
+    let entries = read_predicate(&camera, |cam| {
+        cam.nodemap()
+            .available_enum_entries("PixelFormat", cam.transport())
+            .unwrap()
+    })
+    .await;
+    assert_eq!(entries, vec!["BayerRG8".to_string()]);
+
+    // Color sensor → only RGB8.
+    set_feature(&camera, "SensorType", "Color".into()).await;
+    let entries = read_predicate(&camera, |cam| {
+        cam.nodemap()
+            .available_enum_entries("PixelFormat", cam.transport())
+            .unwrap()
+    })
+    .await;
+    assert_eq!(entries, vec!["RGB8".to_string()]);
 }

@@ -3,8 +3,10 @@
 //! The Rust generic `Camera<T: RegisterIo>` is hidden behind an enum so Python
 //! sees a single `Camera` class regardless of transport.
 
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
+use if_addrs::{IfAddr, get_if_addrs};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -22,6 +24,27 @@ use crate::stream::{PyFrameStream, build_gige_stream, build_u3v_stream};
 
 pub(crate) type GigeCamera = Camera<GigeRegisterIo>;
 pub(crate) type U3vCamera = Camera<U3vRegisterIo<RusbTransfer>>;
+
+/// Pick the NIC whose subnet contains `device_ip`. Returns `None` if no
+/// interface matches; the caller should raise a user-actionable error.
+pub(crate) fn auto_iface(device_ip: Ipv4Addr) -> Option<Iface> {
+    if device_ip.is_loopback() {
+        return Iface::from_ipv4(Ipv4Addr::LOCALHOST).ok();
+    }
+    let ifaces = get_if_addrs().ok()?;
+    for iface in ifaces {
+        let IfAddr::V4(v4) = iface.addr else { continue };
+        let ip = u32::from(v4.ip);
+        let mask = u32::from(v4.netmask);
+        let target = u32::from(device_ip);
+        if (ip & mask) == (target & mask) {
+            if let Ok(resolved) = Iface::from_system(&iface.name) {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
 
 pub(crate) enum CameraInner {
     Gige {
@@ -268,17 +291,28 @@ impl PyCamera {
     ) -> PyResult<PyFrameStream> {
         match &self.inner {
             CameraInner::Gige {
+                device_info,
                 iface: iface_cell,
                 camera,
                 ..
             } => {
                 let iface_resolved = match iface {
                     Some(name) => Some(iface_from_str(name)?),
-                    None => iface_cell
-                        .lock()
-                        .map_err(|_| parse_error("iface mutex poisoned"))?
-                        .clone(),
+                    None => {
+                        let stored = iface_cell
+                            .lock()
+                            .map_err(|_| parse_error("iface mutex poisoned"))?
+                            .clone();
+                        stored.or_else(|| auto_iface(device_info.ip))
+                    }
                 };
+                let iface_resolved = iface_resolved.ok_or_else(|| {
+                    parse_error(format!(
+                        "no network interface matched camera IP {}; pass iface=... \
+                         to connect_gige(...) or camera.stream(iface=...)",
+                        device_info.ip
+                    ))
+                })?;
                 let multicast_addr = match multicast {
                     Some(s) => Some(
                         s.parse::<std::net::Ipv4Addr>()
@@ -289,7 +323,7 @@ impl PyCamera {
                 build_gige_stream(
                     py,
                     camera.clone(),
-                    iface_resolved,
+                    Some(iface_resolved),
                     auto_packet_size,
                     multicast_addr,
                     destination_port,

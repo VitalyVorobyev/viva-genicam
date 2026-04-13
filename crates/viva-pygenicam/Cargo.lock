@@ -647,7 +647,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "viva-genapi"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "thiserror 1.0.69",
  "tracing",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genapi-xml"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "quick-xml",
  "serde",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gencp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bitflags",
  "bytes",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genicam"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gige"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -709,16 +709,18 @@ dependencies = [
 
 [[package]]
 name = "viva-pfnc"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "viva-pygenicam"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bytes",
+ "if-addrs",
  "numpy",
  "once_cell",
  "pyo3",
+ "rusb",
  "tokio",
  "tracing",
  "viva-genapi",
@@ -731,11 +733,11 @@ dependencies = [
 
 [[package]]
 name = "viva-sfnc"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "viva-u3v"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bytes",
  "rusb",

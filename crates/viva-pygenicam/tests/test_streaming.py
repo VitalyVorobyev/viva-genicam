@@ -47,3 +47,17 @@ def test_iterate_multiple_frames(camera):
             if received >= 3:
                 break
     assert received == 3
+
+
+def test_stream_auto_iface_for_loopback(fake_gige):
+    """Default `cam.stream()` with no iface should resolve via subnet match.
+
+    For the loopback fake camera this should pick the lo/lo0 interface
+    automatically — no need for the user to pass `iface=`.
+    """
+    cams = vg.discover(timeout_ms=1500, all=True)
+    cam_info = next(c for c in cams if c.ip.startswith("127."))
+    cam = vg.connect_gige(cam_info)  # no iface
+    with cam.stream(auto_packet_size=False) as frames:
+        frame = frames.next_frame(timeout_ms=5000)
+        assert frame is not None

@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Python bindings (`viva-genicam` on PyPI)** -- new `crates/viva-pygenicam` PyO3 crate plus pure-Python facade in `python/viva_genicam/`. Ships as an abi3 wheel covering discovery, control, introspection, and streaming for both GigE Vision and USB3 Vision cameras. Frames expose a NumPy-friendly `to_numpy()` / `to_rgb8()` API, streams are sync iterators over a managed Tokio runtime (no asyncio required), errors map onto a `GenicamError` subclass hierarchy, and `py.typed` + `.pyi` stubs give IDEs full completion. Fake-camera pytest suite (19 tests) runs against the built wheel.
-- **Python wheels CI (`.github/workflows/python.yml`)** -- cross-platform wheel matrix (Linux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64) × Python 3.9–3.13, bundling libusb where appropriate; publishes to PyPI via OIDC on `py-v*` tags.
+- **Python wheels CI (`.github/workflows/python.yml`)** -- cross-platform wheel matrix (Linux x86_64, macOS arm64, Windows x86_64) × Python 3.9–3.13; libusb is statically vendored into the extension so no system libusb is required by the wheel. Publishes to PyPI via OIDC on `py-v*` tags. Test install uses `pip --no-index --find-links dist` so CI never falls back to a published PyPI wheel while validating the just-built artifact.
+- **Auto-detected GigE streaming interface** -- `camera.stream()` now picks the NIC whose IPv4 subnet contains the camera's IP when `iface` is omitted; loopback cameras resolve to `lo`/`lo0` automatically. An explicit `iface=` override remains available on both `connect_gige` and `stream`.
 - **`book/src/python.md`** -- Python API tutorial chapter; README gains a Python section.
 
 ### Changed

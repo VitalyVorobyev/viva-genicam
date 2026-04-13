@@ -93,6 +93,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Python
+
+Pre-built wheels are published on PyPI — no C toolchain needed:
+
+```bash
+pip install viva-genicam
+```
+
+```python
+import viva_genicam as vg
+
+cams = vg.discover(timeout_ms=500)
+cam = vg.connect_gige(cams[0])
+cam.set_exposure_time_us(10_000.0)
+
+with cam.stream() as frames:
+    for frame in frames:
+        arr = frame.to_numpy()           # NumPy (H, W) or (H, W, 3) uint8
+        break
+```
+
+See [`book/src/python.md`](book/src/python.md) for the full Python API.
+
 ## Documentation
 
 - **[GenICam standards introduction](doc/genicam.md)** -- what GenApi, GenCP, GVCP, SFNC, and PFNC are and how they map to crates

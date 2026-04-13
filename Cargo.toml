@@ -15,10 +15,11 @@ members = [
   "crates/viva-fake-u3v",
   "crates/viva-service-u3v",
 ]
+exclude = ["crates/viva-pygenicam"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/VitalyVorobyev/viva-genicam"

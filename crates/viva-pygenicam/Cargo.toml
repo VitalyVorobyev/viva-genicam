@@ -1,0 +1,29 @@
+[package]
+name = "viva-pygenicam"
+version = "0.2.4"
+edition = "2021"
+license = "MIT"
+description = "Python bindings for viva-genicam: GenICam camera discovery, control, and streaming"
+repository = "https://github.com/VitalyVorobyev/viva-genicam"
+homepage = "https://github.com/VitalyVorobyev/viva-genicam"
+readme = "README.md"
+rust-version = "1.88"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+numpy = "0.22"
+viva-genicam = { path = "../viva-genicam", features = ["u3v", "u3v-usb"] }
+viva-genapi = { path = "../viva-genapi" }
+viva-genapi-xml = { path = "../viva-genapi-xml" }
+viva-gige = { path = "../viva-gige" }
+viva-u3v = { path = "../viva-u3v", features = ["usb"] }
+viva-pfnc = { path = "../viva-pfnc" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+once_cell = "1"
+bytes = "1"
+tracing = "0.1"

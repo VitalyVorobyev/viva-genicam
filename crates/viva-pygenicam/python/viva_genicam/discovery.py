@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from . import _native
 
@@ -79,7 +79,7 @@ class U3vDeviceInfo:
         }
 
 
-DeviceInfo = GigeDeviceInfo | U3vDeviceInfo
+DeviceInfo = Union[GigeDeviceInfo, U3vDeviceInfo]
 
 
 def discover(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -16,23 +15,37 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FAKE_BIN = REPO_ROOT / "target" / "release" / "viva-fake-gige"
 
 
-def _wait_for_port(host: str, port: int, deadline: float) -> None:
+def _wait_for_discovery(deadline: float) -> None:
+    """Poll `vg.discover` until the fake camera responds or we time out.
+
+    UDP port probes can't confirm a listener (sendto always succeeds), so
+    we do the real thing: call the discovery pipeline and wait until it
+    returns a loopback camera.
+    """
+    import viva_genicam as vg
+
+    last_err: Exception | None = None
     while time.time() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(0.1)
-            try:
-                s.sendto(b"\x00\x00\x00\x00", (host, port))
+        try:
+            cams = vg.discover(timeout_ms=400, all=True)
+            if any(c.ip.startswith("127.") for c in cams):
                 return
-            except OSError:
-                time.sleep(0.05)
-    raise RuntimeError(f"fake camera did not bind {host}:{port}")
+        except Exception as exc:
+            last_err = exc
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"fake camera not discovered within deadline (last err: {last_err})"
+    )
 
 
 @pytest.fixture(scope="session")
 def fake_gige() -> Iterator[None]:
     """Boot one fake GigE camera on 127.0.0.1:3956 for the test session."""
     if not FAKE_BIN.exists():
-        pytest.skip(f"fake-gige binary not found at {FAKE_BIN} — run `cargo build -p viva-fake-gige --release`")
+        pytest.skip(
+            f"fake-gige binary not found at {FAKE_BIN} — "
+            "run `cargo build -p viva-fake-gige --release`"
+        )
 
     env = os.environ.copy()
     env.setdefault("RUST_LOG", "warn")
@@ -43,7 +56,7 @@ def fake_gige() -> Iterator[None]:
         stderr=subprocess.PIPE,
     )
     try:
-        _wait_for_port("127.0.0.1", 3956, time.time() + 5.0)
+        _wait_for_discovery(deadline=time.time() + 15.0)
         yield
     finally:
         proc.terminate()

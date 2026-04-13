@@ -1,86 +1,41 @@
 # Python bindings
 
-The `viva-genicam` Python package wraps the Rust workspace behind a NumPy-friendly API. It ships as a pre-built wheel on PyPI — no C toolchain, no aravis, just `pip install`.
+The `viva-genicam` Python package wraps the Rust workspace behind a NumPy-friendly API. It ships as a pre-built wheel on PyPI — no C toolchain, no aravis, libusb is statically bundled.
 
 ```bash
 pip install viva-genicam
 ```
-
-## Quickstart
 
 ```python
 import viva_genicam as vg
 
 cams = vg.discover(timeout_ms=500)
 cam = vg.connect_gige(cams[0])
-
 print(cam.get("DeviceModelName"))
-cam.set_exposure_time_us(10_000.0)
 
 with cam.stream() as frames:
     for frame in frames:
-        arr = frame.to_numpy()            # (H, W) or (H, W, 3) uint8
-        print(frame.width, frame.height, frame.pixel_format)
+        arr = frame.to_numpy()           # NumPy (H, W) or (H, W, 3) uint8
         break
 ```
 
-## Discovery
+## Tutorials
 
-```python
-vg.discover(timeout_ms=500, iface="en0")   # restrict to one NIC
-vg.discover(timeout_ms=500, all=True)       # enumerate every interface
-vg.discover_u3v()                            # USB3 Vision cameras
-```
+1. [Install & hello-camera](python/install.md) — install the wheel, run the self-contained fake-camera demo.
+2. [Discovery](python/discovery.md) — enumerate GigE and U3V cameras, restrict to one NIC, auto-detect interfaces.
+3. [Control & introspection](python/control.md) — read and write features, walk the NodeMap, discover which features apply.
+4. [Streaming](python/streaming.md) — context-manager streams, NumPy frames, pixel formats, timestamps.
 
-Returns a list of `GigeDeviceInfo` / `U3vDeviceInfo` frozen dataclasses with `.ip`, `.mac`, `.manufacturer`, `.model`.
+## Reference
 
-## Camera
+- [API reference](python/api.md) — every public class, function, and exception in one place.
+- [Example scripts](https://github.com/VitalyVorobyev/viva-genicam/tree/main/crates/viva-pygenicam/examples) — runnable Python files mirroring the most common Rust examples.
 
-`Camera` is one class for both GigE and U3V. Methods:
+## Supported
 
-- `get(name) -> str`, `set(name, value)` — string-based feature access
-- `set_exposure_time_us(float)`, `set_gain_db(float)` — typed conveniences
-- `nodes() -> list[str]`, `node_info(name) -> NodeInfo`, `all_node_info()`, `categories()`
-- `enum_entries(name) -> list[str]`
-- `acquisition_start()`, `acquisition_stop()`
-- `stream(iface=..., auto_packet_size=...) -> FrameStream`
+- Python 3.9+, abi3 wheels (one wheel covers every minor version).
+- GigE Vision: discovery, control, streaming, chunks, events, time sync.
+- USB3 Vision: discovery, control, streaming.
+- Platforms with pre-built wheels: Linux x86_64 (manylinux_2_28), macOS arm64, Windows x86_64.
 
-`NodeInfo` exposes `name`, `kind` ("Integer", "Float", …), `access` ("RO"/"RW"/"WO"), `visibility`, `description`, `tooltip`, plus `.readable` / `.writable` properties.
-
-## Streaming
-
-`camera.stream()` returns a context manager that starts acquisition on entry, stops on exit, and yields `Frame` objects:
-
-```python
-with cam.stream() as frames:
-    for frame in frames:
-        rgb = frame.to_rgb8()           # always (H, W, 3) uint8
-        # or
-        arr = frame.to_numpy()           # natural shape per pixel format
-        ...
-```
-
-Frames carry `.width`, `.height`, `.pixel_format`, `.pixel_format_code`, `.ts_dev`, `.ts_host`, and `.payload()` for raw bytes.
-
-## Errors
-
-All exceptions subclass `vg.GenicamError`:
-
-```
-GenicamError
-├── GenApiError               (nodemap evaluation)
-├── TransportError            (register I/O / discovery / streaming)
-├── ParseError                (invalid user input)
-├── MissingChunkFeatureError  (chunk selector absent from XML)
-└── UnsupportedPixelFormatError
-```
-
-## Build from source
-
-```bash
-uv venv .venv
-uv pip install --python .venv/bin/python maturin numpy pytest
-uv run --python .venv/bin/python maturin develop -m crates/viva-pygenicam/Cargo.toml --release
-```
-
-Linux/macOS need `libusb` installed (`apt install libusb-1.0-0-dev` / `brew install libusb`) for USB3 Vision support.
+Need another platform? The sdist on PyPI builds from source — you'll need a Rust toolchain (`rustup`) and a C compiler. libusb is always statically vendored; no system package needed.

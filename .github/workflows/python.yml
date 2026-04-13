@@ -42,12 +42,17 @@ jobs:
 
       # libusb is statically linked into the extension via `rusb/vendored`,
       # so no system libusb needs to be installed on any platform.
+      # For Linux we specify `manylinux` + `container` as action inputs so
+      # the action spins up the matching manylinux docker image (the runner
+      # itself has glibc ≥2.38 which would emit non-compliant symbols).
       - name: Build wheel (abi3)
         uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/viva-pygenicam
           target: ${{ matrix.target }}
-          args: --release --out dist --manylinux ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'off' }}
+          manylinux: ${{ startsWith(matrix.os, 'ubuntu') && '2_28' || 'auto' }}
+          container: ${{ startsWith(matrix.os, 'ubuntu') && 'quay.io/pypa/manylinux_2_28_x86_64' || '' }}
+          args: --release --out dist
 
       - uses: actions/upload-artifact@v4
         with:

@@ -13,6 +13,7 @@ mod frame;
 mod nodemap;
 mod runtime;
 mod stream;
+mod testing;
 
 #[pymodule]
 fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -22,5 +23,6 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     frame::register(m)?;
     stream::register(m)?;
     nodemap::register(m)?;
+    testing::register(py, m)?;
     Ok(())
 }

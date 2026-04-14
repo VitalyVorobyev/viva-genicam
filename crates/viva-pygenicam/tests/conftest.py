@@ -1,69 +1,36 @@
-"""Shared pytest fixtures: spawn the fake GigE camera as a subprocess."""
+"""Shared pytest fixtures.
+
+Tests use the in-process fake camera from `viva_genicam.testing` —
+no subprocess, no external binary to build. One session-scoped fake
+serves every test.
+"""
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
-import time
-from pathlib import Path
 from typing import Iterator
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-FAKE_BIN = REPO_ROOT / "target" / "release" / "viva-fake-gige"
+from viva_genicam.testing import FakeGigeCamera
 
 
-def _wait_for_discovery(deadline: float) -> None:
-    """Poll `vg.discover` until the fake camera responds or we time out.
+@pytest.fixture(scope="module")
+def fake_gige() -> Iterator[FakeGigeCamera]:
+    """Boot one in-process fake GigE camera on 127.0.0.1:3956 per test module.
 
-    UDP port probes can't confirm a listener (sendto always succeeds), so
-    we do the real thing: call the discovery pipeline and wait until it
-    returns a loopback camera.
+    Module scope (not session) so tests that manage their own fake camera
+    lifecycle — see `test_testing.py` — get port 3956 back between
+    modules.
     """
-    import viva_genicam as vg
-
-    last_err: Exception | None = None
-    while time.time() < deadline:
-        try:
-            cams = vg.discover(timeout_ms=400, all=True)
-            if any(c.ip.startswith("127.") for c in cams):
-                return
-        except Exception as exc:
-            last_err = exc
-        time.sleep(0.1)
-    raise RuntimeError(
-        f"fake camera not discovered within deadline (last err: {last_err})"
-    )
-
-
-@pytest.fixture(scope="session")
-def fake_gige() -> Iterator[None]:
-    """Boot one fake GigE camera on 127.0.0.1:3956 for the test session."""
-    if not FAKE_BIN.exists():
-        pytest.skip(
-            f"fake-gige binary not found at {FAKE_BIN} — "
-            "run `cargo build -p viva-fake-gige --release`"
-        )
-
-    env = os.environ.copy()
-    env.setdefault("RUST_LOG", "warn")
-    proc = subprocess.Popen(
-        [str(FAKE_BIN), "--bind", "127.0.0.1", "--port", "3956"],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    cam = FakeGigeCamera(width=640, height=480, fps=30)
+    cam.start()
     try:
-        _wait_for_discovery(deadline=time.time() + 15.0)
-        yield
+        # Make sure discovery actually sees it before tests run.
+        cam.device_info(timeout_ms=5000)
+        yield cam
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        cam.stop()
 
 
 @pytest.fixture()

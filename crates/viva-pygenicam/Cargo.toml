@@ -23,6 +23,7 @@ viva-genapi-xml = { path = "../viva-genapi-xml" }
 viva-gige = { path = "../viva-gige" }
 viva-u3v = { path = "../viva-u3v", features = ["usb"] }
 viva-pfnc = { path = "../viva-pfnc" }
+viva-fake-gige = { path = "../viva-fake-gige" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 once_cell = "1"
 bytes = "1"

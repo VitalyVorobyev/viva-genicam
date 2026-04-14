@@ -1,11 +1,8 @@
-"""Self-contained end-to-end demo — no hardware required.
+"""Self-contained end-to-end demo — no hardware, no repo clone.
 
-Spawns the `viva-fake-gige` binary on loopback, discovers it, reads and
-writes features, and streams 5 frames. Mirrors the Rust
-`demo_fake_camera` example.
+Everything runs in-process: the fake camera is shipped inside the wheel.
 
-Prerequisites:
-    cargo build -p viva-fake-gige --release
+Prerequisites: `pip install viva-genicam` (or a local wheel build).
 
 Usage:
     python demo_fake_camera.py
@@ -13,59 +10,22 @@ Usage:
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-import time
-from pathlib import Path
-
 import viva_genicam as vg
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-FAKE_BIN = REPO_ROOT / "target" / "release" / "viva-fake-gige"
-
-
-def wait_for_discovery(deadline: float) -> vg.GigeDeviceInfo:
-    """Poll discovery until the fake camera responds."""
-    while time.time() < deadline:
-        cams = vg.discover(timeout_ms=300, all=True)
-        for c in cams:
-            if c.ip.startswith("127."):
-                return c
-        time.sleep(0.1)
-    raise RuntimeError("fake camera did not come up in time")
+from viva_genicam.testing import FakeGigeCamera
 
 
 def main() -> None:
-    if not FAKE_BIN.exists():
-        print(
-            f"Missing {FAKE_BIN} — build it first:\n"
-            "    cargo build -p viva-fake-gige --release",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    print("1. Starting in-process fake GigE camera ...")
+    with FakeGigeCamera(width=640, height=480, fps=10) as fake:
+        print(f"   bound to {fake.ip}:{fake.port}")
 
-    env = os.environ.copy()
-    env.setdefault("RUST_LOG", "warn")
-
-    print("1. Starting fake GigE camera on 127.0.0.1:3956 ...")
-    proc = subprocess.Popen(
-        [str(FAKE_BIN), "--bind", "127.0.0.1", "--port", "3956"],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
         print("2. Discovering ...")
-        info = wait_for_discovery(time.time() + 10.0)
+        info = fake.device_info()
         print(f"   found {info.model or '(unknown)'} @ {info.ip}")
 
         print("3. Connecting ...")
         cam = vg.connect_gige(info)
-        print(
-            f"   connected; XML is {len(cam.xml)} bytes, "
-            f"{len(cam.nodes())} features"
-        )
+        print(f"   connected; XML is {len(cam.xml)} bytes, {len(cam.nodes())} features")
 
         print("4. Reading features:")
         for name in ("Width", "Height", "PixelFormat", "ExposureTime", "Gain"):
@@ -89,13 +49,7 @@ def main() -> None:
                 if i >= 5:
                     break
 
-        print("\nDemo complete — everything ran without any real hardware.")
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    print("\nDemo complete — everything ran without any real hardware.")
 
 
 if __name__ == "__main__":

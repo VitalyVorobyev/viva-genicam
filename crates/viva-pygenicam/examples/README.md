@@ -12,18 +12,22 @@ Runnable scripts demonstrating the `viva-genicam` Python package.
 
 ## Running without a real camera
 
-Build the fake GigE camera once, then run any example that discovers on loopback:
-
-```bash
-cargo build -p viva-fake-gige --release
-# In one terminal:
-./target/release/viva-fake-gige --bind 127.0.0.1 --port 3956
-# In another:
-python crates/viva-pygenicam/examples/discover.py --all
-```
-
-Or let `demo_fake_camera.py` spawn the binary for you:
+The wheel ships an in-process fake GigE camera. Either run the bundled demo end to end:
 
 ```bash
 python crates/viva-pygenicam/examples/demo_fake_camera.py
 ```
+
+…or stand up a fake yourself and point any other example at it:
+
+```python
+from viva_genicam.testing import FakeGigeCamera
+
+with FakeGigeCamera(width=640, height=480, fps=10) as fake:
+    # fake is now running on 127.0.0.1:3956
+    # Run discover.py / get_set_feature.py / node_browser.py in another
+    # terminal, or call the APIs directly here.
+    ...
+```
+
+No `cargo build`, no subprocess, no repo clone.

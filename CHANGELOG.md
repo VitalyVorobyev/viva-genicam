@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`book/src/python.md`** -- Python API tutorial chapter; README gains a Python section.
 - **Python examples** -- `crates/viva-pygenicam/examples/` ships five runnable scripts (`discover.py`, `get_set_feature.py`, `node_browser.py`, `grab_frame.py`, `demo_fake_camera.py`) plus an `examples/README.md` that describes each.
 - **Expanded book tutorial** -- `book/src/python.md` becomes an index; five sibling pages under `book/src/python/` walk through install, discovery, control & introspection, streaming, and a full API reference.
+- **In-process fake camera (`viva_genicam.testing.FakeGigeCamera`)** -- the `viva-fake-gige` crate is now bound as a Python class shipped inside the wheel. `pip install viva-genicam` alone is enough to run the full demo end-to-end; no subprocess, no binary to build, no repo clone required. The `demo_fake_camera.py` example and `tests/conftest.py` were migrated onto the in-process path.
 
 ### Changed
 

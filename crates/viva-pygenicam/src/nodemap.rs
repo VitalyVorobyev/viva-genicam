@@ -28,7 +28,7 @@ pub(crate) fn to_node_info<'py>(
     name: &str,
     node: &Node,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("name", name)?;
     dict.set_item("kind", node.kind_name())?;
     dict.set_item("access", access_str(node.access_mode()))?;
@@ -44,7 +44,7 @@ pub(crate) fn collect_node_names(nodemap: &NodeMap) -> Vec<String> {
 }
 
 pub(crate) fn collect_node_info<'py>(py: Python<'py>, nodemap: &NodeMap) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for name in nodemap.node_names() {
         if let Some(node) = nodemap.node(name) {
             list.append(to_node_info(py, name, node)?)?;
@@ -54,9 +54,9 @@ pub(crate) fn collect_node_info<'py>(py: Python<'py>, nodemap: &NodeMap) -> PyRe
 }
 
 pub(crate) fn collect_categories<'py>(py: Python<'py>, nodemap: &NodeMap) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     for (cat, children) in nodemap.categories() {
-        let list = PyList::new_bound(py, children.iter().map(|s| s.as_str()));
+        let list = PyList::new(py, children.iter().map(|s| s.as_str()))?;
         dict.set_item(cat, list)?;
     }
     Ok(dict)

@@ -8,7 +8,7 @@ use viva_genicam::gige;
 use crate::errors::transport_error;
 use crate::runtime::runtime;
 
-#[pyclass(frozen, module = "viva_genicam._native")]
+#[pyclass(frozen, from_py_object, module = "viva_genicam._native")]
 #[derive(Clone)]
 pub(crate) struct PyGigeDeviceInfo {
     #[pyo3(get)]
@@ -51,7 +51,7 @@ impl PyGigeDeviceInfo {
     }
 }
 
-#[pyclass(frozen, module = "viva_genicam._native")]
+#[pyclass(frozen, from_py_object, module = "viva_genicam._native")]
 #[derive(Clone)]
 pub(crate) struct PyU3vDeviceInfo {
     #[pyo3(get)]
@@ -112,7 +112,7 @@ fn discover_gige(
     all: bool,
 ) -> PyResult<Vec<PyGigeDeviceInfo>> {
     let timeout = Duration::from_millis(timeout_ms);
-    let devices = py.allow_threads(|| {
+    let devices = py.detach(|| {
         runtime().block_on(async move {
             match (iface, all) {
                 (Some(name), _) => gige::discover_on_interface(timeout, name).await,
@@ -128,7 +128,7 @@ fn discover_gige(
 #[pyfunction]
 fn discover_u3v(py: Python<'_>) -> PyResult<Vec<PyU3vDeviceInfo>> {
     let devices =
-        py.allow_threads(viva_u3v::discovery::discover).map_err(|e| transport_error(e.to_string()))?;
+        py.detach(viva_u3v::discovery::discover).map_err(|e| transport_error(e.to_string()))?;
     Ok(devices.into_iter().map(PyU3vDeviceInfo::from).collect())
 }
 

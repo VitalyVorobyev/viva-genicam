@@ -13,17 +13,17 @@ create_exception!(_native, MissingChunkFeatureError_, GenicamError_);
 create_exception!(_native, UnsupportedPixelFormatError_, GenicamError_);
 
 pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("GenicamError", py.get_type_bound::<GenicamError_>())?;
-    m.add("GenApiError", py.get_type_bound::<GenApiError_>())?;
-    m.add("TransportError", py.get_type_bound::<TransportError_>())?;
-    m.add("ParseError", py.get_type_bound::<ParseError_>())?;
+    m.add("GenicamError", py.get_type::<GenicamError_>())?;
+    m.add("GenApiError", py.get_type::<GenApiError_>())?;
+    m.add("TransportError", py.get_type::<TransportError_>())?;
+    m.add("ParseError", py.get_type::<ParseError_>())?;
     m.add(
         "MissingChunkFeatureError",
-        py.get_type_bound::<MissingChunkFeatureError_>(),
+        py.get_type::<MissingChunkFeatureError_>(),
     )?;
     m.add(
         "UnsupportedPixelFormatError",
-        py.get_type_bound::<UnsupportedPixelFormatError_>(),
+        py.get_type::<UnsupportedPixelFormatError_>(),
     )?;
     Ok(())
 }

@@ -156,6 +156,13 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 - Both crates compile for `wasm32-unknown-unknown`
 - `fetch_and_load_xml` is behind the `fetch` feature flag (default on)
 
+## Dependency Upgrades
+
+Before bumping a crate's version in any `Cargo.toml`, always check crates.io for the latest
+release — e.g. `curl -sSL https://crates.io/api/v1/crates/<name> | jq -r .crate.max_version`
+or the crate's crates.io page. Don't assume the version the user names is current; verify
+it exists and whether a newer one is available before editing manifests.
+
 ## Standards
 
 This codebase implements these EMVA standards:

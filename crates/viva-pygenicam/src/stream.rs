@@ -55,7 +55,7 @@ impl PyFrameStream {
             .inner
             .as_mut()
             .ok_or_else(|| parse_error("frame stream is closed"))?;
-        py.allow_threads(|| match inner {
+        py.detach(|| match inner {
             StreamInner::Gige(s) => runtime()
                 .block_on(async { tokio_timeout(to, s.next_frame()).await })
                 .map_err(|_| transport_error("timeout waiting for frame"))
@@ -98,7 +98,7 @@ pub(crate) fn build_gige_stream(
         g.time_sync().clone()
     };
 
-    let stream = py.allow_threads(|| {
+    let stream = py.detach(|| {
         let cam = camera
             .lock()
             .map_err(|_| parse_error("camera mutex poisoned"))?;
@@ -128,7 +128,7 @@ pub(crate) fn build_u3v_stream(
     py: Python<'_>,
     camera: Arc<Mutex<U3vCamera>>,
 ) -> PyResult<PyFrameStream> {
-    let stream = py.allow_threads(|| {
+    let stream = py.detach(|| {
         let mut cam = camera
             .lock()
             .map_err(|_| parse_error("camera mutex poisoned"))?;

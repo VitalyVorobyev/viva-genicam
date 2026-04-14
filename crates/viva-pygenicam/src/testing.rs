@@ -83,7 +83,7 @@ impl PyFakeGigeCamera {
         let bind_ip = self.bind_ip;
         let port = self.port;
         let pixel_format = self.pixel_format;
-        let built = py.allow_threads(|| {
+        let built = py.detach(|| {
             runtime().block_on(async move {
                 FakeCamera::builder()
                     .width(width)
@@ -133,7 +133,7 @@ impl PyFakeGigeCamera {
             ));
         }
         let target_ip = self.bind_ip;
-        let devices = py.allow_threads(|| {
+        let devices = py.detach(|| {
             runtime().block_on(async move {
                 gige::discover_all(Duration::from_millis(timeout_ms)).await
             })
@@ -157,9 +157,9 @@ impl PyFakeGigeCamera {
 
     fn __exit__(
         &mut self,
-        _exc_type: PyObject,
-        _exc: PyObject,
-        _tb: PyObject,
+        _exc_type: Py<PyAny>,
+        _exc: Py<PyAny>,
+        _tb: Py<PyAny>,
     ) -> PyResult<bool> {
         self.stop();
         Ok(false)
@@ -175,12 +175,12 @@ impl PyFakeGigeCamera {
 }
 
 pub(crate) fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    let submodule = PyModule::new_bound(py, "testing")?;
+    let submodule = PyModule::new(py, "testing")?;
     submodule.add_class::<PyFakeGigeCamera>()?;
     parent.add_submodule(&submodule)?;
     // Without this, `from viva_genicam._native.testing import ...` fails
     // because Python only searches `sys.modules` for dotted imports.
-    py.import_bound("sys")?
+    py.import("sys")?
         .getattr("modules")?
         .set_item("viva_genicam._native.testing", submodule)?;
     Ok(())

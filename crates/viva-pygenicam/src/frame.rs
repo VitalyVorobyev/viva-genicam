@@ -70,7 +70,7 @@ impl PyFrame {
 
     /// Raw payload bytes (copies into a Python `bytes` object).
     fn payload<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, self.inner.payload.as_ref())
+        PyBytes::new(py, self.inner.payload.as_ref())
     }
 
     /// Convert to a NumPy array in the most natural shape for the pixel format.
@@ -88,7 +88,7 @@ impl PyFrame {
         match self.inner.pixel_format {
             PixelFormat::Mono8 => {
                 expect_len(payload.len(), h * w, "Mono8")?;
-                let arr = PyArray1::<u8>::from_slice_bound(py, payload).reshape([h, w])?;
+                let arr = PyArray1::<u8>::from_slice(py, payload).reshape([h, w])?;
                 Ok(arr.into_any())
             }
             PixelFormat::Mono16 => {
@@ -97,12 +97,12 @@ impl PyFrame {
                     .chunks_exact(2)
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect();
-                let arr = PyArray1::<u16>::from_vec_bound(py, u16_vec).reshape([h, w])?;
+                let arr = PyArray1::<u16>::from_vec(py, u16_vec).reshape([h, w])?;
                 Ok(arr.into_any())
             }
             PixelFormat::RGB8Packed => {
                 expect_len(payload.len(), h * w * 3, "RGB8")?;
-                let arr = PyArray1::<u8>::from_slice_bound(py, payload).reshape([h, w, 3])?;
+                let arr = PyArray1::<u8>::from_slice(py, payload).reshape([h, w, 3])?;
                 Ok(arr.into_any())
             }
             PixelFormat::BGR8Packed
@@ -111,11 +111,11 @@ impl PyFrame {
             | PixelFormat::BayerBG8
             | PixelFormat::BayerGR8 => {
                 let rgb = self.inner.to_rgb8().into_py_err()?;
-                let arr = PyArray1::<u8>::from_vec_bound(py, rgb).reshape([h, w, 3])?;
+                let arr = PyArray1::<u8>::from_vec(py, rgb).reshape([h, w, 3])?;
                 Ok(arr.into_any())
             }
             _ => {
-                let arr = PyArray1::<u8>::from_slice_bound(py, payload);
+                let arr = PyArray1::<u8>::from_slice(py, payload);
                 Ok(arr.into_any())
             }
         }
@@ -126,7 +126,7 @@ impl PyFrame {
         let h = self.inner.height as usize;
         let w = self.inner.width as usize;
         let rgb = self.inner.to_rgb8().into_py_err()?;
-        let arr = PyArray1::<u8>::from_vec_bound(py, rgb).reshape([h, w, 3])?;
+        let arr = PyArray1::<u8>::from_vec(py, rgb).reshape([h, w, 3])?;
         Ok(arr)
     }
 

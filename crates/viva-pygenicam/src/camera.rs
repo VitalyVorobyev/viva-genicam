@@ -84,7 +84,7 @@ fn connect_gige(
     };
     let info = device_info.inner.clone();
     let (camera, xml) = py
-        .allow_threads(|| runtime().block_on(async move { connect_gige_with_xml(&info).await }))
+        .detach(|| runtime().block_on(async move { connect_gige_with_xml(&info).await }))
         .into_py_err()?;
     Ok(PyCamera {
         inner: CameraInner::Gige {
@@ -100,7 +100,7 @@ fn connect_gige(
 fn connect_u3v(py: Python<'_>, device_info: PyU3vDeviceInfo) -> PyResult<PyCamera> {
     let info = device_info.inner.clone();
     let (camera, xml) = py
-        .allow_threads(|| connect_u3v_with_xml(&info))
+        .detach(|| connect_u3v_with_xml(&info))
         .into_py_err()?;
     Ok(PyCamera {
         inner: CameraInner::U3v {
@@ -132,7 +132,7 @@ impl PyCamera {
     }
 
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<String> {
-        py.allow_threads(|| match &self.inner {
+        py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let g = camera.lock().map_err(|_| parse_error("camera mutex poisoned"))?;
                 g.get(name).into_py_err()
@@ -145,7 +145,7 @@ impl PyCamera {
     }
 
     fn set(&self, py: Python<'_>, name: &str, value: &str) -> PyResult<()> {
-        py.allow_threads(|| match &self.inner {
+        py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera.lock().map_err(|_| parse_error("camera mutex poisoned"))?;
                 g.set(name, value).into_py_err()
@@ -158,7 +158,7 @@ impl PyCamera {
     }
 
     fn set_exposure_time_us(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        py.allow_threads(|| match &self.inner {
+        py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera.lock().map_err(|_| parse_error("camera mutex poisoned"))?;
                 g.set_exposure_time_us(value).into_py_err()
@@ -171,7 +171,7 @@ impl PyCamera {
     }
 
     fn set_gain_db(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        py.allow_threads(|| match &self.inner {
+        py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera.lock().map_err(|_| parse_error("camera mutex poisoned"))?;
                 g.set_gain_db(value).into_py_err()
@@ -184,7 +184,7 @@ impl PyCamera {
     }
 
     fn acquisition_start(&self, py: Python<'_>) -> PyResult<()> {
-        py.allow_threads(|| match &self.inner {
+        py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera.lock().map_err(|_| parse_error("camera mutex poisoned"))?;
                 g.acquisition_start().into_py_err()
@@ -197,7 +197,7 @@ impl PyCamera {
     }
 
     fn acquisition_stop(&self, py: Python<'_>) -> PyResult<()> {
-        py.allow_threads(|| match &self.inner {
+        py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera.lock().map_err(|_| parse_error("camera mutex poisoned"))?;
                 g.acquisition_stop().into_py_err()

@@ -89,5 +89,5 @@ async fn main() {
         .expect("failed to listen for Ctrl+C");
 
     eprintln!("\nShutting down...");
-    camera.stop();
+    camera.stop().await;
 }

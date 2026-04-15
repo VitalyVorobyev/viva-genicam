@@ -52,8 +52,8 @@ impl TestCamera {
 
 impl Drop for TestCamera {
     fn drop(&mut self) {
-        if let Some(camera) = self.camera.take() {
-            camera.stop();
-        }
+        // `FakeCamera::stop` is async; from a sync Drop we rely on
+        // `FakeCamera`'s own Drop impl to abort the tasks best-effort.
+        self.camera.take();
     }
 }

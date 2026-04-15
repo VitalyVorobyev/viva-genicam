@@ -17,5 +17,5 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", 
 bytes = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-socket2 = { workspace = true }
+socket2 = { workspace = true, features = ["all"] }
 clap = { workspace = true }

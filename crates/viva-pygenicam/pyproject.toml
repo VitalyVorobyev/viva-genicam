@@ -1,0 +1,48 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "viva-genicam"
+version = "0.2.5"
+description = "Pure-Rust GenICam stack for Python: discover, control, and stream GigE Vision / USB3 Vision cameras"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Vitaly Vorobyev" },
+]
+requires-python = ">=3.9"
+keywords = ["genicam", "gige", "usb3-vision", "camera", "vision"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Graphics :: Capture",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "maturin>=1.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/VitalyVorobyev/viva-genicam"
+Repository = "https://github.com/VitalyVorobyev/viva-genicam"
+Documentation = "https://vitalyvorobyev.github.io/viva-genicam/"
+
+[tool.maturin]
+module-name = "viva_genicam._native"
+python-source = "python"
+features = ["pyo3/extension-module"]

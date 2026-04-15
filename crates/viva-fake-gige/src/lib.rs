@@ -24,7 +24,7 @@
 //! // Use viva_genicam::gige::discover() to find it.
 //!
 //! // When done:
-//! camera.stop();
+//! camera.stop().await;
 //! # }
 //! ```
 
@@ -119,11 +119,16 @@ impl FakeCameraBuilder {
         let acq_start = Arc::new(Notify::new());
         let acq_stop_flag = Arc::new(AtomicBool::new(false));
 
-        // Bind GVCP control socket with SO_REUSEADDR to avoid TIME_WAIT issues.
+        // Bind GVCP control socket. On macOS `SO_REUSEADDR` is a no-op for UDP,
+        // so also set `SO_REUSEPORT` to let a fresh socket rebind the port while
+        // the previous camera's tokio task is still shutting down (matters for
+        // back-to-back module-scoped pytest fixtures).
         let bind_addr: std::net::SocketAddr =
             format!("{}:{}", self.bind_ip, self.port).parse().unwrap();
         let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         sock.set_reuse_address(true)?;
+        #[cfg(unix)]
+        sock.set_reuse_port(true)?;
         sock.set_nonblocking(true)?;
         sock.bind(&bind_addr.into())?;
         let std_sock: std::net::UdpSocket = sock.into();
@@ -155,8 +160,8 @@ impl FakeCameraBuilder {
         };
 
         Ok(FakeCamera {
-            gvcp_handle,
-            gvsp_handle,
+            gvcp_handle: Some(gvcp_handle),
+            gvsp_handle: Some(gvsp_handle),
             _regs: regs,
             local_addr,
         })
@@ -168,8 +173,8 @@ impl FakeCameraBuilder {
 /// The camera runs as background tokio tasks. Call [`stop`](FakeCamera::stop) or
 /// drop the handle to shut down the camera.
 pub struct FakeCamera {
-    gvcp_handle: JoinHandle<()>,
-    gvsp_handle: JoinHandle<()>,
+    gvcp_handle: Option<JoinHandle<()>>,
+    gvsp_handle: Option<JoinHandle<()>>,
     _regs: Arc<Mutex<registers::RegisterMap>>,
     local_addr: std::net::SocketAddr,
 }
@@ -195,16 +200,33 @@ impl FakeCamera {
         self.local_addr.port()
     }
 
-    /// Stop the fake camera by aborting its background tasks.
-    pub fn stop(self) {
-        self.gvcp_handle.abort();
-        self.gvsp_handle.abort();
+    /// Stop the fake camera and wait for its background tasks to exit.
+    ///
+    /// Awaiting the `JoinHandle`s after `abort()` ensures the tokio tasks have
+    /// dropped their `Arc<UdpSocket>` clones and the GVCP port is actually
+    /// released before the call returns — otherwise a subsequent rebind on
+    /// the same port can hit `EADDRINUSE`.
+    pub async fn stop(mut self) {
+        if let Some(h) = self.gvcp_handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
+        if let Some(h) = self.gvsp_handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
     }
 }
 
 impl Drop for FakeCamera {
+    /// Best-effort cleanup when the handle is dropped without calling `stop`.
+    /// Does not wait for tasks to exit — use `stop().await` for that.
     fn drop(&mut self) {
-        self.gvcp_handle.abort();
-        self.gvsp_handle.abort();
+        if let Some(h) = self.gvcp_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.gvsp_handle.take() {
+            h.abort();
+        }
     }
 }

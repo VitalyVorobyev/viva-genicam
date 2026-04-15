@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-04-15
+
+### Changed
+
+- **PyO3 / NumPy 0.22 → 0.28** -- port the Python bindings to current PyO3: drop `_bound`-suffixed constructors (`PyDict::new_bound`, `PyBytes::new_bound`, `PyArray1::from_slice_bound`, `PyModule::new_bound`, `py.import_bound`, `py.get_type_bound`, `from_vec_bound`, `empty_bound`), migrate `Python::allow_threads` to `Python::detach`, replace the removed `PyObject` type alias with `Py<PyAny>`, opt in to `FromPyObject` on `Clone + pyclass` types explicitly, handle `PyList::new`'s new `PyResult` return type. Wheel rebuilds cleanly with zero warnings.
+
+### Fixed
+
+- **Logo renders identically on every platform** -- the SVG at the top of the README loaded Nunito Black and Fira Code from Google Fonts via `@import`, which GitHub's SVG sanitizer strips. On Windows the fallback font shifted "viva" so it overlapped "genicam" and misplaced the red dot. Flatten all text to SVG paths (instanced the variable Nunito font at weight 900) so the logo is font-independent, and re-center the dot over the dotless `ı`.
+- **EADDRINUSE race in the fake GigE camera** -- `FakeCamera::stop` used to fire `JoinHandle::abort()` and return immediately; the tokio task still held an `Arc<UdpSocket>` clone briefly, so rebinding the same port back-to-back (e.g. between module-scoped pytest fixtures) intermittently failed on macOS-14 / Python 3.9. `stop` is now `async` and awaits both join handles after aborting; the Python binding drives it via the shared runtime. Also set `SO_REUSEPORT` on the GVCP socket as defense-in-depth since `SO_REUSEADDR` is a UDP no-op on macOS.
+- **CI build failure for `viva-fake-gige`** -- `socket2::set_reuse_port` sits behind socket2's `all` feature; local builds picked it up via transitive feature unification with `viva-gige`, but clean CI builds that don't pull in `viva-gige` failed with `no method set_reuse_port found`. Enable `socket2 = { features = ["all"] }` on `viva-fake-gige` directly.
+
+### Added
+
+- **`CLAUDE.md` pre-push checklist** -- document the three local gates CI runs with warnings-as-errors (`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo doc --workspace --all-features --no-deps`) and the version-bump procedure (root `Cargo.toml`, `viva-pygenicam/Cargo.toml`, `viva-pygenicam/pyproject.toml`, `CHANGELOG.md`). Also require verifying the latest crate version on crates.io before any dependency bump.
+
+## [0.2.4] - 2026-04-13
+
+### Added
+
+- **Python bindings (`viva-genicam` on PyPI)** -- new `crates/viva-pygenicam` PyO3 crate plus pure-Python facade in `python/viva_genicam/`. Ships as an abi3 wheel covering discovery, control, introspection, and streaming for both GigE Vision and USB3 Vision cameras. Frames expose a NumPy-friendly `to_numpy()` / `to_rgb8()` API, streams are sync iterators over a managed Tokio runtime (no asyncio required), errors map onto a `GenicamError` subclass hierarchy, and `py.typed` + `.pyi` stubs give IDEs full completion. Fake-camera pytest suite (19 tests) runs against the built wheel.
+- **Python wheels CI (`.github/workflows/python.yml`)** -- cross-platform wheel matrix (Linux x86_64, macOS arm64, Windows x86_64) × Python 3.9–3.13; libusb is statically vendored into the extension so no system libusb is required by the wheel. Publishes to PyPI via OIDC on `py-v*` tags. Test install uses `pip --no-index --find-links dist` so CI never falls back to a published PyPI wheel while validating the just-built artifact.
+- **Auto-detected GigE streaming interface** -- `camera.stream()` now picks the NIC whose IPv4 subnet contains the camera's IP when `iface` is omitted; loopback cameras resolve to `lo`/`lo0` automatically. An explicit `iface=` override remains available on both `connect_gige` and `stream`.
+- **`book/src/python.md`** -- Python API tutorial chapter; README gains a Python section.
+- **Python examples** -- `crates/viva-pygenicam/examples/` ships five runnable scripts (`discover.py`, `get_set_feature.py`, `node_browser.py`, `grab_frame.py`, `demo_fake_camera.py`) plus an `examples/README.md` that describes each.
+- **Expanded book tutorial** -- `book/src/python.md` becomes an index; five sibling pages under `book/src/python/` walk through install, discovery, control & introspection, streaming, and a full API reference.
+- **In-process fake camera (`viva_genicam.testing.FakeGigeCamera`)** -- the `viva-fake-gige` crate is now bound as a Python class shipped inside the wheel. `pip install viva-genicam` alone is enough to run the full demo end-to-end; no subprocess, no binary to build, no repo clone required. The `demo_fake_camera.py` example and `tests/conftest.py` were migrated onto the in-process path.
+
+### Changed
+
+- Root `Cargo.toml` gains `workspace.exclude = ["crates/viva-pygenicam"]` so PyO3/maturin stays out of the default `cargo test --workspace` path.
+
 ## [0.2.3] - 2026-04-12
 
 ### Added
@@ -113,6 +145,8 @@ Initial public release of the viva-genicam workspace.
 - `viva-fake-gige` -- In-process fake GigE Vision camera for self-contained integration testing (no external dependencies required)
 - `viva-fake-u3v` -- In-process fake USB3 Vision camera for testing
 
+[0.2.5]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.5
+[0.2.4]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.4
 [0.2.3]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.3
 [0.2.2]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.2
 [0.2.1]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.2.1

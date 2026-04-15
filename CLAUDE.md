@@ -172,6 +172,29 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 - Both crates compile for `wasm32-unknown-unknown`
 - `fetch_and_load_xml` is behind the `fetch` feature flag (default on)
 
+## Version Bumps
+
+A single release version is shared by all workspace crates plus the
+Python package. When cutting a new version, update all four touch-
+points together:
+
+1. `Cargo.toml` — `[workspace.package] version` (picked up by every
+   crate that uses `version.workspace = true`).
+2. `crates/viva-pygenicam/Cargo.toml` — `[package] version` (this
+   crate does not inherit from the workspace so it must be bumped
+   explicitly).
+3. `crates/viva-pygenicam/pyproject.toml` — `[project] version`
+   (this is what PyPI reads).
+4. `crates/viva-pygenicam/python/viva_genicam/__init__.py` —
+   `__version__ = "X.Y.Z"` (what `viva_genicam.__version__` returns
+   at runtime).
+5. `CHANGELOG.md` — new `## [X.Y.Z] - YYYY-MM-DD` entry plus a link
+   line in the footer. Follow Keep a Changelog categories (Added /
+   Changed / Fixed / etc.).
+
+A missed file will either break the wheel build (mismatched crate
+vs pyproject version) or publish with the wrong metadata.
+
 ## Dependency Upgrades
 
 Before bumping a crate's version in any `Cargo.toml`, always check crates.io for the latest

@@ -1,6 +1,6 @@
 [package]
 name = "viva-pygenicam"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 license = "MIT"
 description = "Python bindings for viva-genicam: GenICam camera discovery, control, and streaming"

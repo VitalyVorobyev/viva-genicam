@@ -103,8 +103,14 @@ impl PyFakeGigeCamera {
     }
 
     /// Abort the background tasks and release the sockets.
-    fn stop(&mut self) {
-        self.handle.take();
+    ///
+    /// Blocks until the tokio tasks have actually exited so the GVCP port
+    /// is released by the time this returns; otherwise a quick back-to-back
+    /// `start()` on the same port can hit `EADDRINUSE`.
+    fn stop(&mut self, py: Python<'_>) {
+        if let Some(cam) = self.handle.take() {
+            py.detach(|| runtime().block_on(cam.stop()));
+        }
     }
 
     /// IP the GVCP socket is bound to.
@@ -157,11 +163,12 @@ impl PyFakeGigeCamera {
 
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Py<PyAny>,
         _exc: Py<PyAny>,
         _tb: Py<PyAny>,
     ) -> PyResult<bool> {
-        self.stop();
+        self.stop(py);
         Ok(false)
     }
 

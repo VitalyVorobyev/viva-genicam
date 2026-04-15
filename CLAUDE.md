@@ -41,6 +41,22 @@ cargo run -p viva-service -- --iface en0
 cargo run -p viva-camctl -- list
 ```
 
+## Pre-Push Checklist
+
+Before pushing to a remote branch, always run these three gates locally
+— CI runs them with warnings-as-errors and will reject any failure:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo doc --workspace --all-features --no-deps
+```
+
+Transitive feature unification can mask breakage locally (a workspace
+sibling may already pull a crate in with extra features), so clippy
+and doc on a clean checkout matter — don't rely only on "it built on
+my machine".
+
 ## Architecture
 
 **Layered design (bottom to top):**

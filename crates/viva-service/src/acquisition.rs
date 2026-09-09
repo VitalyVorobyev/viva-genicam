@@ -289,8 +289,8 @@ async fn frame_loop(
                             warn!(
                                 device_id,
                                 pixel_format = %frame.pixel_format,
-                                "pixel format has no whole-byte pixel size; publishing \
-                                 frames unmodified and without a length check"
+                                "payload cannot be sized from image geometry; publishing \
+                                 it unmodified and without a length check"
                             );
                             logged_unsized_format = true;
                         }

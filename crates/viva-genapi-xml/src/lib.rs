@@ -885,26 +885,26 @@ pub fn parse_into_minimal_nodes(xml: &str) -> Result<MinimalXmlInfo, XmlError> {
 }
 
 /// `true` for tags this parser turns into one or more [`NodeDecl`]s.
-fn is_node_tag(tag: &[u8]) -> bool {
+fn is_node_tag(tag: &str) -> bool {
     matches!(
         tag,
-        b"Integer"
-            | b"IntReg"
-            | b"MaskedIntReg"
-            | b"IntSwissKnife"
-            | b"SwissKnife"
-            | b"Float"
-            | b"FloatReg"
-            | b"Enumeration"
-            | b"Boolean"
-            | b"Command"
-            | b"Category"
-            | b"Converter"
-            | b"IntConverter"
-            | b"Register"
-            | b"StringReg"
-            | b"String"
-            | b"StructReg"
+        "Integer"
+            | "IntReg"
+            | "MaskedIntReg"
+            | "IntSwissKnife"
+            | "SwissKnife"
+            | "Float"
+            | "FloatReg"
+            | "Enumeration"
+            | "Boolean"
+            | "Command"
+            | "Category"
+            | "Converter"
+            | "IntConverter"
+            | "Register"
+            | "StringReg"
+            | "String"
+            | "StructReg"
     )
 }
 
@@ -917,11 +917,11 @@ fn is_node_tag(tag: &[u8]) -> bool {
 /// `skip_element` and vanished — no log line, no [`XmlModel::skipped`] entry,
 /// nothing for a corpus test to trip over. `<Register>`, 56 declarations
 /// across 14 corpus documents, disappeared exactly this way.
-fn unknown_node(tag: &[u8], start: &BytesStart<'_>) -> Result<Option<SkippedNode>, XmlError> {
-    let Some(name) = attribute_value(start, b"Name")? else {
+fn unknown_node(tag: &str, start: &BytesStart<'_>) -> Result<Option<SkippedNode>, XmlError> {
+    let Some(name) = attribute_value(start, "Name")? else {
         return Ok(None);
     };
-    let tag = String::from_utf8_lossy(tag).into_owned();
+    let tag = tag.to_owned();
     tracing::warn!(
         tag = %tag,
         node = %name,
@@ -940,25 +940,22 @@ fn parse_node(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<Vec<NodeDecl>, XmlError> {
-    let tag = start.name().as_ref().to_vec();
-    let node = match tag.as_slice() {
-        b"Integer" | b"IntReg" | b"MaskedIntReg" => parse_integer(reader, start)?,
-        b"IntSwissKnife" | b"SwissKnife" => parse_swissknife(reader, start)?,
-        b"Float" | b"FloatReg" => parse_float(reader, start)?,
-        b"Enumeration" => parse_enum(reader, start)?,
-        b"Boolean" => parse_boolean(reader, start)?,
-        b"Command" => parse_command(reader, start)?,
-        b"Category" => parse_category(reader, start)?,
-        b"Converter" => parse_converter(reader, start)?,
-        b"IntConverter" => parse_int_converter(reader, start)?,
-        b"Register" => parse_register(reader, start)?,
-        b"StringReg" | b"String" => parse_string(reader, start)?,
-        b"StructReg" => return parse_struct_reg(reader, start),
+    let tag = start.name().as_ref().to_string();
+    let node = match tag.as_str() {
+        "Integer" | "IntReg" | "MaskedIntReg" => parse_integer(reader, start)?,
+        "IntSwissKnife" | "SwissKnife" => parse_swissknife(reader, start)?,
+        "Float" | "FloatReg" => parse_float(reader, start)?,
+        "Enumeration" => parse_enum(reader, start)?,
+        "Boolean" => parse_boolean(reader, start)?,
+        "Command" => parse_command(reader, start)?,
+        "Category" => parse_category(reader, start)?,
+        "Converter" => parse_converter(reader, start)?,
+        "IntConverter" => parse_int_converter(reader, start)?,
+        "Register" => parse_register(reader, start)?,
+        "StringReg" | "String" => parse_string(reader, start)?,
+        "StructReg" => return parse_struct_reg(reader, start),
         other => {
-            return Err(XmlError::Invalid(format!(
-                "not a node element: {}",
-                String::from_utf8_lossy(other)
-            )));
+            return Err(XmlError::Invalid(format!("not a node element: {other}")));
         }
     };
     Ok(vec![node])
@@ -1018,20 +1015,20 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
         let element_start = reader.buffer_position() as usize;
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"RegisterDescription" => {
+                "RegisterDescription" => {
                     version = schema_version_from(e)?;
                 }
-                b"Group" => {
+                "Group" => {
                     // Group is a transparent container wrapping feature nodes;
                     // let child events surface in the next loop iterations.
                 }
-                b"Port" => {
+                "Port" => {
                     // Port nodes are transport-level abstractions; skip them.
                     skip_element(&mut reader, e.name().as_ref())?;
                 }
                 tag if is_node_tag(tag) => {
-                    let tag = tag.to_vec();
-                    let name = attribute_value(e, b"Name")?;
+                    let tag = tag.to_owned();
+                    let name = attribute_value(e, "Name")?;
                     // Consume the element up front: whatever the node parser
                     // makes of it, the document reader stays in step.
                     reader
@@ -1055,7 +1052,6 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     match element.and_then(parse_isolated_node) {
                         Ok(parsed) => nodes.extend(parsed),
                         Err(err) => {
-                            let tag = String::from_utf8_lossy(&tag).into_owned();
                             tracing::warn!(
                                 tag = %tag,
                                 node = name.as_deref().unwrap_or("<unnamed>"),
@@ -1079,20 +1075,20 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
-                b"RegisterDescription" => {
+                "RegisterDescription" => {
                     version = schema_version_from(e)?;
                 }
-                b"Command" => {
+                "Command" => {
                     let node = parse_command_empty(e)?;
                     nodes.push(node);
                 }
-                b"Category" => {
+                "Category" => {
                     let node = parse_category_empty(e)?;
                     nodes.push(node);
                 }
                 // Same transport-level abstraction the Start arm skips; four
                 // corpus documents declare it as `<Port Name="Device"/>`.
-                b"Port" => {}
+                "Port" => {}
                 tag => {
                     if let Some(record) = unknown_node(tag, e)? {
                         skipped.push(record);
@@ -1122,9 +1118,9 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
 }
 
 fn schema_version_from(event: &BytesStart<'_>) -> Result<String, XmlError> {
-    let major = attribute_value(event, b"SchemaMajorVersion")?;
-    let minor = attribute_value(event, b"SchemaMinorVersion")?;
-    let sub = attribute_value(event, b"SchemaSubMinorVersion")?;
+    let major = attribute_value(event, "SchemaMajorVersion")?;
+    let minor = attribute_value(event, "SchemaMinorVersion")?;
+    let sub = attribute_value(event, "SchemaSubMinorVersion")?;
     let major = major.unwrap_or_else(|| "0".to_string());
     let minor = minor.unwrap_or_else(|| "0".to_string());
     let sub = sub.unwrap_or_else(|| "0".to_string());
@@ -1140,19 +1136,19 @@ fn handle_start(
     if depth == 1 && schema_version.is_none() {
         *schema_version = extract_schema_version(event);
     } else if depth == 2 {
-        if let Some(name) = attribute_value(event, b"Name")? {
+        if let Some(name) = attribute_value(event, "Name")? {
             top_level.push(name);
         } else {
-            top_level.push(String::from_utf8_lossy(event.name().as_ref()).to_string());
+            top_level.push(event.name().as_ref().to_string());
         }
     }
     Ok(())
 }
 
 fn extract_schema_version(event: &BytesStart<'_>) -> Option<String> {
-    let major = attribute_value(event, b"SchemaMajorVersion").ok().flatten();
-    let minor = attribute_value(event, b"SchemaMinorVersion").ok().flatten();
-    let sub = attribute_value(event, b"SchemaSubMinorVersion")
+    let major = attribute_value(event, "SchemaMajorVersion").ok().flatten();
+    let minor = attribute_value(event, "SchemaMinorVersion").ok().flatten();
+    let sub = attribute_value(event, "SchemaSubMinorVersion")
         .ok()
         .flatten();
     if major.is_none() && minor.is_none() && sub.is_none() {

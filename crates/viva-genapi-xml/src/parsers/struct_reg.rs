@@ -33,13 +33,13 @@ pub fn parse_struct_reg(
     let mut byte_order = ByteOrder::Little;
     let mut sign = Sign::default();
     let mut entries = Vec::new();
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"Address" => {
+                "Address" => {
                     let text = read_text_start(reader, e)?;
                     terms.push(AddressTerm::Fixed(parse_u64(&text)?));
                 }
@@ -61,27 +61,27 @@ pub fn parse_struct_reg(
                         });
                     }
                 }
-                b"Length" => {
+                "Length" => {
                     let text = read_text_start(reader, e)?;
                     length = parse_u64(&text)? as u32;
                 }
-                b"AccessMode" => {
+                "AccessMode" => {
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
-                b"Sign" => {
+                "Sign" => {
                     let text = read_text_start(reader, e)?;
                     if let Some(parsed) = Sign::parse(&text) {
                         sign = parsed;
                     }
                 }
-                b"Endianness" | b"Endianess" => {
+                "Endianness" | "Endianess" => {
                     let text = read_text_start(reader, e)?;
                     if let Some(order) = ByteOrder::parse(&text) {
                         byte_order = order;
                     }
                 }
-                b"StructEntry" => {
+                "StructEntry" => {
                     let entry = parse_struct_entry(reader, e.clone(), byte_order)?;
                     entries.push(entry);
                 }
@@ -89,7 +89,7 @@ pub fn parse_struct_reg(
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 TAG_P_ADDRESS => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
+                    if let Some(value) = attribute_value(e, "Name")? {
                         let trimmed = value.trim();
                         if !trimmed.is_empty() {
                             terms.push(AddressTerm::Node(trimmed.to_string()));
@@ -97,7 +97,7 @@ pub fn parse_struct_reg(
                     }
                 }
                 TAG_P_INDEX => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
+                    if let Some(value) = attribute_value(e, "Name")? {
                         let trimmed = value.trim();
                         if !trimmed.is_empty() {
                             terms.push(AddressTerm::Index {
@@ -109,7 +109,7 @@ pub fn parse_struct_reg(
                 }
                 _ => {}
             },
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid("unterminated StructReg".into()));
             }
@@ -195,40 +195,40 @@ fn parse_struct_entry(
     start: BytesStart<'_>,
     default_byte_order: ByteOrder,
 ) -> Result<StructEntryData, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
+    let name = attribute_value_required(&start, "Name")?;
     let mut lsb: Option<u16> = None;
     let mut msb: Option<u16> = None;
     let mut bit: Option<u16> = None;
     let mut access: Option<AccessMode> = None;
     let mut sign: Option<Sign> = None;
     let mut byte_order = default_byte_order;
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"LSB" | b"Lsb" => {
+                "LSB" | "Lsb" => {
                     let text = read_text_start(reader, e)?;
                     lsb = Some(parse_u64(&text)? as u16);
                 }
-                b"MSB" | b"Msb" => {
+                "MSB" | "Msb" => {
                     let text = read_text_start(reader, e)?;
                     msb = Some(parse_u64(&text)? as u16);
                 }
-                b"Bit" => {
+                "Bit" => {
                     let text = read_text_start(reader, e)?;
                     bit = Some(parse_u64(&text)? as u16);
                 }
-                b"AccessMode" => {
+                "AccessMode" => {
                     let text = read_text_start(reader, e)?;
                     access = Some(AccessMode::parse(&text)?);
                 }
-                b"Sign" => {
+                "Sign" => {
                     let text = read_text_start(reader, e)?;
                     sign = Sign::parse(&text);
                 }
-                b"Endianness" | b"Endianess" => {
+                "Endianness" | "Endianess" => {
                     let text = read_text_start(reader, e)?;
                     if let Some(order) = ByteOrder::parse(&text) {
                         byte_order = order;
@@ -236,7 +236,7 @@ fn parse_struct_entry(
                 }
                 _ => skip_element(reader, e.name().as_ref())?,
             },
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated StructEntry {name}"

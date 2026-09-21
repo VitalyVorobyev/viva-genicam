@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An eight-byte register declared `<Sign>Unsigned</Sign>` could not be read at
+  all** once its top bit was set — `node <name> holds an unsigned 64-bit value
+  larger than i64::MAX`. Reported on two vendors' cameras by two people: a
+  Vieworks FS3200T ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112),
+  62 failing timestamp reads in an attached log) and a FLIR Blackfly
+  ([#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140), a PTP
+  offset failing whenever it went negative). The value is now reinterpreted as
+  two's complement instead of refused, which is lossless at the bit level and
+  round-trips through the encoder. GenApi's `IInteger` *is* an `int64` (GenICam
+  v2.1.1 §2.4), so there is nowhere else to put it; see
+  [ADR-0022](docs/adrs/adr0022-integer-register-decoding.md) for why this
+  knowingly accepts XML the specification says cannot exist. The vendor corpus
+  holds **196 such registers across 22 of its 38 documents**, overwhelmingly
+  `*Timestamp*` and `Chunk*`. Neither reporter has confirmed the fix on their own
+  hardware yet.
+
+- **A plain `<IntReg>` declaring `<Endianess>LittleEndian</Endianess>` was
+  decoded big-endian anyway.** `NodeDecl::Integer` had no field for byte order,
+  and the parser routed the element only into the bitfield builder — which
+  discards it when no `<LSB>`, `<MSB>`, `<Bit>` or `<Mask>` creates a bitfield.
+  So on an *unmasked* register the declared order went nowhere. **311
+  declarations across 16 of the 38 corpus documents** are of that shape,
+  concentrated in Point Grey, FLIR, Basler, Hikrobot and Micro-Epsilon. Masked
+  registers were never affected.
+
+  **This was not reported; it was found while tracing the register above**, and
+  it changes reads *and* writes. `i64_to_bytes` had the same defect and validates
+  by round-tripping through the reader, so fixing one side alone would have
+  turned every little-endian write into a range error.
+
+- **Read this before upgrading.** Two consequences worth knowing about. A `u64`
+  register above `i64::MAX` — a PTP timestamp, typically — now reads as a large
+  negative number rather than an error; cast back with `as u64` if you want the
+  unsigned value. And because the byte-order fix moves reads and writes together,
+  an application that worked around the old behaviour on **one** side only will
+  now be self-inconsistent, while one that worked around both stays correct.
+
+- **The corpus test could not have caught either of them, and now can catch the
+  first.** Its `viva-genapi` stage evaluated every node against `NullIo`, which
+  answers reads with zeros — a byte swap of zero is still zero, and an unsigned
+  value's top bit is never set, so the weekly `Vendor XML Corpus` workflow passed
+  on 2026-08-31, 09-07 and 09-14 across a union of 448 wrong nodes. Each document
+  is now evaluated **twice**: once against `NullIo` and once against a test-local
+  stub returning a descending byte pattern that sets the top bit in either byte
+  order, where a conversion error counts as an engine defect. That second pass
+  fails on **373 nodes across 19 of the 38 documents** before this change and is
+  clean after. It still asserts no *values*, so a wrong-but-plausible number
+  would pass it; that is the rest of backlog `GA-11`.
+
 - **`cargo deny` was failing on `main`, and it was not the fault of the pull
   request whose CI reported it.** A refresh of `Cargo.lock` — 153 packages,
   `zenoh` 1.9.0 → 1.10.1 — clears two findings that had appeared since the last

@@ -631,6 +631,11 @@ pub enum NodeDecl {
         /// Whether the register payload is signed. Defaults to unsigned.
         #[serde(default)]
         sign: Sign,
+        /// Byte order of the register payload. Defaults to [`ByteOrder::Big`]
+        /// (the GenICam default). Recorded here as well as on `bitfield`,
+        /// because an unmasked register has no bitfield to carry it.
+        #[serde(default = "default_big_endian")]
+        byte_order: ByteOrder,
         /// Selector nodes referencing this feature.
         selectors: Vec<String>,
         /// Selector gating rules in the form (selector name, allowed values).
@@ -1829,6 +1834,99 @@ mod tests {
                 assert_eq!(bf.byte_order, ByteOrder::Little);
                 assert_eq!(bf.bit_length, 1);
                 assert_eq!(bf.bit_offset, 3);
+            }
+            other => panic!("unexpected node: {other:?}"),
+        }
+    }
+
+    /// GA-28: `<Endianess>` on a plain `<IntReg>` used to go only into the
+    /// bitfield builder, which discards it when nothing sets a bit range — so
+    /// 311 declarations across 16 of the 38 corpus documents decoded
+    /// byte-swapped. All three spellings the parser accepts are checked,
+    /// because vendors use all three.
+    #[test]
+    fn plain_integer_records_its_declared_byte_order() {
+        for tag in ["Endianess", "Endianness", "ByteOrder"] {
+            let xml = format!(
+                r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntReg Name="Reg">
+                    <Address>0x3000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <{tag}>LittleEndian</{tag}>
+                </IntReg>
+            </RegisterDescription>
+        "#
+            );
+
+            let model = parse(&xml).unwrap_or_else(|err| panic!("parse <{tag}>: {err}"));
+            match &model.nodes[0] {
+                NodeDecl::Integer {
+                    byte_order,
+                    bitfield,
+                    ..
+                } => {
+                    assert_eq!(*byte_order, ByteOrder::Little, "<{tag}>");
+                    // No <LSB>/<MSB>/<Bit>/<Mask>, so there is no bitfield to
+                    // have carried the order — which is the whole defect.
+                    assert!(bitfield.is_none(), "<{tag}>");
+                }
+                other => panic!("unexpected node: {other:?}"),
+            }
+        }
+    }
+
+    /// GenICam's default is big-endian, and a document that says nothing must
+    /// keep getting it.
+    #[test]
+    fn plain_integer_without_endianness_defaults_to_big() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntReg Name="Reg">
+                    <Address>0x3000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse");
+        match &model.nodes[0] {
+            NodeDecl::Integer { byte_order, .. } => assert_eq!(*byte_order, ByteOrder::Big),
+            other => panic!("unexpected node: {other:?}"),
+        }
+    }
+
+    /// Negative control. A masked register takes the bitfield path, which
+    /// already handled byte order and must keep doing so — the decl field is
+    /// recorded but not consulted. Asserting both stops a later refactor
+    /// quietly routing masked registers through the new path.
+    #[test]
+    fn masked_integer_keeps_the_bitfield_byte_order_path() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntReg Name="Reg">
+                    <Address>0x3000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <Endianess>LittleEndian</Endianess>
+                    <LSB>15</LSB>
+                    <MSB>0</MSB>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse");
+        match &model.nodes[0] {
+            NodeDecl::Integer {
+                byte_order,
+                bitfield,
+                ..
+            } => {
+                assert_eq!(*byte_order, ByteOrder::Little);
+                let field = bitfield.as_ref().expect("bitfield present");
+                assert_eq!(field.byte_order, ByteOrder::Little);
             }
             other => panic!("unexpected node: {other:?}"),
         }

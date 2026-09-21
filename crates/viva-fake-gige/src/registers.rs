@@ -41,6 +41,7 @@
 //! | `0x20060`   | 4      | GevTimestampTickFrequency (RO)  | u32 BE   |
 //! | `0x20068`   | 8      | GevTimestampValue (RO)          | u64 BE   |
 //! | `0x20070`   | 4      | TimestampLatch (command)        | u32 BE   |
+//! | `0x20078`   | 8      | GevIEEE1588OffsetFromMaster…    | u64 BE   |
 //! | `0x20080`   | 4      | ChunkModeActive                 | u32 BE   |
 //! | `0x20084`   | 4      | ChunkSelector                   | u32 BE   |
 //! | `0x20088`   | 4      | ChunkEnable                     | u32 BE   |
@@ -52,6 +53,8 @@
 //! | `0x20104`   | 4      | WidthMax (RO)                   | u32 BE   |
 //! | `0x20108`   | 4      | HeightMin (RO)                  | u32 BE   |
 //! | `0x2010c`   | 4      | HeightMax (RO)                  | u32 BE   |
+//! | `0x20110`   | 8      | ChunkTimestamp_Val (RO)         | u64 **LE** |
+//! | `0x20118`   | 4      | ChunkWidth_Val (RO)             | u32 **LE** |
 //! | `0x20200`   | 32     | DeviceModelName (RO)            | string   |
 //! | `0x20220`   | 32     | DeviceVendorName (RO)           | string   |
 //! | `0x20240`   | 16     | DeviceSerialNumber (RO)         | string   |
@@ -158,6 +161,37 @@ pub const REG_STREAM_CHANNEL_SELECTOR: u64 = 0x20090;
 pub const REG_TIMESTAMP_FREQ: u64 = 0x20060;
 pub const REG_TIMESTAMP_VALUE: u64 = 0x20068;
 pub const REG_TIMESTAMP_LATCH: u64 = 0x20070;
+
+/// A PTP offset-from-master, copied in shape from the FLIR BFS-PGE-31S4C-C
+/// description in the corpus (`<Length>8</Length>`, `<Sign>Unsigned</Sign>`,
+/// `<Endianess>BigEndian</Endianess>`). It is the node issue #140 was filed
+/// against, and it is declared unsigned although a clock offset is signed by
+/// nature — so its top bit is set whenever the slave leads the master. That
+/// combination is what made the node unreadable.
+pub const REG_PTP_OFFSET_LATCHED: u64 = 0x20078;
+
+/// Chunk value registers, declared **little-endian** exactly as FLIR, Point
+/// Grey and Hikrobot declare theirs. 311 plain `<IntReg>` declarations across
+/// 16 of the 38 corpus documents are of this shape; before GA-28 every one of
+/// them decoded byte-swapped, and nothing in the tree could notice.
+pub const REG_CHUNK_TIMESTAMP_LE: u64 = 0x20110;
+pub const REG_CHUNK_WIDTH_LE: u64 = 0x20118;
+
+/// Value latched into [`REG_PTP_OFFSET_LATCHED`]: the slave leading the master
+/// by 1 234 567 ns. Stored as the two's-complement bit pattern a camera would
+/// put on the wire, so the test asserts the bytes and the decoded value
+/// separately rather than round-tripping through our own codec.
+pub const PTP_OFFSET_NS: i64 = -1_234_567;
+
+/// Value latched into [`REG_CHUNK_TIMESTAMP_LE`]. Chosen so that reading it in
+/// the wrong byte order yields a plausible positive number
+/// (`0x7856_3412_0000_0000`) rather than an error — a byte-order defect that
+/// announces itself is not the one that shipped.
+pub const CHUNK_TIMESTAMP_TICKS: u64 = 0x0000_0000_1234_5678;
+
+/// Value latched into [`REG_CHUNK_WIDTH_LE`]. Most of the 311 are 4 bytes
+/// wide, so the common width gets its own node.
+pub const CHUNK_WIDTH_PX: u32 = 1440;
 
 /// Chunk data registers.
 pub const REG_CHUNK_MODE_ACTIVE: u64 = 0x20080;
@@ -311,6 +345,9 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>GevTimestampTickFrequency</pFeature>
     <pFeature>GevTimestampValue</pFeature>
     <pFeature>TimestampLatch</pFeature>
+    <pFeature>GevIEEE1588OffsetFromMasterLatched_Val</pFeature>
+    <pFeature>ChunkTimestamp_Val</pFeature>
+    <pFeature>ChunkWidth_Val</pFeature>
   </Category>
 
   <Category Name="ChunkDataControl">
@@ -716,6 +753,33 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
 
+  <IntReg Name="GevIEEE1588OffsetFromMasterLatched_Val" NameSpace="Custom">
+    <ToolTip>PTP offset from master in ns, latched</ToolTip>
+    <Address>0x20078</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </IntReg>
+
+  <IntReg Name="ChunkTimestamp_Val" NameSpace="Custom">
+    <ToolTip>Chunk timestamp in ticks</ToolTip>
+    <Address>0x20110</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+
+  <IntReg Name="ChunkWidth_Val" NameSpace="Custom">
+    <ToolTip>Chunk image width in pixels</ToolTip>
+    <Address>0x20118</Address>
+    <Length>4</Length>
+    <AccessMode>RO</AccessMode>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+
   <Command Name="TimestampLatch" NameSpace="Standard">
     <ToolTip>Latch the current timestamp into GevTimestampValue</ToolTip>
     <Address>0x20070</Address>
@@ -964,6 +1028,15 @@ impl RegisterMap {
         regs.insert(REG_TIMESTAMP_FREQ, 1_000_000_000u32.to_be_bytes().to_vec());
         regs.insert(REG_TIMESTAMP_VALUE, vec![0u8; 8]);
         regs.insert(REG_TIMESTAMP_LATCH, vec![0, 0, 0, 0]);
+        regs.insert(
+            REG_PTP_OFFSET_LATCHED,
+            (PTP_OFFSET_NS as u64).to_be_bytes().to_vec(),
+        );
+        regs.insert(
+            REG_CHUNK_TIMESTAMP_LE,
+            CHUNK_TIMESTAMP_TICKS.to_le_bytes().to_vec(),
+        );
+        regs.insert(REG_CHUNK_WIDTH_LE, CHUNK_WIDTH_PX.to_le_bytes().to_vec());
 
         // ── Chunk data ──────────────────────────────────────────────────
         regs.insert(REG_CHUNK_MODE_ACTIVE, 0u32.to_be_bytes().to_vec());

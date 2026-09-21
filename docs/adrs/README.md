@@ -33,6 +33,7 @@ of the record.
 | [0019](adr0019-transport-conformance-and-spec-derived-fakes.md) | Transport Conformance and Spec-Derived Fakes | Accepted |
 | [0020](adr0020-per-transport-status-codes.md) | Per-Transport Status Codes over a Shared Table | Proposed |
 | [0021](adr0021-gvsp-packet-size-policy.md) | GVSP Packet-Size Policy (Preserve, `--auto`, Explicit) | Accepted |
+| [0022](adr0022-integer-register-decoding.md) | Reinterpret Full-Width Unsigned Registers Rather Than Refuse Them | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

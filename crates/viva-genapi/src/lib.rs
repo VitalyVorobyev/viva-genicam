@@ -26,7 +26,7 @@ mod tests {
 
     use crate::conversions::{bytes_to_i64, i64_to_bytes};
     use crate::{AccessMode, GenApiError, NodeMap, RegisterIo, Visibility};
-    use viva_genapi_xml::Sign;
+    use viva_genapi_xml::{ByteOrder, Sign};
 
     const FIXTURE: &str = r#"
         <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="2" SchemaSubMinorVersion="3">
@@ -584,7 +584,7 @@ mod tests {
         let raw = 50_000i64;
         let io = MockIo::with_registers(&[(
             0x200,
-            i64_to_bytes("ExposureTime", raw, 4, Sign::Signed).unwrap(),
+            i64_to_bytes("ExposureTime", raw, 4, Sign::Signed, ByteOrder::Big).unwrap(),
         )]);
         let exposure = nodemap
             .get_float("ExposureTime", &io)
@@ -1008,7 +1008,7 @@ mod tests {
         let raw = 50_000i64; // 50 ms with 1/1000 scale
         let io = MockIo::with_registers(&[(
             0x200,
-            i64_to_bytes("ExposureTime", raw, 4, Sign::Signed).unwrap(),
+            i64_to_bytes("ExposureTime", raw, 4, Sign::Signed, ByteOrder::Big).unwrap(),
         )]);
         let exposure = nodemap
             .get_float("ExposureTime", &io)
@@ -1017,8 +1017,13 @@ mod tests {
         nodemap
             .set_float("ExposureTime", 75.0, &io)
             .expect("write exposure");
-        let raw_back =
-            bytes_to_i64("ExposureTime", &io.read(0x200, 4).unwrap(), Sign::Signed).unwrap();
+        let raw_back = bytes_to_i64(
+            "ExposureTime",
+            &io.read(0x200, 4).unwrap(),
+            Sign::Signed,
+            ByteOrder::Big,
+        )
+        .unwrap();
         assert_eq!(raw_back, 75_000);
     }
 
@@ -1028,10 +1033,16 @@ mod tests {
         let io = MockIo::with_registers(&[
             (
                 0x300,
-                i64_to_bytes("GainSelector", 0, 2, Sign::Signed).unwrap(),
+                i64_to_bytes("GainSelector", 0, 2, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
-            (0x310, i64_to_bytes("Gain", 10, 2, Sign::Signed).unwrap()),
-            (0x314, i64_to_bytes("Gain", 24, 2, Sign::Signed).unwrap()),
+            (
+                0x310,
+                i64_to_bytes("Gain", 10, 2, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x314,
+                i64_to_bytes("Gain", 24, 2, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
         ]);
 
         let gain_all = nodemap.get_integer("Gain", &io).expect("gain for All");
@@ -1039,8 +1050,11 @@ mod tests {
         assert_eq!(io.read_count(0x310), 1);
         assert_eq!(io.read_count(0x314), 0);
 
-        io.write(0x314, &i64_to_bytes("Gain", 32, 2, Sign::Signed).unwrap())
-            .expect("update red gain");
+        io.write(
+            0x314,
+            &i64_to_bytes("Gain", 32, 2, Sign::Signed, ByteOrder::Big).unwrap(),
+        )
+        .expect("update red gain");
         nodemap
             .set_enum("GainSelector", "Red", &io)
             .expect("set selector to red");
@@ -1073,8 +1087,11 @@ mod tests {
             "no read expected for missing mapping"
         );
 
-        io.write(0x310, &i64_to_bytes("Gain", 12, 2, Sign::Signed).unwrap())
-            .expect("update all gain");
+        io.write(
+            0x310,
+            &i64_to_bytes("Gain", 12, 2, Sign::Signed, ByteOrder::Big).unwrap(),
+        )
+        .expect("update all gain");
         nodemap
             .set_enum("GainSelector", "All", &io)
             .expect("restore selector to all");
@@ -1114,10 +1131,16 @@ mod tests {
         let io = MockIo::with_registers(&[
             (
                 0x2000,
-                i64_to_bytes("RegAddr", 0x3000, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegAddr", 0x3000, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
-            (0x3000, i64_to_bytes("Gain", 123, 4, Sign::Signed).unwrap()),
-            (0x3100, i64_to_bytes("Gain", 77, 4, Sign::Signed).unwrap()),
+            (
+                0x3000,
+                i64_to_bytes("Gain", 123, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x3100,
+                i64_to_bytes("Gain", 77, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
         ]);
 
         let initial = nodemap.get_integer("Gain", &io).expect("read gain");
@@ -1179,7 +1202,7 @@ mod tests {
         let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
         let io = MockIo::with_registers(&[(
             0x2000,
-            i64_to_bytes("RegAddr", -4, 4, Sign::Signed).unwrap(),
+            i64_to_bytes("RegAddr", -4, 4, Sign::Signed, ByteOrder::Big).unwrap(),
         )]);
 
         let err = nodemap.get_integer("Gain", &io).unwrap_err();
@@ -1267,7 +1290,7 @@ mod tests {
         let mut nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
         let io = MockIo::with_registers(&[(
             0x1000,
-            i64_to_bytes("ExposureTimeRaw", 5000, 4, Sign::Unsigned).unwrap(),
+            i64_to_bytes("ExposureTimeRaw", 5000, 4, Sign::Unsigned, ByteOrder::Big).unwrap(),
         )]);
 
         // Read goes through FormulaFrom: 5000 / 100.
@@ -1310,7 +1333,14 @@ mod tests {
         let mut nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
         let io = MockIo::with_registers(&[(
             0x1000,
-            i64_to_bytes("Binning_Reg", 0x0004_0002, 4, Sign::Unsigned).unwrap(),
+            i64_to_bytes(
+                "Binning_Reg",
+                0x0004_0002,
+                4,
+                Sign::Unsigned,
+                ByteOrder::Big,
+            )
+            .unwrap(),
         )]);
 
         assert_eq!(
@@ -1464,11 +1494,17 @@ mod tests {
         let io = MockIo::with_registers(&[
             (
                 0x2000,
-                i64_to_bytes("RegBase", 0x3000, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegBase", 0x3000, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
             // Only the summed address holds the value we expect.
-            (0x3008, i64_to_bytes("Gain", 77, 4, Sign::Signed).unwrap()),
-            (0x3000, i64_to_bytes("Gain", 11, 4, Sign::Signed).unwrap()),
+            (
+                0x3008,
+                i64_to_bytes("Gain", 77, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x3000,
+                i64_to_bytes("Gain", 11, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
         ]);
 
         assert_eq!(nodemap.get_integer("Gain", &io).expect("read gain"), 77);
@@ -1516,15 +1552,15 @@ mod tests {
         let io = MockIo::with_registers(&[
             (
                 0x2000,
-                i64_to_bytes("TriggerSelectorIdx", 2, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("TriggerSelectorIdx", 2, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
             (
                 0x13400,
-                i64_to_bytes("TriggerInqDelay", 1, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("TriggerInqDelay", 1, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
             (
                 0x13480,
-                i64_to_bytes("TriggerInqDelay", 42, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("TriggerInqDelay", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
         ]);
 
@@ -1552,10 +1588,13 @@ mod tests {
     fn enum_literal_entry_read() {
         let nodemap = build_enum_pvalue_nodemap();
         let io = MockIo::with_registers(&[
-            (0x4000, i64_to_bytes("Mode", 10, 4, Sign::Signed).unwrap()),
+            (
+                0x4000,
+                i64_to_bytes("Mode", 10, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
             (
                 0x4100,
-                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
         ]);
 
@@ -1572,10 +1611,13 @@ mod tests {
     fn enum_provider_entry_read() {
         let nodemap = build_enum_pvalue_nodemap();
         let io = MockIo::with_registers(&[
-            (0x4000, i64_to_bytes("Mode", 42, 4, Sign::Signed).unwrap()),
+            (
+                0x4000,
+                i64_to_bytes("Mode", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
             (
                 0x4100,
-                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
         ]);
 
@@ -1588,17 +1630,26 @@ mod tests {
     fn enum_set_uses_provider_value() {
         let mut nodemap = build_enum_pvalue_nodemap();
         let io = MockIo::with_registers(&[
-            (0x4000, i64_to_bytes("Mode", 0, 4, Sign::Signed).unwrap()),
+            (
+                0x4000,
+                i64_to_bytes("Mode", 0, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
             (
                 0x4100,
-                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
         ]);
 
         nodemap
             .set_enum("Mode", "DynFromReg", &io)
             .expect("write enum");
-        let raw = bytes_to_i64("Mode", &io.read(0x4000, 4).unwrap(), Sign::Signed).unwrap();
+        let raw = bytes_to_i64(
+            "Mode",
+            &io.read(0x4000, 4).unwrap(),
+            Sign::Signed,
+            ByteOrder::Big,
+        )
+        .unwrap();
         assert_eq!(raw, 42);
         assert_eq!(io.read_count(0x4100), 1);
     }
@@ -1607,10 +1658,13 @@ mod tests {
     fn enum_provider_update_invalidates_mapping() {
         let mut nodemap = build_enum_pvalue_nodemap();
         let io = MockIo::with_registers(&[
-            (0x4000, i64_to_bytes("Mode", 42, 4, Sign::Signed).unwrap()),
+            (
+                0x4000,
+                i64_to_bytes("Mode", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
             (
                 0x4100,
-                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
         ]);
 
@@ -1620,13 +1674,22 @@ mod tests {
         nodemap
             .set_integer("RegModeVal", 17, &io)
             .expect("update provider");
-        io.write(0x4000, &i64_to_bytes("Mode", 0, 4, Sign::Signed).unwrap())
-            .expect("reset mode register");
+        io.write(
+            0x4000,
+            &i64_to_bytes("Mode", 0, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+        )
+        .expect("reset mode register");
 
         nodemap
             .set_enum("Mode", "DynFromReg", &io)
             .expect("write enum after provider change");
-        let raw = bytes_to_i64("Mode", &io.read(0x4000, 4).unwrap(), Sign::Signed).unwrap();
+        let raw = bytes_to_i64(
+            "Mode",
+            &io.read(0x4000, 4).unwrap(),
+            Sign::Signed,
+            ByteOrder::Big,
+        )
+        .unwrap();
         assert_eq!(raw, 17);
     }
 
@@ -1634,10 +1697,13 @@ mod tests {
     fn enum_unknown_value_error() {
         let nodemap = build_enum_pvalue_nodemap();
         let io = MockIo::with_registers(&[
-            (0x4000, i64_to_bytes("Mode", 99, 4, Sign::Signed).unwrap()),
+            (
+                0x4000,
+                i64_to_bytes("Mode", 99, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
             (
                 0x4100,
-                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("RegModeVal", 42, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
         ]);
 
@@ -1737,10 +1803,16 @@ mod tests {
         let io = MockIo::with_registers(&[
             (
                 0x3000,
-                i64_to_bytes("GainRaw", 100, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("GainRaw", 100, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
-            (0x3008, i64_to_bytes("Offset", 3, 4, Sign::Signed).unwrap()),
-            (0x3010, i64_to_bytes("B", 1, 4, Sign::Signed).unwrap()),
+            (
+                0x3008,
+                i64_to_bytes("Offset", 3, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x3010,
+                i64_to_bytes("B", 1, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
         ]);
 
         let value = nodemap
@@ -1761,9 +1833,18 @@ mod tests {
     fn swissknife_integer_rounding_and_unary() {
         let mut nodemap = build_swissknife_nodemap();
         let io = MockIo::with_registers(&[
-            (0x3000, i64_to_bytes("GainRaw", 5, 4, Sign::Signed).unwrap()),
-            (0x3008, i64_to_bytes("Offset", 0, 4, Sign::Signed).unwrap()),
-            (0x3010, i64_to_bytes("B", 1, 4, Sign::Signed).unwrap()),
+            (
+                0x3000,
+                i64_to_bytes("GainRaw", 5, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x3008,
+                i64_to_bytes("Offset", 0, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x3010,
+                i64_to_bytes("B", 1, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
         ]);
 
         // `<IntSwissKnife>` evaluates in integer arithmetic, so 5 / 3 truncates
@@ -1849,10 +1930,16 @@ mod tests {
         let io = MockIo::with_registers(&[
             (
                 0x3000,
-                i64_to_bytes("GainRaw", 10, 4, Sign::Signed).unwrap(),
+                i64_to_bytes("GainRaw", 10, 4, Sign::Signed, ByteOrder::Big).unwrap(),
             ),
-            (0x3008, i64_to_bytes("Offset", 0, 4, Sign::Signed).unwrap()),
-            (0x3010, i64_to_bytes("B", 0, 4, Sign::Signed).unwrap()),
+            (
+                0x3008,
+                i64_to_bytes("Offset", 0, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
+            (
+                0x3010,
+                i64_to_bytes("B", 0, 4, Sign::Signed, ByteOrder::Big).unwrap(),
+            ),
         ]);
 
         let err = nodemap

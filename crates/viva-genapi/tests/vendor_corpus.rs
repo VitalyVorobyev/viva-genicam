@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use viva_genapi::{GenApiError, NodeMap, NullIo};
+use viva_genapi::{GenApiError, NodeMap, NullIo, RegisterIo};
 
 /// Default corpus location relative to the workspace root.
 const DEFAULT_CORPUS: &str = "fixtures/vendor-xml";
@@ -59,6 +59,84 @@ const EXPECTED_SKIP_REASONS: &[(&str, &str)] = &[
     // the other 42 are supported and must now build.
     ("Register", "<pLength>"),
 ];
+
+/// Nodes that legitimately fail under the [`PatternIo`] pass, as
+/// `(document, node name, required error substring)`.
+///
+/// Separate from [`EXPECTED_SKIPS`] on purpose: the pattern is a synthetic
+/// device state, so a node can fail under it for reasons that say nothing
+/// about the engine. An entry here is a statement that we looked and it is
+/// honest.
+const EXPECTED_PATTERN_DEFECTS: &[(&str, &str, &str)] = &[];
+
+/// A stub transport that answers every read with a descending byte pattern
+/// (`FF FE FD ...`).
+///
+/// [`NullIo`] returns zeros, and that is why this corpus test passed for three
+/// weekly runs while 448 plain `<IntReg>` nodes decoded wrong: a byte swap of
+/// zero is still zero, and an unsigned value's top bit is never set. A gate
+/// that cannot fail is not a gate (GA-11).
+///
+/// Descending rather than all-ones on purpose. All-ones is a palindrome, so it
+/// cannot distinguish a big-endian read from a little-endian one; this pattern
+/// sets the top bit in *either* byte order while staying asymmetric.
+///
+/// What this pass catches is a conversion that *refuses* a representable
+/// value. It does not catch a value that is merely wrong, because the corpus
+/// test asserts no values — nothing here knows what a register should hold.
+/// Per-document value expectations are the rest of GA-11, and they are what a
+/// byte-order regression would need.
+///
+/// Deliberately test-local rather than a sibling of `NullIo` in
+/// `viva-genapi/src/io.rs`: `NullIo`'s zero contract is public API that Viva
+/// Studio and the wasm build depend on for offline XML browsing, and a second,
+/// differently-behaved stub next to it invites the wrong one.
+struct PatternIo;
+
+impl RegisterIo for PatternIo {
+    fn read(&self, _addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+        Ok((0..len).map(|i| 0xFFu8.wrapping_sub(i as u8)).collect())
+    }
+
+    fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
+        Ok(())
+    }
+}
+
+/// Which stub a pass runs against, and how strict it is about `Parse`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Reads return zeros. `Parse` can be an honest outcome here — a zero
+    /// enum value with no matching entry, for instance.
+    Zeros,
+    /// Reads return a descending byte pattern, which sets the top bit of
+    /// every register in either byte order. `Parse` is a defect in this pass:
+    /// every value is representable, so a conversion that refuses one is ours.
+    Pattern,
+}
+
+impl Pass {
+    fn io(self) -> Box<dyn RegisterIo> {
+        match self {
+            Pass::Zeros => Box::new(NullIo),
+            Pass::Pattern => Box::new(PatternIo),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Pass::Zeros => "zeros",
+            Pass::Pattern => "pattern",
+        }
+    }
+
+    fn is_defect(self, err: &GenApiError) -> bool {
+        if is_engine_defect(err) {
+            return true;
+        }
+        self == Pass::Pattern && matches!(err, GenApiError::Parse(_))
+    }
+}
 
 fn corpus_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VIVA_GENICAM_XML_CORPUS") {
@@ -121,7 +199,6 @@ fn vendor_xml_corpus_builds_nodemaps() {
         return;
     }
 
-    let io = NullIo;
     let mut failures = Vec::new();
     let mut total_nodes = 0usize;
     let mut total_evaluated = 0usize;
@@ -146,7 +223,7 @@ fn vendor_xml_corpus_builds_nodemaps() {
             }
         };
 
-        let nodemap = match NodeMap::try_from_xml(model) {
+        let nodemap = match NodeMap::try_from_xml(model.clone()) {
             Ok(nodemap) => nodemap,
             Err(err) => {
                 println!("FAIL  {document}: nodemap: {err}");
@@ -178,37 +255,65 @@ fn vendor_xml_corpus_builds_nodemaps() {
         }
 
         // 2. Every node should be reachable through the value API without the
-        //    formula engine complaining.
+        //    formula engine complaining — under both stub patterns. Zeros
+        //    leave byte order and full-width values invisible; all-ones is
+        //    what makes them observable without hardware.
         let names: Vec<String> = nodemap.node_names().map(str::to_string).collect();
-        let mut defects: BTreeMap<String, String> = BTreeMap::new();
-        for name in &names {
-            total_evaluated += 1;
-            // A node is readable through whichever accessor matches its kind;
-            // trying float first and falling back covers integer, boolean and
-            // enum nodes without needing to switch on the kind here.
-            let err = match nodemap.get_float(name, &io) {
-                Ok(_) => continue,
-                Err(err) => err,
+        let mut clean = true;
+        for pass in [Pass::Zeros, Pass::Pattern] {
+            let io = pass.io();
+            // A fresh nodemap per pass. The two stubs disagree about every
+            // register, and node caches are per-nodemap, so sharing one would
+            // have the second pass read the first pass's values.
+            let nodemap = match NodeMap::try_from_xml(model.clone()) {
+                Ok(nodemap) => nodemap,
+                Err(err) => {
+                    failures.push(format!("{document}: nodemap build failed: {err}"));
+                    continue;
+                }
             };
-            if is_engine_defect(&err) {
-                defects.insert(name.clone(), err.to_string());
-                continue;
+            let mut defects: BTreeMap<String, String> = BTreeMap::new();
+            for name in &names {
+                total_evaluated += 1;
+                // A node is readable through whichever accessor matches its
+                // kind; trying float first and falling back covers integer,
+                // boolean and enum nodes without switching on the kind here.
+                let err = match nodemap.get_float(name, io.as_ref()) {
+                    Ok(_) => continue,
+                    Err(err) => err,
+                };
+                if pass.is_defect(&err) {
+                    defects.insert(name.clone(), err.to_string());
+                    continue;
+                }
+                if let Err(err) = nodemap.get_integer(name, io.as_ref())
+                    && pass.is_defect(&err)
+                {
+                    defects.insert(name.clone(), err.to_string());
+                }
             }
-            if let Err(err) = nodemap.get_integer(name, &io)
-                && is_engine_defect(&err)
-            {
-                defects.insert(name.clone(), err.to_string());
+
+            for (name, err) in &defects {
+                if EXPECTED_PATTERN_DEFECTS.iter().any(|(doc, node, reason)| {
+                    pass == Pass::Pattern
+                        && *doc == document
+                        && node == name
+                        && err.contains(reason)
+                }) {
+                    continue;
+                }
+                println!("EVAL  {document} [{}]: {name}: {err}", pass.label());
+                failures.push(format!(
+                    "{document}: evaluating {name} under {}: {err}",
+                    pass.label()
+                ));
+                clean = false;
             }
         }
 
-        for (name, err) in &defects {
-            println!("EVAL  {document}: {name}: {err}");
-            failures.push(format!("{document}: evaluating {name}: {err}"));
-        }
-
-        if defects.is_empty() && nodemap.skipped().is_empty() {
+        if clean && nodemap.skipped().is_empty() {
             println!(
-                "ok    {document}: {} nodes built and evaluated",
+                "ok    {document}: {} nodes built and evaluated twice",
                 names.len()
             );
         }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use viva_xml_model::{UiGraph, UiNodeKind};
 use viva_zenoh_api::NodeValueUpdate;
 
@@ -205,15 +205,15 @@ impl NodeStore {
                 }
                 if let Some(ref c) = entry.constraints {
                     let v = value.as_i64().unwrap_or(0) as f64;
-                    if let Some(min) = c.min {
-                        if v < min {
-                            return Err(format!("Value {v} below min {min} for {name}"));
-                        }
+                    if let Some(min) = c.min
+                        && v < min
+                    {
+                        return Err(format!("Value {v} below min {min} for {name}"));
                     }
-                    if let Some(max) = c.max {
-                        if v > max {
-                            return Err(format!("Value {v} above max {max} for {name}"));
-                        }
+                    if let Some(max) = c.max
+                        && v > max
+                    {
+                        return Err(format!("Value {v} above max {max} for {name}"));
                     }
                 }
             }
@@ -223,15 +223,15 @@ impl NodeStore {
                 }
                 if let Some(ref c) = entry.constraints {
                     let v = value.as_f64().unwrap_or(0.0);
-                    if let Some(min) = c.min {
-                        if v < min {
-                            return Err(format!("Value {v} below min {min} for {name}"));
-                        }
+                    if let Some(min) = c.min
+                        && v < min
+                    {
+                        return Err(format!("Value {v} below min {min} for {name}"));
                     }
-                    if let Some(max) = c.max {
-                        if v > max {
-                            return Err(format!("Value {v} above max {max} for {name}"));
-                        }
+                    if let Some(max) = c.max
+                        && v > max
+                    {
+                        return Err(format!("Value {v} above max {max} for {name}"));
                     }
                 }
             }
@@ -242,13 +242,13 @@ impl NodeStore {
                 let s = value
                     .as_str()
                     .ok_or_else(|| format!("Node {name} expects a string value"))?;
-                if let Some(ref c) = entry.constraints {
-                    if !c.enum_values.contains(&s.to_string()) {
-                        return Err(format!(
-                            "Invalid enum value '{s}' for {name}. Valid: {:?}",
-                            c.enum_values
-                        ));
-                    }
+                if let Some(ref c) = entry.constraints
+                    && !c.enum_values.contains(&s.to_string())
+                {
+                    return Err(format!(
+                        "Invalid enum value '{s}' for {name}. Valid: {:?}",
+                        c.enum_values
+                    ));
                 }
             }
             "String" if !value.is_string() => {

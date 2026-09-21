@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use std::net::SocketAddr;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 

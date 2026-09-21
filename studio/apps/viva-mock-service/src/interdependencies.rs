@@ -55,11 +55,11 @@ pub fn apply_side_effects(
                 }
             }
 
-            if let Some(size) = recalculate_payload_size(values) {
-                if let Some(entry) = values.get_mut("PayloadSize") {
-                    entry.value = serde_json::json!(size);
-                    secondary.push(("PayloadSize".to_string(), entry.value.clone()));
-                }
+            if let Some(size) = recalculate_payload_size(values)
+                && let Some(entry) = values.get_mut("PayloadSize")
+            {
+                entry.value = serde_json::json!(size);
+                secondary.push(("PayloadSize".to_string(), entry.value.clone()));
             }
         }
         "Height" => {
@@ -80,19 +80,19 @@ pub fn apply_side_effects(
                 }
             }
 
-            if let Some(size) = recalculate_payload_size(values) {
-                if let Some(entry) = values.get_mut("PayloadSize") {
-                    entry.value = serde_json::json!(size);
-                    secondary.push(("PayloadSize".to_string(), entry.value.clone()));
-                }
+            if let Some(size) = recalculate_payload_size(values)
+                && let Some(entry) = values.get_mut("PayloadSize")
+            {
+                entry.value = serde_json::json!(size);
+                secondary.push(("PayloadSize".to_string(), entry.value.clone()));
             }
         }
         "PixelFormat" => {
-            if let Some(size) = recalculate_payload_size(values) {
-                if let Some(entry) = values.get_mut("PayloadSize") {
-                    entry.value = serde_json::json!(size);
-                    secondary.push(("PayloadSize".to_string(), entry.value.clone()));
-                }
+            if let Some(size) = recalculate_payload_size(values)
+                && let Some(entry) = values.get_mut("PayloadSize")
+            {
+                entry.value = serde_json::json!(size);
+                secondary.push(("PayloadSize".to_string(), entry.value.clone()));
             }
         }
         _ => {}

@@ -500,10 +500,10 @@ async fn test_device_lost_detection() {
         loop {
             if let Ok(sample) = sub.recv_async().await {
                 let bytes = sample.payload().to_bytes();
-                if let Ok(status) = serde_json::from_slice::<viva_zenoh_api::DeviceStatus>(&bytes) {
-                    if !status.connected {
-                        return status;
-                    }
+                if let Ok(status) = serde_json::from_slice::<viva_zenoh_api::DeviceStatus>(&bytes)
+                    && !status.connected
+                {
+                    return status;
                 }
             }
         }

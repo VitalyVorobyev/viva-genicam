@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cargo deny` was failing on `main`, and it was not the fault of the pull
+  request whose CI reported it.** A refresh of `Cargo.lock` — 153 packages,
+  `zenoh` 1.9.0 → 1.10.1 — clears two findings that had appeared since the last
+  lockfile touch: **RUSTSEC-2026-0285**, a rustls vulnerability where TLS 1.3
+  handshake messages packed into the same record as a key-changing message were
+  accepted at the wrong encryption level (fixed in rustls 0.23.45), and a yanked
+  `chacha20` 0.10.1. Both arrive through zenoh's QUIC link, so no code here is
+  affected, but `cargo deny check` is a hard gate and the whole repository was
+  red on it — including [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139),
+  where it looked like a contributor's failure.
+
+  The four advisories `deny.toml` accepts were **re-derived rather than carried
+  forward**: emptied, re-run, and kept only where they still fire. All four still
+  do, all four are still zenoh transitive dependencies (`lz4_flex`, `rsa`,
+  `paste`, `rustls-pemfile`), and the comment now says so against 1.10.1 instead
+  of 1.9.0. The procedure is written into `deny.toml`, because an exception list
+  is only defensible against the lock that actually ships.
+
+### Changed
+
+- **`zip` 2 → 8, and declared once instead of three times.** It was pinned six
+  majors back and repeated independently in `viva-genapi-xml` (behind the `fetch`
+  feature), `viva-u3v` and `viva-fake-gige` — three copies of a dependency that
+  is on the connect path of both transports, because GenICam XML is frequently
+  served as a ZIP archive by the camera itself. It is now a single
+  `[workspace.dependencies]` entry that all three inherit. No source change was
+  needed: the API surface used (`ZipArchive`, `ZipWriter`, `SimpleFileOptions`,
+  `CompressionMethod::Deflated`) is unchanged across those six majors, the
+  `deflate` feature still exists, and zip 8's MSRV of 1.88 is exactly ours.
+
 ### Viva Studio and documentation — not part of any published crate
 
 Viva Studio lives in the `studio/` workspace, which is excluded from the root
@@ -38,6 +70,22 @@ library.
   And the Tauri crate's 50 unit tests had never run in CI — it is excluded from
   the studio workspace, so `cargo test --workspace` never reached it — which
   `studio-ci.yml` now corrects.
+
+- **The `studio/` workspace now has a `[workspace.dependencies]` table, and its
+  crates are on edition 2024** (backlog `ST-01`). It had none, so five crates
+  declared their own versions and quietly drifted from the library workspace:
+  `thiserror` stayed on 1 after the root moved to 2, `axum` on 0.7,
+  `tokio-tungstenite` on 0.26, and `zenoh` was spelled `"1.8"` where the root says
+  `"1"`. All five are now on edition 2024 with inherited versions, `axum` 0.8,
+  `tokio-tungstenite` 0.30 and `thiserror` 2; the Tauri crate, which is its own
+  workspace, takes `dirs` 7.
+
+  Two things had to change in source. axum 0.8's `Message::Text` takes
+  `Utf8Bytes` and `Message::Binary` takes `Bytes` — which the frame channel
+  already carries, so passing it through **drops a full copy of every frame** that
+  the old `to_vec()` was making on each WebSocket send. And edition 2024 enables
+  let-chains, so `clippy::collapsible_if` now fires on nested `if let`; the 12
+  sites it found are mechanical and were collapsed.
 
 - **The Studio UI's 14 type errors are fixed, and CI now type-checks the
   frontend** (backlog `ST-20`). `bun run build` is Vite, which strips types

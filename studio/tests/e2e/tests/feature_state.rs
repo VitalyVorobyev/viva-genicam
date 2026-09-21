@@ -166,11 +166,10 @@ async fn acquisition_start_flips_status() {
                 let bytes = sample.payload().to_bytes();
                 if let Ok(status) =
                     serde_json::from_slice::<viva_zenoh_api::AcquisitionStatus>(&bytes)
+                    && status.active
                 {
-                    if status.active {
-                        saw_active = true;
-                        break;
-                    }
+                    saw_active = true;
+                    break;
                 }
             }
             _ => break,

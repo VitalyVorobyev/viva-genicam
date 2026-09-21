@@ -1,156 +1,63 @@
 # Roadmap
 
-Mid-term direction, ordered by phase. This file only looks forward — "done"
-history lives in [CHANGELOG.md](../CHANGELOG.md). Immediate, actionable tasks
-are tracked in [backlog.md](backlog.md).
-
-Phase 1 (July 2026 — CI un-break, Hikrobot READMEM fix #35, external PR #34,
-0.2.6 release with LGPL notices, CI modernization) is complete. 0.2.7 and
-0.2.8 fixed the XML-load failures behind #45 and #35 and added per-node error
-isolation.
+Mid-term direction, ordered by phase. **This file only looks forward.** Shipped
+history lives in [CHANGELOG.md](../CHANGELOG.md), and immediate actionable tasks
+in [backlog.md](backlog.md). It used to carry a closed phase per release, which
+made it a second changelog and a worse one; a phase is deleted when it closes.
 
 **Ordering principle.** [ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)
 established that priority is argued from measurement, not intuition: count the
 construct in the vendor corpus, or point at the user report, before ranking it.
-This roadmap applies that rule throughout, which is why several items moved
-between phases relative to the previous revision.
+The phases below are numbered by the order they were opened, not by the order
+they will close — the evidence hierarchy in
+[CLAUDE.md](../CLAUDE.md#evidence-hierarchy) decides that, and it routinely
+promotes something out of a later phase because a user with hardware appeared.
 
-## Phase 0 — 0.4.0, shipped
+## Next release — 0.6.0
 
-**0.4.0 was tagged on 2026-07-31 at `41dee23`, and this phase is closed.**
+A minor, not a patch. Three reasons, and only the third is about semver strictly:
+`NodeDecl::Integer` gains a field and `#[non_exhaustive]` sits on the enum rather
+than the variant; `DeviceAnnounce` gains fields and has no `#[non_exhaustive]` at
+all; and `^0.5` resolves to any 0.5.x, so a patch that changes what 448 registers
+decode to would reach dependents on their next `cargo update`. 0.4.0 had to
+become a minor for exactly that reason, and the lesson is worth restating rather
+than relearning.
 
-Two lessons are worth carrying past it. The first is the shape of the gate on
-0.3.1: it waited on a user with the hardware rather than on our own confidence,
-because a green CI on a platform-conditional fix confirms nothing. The second
-is that 0.4.0 had to be a minor bump, not the 0.3.2 originally planned —
-removing `StreamBuilder::auto_packet_size` and the Python
-`open_stream(auto_packet_size=)` argument, and adding variants to public enums,
-are all breaking under semver, and Cargo reads `^0.3` as any 0.3.x, so a patch
-would have broken dependents on their next `cargo update`. Phase 5 renumbered to
-0.5.0 as a consequence — see its heading below. What shipped:
+**What gates it** (rows in [backlog.md](backlog.md)):
 
-- **TC-17 and TC-20**, which landed after the 0.3.1 tag: the GVSP data trailer
-  read at offset 2 of an 8-byte payload, and a Linux link-local discovery
-  broadcast that resolved to the host's own address.
-- **TC-19** — `viva-fake-gige` declared `ChunkModeActive` as `<Integer>` where
-  SFNC and all 23 corpus documents that define it say `<Boolean>`, so the chunk
-  path had never run end to end against anything. That is why TC-17 was found
-  on a user's camera instead of in CI; there is now an end-to-end chunk test.
-- **DX-08 and SR-10** — both surfaced by #70's log rather than by a bug report:
-  `viva-camctl stream` refused to run without `--iface`, which is the command
-  our own documentation tells reporters to use, and a probed 16114-byte MTU was
-  discarded in favour of a hardcoded 1500.
-- **SR-11 and DC-01** — an unnamed pixel format was silently sized at one byte
-  per pixel, and the Zenoh bridge then truncated the frame to that fiction.
-- **GA-09, first cut** — `<Register>` limited to a plain `<Length>`, which
-  covers 42 of the corpus's 63 declarations and clears every skipped node in
-  seven documents.
-- **`#[non_exhaustive]` on the public enums that actually grow** — `Node`,
-  `NodeDecl`, `ChunkKind`, `ChunkValue`, `ChunkError` — so the next node type is
-  not another breaking release. Only possible in a breaking release, which is
-  why it rides along with this one.
+- **GA-20 + GA-28** — the integer codec. An eight-byte unsigned register is
+  unreadable, on two vendors' cameras and two reporters ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112),
+  [#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140)); and a plain `<IntReg>` that declares `LittleEndian` is
+  decoded big-endian anyway, on 311 declarations across 16 of 38 corpus
+  documents. Same two functions, same missing metadata, one release.
+  **GA-11** rides along: the corpus test evaluates against zeros, so it stayed
+  green through both.
+- **TC-22 + TC-23 + GA-31 + DX-11 + SVC-08** — what leaves the host when a
+  register is read. Every access is READMEM/WRITEMEM where GVCP has
+  READREG/WRITEREG ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)), and a masked write to a write-only
+  register reads it first ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)). The fake cannot currently
+  contradict us on either, which is TC-23.
+- **SVC-07 + ST-24 + API-13** — two identical cameras are indistinguishable in
+  Studio ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), because the service announces the device id as the
+  serial and drops the user-defined name and the address.
 
-Retest status is now settled and should not be restated more favourably than it
-is: **#45 and #57 confirmed on 0.3.0; #35 was asked and never answered.**
-
-## Phase 0b — 0.4.1, the first thing after 0.4.0
-
-All additive, so this is a patch release rather than another minor: nothing is
-removed and both `--iface` spellings are accepted, so no caller that worked
-stops working.
-
-**Landed 2026-08-03 in `46a6d67` ([#111](https://github.com/VitalyVorobyev/viva-genicam/pull/111)):**
-
-- **DX-10** (#109) — `--iface` meant a host IPv4 address in `viva-camctl`, an
-  OS interface name in `viva-service` and the Python bindings, and one or the
-  other depending on which example you ran. One `IfaceSelector` now takes
-  either spelling everywhere, and an unresolvable value lists the interfaces
-  the library can see — the Windows GUID a reporter otherwise has to hunt for.
-- **SVC-06** — found while doing DX-10, not reported: `viva-service` resolved
-  the receive interface by looking the *camera's* address up among the host's
-  own, so it could not stream without `--iface` at all. Third instance of the
-  #70 confusion, and the last site that still had it.
-- **ST-19** (#110) — Studio's Command `Execute` renders as plain text because
-  the button carries no class. Studio ships separately, so this does not gate
-  the crate release.
-
-**Also landed 2026-08-03:**
-
-- **SR-02** — `GevSCPSPacketSize` was written and never read back, and the
-  *requested* value then drove every reassembly offset, so a camera that clamps
-  left the host striding at the wrong pitch. Found by reading code and fixed
-  against a fake taught to clamp. **It is not the cause of #112**, which this
-  phase briefly recorded that it was: the FS3200T accepts 16114 and holds it,
-  and the `1500` in the report was a GenApi node read. Correcting that is the
-  evidence hierarchy applied to us — "confirmed in the tree" and "explains the
-  hardware" are different claims, and only the first was ever true here.
-- **DX-09** — a stream that received nothing printed `frames=0` and named no
-  candidate cause. #112's reporter needed a custom instrumented build to find a
-  packet-size mismatch the warning now names outright. Landed with SR-02: one
-  review surface, and the two halves of one user's afternoon.
-
-**0.4.1 no longer waits.** It was held so #112's reporter would not get a
-release that failed to fix what they reported — but SR-02 was never going to
-fix it, and DX-09 will at least tell them which half of the stream is at fault.
-Ship 0.4.1 with what has landed; **SR-13** (the GVSP test packet) is the actual
-candidate fix for #112 and belongs to the release after this one.
-
-**Since then**: the reporter's path measurement came back and isolated an
-ipTIME PoE4002 switch (≤9198 streams, ≥9199 does not; the same camera direct to
-the NIC reaches 16114). SR-13 landed on that evidence, then needed **SR-15** —
-the probe wrote test packets into `GevSCPSPacketSize` and never put its answer
-back. The reporter also contributed **SR-14** / ADR-0021, which stops the
-library overwriting a packet size an operator set. None of it is confirmed on
-their hardware yet; #112 stays open until it is.
-
-**Also newly filed from #112's attached log**, none of them related to the
-streaming failure and all of them real: **GA-20** (62 reads fail because a
-GigE Vision timestamp is a `u64` and our integer model is `i64` — those
-features are unreadable, not merely mis-parsed), **TC-21** (62 `BAD_ALIGNMENT`
-on event registers; #35 fixed the READMEM *count*, this is the *address*), and
-**ST-21** (Studio bulk-reads command-backed registers). One user's log, three
-defects, 297 WARN lines in a single session.
-
-**The ordering argument is the evidence hierarchy, not novelty.** Everything in
-this phase came from users running hardware this project does not have — a JAI
-and a Vieworks FS3200T on Windows (#57, #70, #109, #110, #112) and a
-Micro-Epsilon scanCONTROL 850050 (#91-#93) — so it outranks the conformance
-work queued behind it.
-
-After 0.4.1 the queue returns to Phase 1: **TC-04** (#63) first, since it is
-the structural item the rest of that phase rests on — and #112 is a fresh
-argument for it, because `viva-fake-gige` accepts any packet size and so cannot
-express the camera that caused it. **GA-09 phase two** (`<pLength>`) follows,
-with its API shape now confirmed by the contributor who needed it (#93).
+**What does not gate it.** The Lucid event-camera contribution
+([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)) depends on a contributor's judgement and their hardware; take
+it if it converges first, but a release does not wait on a fork's CI.
 
 ## Phase 1 — Transport conformance (ADR-0019)
 
 ADR-0018 audited the GenApi layer against the specification and found eight
 defects. The same audit had never been run on GVCP/GVSP, and the wire layer
-carried the same class of error. **Most of what this phase named is now fixed**
-— the list is kept because the pattern is the point, not because the work is
-outstanding. Per-item status lives in `backlog.md`'s `TC` section.
+carried the same class of error: a `PENDING_ACK` nobody handled, an
+`ACTION_COMMAND` sharing an opcode with `READREG`, an event channel keyed on a
+number that is not a GVCP opcode, and a GVSP trailer read at the wrong offset.
+Those are fixed and recorded in [CHANGELOG.md](../CHANGELOG.md); the pattern is
+what this phase is still about.
 
-- `PENDING_ACK` (0x0089) was handled nowhere, so a camera answering a slow
-  WRITEMEM/READMEM with a pending-ack produced a hard failure — and flash
-  writes and mode changes are exactly what cameras use it for. *Fixed (TC-01)
-  for GVCP; the field width is still unsettled against hardware (TC-12).*
-- `ACTION_COMMAND` was defined as 0x0080 — the same opcode as `READREG`.
-  *Fixed (TC-02).*
-- The event channel keyed on 0x000D, which is not a GVCP opcode at all.
-  *Fixed (TC-03).*
-- The GVSP data trailer was read at the wrong offset — two bytes of an
-  eight-byte payload — so `payload_type` and `size_y` were fed to the chunk
-  parser as if they were chunk data. Chunks could not decode on any conforming
-  camera, and the frame-error check read the trailer's reserved word while the
-  real status word was examined nowhere. Found on real hardware (#70), and
-  notable as the one case so far where the fake camera was correct and only the
-  client was wrong. *Fixed (TC-17); ships in 0.4.0.*
-
-ACTION and EVENT are now implemented by `viva-fake-gige` (TC-07), so both are
-exercised by tests. **Still open in this phase**: TC-04 (spec-derived GVSP and
-GenCP fixtures), TC-05 (the payload types cameras actually send), TC-06 (chunk
-trailer layout), TC-16 (per-transport status-code types) and TC-19.
+**Open**: TC-05 (the payload types cameras actually send), TC-06 (chunk trailer
+layout), TC-12 (the `PENDING_ACK` field width, unsettled against hardware),
+TC-16 (per-transport status-code types), TC-22 and TC-23.
 
 **The structural half of this phase matters more than any single fix.**
 Issue #57's MAC offset is the *third* time the fake camera and the client have
@@ -170,56 +77,50 @@ reporter who read the Wireshark dissector. Yet there is no supported way to
 produce those artifacts — `viva-camctl` has no XML dump, and the Python
 retrieval snippet given in #45 had to be retracted and corrected.
 
-- `viva-camctl` gains an XML dump and a single-command diagnostic bundle
-  (discovery raw bytes, bootstrap registers, XML, environment). *Done —
-  `viva-camctl xml` and `viva-camctl report`, both of which work on a camera we
-  cannot open, which is the only camera anyone reports.*
-- `NodeMap::skipped()` is surfaced through camctl, the Python bindings and
-  Studio, rather than only appearing in a log line. *Done for camctl (DX-03);
-  Python and Studio still open (DX-05).*
-- Discovery reports the fields it currently discards — serial number and
-  user-defined name — so users and Studio can identify a camera the way its
-  label does. *Done (DX-04).*
+`viva-camctl xml` and `viva-camctl report` now close that gap — both work on a
+camera we cannot open, which is the only camera anyone reports — and discovery
+parses the serial and user-defined name it used to discard.
 
-The loop keeps paying out, and not only through bug reports: **DX-08 and DX-09
-were both found by reading a log a reporter attached for an unrelated reason**,
-and DX-08 turned out to be our own diagnostic instruction failing on the first
-person we gave it to.
+**Open**: DX-05 (skipped nodes reach camctl but not Python or Studio), DX-06 (no
+`report` equivalent for USB3 Vision), DX-11.
+
+The loop keeps paying out, and not only through bug reports: **two defects have
+been found by reading a log a reporter attached for an unrelated reason**, and
+one of them was our own diagnostic instruction failing on the first person we
+gave it to. That is the argument for making the artifacts easy to produce even
+when nothing is known to be wrong.
 
 ## Phase 3 — Streaming reliability
 
 The features that make the library trustworthy on a factory floor.
 
-- **SCPS read-back after write** — cameras clamp the requested packet size;
-  the receiver's stride must follow the *negotiated* value.
 - **Per-stream ephemeral ports + `source_filter` enforcement** — the filter is
   configured today but never applied, because the receive path discards the
   packet's source address.
 - **Wire packet resend end-to-end** — `ResendPlanner` and `request_resend`
   exist, are tested, and have no production callers. Either wire them or delete
   them; the README currently advertises them as shipping.
-- **Library-owned heartbeat keepalive** — consumers lose CCP after ~3 s idle.
-  *Done (SR-05).*
 - **Honest streaming telemetry** — five `StreamStats` counters are permanently
   zero because nothing calls their recorders, and every GVSP parse error is
   swallowed at `trace` level and counted nowhere.
-- **Fix unsound `unsafe impl Sync` on `MockUsbTransfer`** — a soundness bug in
-  a type that is `pub` in a published crate. *Done (SR-06); every `unsafe impl`
-  is now gone from both workspaces.*
-- **Size a frame correctly even when the format is unnamed** — an unknown PFNC
-  code reports no size, callers fall back to one byte per pixel, and the Zenoh
-  bridge truncates the payload to match (SR-11, DC-01).
+- **IGMP leave on multicast teardown** — the group is joined and never left.
+- **The per-packet `HashSet` on the receive hot path** — one insert per datagram,
+  roughly 2 100 hashes for a 3.1 MB frame at a 1 500-byte packet size.
 
 ## Phase 4 — GenApi conformance, round 2
 
 What ADR-0018 did not reach, ordered by corpus frequency rather than by how
-interesting it looks. The counts below were measured against the corpus as it
-stood at 35 documents; it now holds **37**, and they have not been re-run. They
-are here to rank work, not to be quoted as current — and when one of them starts
-carrying an argument, re-measure it first. `<Register>`'s count was wrong by
-seven declarations and its `<pLength>` split wrong by a factor of eight, because
-a line-based `grep` cannot count elements in the single-line XML that FLIR and
-PGR ship.
+interesting it looks. **The counts live in `backlog.md` and are not repeated
+here**, because they were measured against a corpus that keeps growing and every
+copy of a number is one more place for it to go stale. Re-measure before quoting
+one, with a whole-element match: a line-based `grep` cannot count elements in the
+single-line XML that FLIR and PGR ship, which is how `<Register>`'s count came to
+be wrong by seven declarations and its `<pLength>` split wrong by a factor of
+eight.
+
+**The two at the front of this phase are not from the corpus at all.** GA-20 and
+GA-28 are in the integer codec, they came from users' cameras, and they gate
+0.6.0 — see the top of this file.
 
 - `pInvalidator` — **18 502 occurrences across 32 of 35 documents**, entirely
   unparsed. Cache invalidation currently fires only on writes made through the
@@ -232,17 +133,18 @@ PGR ship.
   never read; range checks use the static limits.
 - `ImposedAccessMode` (2 709 / 28), `Streamable` (1 700 / 18), `Slope`
   (632 / 29), `pInc` (333 / 25) — unparsed.
-- `<Register>` (**63 / 16**, re-measured 2026-07-31) — the raw-byte base
-  register type, still dropped. No longer dropped *silently*: GA-02 moved
-  unknown node tags into `XmlModel::skipped`, so the corpus allowlist now sees
-  them. Two vendors' hardware and an outside contributor's API request all
+- `<Register>` — the raw-byte base register type, still partly dropped. No
+  longer dropped *silently*: unknown node tags go into `XmlModel::skipped`, so
+  the corpus allowlist sees them. Two vendors' hardware and an outside contributor's API request all
   point at the same node, `FileAccessBuffer`. Taking the 42 plain-`<Length>`
   declarations first leaves only 21, concentrated in three vendors.
 - GenApi chunk adapter, to replace the hardcoded 4-entry chunk table.
 
-**Also in scope: make the corpus test prove more.** Its `viva-genapi` stage
-evaluates every node against `NullIo`, which returns zeros — it demonstrates
-that nothing panics, not that any value is correct.
+**Also in scope, and now urgent: make the corpus test able to fail.** Its
+`viva-genapi` stage evaluates every node against `NullIo`, which returns zeros,
+so it demonstrates that nothing panics rather than that any value is correct.
+GA-20 and GA-28 are wrong on a union of 448 corpus nodes and the weekly corpus
+workflow stayed green through all of it. GA-11.
 
 ## Not a phase — device classes beyond area-scan
 
@@ -253,17 +155,35 @@ its `Coord3D_*` pixel formats. The formats now exist in `viva-pfnc`; the device
 class does not exist anywhere above it. A `Coord3D_ABC32f` frame reaching the
 Zenoh bridge today is truncated to a twelfth of itself and published as valid.
 
+**Event cameras are the second class, and the first one somebody is actually
+streaming.** [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138) and [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139) bring a Lucid Triton2 EVS on a
+Sony IMX636: a GigE Vision camera that publishes no `PixelFormat` in its GenApi
+XML, sends a vendor-defined code with PFNC's custom bit set, declares
+`payload_type` 0x0001 as if it were an image, and emits an encoded event stream
+rather than a frame. So the reassembly path already works on it — what does not
+work is everything that assumes the reassembled bytes are pixels. The contributor
+read the wire with a capture, which is precisely the evidence this section says it
+is waiting for.
+
+The open question is not how to parse the block; it is **which topic a non-image
+stream belongs on**, because `viva-service` currently publishes one as a 1×64000
+image with an unnamed format. That is DC-05, and it is ours rather than the
+contributor's — it is a service design decision, not something to ask of somebody
+who owns one camera.
+
 This is deliberately not a numbered phase. The concrete defects are tracked in
-`backlog.md`'s `DC` section, and only the one that is verified against code
-rather than inferred about hardware is scheduled. The rest wait for the thing
-the evidence hierarchy actually values: somebody streaming one of these devices
-and telling us what came off the wire.
+`backlog.md`'s `DC` section, and only the ones verified against code rather than
+inferred about hardware are scheduled. The rest wait for the thing the evidence
+hierarchy actually values: somebody streaming one of these devices and telling us
+what came off the wire.
 
-## Phase 5 — 0.5.0 API consolidation (breaking)
+## Phase 5 — API consolidation (breaking)
 
-One deliberate breaking release to pay down surface-area debt. It was numbered
-0.4.0 until that number was spent on Phase 0 — see there for why the follow-up
-to 0.3.1 had to break.
+One deliberate breaking release to pay down surface-area debt. It has been
+renumbered twice, because both 0.4.0 and 0.5.0 turned out to owe their breaking
+window to a user's camera instead. That is the right trade every time, and it is
+also why this phase should stop being described by a version number: it lands in
+whichever breaking release is not already spoken for.
 
 - Typed accessors on `Camera`. Everything currently round-trips through
   `String` even though `NodeMap` one layer down already has
@@ -299,6 +219,10 @@ to 0.3.1 had to break.
 
 ## Services & Studio
 
+- **The announce carries the wrong identity** — the GigE service reports the
+  device id as the serial and drops the user-defined name and the address, so two
+  identical cameras are indistinguishable in Studio. Gates 0.6.0; see the top of
+  this file.
 - **Announce cadence exceeds Studio's expiry window** — the GigE service
   re-announces roughly every 7 s against a 6 s expiry, so devices can flicker.
 - **U3V introspection is typeless** — `U3vDeviceHandle` never overrides

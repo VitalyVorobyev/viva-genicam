@@ -68,6 +68,62 @@ carries these changes. They are recorded here because the book they correct
 *is* published on every push to `main`. Nothing in this section changes the
 library.
 
+- **The planning documents now only describe open work.** `docs/backlog.md` had
+  accumulated 69 completed rows, each carrying a post-mortem paragraph, and the
+  working list had reached 131 KB across 275 rows — about 60% of it a second,
+  worse changelog. Those rows are deleted; this file is the record of what
+  shipped. `docs/roadmap.md` opened with "This file only looks forward" and then
+  spent 110 of its 310 lines narrating two closed releases, so the closed phases
+  are gone and the file now names the release in flight and what gates it. The
+  remaining phases lost their *"Fixed (TC-xx)"* annotations for the same reason.
+
+  Two things were preserved rather than dropped on the way out. The lessons that
+  were about *how to file a row* rather than about any one defect are now in the
+  backlog's preamble — do not propose downgrading a log level before the
+  warning's cause is known, because that is a proposal to delete the evidence;
+  and a row filed from fake-camera output alone is a hypothesis. And the 16 open
+  rows that referenced a deleted one were rewritten to carry the fact instead of
+  the row ID, so the prune could not quietly turn into data loss.
+
+  Also corrected while in there: the `API` section was still titled "0.4.0
+  consolidation" two releases later, `API-03` still asked for a `thiserror` bump
+  that shipped in 0.5.0, and the `GA` section asserted a corpus denominator of 37
+  where the tree holds 38 — in a paragraph whose own subject is that these
+  numbers go stale. It now gives the command instead of a number.
+
+- **Three ADRs that had been reversed in fact are marked reversed in writing.**
+  [ADR-0003](docs/adrs/adr0003-gentl-transport.md) said the transport was GenTL
+  "exclusively" and was still marked `Accepted`, although GenTL appears nowhere
+  in `crates/` — [ADR-0011](docs/adrs/adr0011-pure-rust-genicam-stack.md)
+  replaced it. [ADR-0002](docs/adrs/adr0002-camera-service-architecture.md)
+  described the camera service as external and in a separate repository; it is
+  `crates/viva-service` here. [ADR-0001](docs/adrs/adr0001-desktop-primary.md)
+  named a WASM crate that was never carried into this repository. Each now
+  carries a "What changed" note, because a superseded decision is part of the
+  record and deleting it loses the reversal.
+
+- **`docs/studio/camera-service-api.md` and `studio/CHANGELOG.md` are deleted.**
+  The first specified the API of a GenTL-based service in another repository —
+  both premises retired. The second is the changelog of "GenICam Studio" before
+  the rename and the monorepo import, and every path it names
+  (`crates/genicam_xml_model`, `apps/genicam-ws-streamer`, …) is gone; nothing is
+  published from it and this file carries the Studio entries now. The seven
+  stale `docs/zenoh-api.md` / `docs/camera-service-api.md` links left over from
+  that move are fixed, and the gap that let them rot for weeks is filed as
+  `CI-17` — nothing checks links outside `book/`.
+
+- **Triage of seven open issues is recorded as backlog rows rather than prose.**
+  New: `GA-28` (a plain `<IntReg>` discards its declared byte order — 311
+  declarations in 16 of 38 corpus documents decode byte-swapped, found while
+  tracing [#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140)), `GA-31`/`DX-11`/`SVC-08` ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)),
+  `TC-22`/`TC-23` ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)), `SVC-07`/`ST-24`/`ST-25`/`API-13`
+  ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), `DC-05`/`GA-29` ([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138), [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)), plus
+  `GA-30`, `CI-17` and `REL-08`. `GA-20` moves to **P0** with its open design
+  question closed — [#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140) is the second vendor to report it and its
+  spec citation settles the representation — and `GA-11` moves to **P0** because
+  it is why neither defect was ever caught: the corpus test evaluates against
+  zeros, so it stayed green across a union of 448 wrong nodes.
+
 - **Viva Studio now shows which backend mode it started in, and says so when it
   could not honour `ZENOH_CONFIG`** (backlog `DOC-18`/`ST-23`,
   [#132](https://github.com/VitalyVorobyev/viva-genicam/issues/132)). Six

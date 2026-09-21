@@ -13,8 +13,10 @@ User-facing documentation lives in the mdBook (`book/`); decision history in
   control, sustained streaming, and defensive handling of untrusted network
   input.
 - **Pre-1.0**: no backward-compatibility guarantees. Clear design and structure
-  take priority over API stability; breaking releases are expected (0.4.0 is
-  planned as a consolidation release, see [roadmap](roadmap.md)).
+  take priority over API stability, and breaking releases are expected — in
+  practice every minor so far has become breaking because a user's camera needed
+  it rather than because we planned the window. The [roadmap](roadmap.md) names
+  the release in flight and what gates it.
 
 ## Layered architecture
 

@@ -24,7 +24,7 @@ which arv-fake-gv-camera-0.8  # should print a path
 └──────────────────┘   queryable   └──────────────────┘                   └──────────────────┘
 ```
 
-The **mock service** (`studio/apps/viva-mock-service`) can be swapped 1:1 with `viva-service` — they implement the same Zenoh API contract (`docs/zenoh-api.md`).
+The **mock service** (`studio/apps/viva-mock-service`) can be swapped 1:1 with `viva-service` — they implement the same Zenoh API contract (`docs/studio/zenoh-api.md`).
 
 ## Quick Start: Mock Service (no camera needed)
 
@@ -116,7 +116,7 @@ All keys prefixed with `genicam/devices/{device_id}/`:
 | `image` | Service → Streamer | Binary: 16-byte FrameHeader + raw pixels |
 | `image/meta` | Service → App | JSON: pixel_format, width, height, payload_size |
 
-Full specification: `docs/zenoh-api.md`
+Full specification: [`docs/studio/zenoh-api.md`](zenoh-api.md)
 
 ## Differences: Mock Service vs Real Service
 

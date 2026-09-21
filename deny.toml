@@ -2,8 +2,17 @@
 # Run: cargo deny check
 
 [advisories]
-# Advisories we accept because they come from zenoh 1.9.0 transitive
-# dependencies and cannot be resolved without an upstream zenoh release.
+# Advisories we accept because they come from zenoh transitive dependencies and
+# cannot be resolved without an upstream zenoh release.
+#
+# An entry here is only defensible against the lock that actually ships, so
+# re-derive the list rather than carrying it forward: empty `ignore`, run
+# `cargo deny check advisories`, and keep exactly what fires. Every entry below
+# was re-derived that way against zenoh 1.10.1 on 2026-09-21, and all four still
+# fire. Two advisories that used to be here are gone, cleared by the same
+# refresh rather than by an exception: RUSTSEC-2026-0285 (rustls accepted TLS 1.3
+# handshake messages at the wrong encryption level, fixed in 0.23.45) and a
+# yanked chacha20 0.10.1, both reached through zenoh's QUIC link.
 ignore = [
     # lz4_flex 0.10.0 -- zenoh-transport pins "0.10", fix is in 0.11.6
     "RUSTSEC-2026-0041",

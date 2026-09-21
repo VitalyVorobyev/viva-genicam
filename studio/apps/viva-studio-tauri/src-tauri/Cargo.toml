@@ -13,7 +13,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 async-trait = "0.1"
 bytes = "1"
-dirs = "6"
+dirs = "7"
 viva-genicam = { path = "../../../../crates/viva-genicam", features = ["u3v-usb"] }
 viva_streamer = { path = "../../../crates/viva_streamer" }
 viva_xml_model = { path = "../../../crates/viva_xml_model" }

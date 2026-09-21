@@ -1,16 +1,16 @@
 [package]
 name = "viva-ws-streamer"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-bytes = "1"
-clap = { version = "4", features = ["derive"] }
+bytes.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+viva-zenoh-api.workspace = true
 viva_streamer = { path = "../../crates/viva_streamer" }
-viva-zenoh-api = { path = "../../../crates/viva-zenoh-api" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zenoh = "1.8"
+zenoh.workspace = true

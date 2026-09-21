@@ -25,7 +25,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # deflate only (pure Rust): keeps the crate wasm32-compatible.
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

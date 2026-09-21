@@ -1,13 +1,13 @@
 //! WebSocket server that fans out the latest BMP frame to all clients.
 
 use axum::{
+    Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use bytes::Bytes;
 use serde::Serialize;
@@ -113,18 +113,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Send the current info frame immediately on connect.
     let info_json = info_rx.borrow().to_json();
-    if socket.send(Message::Text(info_json)).await.is_err() {
+    if socket.send(Message::Text(info_json.into())).await.is_err() {
         return;
     }
 
     // If a frame is already available, send it immediately.
     let initial = frame_rx.borrow().clone();
-    if !initial.is_empty()
-        && socket
-            .send(Message::Binary(initial.to_vec()))
-            .await
-            .is_err()
-    {
+    if !initial.is_empty() && socket.send(Message::Binary(initial.clone())).await.is_err() {
         return;
     } else if !initial.is_empty() {
         info!(
@@ -144,7 +139,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 if frame.is_empty() {
                     continue;
                 }
-                if socket.send(Message::Binary(frame.to_vec())).await.is_err() {
+                if socket.send(Message::Binary(frame.clone())).await.is_err() {
                     warn!("WebSocket client disconnected");
                     break;
                 } else if !logged_first_bmp_send {
@@ -161,7 +156,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     break;
                 }
                 let info_json = info_rx.borrow_and_update().to_json();
-                if socket.send(Message::Text(info_json)).await.is_err() {
+                if socket.send(Message::Text(info_json.into())).await.is_err() {
                     warn!("WebSocket client disconnected while sending info frame");
                     break;
                 }

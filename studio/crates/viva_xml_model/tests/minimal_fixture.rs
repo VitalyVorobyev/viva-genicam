@@ -1,5 +1,5 @@
 use serde_json::Value;
-use viva_xml_model::{parse_genicam_xml, UiNodeKind};
+use viva_xml_model::{UiNodeKind, parse_genicam_xml};
 
 #[test]
 fn parse_minimal_fixture() {

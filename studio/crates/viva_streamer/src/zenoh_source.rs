@@ -26,11 +26,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use tracing::{info, warn};
 use viva_zenoh_api::{FrameHeader, ImageMeta, PixelFormat};
 
-use crate::bmp::{debayer_nn, mono_u16le_to_gray8, BayerPattern, BmpEncoder};
+use crate::bmp::{BayerPattern, BmpEncoder, debayer_nn, mono_u16le_to_gray8};
 use crate::error::StreamerError;
 
 #[derive(Clone, Debug)]
@@ -171,13 +171,11 @@ async fn run_inner(
                     }
                 };
 
-                if let Some(interval) = min_interval {
-                    if let Some(last) = last_emit {
-                        if last.elapsed() < interval {
+                if let Some(interval) = min_interval
+                    && let Some(last) = last_emit
+                        && last.elapsed() < interval {
                             continue;
                         }
-                    }
-                }
 
                 let raw = sample.payload().to_bytes();
 

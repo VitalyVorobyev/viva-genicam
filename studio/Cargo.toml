@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 
 members = [
   "crates/viva_xml_model",
@@ -10,6 +10,37 @@ members = [
 ]
 
 # Keep Tauri app(s) out of the Rust workspace. They are built via `cargo tauri`.
+# It carries its own lockfile and its own dependency versions; nothing below
+# reaches it.
 exclude = [
   "apps/viva-studio-tauri/src-tauri",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# Declared here rather than five times over. Before this existed the studio
+# crates drifted from the library workspace on their own: `thiserror` stayed on
+# 1 after the root moved to 2, `zenoh` was spelled "1.8" where the root says "1",
+# and every crate was still on edition 2021.
+[workspace.dependencies]
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zenoh = "1"
+
+# The library workspace, by path. These are the only crates the studio consumes
+# from it (ADR-0017), and `viva-genapi-xml` is taken without default features so
+# the studio never pulls the `fetch` path.
+viva-genapi = { path = "../crates/viva-genapi" }
+viva-genapi-xml = { path = "../crates/viva-genapi-xml", default-features = false }
+viva-zenoh-api = { path = "../crates/viva-zenoh-api" }

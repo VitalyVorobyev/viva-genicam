@@ -99,10 +99,10 @@ fn build_from_nodemap(xml_model: &XmlModel, nodemap: &NodeMap) -> Result<UiGraph
     }
 
     // If no "Root" category found, use the first one
-    if !categories.contains_key("Root") {
-        if let Some(first) = nodemap.categories().first() {
-            root_category = first.0.to_string();
-        }
+    if !categories.contains_key("Root")
+        && let Some(first) = nodemap.categories().first()
+    {
+        root_category = first.0.to_string();
     }
 
     // Map each node from NodeDecl to UiNode
@@ -159,10 +159,10 @@ fn build_from_xml_model(xml_model: &XmlModel) -> Result<UiGraph, ParseError> {
         nodes_by_name.insert(name, ui_node);
     }
 
-    if !categories.contains_key("Root") {
-        if let Some(first_cat) = categories.keys().next() {
-            root_category = first_cat.clone();
-        }
+    if !categories.contains_key("Root")
+        && let Some(first_cat) = categories.keys().next()
+    {
+        root_category = first_cat.clone();
     }
 
     Ok(UiGraph {

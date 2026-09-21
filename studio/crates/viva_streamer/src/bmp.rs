@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(bytes[offset], 0); // B
         assert_eq!(bytes[offset + 1], 0); // G
         assert_eq!(bytes[offset + 2], 255); // R
-                                            // row1 starts at offset+4
+        // row1 starts at offset+4
         assert_eq!(bytes[offset + 4], 0); // B
         assert_eq!(bytes[offset + 5], 255); // G
         assert_eq!(bytes[offset + 6], 0); // R

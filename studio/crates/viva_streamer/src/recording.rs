@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use viva_zenoh_api::{FrameHeader, HEADER_SIZE};
 

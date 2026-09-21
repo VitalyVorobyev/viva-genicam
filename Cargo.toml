@@ -35,7 +35,7 @@ bitflags = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 # GenICam XML is often served as a ZIP archive from the camera itself, so this
 # is on the connect path of every transport rather than a dev convenience.
 zip = { version = "8", default-features = false, features = ["deflate"] }

@@ -36,7 +36,7 @@ pub fn read_text_start(
 
 /// Event loop backing [`read_text_start`], split out so the caller can restore
 /// the reader's trim configuration on both the success and the error path.
-fn read_text_events(reader: &mut Reader<&[u8]>, name: &[u8]) -> Result<String, XmlError> {
+fn read_text_events(reader: &mut Reader<&[u8]>, name: &str) -> Result<String, XmlError> {
     let mut text = String::new();
     let mut depth = 1usize;
     let mut buf = Vec::new();
@@ -50,27 +50,14 @@ fn read_text_events(reader: &mut Reader<&[u8]>, name: &[u8]) -> Result<String, X
                     break;
                 }
             }
-            Ok(Event::Text(chunk)) => {
-                text.push_str(
-                    &chunk
-                        .decode()
-                        .map_err(|err| XmlError::Xml(err.to_string()))?,
-                );
-            }
+            Ok(Event::Text(chunk)) => text.push_str(&chunk),
             Ok(Event::CData(chunk)) => {
                 // CDATA content is literal: no entity resolution.
-                text.push_str(
-                    &chunk
-                        .decode()
-                        .map_err(|err| XmlError::Xml(err.to_string()))?,
-                );
+                text.push_str(&chunk);
             }
             Ok(Event::GeneralRef(reference)) => push_reference(&mut text, &reference)?,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated <{}> element",
-                    String::from_utf8_lossy(name)
-                )));
+                return Err(XmlError::Invalid(format!("unterminated <{name}> element")));
             }
             Err(err) => return Err(XmlError::Xml(err.to_string())),
             // Comments, processing instructions and declarations carry no text.
@@ -95,10 +82,7 @@ fn push_reference(text: &mut String, reference: &BytesRef<'_>) -> Result<(), Xml
         text.push(ch);
         return Ok(());
     }
-    let name = reference
-        .decode()
-        .map_err(|err| XmlError::Xml(err.to_string()))?;
-    match name.as_ref() {
+    match &**reference {
         "lt" => text.push('<'),
         "gt" => text.push('>'),
         "amp" => text.push('&'),
@@ -114,7 +98,7 @@ fn push_reference(text: &mut String, reference: &BytesRef<'_>) -> Result<(), Xml
 }
 
 /// Extract an optional attribute value from an XML start element.
-pub fn attribute_value(event: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, XmlError> {
+pub fn attribute_value(event: &BytesStart<'_>, name: &str) -> Result<Option<String>, XmlError> {
     for attr in event.attributes() {
         let attr = attr.map_err(|err| XmlError::Xml(err.to_string()))?;
         if attr.key.as_ref() == name {
@@ -132,13 +116,9 @@ pub fn attribute_value(event: &BytesStart<'_>, name: &[u8]) -> Result<Option<Str
 }
 
 /// Extract a required attribute value from an XML start element.
-pub fn attribute_value_required(event: &BytesStart<'_>, name: &[u8]) -> Result<String, XmlError> {
-    attribute_value(event, name)?.ok_or_else(|| {
-        XmlError::Invalid(format!(
-            "missing attribute {}",
-            String::from_utf8_lossy(name)
-        ))
-    })
+pub fn attribute_value_required(event: &BytesStart<'_>, name: &str) -> Result<String, XmlError> {
+    attribute_value(event, name)?
+        .ok_or_else(|| XmlError::Invalid(format!("missing attribute {name}")))
 }
 
 /// Parse an unsigned 64-bit integer from a string (supports hex with `0x` prefix).
@@ -178,7 +158,7 @@ pub fn parse_f64(value: &str) -> Result<f64, XmlError> {
 }
 
 /// Skip over an XML element and all of its children.
-pub fn skip_element(reader: &mut Reader<&[u8]>, _name: &[u8]) -> Result<(), XmlError> {
+pub fn skip_element(reader: &mut Reader<&[u8]>, _name: &str) -> Result<(), XmlError> {
     let mut depth = 1usize;
     let mut buf = Vec::new();
     while depth > 0 {

@@ -16,7 +16,7 @@ pub fn parse_converter(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
+    let name = attribute_value_required(&start, "Name")?;
     let mut p_value: Option<String> = None;
     let mut formula_to: Option<String> = None;
     let mut formula_from: Option<String> = None;
@@ -25,7 +25,7 @@ pub fn parse_converter(
     let mut unit: Option<String> = None;
     let mut output = SkOutput::Float;
     let mut predicates = PredicateRefs::default();
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut bindings = FormulaBindings::default();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -40,14 +40,14 @@ pub fn parse_converter(
                         p_value = Some(trimmed.to_string());
                     }
                 }
-                b"FormulaTo" => {
+                "FormulaTo" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         formula_to = Some(trimmed.to_string());
                     }
                 }
-                b"FormulaFrom" => {
+                "FormulaFrom" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
@@ -56,24 +56,24 @@ pub fn parse_converter(
                 }
                 // Named literals and sub-formulas, resolved by substitution
                 // when the runtime builds the node.
-                b"Constant" => {
-                    let const_name = attribute_value_required(e, b"Name")?;
+                "Constant" => {
+                    let const_name = attribute_value_required(e, "Name")?;
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         bindings.constants.push((const_name, trimmed.to_string()));
                     }
                 }
-                b"Expression" => {
-                    let sub_name = attribute_value_required(e, b"Name")?;
+                "Expression" => {
+                    let sub_name = attribute_value_required(e, "Name")?;
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         bindings.expressions.push((sub_name, trimmed.to_string()));
                     }
                 }
-                b"pVariable" => {
-                    let var_name = attribute_value_required(e, b"Name")?;
+                "pVariable" => {
+                    let var_name = attribute_value_required(e, "Name")?;
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if target.is_empty() {
@@ -85,14 +85,14 @@ pub fn parse_converter(
                     variables_to.push((var_name.clone(), target.to_string()));
                     variables_from.push((var_name, target.to_string()));
                 }
-                b"Unit" => {
+                "Unit" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         unit = Some(trimmed.to_string());
                     }
                 }
-                b"Output" | b"Representation" => {
+                "Output" | "Representation" => {
                     let text = read_text_start(reader, e)?;
                     if let Some(kind) = SkOutput::parse(&text) {
                         output = kind;
@@ -108,13 +108,13 @@ pub fn parse_converter(
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 TAG_P_VALUE => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
+                    if let Some(value) = attribute_value(e, "Name")? {
                         p_value = Some(value);
                     }
                 }
-                b"pVariable" => {
-                    let var_name = attribute_value_required(e, b"Name")?;
-                    if let Some(target) = attribute_value(e, b"Value")? {
+                "pVariable" => {
+                    let var_name = attribute_value_required(e, "Name")?;
+                    if let Some(target) = attribute_value(e, "Value")? {
                         if target.is_empty() {
                             return Err(XmlError::Invalid(format!(
                                 "Converter node {name} has empty <pVariable/>"
@@ -126,7 +126,7 @@ pub fn parse_converter(
                 }
                 _ => {}
             },
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Converter node {name}"
@@ -179,7 +179,7 @@ pub fn parse_int_converter(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
+    let name = attribute_value_required(&start, "Name")?;
     let mut p_value: Option<String> = None;
     let mut formula_to: Option<String> = None;
     let mut formula_from: Option<String> = None;
@@ -187,7 +187,7 @@ pub fn parse_int_converter(
     let mut variables_from: Vec<(String, String)> = Vec::new();
     let mut unit: Option<String> = None;
     let mut predicates = PredicateRefs::default();
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut bindings = FormulaBindings::default();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -202,14 +202,14 @@ pub fn parse_int_converter(
                         p_value = Some(trimmed.to_string());
                     }
                 }
-                b"FormulaTo" => {
+                "FormulaTo" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         formula_to = Some(trimmed.to_string());
                     }
                 }
-                b"FormulaFrom" => {
+                "FormulaFrom" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
@@ -218,24 +218,24 @@ pub fn parse_int_converter(
                 }
                 // Named literals and sub-formulas, resolved by substitution
                 // when the runtime builds the node.
-                b"Constant" => {
-                    let const_name = attribute_value_required(e, b"Name")?;
+                "Constant" => {
+                    let const_name = attribute_value_required(e, "Name")?;
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         bindings.constants.push((const_name, trimmed.to_string()));
                     }
                 }
-                b"Expression" => {
-                    let sub_name = attribute_value_required(e, b"Name")?;
+                "Expression" => {
+                    let sub_name = attribute_value_required(e, "Name")?;
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         bindings.expressions.push((sub_name, trimmed.to_string()));
                     }
                 }
-                b"pVariable" => {
-                    let var_name = attribute_value_required(e, b"Name")?;
+                "pVariable" => {
+                    let var_name = attribute_value_required(e, "Name")?;
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if target.is_empty() {
@@ -246,7 +246,7 @@ pub fn parse_int_converter(
                     variables_to.push((var_name.clone(), target.to_string()));
                     variables_from.push((var_name, target.to_string()));
                 }
-                b"Unit" => {
+                "Unit" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
@@ -263,13 +263,13 @@ pub fn parse_int_converter(
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 TAG_P_VALUE => {
-                    if let Some(value) = attribute_value(e, b"Name")? {
+                    if let Some(value) = attribute_value(e, "Name")? {
                         p_value = Some(value);
                     }
                 }
-                b"pVariable" => {
-                    let var_name = attribute_value_required(e, b"Name")?;
-                    if let Some(target) = attribute_value(e, b"Value")? {
+                "pVariable" => {
+                    let var_name = attribute_value_required(e, "Name")?;
+                    if let Some(target) = attribute_value(e, "Value")? {
                         if target.is_empty() {
                             return Err(XmlError::Invalid(format!(
                                 "IntConverter node {name} has empty <pVariable/>"
@@ -281,7 +281,7 @@ pub fn parse_int_converter(
                 }
                 _ => {}
             },
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated IntConverter node {name}"
@@ -325,23 +325,23 @@ pub fn parse_string(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
+    let name = attribute_value_required(&start, "Name")?;
     let mut addressing = AddressingBuilder::new(&name);
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"Address" => {
+                "Address" => {
                     let text = read_text_start(reader, e)?;
                     let addr = crate::util::parse_u64(&text)?;
                     addressing.attach_selected_address(addr, None);
                 }
-                b"Length" => {
+                "Length" => {
                     let text = read_text_start(reader, e)?;
                     let value = crate::util::parse_u64(&text)?;
                     let len = u32::try_from(value).map_err(|_| {
@@ -349,14 +349,14 @@ pub fn parse_string(
                     })?;
                     addressing.apply_length(len);
                 }
-                b"pAddress" => {
+                "pAddress" => {
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if !target.is_empty() {
                         addressing.push_p_address(target);
                     }
                 }
-                b"AccessMode" => {
+                "AccessMode" => {
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
@@ -369,8 +369,8 @@ pub fn parse_string(
                 }
             },
             Ok(Event::Empty(ref e)) => {
-                if e.name().as_ref() == b"pAddress"
-                    && let Some(value) = attribute_value(e, b"Name")?
+                if e.name().as_ref() == "pAddress"
+                    && let Some(value) = attribute_value(e, "Name")?
                 {
                     let trimmed = value.trim();
                     if !trimmed.is_empty() {
@@ -378,7 +378,7 @@ pub fn parse_string(
                     }
                 }
             }
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated String node {name}"

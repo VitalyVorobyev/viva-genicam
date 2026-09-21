@@ -24,24 +24,24 @@ use crate::util::{attribute_value, parse_u64, read_text_start};
 use crate::{IndexOffset, NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
 
 /// XML element name referencing another node that provides an address.
-pub const TAG_P_ADDRESS: &[u8] = b"pAddress";
+pub const TAG_P_ADDRESS: &str = "pAddress";
 
 /// `<pIndex>`: an index node whose value is scaled and added to the address.
-pub const TAG_P_INDEX: &[u8] = b"pIndex";
+pub const TAG_P_INDEX: &str = "pIndex";
 /// XML element holding an inline literal value.
-pub const TAG_VALUE: &[u8] = b"Value";
+pub const TAG_VALUE: &str = "Value";
 /// XML element referencing another node supplying the value at runtime.
-pub const TAG_P_VALUE: &[u8] = b"pValue";
+pub const TAG_P_VALUE: &str = "pValue";
 /// XML element specifying a user friendly label.
-pub const TAG_DISPLAY_NAME: &[u8] = b"DisplayName";
+pub const TAG_DISPLAY_NAME: &str = "DisplayName";
 /// XML element for node visibility level.
-pub const TAG_VISIBILITY: &[u8] = b"Visibility";
+pub const TAG_VISIBILITY: &str = "Visibility";
 /// XML element for the long-form description.
-pub const TAG_DESCRIPTION: &[u8] = b"Description";
+pub const TAG_DESCRIPTION: &str = "Description";
 /// XML element for short tooltip text.
-pub const TAG_TOOLTIP: &[u8] = b"ToolTip";
+pub const TAG_TOOLTIP: &str = "ToolTip";
 /// XML element for the recommended numeric representation.
-pub const TAG_REPRESENTATION: &[u8] = b"Representation";
+pub const TAG_REPRESENTATION: &str = "Representation";
 /// XML element describing the least significant bit of a bitfield.
 ///
 /// The GenICam schema spells it `LSB`, and every one of the 1 419 declarations
@@ -49,31 +49,31 @@ pub const TAG_REPRESENTATION: &[u8] = b"Representation";
 /// `Lsb`. Both are accepted: matching only the mixed-case form silently dropped
 /// the bit range from every `<MaskedIntReg>` that declared one, leaving the node
 /// reading its whole register (issue #120).
-pub const TAG_LSB: &[u8] = b"LSB";
+pub const TAG_LSB: &str = "LSB";
 /// Mixed-case spelling of [`TAG_LSB`], accepted alongside it.
-pub const TAG_LSB_MIXED: &[u8] = b"Lsb";
+pub const TAG_LSB_MIXED: &str = "Lsb";
 /// XML element describing the most significant bit of a bitfield.
 ///
 /// See [`TAG_LSB`] for why both spellings are accepted.
-pub const TAG_MSB: &[u8] = b"MSB";
+pub const TAG_MSB: &str = "MSB";
 /// Mixed-case spelling of [`TAG_MSB`], accepted alongside it.
-pub const TAG_MSB_MIXED: &[u8] = b"Msb";
+pub const TAG_MSB_MIXED: &str = "Msb";
 /// XML element describing the starting bit index of a bitfield.
-pub const TAG_BIT: &[u8] = b"Bit";
+pub const TAG_BIT: &str = "Bit";
 /// XML element describing a bitmask for a bitfield.
-pub const TAG_MASK: &[u8] = b"Mask";
+pub const TAG_MASK: &str = "Mask";
 /// XML element providing the register byte order (common spelling).
-pub const TAG_ENDIANNESS: &[u8] = b"Endianness";
+pub const TAG_ENDIANNESS: &str = "Endianness";
 /// XML element providing the register byte order (alternate spelling).
-pub const TAG_ENDIANESS: &[u8] = b"Endianess";
+pub const TAG_ENDIANESS: &str = "Endianess";
 /// XML element providing the register byte order (PFNC style).
-pub const TAG_BYTE_ORDER: &[u8] = b"ByteOrder";
+pub const TAG_BYTE_ORDER: &str = "ByteOrder";
 /// XML element referencing a node whose value gates feature implementation.
-pub const TAG_P_IS_IMPLEMENTED: &[u8] = b"pIsImplemented";
+pub const TAG_P_IS_IMPLEMENTED: &str = "pIsImplemented";
 /// XML element referencing a node whose value gates feature availability.
-pub const TAG_P_IS_AVAILABLE: &[u8] = b"pIsAvailable";
+pub const TAG_P_IS_AVAILABLE: &str = "pIsAvailable";
 /// XML element referencing a node whose value locks the feature (RW→RO).
-pub const TAG_P_IS_LOCKED: &[u8] = b"pIsLocked";
+pub const TAG_P_IS_LOCKED: &str = "pIsLocked";
 
 /// Handle a `<pIsImplemented>` / `<pIsAvailable>` / `<pIsLocked>` element.
 ///
@@ -154,9 +154,9 @@ pub fn handle_selected_start(
     addressing: &mut AddressingBuilder,
     state: &mut SelectorState,
 ) -> Result<(), XmlError> {
-    let mut value = attribute_value(event, b"Value")?;
+    let mut value = attribute_value(event, "Value")?;
     if value.is_none() {
-        value = attribute_value(event, b"Name")?;
+        value = attribute_value(event, "Name")?;
     }
     let text = read_text_start(reader, event)?;
     let trimmed = text.trim();
@@ -165,8 +165,8 @@ pub fn handle_selected_start(
     }
     if let Some(val) = value.clone() {
         addressing.push_selected_value(val.clone());
-        if let Some(address_attr) = attribute_value(event, b"Address")? {
-            let len_override = attribute_value(event, b"Length")?
+        if let Some(address_attr) = attribute_value(event, "Address")? {
+            let len_override = attribute_value(event, "Length")?
                 .map(|len| -> Result<u32, XmlError> {
                     let parsed = parse_u64(&len)?;
                     u32::try_from(parsed).map_err(|_| {
@@ -175,7 +175,7 @@ pub fn handle_selected_start(
                 })
                 .transpose()?;
             addressing.attach_selected_address(parse_u64(&address_attr)?, len_override);
-        } else if let Some(len_attr) = attribute_value(event, b"Length")? {
+        } else if let Some(len_attr) = attribute_value(event, "Length")? {
             let parsed = parse_u64(&len_attr)?;
             let len = u32::try_from(parsed)
                 .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
@@ -203,7 +203,7 @@ pub fn handle_p_selected_empty(
     addressing: &mut AddressingBuilder,
     state: &mut SelectorState,
 ) -> Result<(), XmlError> {
-    if let Some(value) = attribute_value(event, b"Name")? {
+    if let Some(value) = attribute_value(event, "Name")? {
         addressing.register_selector(&value);
         state.selectors.push(value.clone());
         state.selected_if.push((value, Vec::new()));
@@ -221,10 +221,10 @@ pub fn handle_selected_empty(
     addressing: &mut AddressingBuilder,
     state: &mut SelectorState,
 ) -> Result<(), XmlError> {
-    if let Some(val) = attribute_value(event, b"Value")? {
+    if let Some(val) = attribute_value(event, "Value")? {
         addressing.push_selected_value(val.clone());
-        if let Some(address_attr) = attribute_value(event, b"Address")? {
-            let len_override = attribute_value(event, b"Length")?
+        if let Some(address_attr) = attribute_value(event, "Address")? {
+            let len_override = attribute_value(event, "Length")?
                 .map(|len| -> Result<u32, XmlError> {
                     let parsed = parse_u64(&len)?;
                     u32::try_from(parsed).map_err(|_| {
@@ -233,7 +233,7 @@ pub fn handle_selected_empty(
                 })
                 .transpose()?;
             addressing.attach_selected_address(parse_u64(&address_attr)?, len_override);
-        } else if let Some(len_attr) = attribute_value(event, b"Length")? {
+        } else if let Some(len_attr) = attribute_value(event, "Length")? {
             let parsed = parse_u64(&len_attr)?;
             let len = u32::try_from(parsed)
                 .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
@@ -251,10 +251,10 @@ pub fn handle_selected_empty(
 /// `Offset` gives a literal stride, `pOffset` names a node supplying one, and
 /// neither means the stride is the register length.
 pub fn index_offset(event: &BytesStart<'_>) -> Result<IndexOffset, XmlError> {
-    if let Some(offset) = attribute_value(event, b"Offset")? {
+    if let Some(offset) = attribute_value(event, "Offset")? {
         return Ok(IndexOffset::Fixed(parse_u64(&offset)?));
     }
-    if let Some(node) = attribute_value(event, b"pOffset")? {
+    if let Some(node) = attribute_value(event, "pOffset")? {
         let trimmed = node.trim();
         if !trimmed.is_empty() {
             return Ok(IndexOffset::Node(trimmed.to_string()));
@@ -273,7 +273,7 @@ pub fn handle_addressing_start(
     addressing: &mut AddressingBuilder,
 ) -> Result<bool, XmlError> {
     match event.name().as_ref() {
-        b"Address" => {
+        "Address" => {
             let text = read_text_start(reader, event)?;
             addressing.attach_selected_address(parse_u64(&text)?, None);
             Ok(true)
@@ -295,7 +295,7 @@ pub fn handle_addressing_start(
             }
             Ok(true)
         }
-        b"Length" => {
+        "Length" => {
             let text = read_text_start(reader, event)?;
             let value = parse_u64(&text)?;
             let len = u32::try_from(value)
@@ -386,7 +386,7 @@ pub fn handle_addressing_empty(
 ) -> Result<bool, XmlError> {
     match event.name().as_ref() {
         TAG_P_ADDRESS => {
-            if let Some(value) = attribute_value(event, b"Name")? {
+            if let Some(value) = attribute_value(event, "Name")? {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     addressing.push_p_address(trimmed);
@@ -395,7 +395,7 @@ pub fn handle_addressing_empty(
             Ok(true)
         }
         TAG_P_INDEX => {
-            if let Some(value) = attribute_value(event, b"Name")? {
+            if let Some(value) = attribute_value(event, "Name")? {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     addressing.push_index(trimmed, index_offset(event)?);

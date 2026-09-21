@@ -34,31 +34,31 @@ pub fn parse_register(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
+    let name = attribute_value_required(&start, "Name")?;
     let mut addressing = AddressingBuilder::new(&name);
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
     let mut port: Option<String> = None;
     let mut p_length: Option<String> = None;
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"AccessMode" => {
+                "AccessMode" => {
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
-                b"pPort" => {
+                "pPort" => {
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if !target.is_empty() {
                         port = Some(target.to_string());
                     }
                 }
-                b"pLength" => {
+                "pLength" => {
                     let text = read_text_start(reader, e)?;
                     p_length = Some(text.trim().to_string());
                 }
@@ -74,7 +74,7 @@ pub fn parse_register(
             Ok(Event::Empty(ref e)) => {
                 handle_addressing_empty(e, &mut addressing)?;
             }
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Register node {name}"
@@ -114,7 +114,7 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) if e.name().as_ref() == b"Register" => {
+                Ok(Event::Start(e)) if e.name().as_ref() == "Register" => {
                     let owned = e.to_owned();
                     return match parse_register(&mut reader, owned)? {
                         NodeDecl::Register(decl) => Ok(decl),

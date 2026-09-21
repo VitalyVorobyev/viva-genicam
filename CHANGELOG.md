@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`quick-xml` 0.41 → 0.42, which moves the parser from bytes to `&str`**
+  (backlog `CI-14`). 0.42 rewrites the API around `&str`: `QName` and the text
+  event types wrap it, `AsRef<[u8]>` is gone, and `BytesText`/`BytesCData`/
+  `BytesRef` deref to `str` rather than needing a fallible `.decode()`. Our XML
+  layer matched element names against byte-string literals throughout, so this
+  touched all ten files of `viva-genapi-xml`: 21 tag constants and 222 literals
+  become `&str`, four helper signatures follow (`attribute_value`,
+  `attribute_value_required`, `skip_element`, `read_text_events`), and the
+  per-element `node_name` snapshot becomes a `String` instead of a `Vec<u8>`.
+
+  It is a net **deletion** — 284 lines added against 317 removed — because the
+  decode error paths and the `String::from_utf8_lossy` calls that existed only to
+  turn an element name back into something printable are gone with it. quick-xml
+  0.42's MSRV is 1.86, below our 1.88, so nothing moves there.
+
+  **The gate for a refactor this wide is that nothing changes**, and that is what
+  the vendor corpus is for: 38 documents, 35 407 nodes, 11 382 bitfields, with
+  per-document node and bitfield counts and known-gap lists **diffed against 0.41
+  and byte-identical**. Worth stating plainly that this is not a bug fix and
+  brings no behaviour change; it was done for the simplification.
+
 - **`zip` 2 → 8, and declared once instead of three times.** It was pinned six
   majors back and repeated independently in `viva-genapi-xml` (behind the `fetch`
   feature), `viva-u3v` and `viva-fake-gige` — three copies of a dependency that

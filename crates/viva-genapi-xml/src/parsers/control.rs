@@ -14,38 +14,38 @@ pub fn parse_command(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
+    let name = attribute_value_required(&start, "Name")?;
     let mut address = None;
     let mut length = None;
     let mut pvalue = None;
     let mut command_value = None;
     let mut predicates = PredicateRefs::default();
-    let node_name = start.name().as_ref().to_vec();
+    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"Address" => {
+                "Address" => {
                     let text = read_text_start(reader, e)?;
                     address = Some(parse_u64(&text)?);
                 }
-                b"Length" => {
+                "Length" => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
                     length = Some(u32::try_from(value).map_err(|_| {
                         XmlError::Invalid(format!("length out of range for node {name}"))
                     })?);
                 }
-                b"pValue" => {
+                "pValue" => {
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if !target.is_empty() {
                         pvalue = Some(target.to_string());
                     }
                 }
-                b"CommandValue" => {
+                "CommandValue" => {
                     let text = read_text_start(reader, e)?;
                     command_value = Some(parse_i64(&text)?);
                 }
@@ -57,7 +57,7 @@ pub fn parse_command(
                     }
                 }
             },
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Command node {name}"
@@ -86,11 +86,11 @@ pub fn parse_command(
 
 /// Parse an empty `<Command />` element.
 pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(start, b"Name")?;
-    let address = attribute_value(start, b"Address")?
+    let name = attribute_value_required(start, "Name")?;
+    let address = attribute_value(start, "Address")?
         .map(|v| parse_u64(&v))
         .transpose()?;
-    let length = attribute_value(start, b"Length")?;
+    let length = attribute_value(start, "Length")?;
     let length = match length {
         Some(value) => {
             let raw = parse_u64(&value)?;
@@ -115,8 +115,8 @@ pub fn parse_category(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(&start, b"Name")?;
-    let node_name = start.name().as_ref().to_vec();
+    let name = attribute_value_required(&start, "Name")?;
+    let node_name = start.name().as_ref().to_string();
     let mut children = Vec::new();
     let mut predicates = PredicateRefs::default();
     let mut buf = Vec::new();
@@ -125,7 +125,7 @@ pub fn parse_category(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"pFeature" => {
+                "pFeature" => {
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
@@ -140,14 +140,14 @@ pub fn parse_category(
                     }
                 }
             },
-            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"pFeature" => {
-                if let Some(value) = attribute_value(e, b"Name")?
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == "pFeature" => {
+                if let Some(value) = attribute_value(e, "Name")?
                     && !value.is_empty()
                 {
                     children.push(value);
                 }
             }
-            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_slice() => break,
+            Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
                     "unterminated Category node {name}"
@@ -169,7 +169,7 @@ pub fn parse_category(
 
 /// Parse an empty `<Category />` element.
 pub fn parse_category_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(start, b"Name")?;
+    let name = attribute_value_required(start, "Name")?;
     Ok(NodeDecl::Category {
         name,
         meta: NodeMeta::default(),

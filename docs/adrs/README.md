@@ -4,16 +4,17 @@ Decisions that shaped viva-genicam, in the classical ADR format
 (Context / Decision / Consequences). Add a new ADR whenever an architectural
 decision is made — retrospective ADRs for past decisions are welcome too.
 
-Numbers **0001–0010** are the ADRs imported from genicam-studio
-(its ADR-001..010; references such as "ADR-010" in CHANGELOG.md remain
-valid). ADR-010 was missing from the studio's own index; it is included
-here.
+Numbers **0001–0010** predate this repository and were imported with the studio,
+so they describe a GenTL-based external service that no longer exists. Three of
+them are marked below and carry a "What changed" note explaining what replaced
+them; a superseded ADR is kept rather than deleted, because the reversal is part
+of the record.
 
 | ADR | Title | Status |
 |-----|-------|--------|
-| [0001](adr0001-desktop-primary.md) | Desktop-primary with WASM maintenance mode | Accepted |
-| [0002](adr0002-camera-service-architecture.md) | Camera service as library + Zenoh process (external) | Accepted |
-| [0003](adr0003-gentl-transport.md) | GenTL as sole transport abstraction | Accepted |
+| [0001](adr0001-desktop-primary.md) | Desktop-primary with WASM maintenance mode | Partly superseded (WASM runtime gone) |
+| [0002](adr0002-camera-service-architecture.md) | Camera service as library + Zenoh process (external) | **Superseded** by 0011 / 0012 / 0017 |
+| [0003](adr0003-gentl-transport.md) | GenTL as sole transport abstraction | **Superseded** by 0011 |
 | [0004](adr0004-single-camera-scope.md) | Single-camera connection model | Accepted |
 | [0005](adr0005-pixel-format-support.md) | Full SFNC pixel format coverage | Accepted |
 | [0006](adr0006-progressive-disclosure-ui.md) | Progressive disclosure for Image Viewer controls | Accepted |

@@ -1,7 +1,17 @@
 # ADR-0003: GenTL as sole transport abstraction
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0011](adr0011-pure-rust-genicam-stack.md)
 **Date:** 2026-03-06
+
+> **What changed.** This decision was reversed outright: GenTL appears nowhere in
+> `crates/`, and the transports are implemented from the EMVA specifications in
+> `viva-gige` (GVCP/GVSP) and `viva-u3v`. ADR-0011 has the argument. The cost of
+> the reversal is the one this ADR's consequences list did not anticipate — we
+> now own conformance against real hardware ourselves, which is what ADR-0018,
+> ADR-0019 and the vendor XML corpus exist to manage. The benefit is that a user
+> needs no vendor `.cti` provider installed, and that the stack cross-compiles.
+> CoaXPress and CameraLink, which GenTL would have covered for free, are
+> consequently not supported.
 
 ## Context
 

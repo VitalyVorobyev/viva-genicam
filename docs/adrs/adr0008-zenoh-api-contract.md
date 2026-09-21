@@ -5,7 +5,7 @@
 
 ## Context
 
-The Tauri desktop app and the camera service communicate over Zenoh. The API is defined in `docs/zenoh-api.md` and typed in `crates/viva-zenoh-api/`.
+The Tauri desktop app and the camera service communicate over Zenoh. The API is defined in `docs/studio/zenoh-api.md` and typed in `crates/viva-zenoh-api/`.
 
 ## Decision
 

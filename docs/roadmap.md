@@ -35,11 +35,15 @@ than relearning.
   on their own hardware yet. **GA-11**'s first slice went with it: the corpus
   test now evaluates each document twice, and the second pass failed on 373
   nodes across 19 documents before the fix.
-- **TC-22 + TC-23 + GA-31 + DX-11 + SVC-08** — what leaves the host when a
-  register is read. Every access is READMEM/WRITEMEM where GVCP has
-  READREG/WRITEREG ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)), and a masked write to a write-only
-  register reads it first ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)). The fake cannot currently
-  contradict us on either, which is TC-23.
+- ~~**What leaves the host when a register is read.**~~ **Done** except
+  **SVC-08**. A single 32-bit register now goes out as READREG/WRITEREG, with a
+  per-session fallback to memory access and a `VIVA_GIGE_FORCE_READMEM` escape
+  hatch ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)); a masked write to a write-only register is refused
+  locally instead of reading it first, and `viva-camctl set` no longer reads a
+  write-only node back ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)). The fake now counts commands per
+  address, refuses reads of `WO` registers and can refuse READREG, so it can
+  contradict us on both. Neither reporter has confirmed on hardware.
+  **SVC-08** — one `WO` node failing a whole feature snapshot — still gates.
 - **SVC-07 + ST-24 + API-13** — two identical cameras are indistinguishable in
   Studio ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), because the service announces the device id as the
   serial and drops the user-defined name and the address.
@@ -60,7 +64,7 @@ what this phase is still about.
 
 **Open**: TC-05 (the payload types cameras actually send), TC-06 (chunk trailer
 layout), TC-12 (the `PENDING_ACK` field width, unsettled against hardware),
-TC-16 (per-transport status-code types), TC-22 and TC-23.
+TC-16 (per-transport status-code types).
 
 **The structural half of this phase matters more than any single fix.**
 Issue #57's MAC offset is the *third* time the fake camera and the client have
@@ -85,7 +89,7 @@ camera we cannot open, which is the only camera anyone reports — and discovery
 parses the serial and user-defined name it used to discard.
 
 **Open**: DX-05 (skipped nodes reach camctl but not Python or Studio), DX-06 (no
-`report` equivalent for USB3 Vision), DX-11.
+`report` equivalent for USB3 Vision).
 
 The loop keeps paying out, and not only through bug reports: **two defects have
 been found by reading a log a reporter attached for an unrelated reason**, and

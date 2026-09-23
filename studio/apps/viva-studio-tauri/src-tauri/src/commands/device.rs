@@ -296,21 +296,14 @@ async fn run_discovery_loop(zenoh: Arc<ZenohState>, app: AppHandle) {
                 };
                 {
                     // Check API version compatibility on first discovery of each device.
-                    let version_status = check_api_version(
-                        announce.api_version,
-                        viva_zenoh_api::API_VERSION,
-                    );
+                    let api_version = announce.api_version;
+                    let version_status =
+                        check_api_version(api_version, viva_zenoh_api::API_VERSION);
 
-                    let info = DeviceInfo {
-                        id: announce.id.clone(),
-                        name: announce.name,
-                        model: announce.model,
-                        serial: announce.serial,
-                        transport: "zenoh".to_string(),
-                    };
+                    let info = DeviceInfo::from_announce(announce, "zenoh");
                     let is_new = {
                         let mut registry = zenoh.registry.lock().await;
-                        let is_new = !registry.contains(&announce.id);
+                        let is_new = !registry.contains(&info.id);
                         registry.update(info.clone());
                         is_new
                     };
@@ -325,8 +318,8 @@ async fn run_discovery_loop(zenoh: Arc<ZenohState>, app: AppHandle) {
                         let _ = app.emit(
                             "api-version-mismatch",
                             ApiVersionMismatch {
-                                device_id: announce.id.clone(),
-                                device_version: announce.api_version,
+                                device_id: info.id.clone(),
+                                device_version: api_version,
                                 app_version: viva_zenoh_api::API_VERSION,
                             },
                         );

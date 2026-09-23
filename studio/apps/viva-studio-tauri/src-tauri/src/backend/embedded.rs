@@ -23,7 +23,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{info, warn};
 use viva_genicam::genapi::{AccessMode, Node};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
-use viva_zenoh_api::{FeatureState, NumericRange};
+use viva_zenoh_api::{DeviceAnnounce, FeatureState, NumericRange};
 
 use crate::state::device_state::{DeviceInfo, NodeValueEntry, StreamerInfo};
 
@@ -127,19 +127,26 @@ impl DeviceBackend for EmbeddedBackend {
         // Disconnect any existing camera first.
         self.disconnect(device_id).await.ok();
 
-        let ip: Ipv4Addr = device_id
-            .parse()
-            .map_err(|_| format!("Invalid device ID '{device_id}': expected an IPv4 address"))?;
-
-        // Look up device info from discovery cache.
-        let (name, model) = {
+        // Look up device info from discovery cache. The id is MAC-derived, so
+        // the address comes from the cache; a bare IPv4 id is still accepted
+        // for a camera discovery has not reported.
+        let cached = {
             let discovered = self.discovered.read().await;
-            discovered
-                .iter()
-                .find(|d| d.id == device_id)
-                .map(|d| (d.name.clone(), d.model.clone()))
-                .unwrap_or_else(|| (device_id.to_string(), String::new()))
+            discovered.iter().find(|d| d.id == device_id).cloned()
         };
+        let ip: Ipv4Addr = cached
+            .as_ref()
+            .and_then(|d| d.ip.as_deref())
+            .unwrap_or(device_id)
+            .parse()
+            .map_err(|_| {
+                format!(
+                    "Unknown device '{device_id}': not in the discovery list, and not an IPv4 address"
+                )
+            })?;
+        let (name, model) = cached
+            .map(|d| (d.name, d.model))
+            .unwrap_or_else(|| (device_id.to_string(), String::new()));
 
         let gige_info = viva_genicam::gige::DeviceInfo {
             model: if model.is_empty() {
@@ -572,7 +579,7 @@ impl DeviceBackend for EmbeddedBackend {
             discovered
                 .iter()
                 .find(|d| d.id == device_id)
-                .map(|d| d.serial.clone())
+                .and_then(|d| d.mac.clone())
                 .unwrap_or_default()
         };
 
@@ -632,24 +639,22 @@ async fn discover_gige_devices() -> Vec<DeviceInfo> {
     // leaving the UI on "No device" with a real camera on the wire (#57).
     // `discover_all` remains for the fake-camera tests that need loopback.
     match viva_genicam::gige::discover(timeout).await {
+        // The same announce the service would publish for this camera, so the
+        // id is the MAC-derived one and not the IP (ST-25): the IP changes under
+        // DHCP, FORCEIP and a persistent-IP write from this very app, and the
+        // bridge has always keyed by MAC. `connect` resolves the IP back.
         Ok(devices) => devices
             .into_iter()
             .map(|d| {
-                // Prefer the device's own serial number; fall back to the MAC
-                // only when the camera does not report one.
-                let serial = d.serial.clone().unwrap_or_else(|| d.mac_string());
-                let name = d
-                    .user_name
-                    .clone()
-                    .or_else(|| d.model.clone())
-                    .unwrap_or_else(|| d.ip.to_string());
-                DeviceInfo {
-                    id: d.ip.to_string(),
-                    name,
-                    model: d.model.unwrap_or_default(),
-                    serial,
-                    transport: "gige".to_string(),
-                }
+                let announce = DeviceAnnounce::for_gige(
+                    &d.mac,
+                    d.ip,
+                    d.model.as_deref(),
+                    d.serial.as_deref(),
+                    d.user_name.as_deref(),
+                    d.manufacturer.as_deref(),
+                );
+                DeviceInfo::from_announce(announce, "gige")
             })
             .collect(),
         Err(e) => {

@@ -55,7 +55,8 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// Discover available cameras on the network / USB bus.
     async fn discover(&self) -> Vec<DeviceInfo>;
 
-    /// Connect to a device by its identifier (IP address for GigE, serial for USB3).
+    /// Connect to a device by the `id` its discovery reported — for GigE the
+    /// MAC-derived `viva_zenoh_api::gige_device_id`, in both modes.
     async fn connect(&self, device_id: &str) -> Result<ConnectResult, String>;
 
     /// Disconnect from the currently connected device.

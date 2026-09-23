@@ -1,5 +1,6 @@
 //! GVCP control channel server: discovery + GenCP register read/write.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,8 +61,96 @@ pub const FAKE_USER_NAME: &str = "FakeCamera";
 
 /// Status code for success.
 const STATUS_SUCCESS: u16 = 0x0000;
+/// GigE Vision `GEV_STATUS_NOT_IMPLEMENTED`.
+const STATUS_NOT_IMPLEMENTED: u16 = 0x8001;
 /// GigE Vision `GEV_STATUS_INVALID_PARAMETER`.
 const STATUS_INVALID_PARAMETER: u16 = 0x8002;
+/// GigE Vision `GEV_STATUS_BAD_ALIGNMENT`.
+const STATUS_BAD_ALIGNMENT: u16 = 0x8005;
+/// GigE Vision `GEV_STATUS_ACCESS_DENIED`.
+const STATUS_ACCESS_DENIED: u16 = 0x8006;
+
+/// The four GVCP register-access commands, as the fake counts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GvcpCommand {
+    /// `READREG_CMD` (0x0080).
+    ReadReg,
+    /// `WRITEREG_CMD` (0x0082).
+    WriteReg,
+    /// `READMEM_CMD` (0x0084).
+    ReadMem,
+    /// `WRITEMEM_CMD` (0x0086).
+    WriteMem,
+}
+
+/// How the fake refuses READREG and WRITEREG when told to.
+///
+/// Both are shapes a non-conformant device can take, and a controller has to
+/// survive either: one answers with a status it can act on, the other leaves
+/// it waiting out its retry budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterCommandRefusal {
+    /// Acknowledge with `NOT_IMPLEMENTED` (0x8001) and do nothing.
+    NotImplemented,
+    /// Drop the command without any acknowledgement.
+    NoReply,
+}
+
+/// Per-command, per-address count of register-access commands received.
+///
+/// Counted on receipt, before the command is served or refused: the question a
+/// test asks is which command left the host, and a refused command did leave
+/// it. Without this nothing could assert *how* a value reached the device, only
+/// that it did — and READMEM and READREG deliver identical bytes.
+#[derive(Debug, Default)]
+pub struct CommandCounters {
+    counts: std::sync::Mutex<HashMap<(GvcpCommand, u64), u64>>,
+}
+
+impl CommandCounters {
+    fn record(&self, command: GvcpCommand, addr: u64) {
+        if let Ok(mut counts) = self.counts.lock() {
+            *counts.entry((command, addr)).or_default() += 1;
+        }
+    }
+
+    /// How many `command`s have been received, at any address.
+    pub fn total(&self, command: GvcpCommand) -> u64 {
+        self.counts.lock().map_or(0, |counts| {
+            counts
+                .iter()
+                .filter(|((cmd, _), _)| *cmd == command)
+                .map(|(_, n)| n)
+                .sum()
+        })
+    }
+
+    /// How many `command`s have been received for `addr`.
+    ///
+    /// A READMEM or WRITEMEM counts at its start address; a multi-register
+    /// READREG or WRITEREG counts once at each address it names.
+    pub fn at(&self, command: GvcpCommand, addr: u64) -> u64 {
+        self.counts.lock().map_or(0, |counts| {
+            counts.get(&(command, addr)).copied().unwrap_or(0)
+        })
+    }
+
+    /// Forget every count so far.
+    pub fn reset(&self) {
+        if let Ok(mut counts) = self.counts.lock() {
+            counts.clear();
+        }
+    }
+}
+
+/// Behaviour of the GVCP server beyond the register store.
+#[derive(Debug, Default)]
+pub struct ServerOptions {
+    /// Counts of every register-access command received.
+    pub counters: Arc<CommandCounters>,
+    /// Refuse READREG/WRITEREG in this way, if set.
+    pub refuse_register_commands: Option<RegisterCommandRefusal>,
+}
 
 /// Run the GVCP control server loop.
 ///
@@ -73,6 +162,7 @@ pub async fn run(
     acq_start_notify: Arc<Notify>,
     acq_stop_flag: Arc<AtomicBool>,
     bind_ip: std::net::Ipv4Addr,
+    options: ServerOptions,
 ) {
     let mut buf = [0u8; 2048];
     loop {
@@ -105,6 +195,24 @@ pub async fn run(
         ) && regs.lock().await.note_register_command()
         {
             warn!(%peer, "heartbeat expired; control privilege released");
+        }
+
+        record_command(&options.counters, command, payload);
+
+        if matches!(command, READREG_CMD | WRITEREG_CMD)
+            && let Some(refusal) = options.refuse_register_commands
+        {
+            if refusal == RegisterCommandRefusal::NotImplemented {
+                let ack = if command == READREG_CMD {
+                    READREG_ACK
+                } else {
+                    WRITEREG_ACK
+                };
+                let resp = build_error_ack(ack, request_id, STATUS_NOT_IMPLEMENTED);
+                let _ = socket.send_to(&resp, peer).await;
+            }
+            debug!(%peer, command, ?refusal, "register command refused");
+            continue;
         }
 
         match command {
@@ -265,6 +373,21 @@ async fn handle_readreg(
     let mut resp_payload = BytesMut::new();
     for chunk in payload.chunks(4) {
         let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
+        // A register is a 32-bit word on a 32-bit boundary; anything else is
+        // not a register, and GVCP says so with its own status.
+        let refusal = if !addr.is_multiple_of(4) {
+            Some(STATUS_BAD_ALIGNMENT)
+        } else if store.is_write_only(addr, 4) {
+            Some(STATUS_ACCESS_DENIED)
+        } else {
+            None
+        };
+        if let Some(status) = refusal {
+            let resp = build_error_ack(READREG_ACK, request_id, status);
+            let _ = socket.send_to(&resp, peer).await;
+            debug!(%peer, addr = format!("0x{addr:x}"), status, "READREG refused");
+            return;
+        }
         let data = store.read(addr, 4);
         resp_payload.put_slice(&data);
     }
@@ -286,17 +409,33 @@ async fn handle_writereg(
     if payload.len() < 8 || !payload.len().is_multiple_of(8) {
         return;
     }
-    let mut store = regs.lock().await;
-    for chunk in payload.chunks(8) {
-        let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
-        let value = &chunk[4..8];
-        store.write(addr, value);
-        store.handle_special_write(addr);
-        check_acquisition(addr, value, acq_start, acq_stop_flag);
-    }
+    let (test_packet, dest_ip, dest_port, max_on_wire) = {
+        let mut store = regs.lock().await;
+        for chunk in payload.chunks(8) {
+            let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
+            let value = &chunk[4..8];
+            store.write(addr, value);
+            store.handle_special_write(addr);
+            check_acquisition(addr, value, acq_start, acq_stop_flag);
+        }
+        (
+            store.take_pending_test_packet(),
+            store.stream_dest_ip(),
+            store.stream_dest_port(),
+            store.max_on_wire(),
+        )
+    };
     // WRITEREG ACK includes a 4-byte data index placeholder.
     let resp = build_ack(WRITEREG_ACK, request_id, &[0, 0, 0, 0]);
     let _ = socket.send_to(&resp, peer).await;
+
+    // `GevSCPSPacketSize` is a single register, so a controller that writes
+    // registers with WRITEREG fires the test packet this way. Serving it only
+    // from WRITEMEM would make the probe depend on which command the host
+    // happened to choose — silently, since the write itself still succeeds.
+    if let Some(size) = test_packet {
+        fire_test_packet(size, dest_ip, dest_port, max_on_wire).await;
+    }
     trace!(%peer, "WRITEREG response");
 }
 
@@ -326,6 +465,15 @@ async fn handle_readmem(
     }
 
     let store = regs.lock().await;
+    // A write-only register is no more readable through READMEM than through
+    // READREG. Serving the stored bytes here is what let a read-modify-write
+    // of a WO bitfield pass against the fake and fail on hardware (#135).
+    if store.is_write_only(addr, count) {
+        let resp = build_error_ack(READMEM_ACK, request_id, STATUS_ACCESS_DENIED);
+        let _ = socket.send_to(&resp, peer).await;
+        debug!(%peer, addr = format!("0x{addr:x}"), count, "READMEM refused: write-only");
+        return;
+    }
     let data = store.read(addr, count);
 
     // READMEM ACK payload: address(4) + data(N)
@@ -526,6 +674,26 @@ async fn handle_forceip(
     // Send FORCEIP_ACK (empty payload).
     let resp = build_ack(FORCEIP_ACK, request_id, &[]);
     let _ = socket.send_to(&resp, peer).await;
+}
+
+/// Count a register-access command against every address it names.
+fn record_command(counters: &CommandCounters, command: u16, payload: &[u8]) {
+    let word = |chunk: &[u8]| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
+    match command {
+        READREG_CMD => {
+            for addr in payload.as_chunks::<4>().0 {
+                counters.record(GvcpCommand::ReadReg, word(addr));
+            }
+        }
+        WRITEREG_CMD => {
+            for pair in payload.as_chunks::<8>().0 {
+                counters.record(GvcpCommand::WriteReg, word(pair));
+            }
+        }
+        READMEM_CMD if payload.len() >= 4 => counters.record(GvcpCommand::ReadMem, word(payload)),
+        WRITEMEM_CMD if payload.len() >= 4 => counters.record(GvcpCommand::WriteMem, word(payload)),
+        _ => {}
+    }
 }
 
 /// Check if a write targets an acquisition register and notify accordingly.

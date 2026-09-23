@@ -49,6 +49,7 @@
 //! | `0x200a4`   | 4      | EventNotification (per selector)| u32 BE   |
 //! | `0x200a8`   | 4      | UserSetSelector                 | u32 BE   |
 //! | `0x200ac`   | 4      | UserSetLoad (command, pValue)   | u32 BE   |
+//! | `0x200b0`   | 4      | SoftwareSignal*Pulse (WO bits)  | u32 BE   |
 //! | `0x20100`   | 4      | WidthMin (RO)                   | u32 BE   |
 //! | `0x20104`   | 4      | WidthMax (RO)                   | u32 BE   |
 //! | `0x20108`   | 4      | HeightMin (RO)                  | u32 BE   |
@@ -234,6 +235,32 @@ pub const DEFAULT_EXPOSURE_US: f64 = 5000.0;
 pub const REG_USER_SET_SELECTOR: u64 = 0x200a8;
 /// See [`REG_USER_SET_SELECTOR`].
 pub const REG_USER_SET_LOAD: u64 = 0x200ac;
+
+/// A write-only register addressed bit by bit: a `<StructReg>` with
+/// `AccessMode WO` whose `<StructEntry>` bits each pulse one software signal.
+///
+/// It is here so the fake can refuse a masked write that reads first
+/// (backlog GA-31, [#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)).
+/// Every other WO node in this XML is a whole-register command, and a
+/// whole-register write never needs the other bits — so the read-modify-write
+/// path had no in-tree coverage at all. A `<StructEntry>` inherits the
+/// register's access mode and always has a bitfield, which is the shape the
+/// vendor corpus uses.
+pub const REG_SOFTWARE_SIGNAL_PULSE: u64 = 0x200b0;
+
+/// Registers the XML declares `WO`. Reading any of them is refused with
+/// `ACCESS_DENIED`, as a real device refuses it.
+///
+/// Listed explicitly rather than derived from the XML: the fake must be able to
+/// disagree with our parser, and deriving the list through it would make the
+/// two agree by construction (ADR-0019).
+pub const WRITE_ONLY_REGISTERS: &[u64] = &[
+    REG_ACQ_START,
+    REG_ACQ_STOP,
+    REG_TIMESTAMP_LATCH,
+    REG_USER_SET_LOAD,
+    REG_SOFTWARE_SIGNAL_PULSE,
+];
 
 /// Limit registers.
 pub const REG_WIDTH_MIN: u64 = 0x20100;
@@ -620,6 +647,18 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Command>
   <IntReg Name="UserSetLoadReg"><Address>0x200ac</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
+  <!-- A write-only register addressed bit by bit. Each entry inherits WO from
+       the StructReg, so setting one bit cannot read the register for the
+       others: the device refuses the read (backlog GA-31, issue #135). -->
+  <StructReg Comment="Software signal pulse">
+    <Address>0x200b0</Address>
+    <Length>4</Length>
+    <AccessMode>WO</AccessMode>
+    <Endianess>BigEndian</Endianess>
+    <StructEntry Name="SoftwareSignal0Pulse"><Bit>0</Bit></StructEntry>
+    <StructEntry Name="SoftwareSignal1Pulse"><Bit>1</Bit></StructEntry>
+  </StructReg>
+
   <Command Name="AcquisitionStop" NameSpace="Standard">
     <ToolTip>Stop image acquisition</ToolTip>
     <Address>0x20028</Address>
@@ -998,6 +1037,7 @@ impl RegisterMap {
         regs.insert(REG_ACQ_START, vec![0, 0, 0, 0]);
         regs.insert(REG_USER_SET_SELECTOR, 0u32.to_be_bytes().to_vec()); // Default
         regs.insert(REG_USER_SET_LOAD, 0u32.to_be_bytes().to_vec());
+        regs.insert(REG_SOFTWARE_SIGNAL_PULSE, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_ACQ_STOP, vec![0, 0, 0, 0]);
         regs.insert(REG_ACQ_FRAME_RATE, 30.0f32.to_be_bytes().to_vec());
         regs.insert(
@@ -1163,6 +1203,19 @@ impl RegisterMap {
     pub fn heartbeat_timeout_ms(&self) -> u32 {
         let data = self.read(HEARTBEAT_TIMEOUT, 4);
         u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    }
+
+    /// Whether `[addr, addr + len)` touches a register the XML declares `WO`.
+    ///
+    /// Checked by the GVCP server before it serves a read, so a READREG or
+    /// READMEM of a write-only register is refused on the wire. The store
+    /// itself stays readable: `peek`-style test access and the fake's own
+    /// side effects must still see what was written.
+    pub fn is_write_only(&self, addr: u64, len: usize) -> bool {
+        let end = addr.saturating_add(len as u64);
+        WRITE_ONLY_REGISTERS
+            .iter()
+            .any(|&reg| reg < end && addr < reg + 4)
     }
 
     /// Read `len` bytes starting at `addr`.

@@ -40,6 +40,12 @@ pub enum TimeError {
 }
 
 /// Minimal interface required to read/write timestamp registers.
+///
+/// The [`GigeDevice`](crate::gvcp::GigeDevice) implementation used to forward
+/// both methods to READMEM/WRITEMEM whatever their names said. It now goes
+/// through [`GigeDevice::read_register_or_mem`](crate::gvcp::GigeDevice::read_register_or_mem),
+/// so the 4-byte control write is a WRITEREG and the 8-byte value reads stay
+/// READMEM — one command, never two registers that could tear.
 #[async_trait]
 pub trait ControlChannel: Send + Sync {
     async fn read_register(&self, addr: u64, len: usize) -> Result<Vec<u8>, TimeError>;
@@ -362,12 +368,18 @@ fn compute_fit(samples: &[(f64, f64)]) -> Option<(f64, f64)> {
 impl ControlChannel for tokio::sync::Mutex<crate::gvcp::GigeDevice> {
     async fn read_register(&self, addr: u64, len: usize) -> Result<Vec<u8>, TimeError> {
         let mut guard = self.lock().await;
-        guard.read_mem(addr, len).await.map_err(TimeError::from)
+        guard
+            .read_register_or_mem(addr, len)
+            .await
+            .map_err(TimeError::from)
     }
 
     async fn write_register(&self, addr: u64, data: &[u8]) -> Result<(), TimeError> {
         let mut guard = self.lock().await;
-        guard.write_mem(addr, data).await.map_err(TimeError::from)
+        guard
+            .write_register_or_mem(addr, data)
+            .await
+            .map_err(TimeError::from)
     }
 }
 

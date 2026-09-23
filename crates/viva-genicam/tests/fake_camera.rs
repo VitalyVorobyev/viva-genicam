@@ -838,13 +838,27 @@ async fn test_probe_leaves_the_device_holding_the_negotiated_size() {
     const PATH_CEILING: u32 = 9198;
     const HOST_MTU: u32 = 16114;
 
-    let _cam = common::TestCamera::start_with(|b| b.max_on_wire(PATH_CEILING)).await;
+    let cam = common::TestCamera::start_with(|b| b.max_on_wire(PATH_CEILING)).await;
     let device_info = discover_fake().await;
 
     let (stream, mut device) =
         build_stream_keeping_device(&device_info, |b| b.packet_size(HOST_MTU)).await;
 
     assert_eq!(stream.params().packet_size, PATH_CEILING);
+
+    // The bisection only converges if the fake fires a test packet for each
+    // probe, and `GevSCPSPacketSize` is one register — so every probe must have
+    // gone out as WRITEREG and the fake must serve test packets from it
+    // (TC-22, TC-23). Before TC-23 the fake fired them from WRITEMEM only.
+    use viva_fake_gige::GvcpCommand;
+    let scps =
+        viva_fake_gige::registers::STREAM_CHANNEL_BASE + viva_fake_gige::registers::SCP_PACKET_SIZE;
+    let commands = cam.fake().commands();
+    assert!(
+        commands.at(GvcpCommand::WriteReg, scps) > 1,
+        "the probe writes GevSCPSPacketSize with WRITEREG"
+    );
+    assert_eq!(commands.at(GvcpCommand::WriteMem, scps), 0);
 
     let held = device
         .get_stream_packet_size(0)

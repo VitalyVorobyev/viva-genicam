@@ -803,12 +803,44 @@ fn parse_pending_ack(buf: &[u8]) -> Option<(u16, Duration)> {
     Some((request_id, Duration::from_millis(u64::from(millis))))
 }
 
+/// Environment variable that starts every [`GigeDevice`] on READMEM/WRITEMEM.
+///
+/// Any non-empty value other than `0` counts as set. The escape hatch for a
+/// device that mishandles READREG/WRITEREG in a way the automatic fallback
+/// cannot detect — answering with a wrong value rather than refusing — so a
+/// user can get back to memory access without a rebuild.
+pub const FORCE_READMEM_ENV: &str = "VIVA_GIGE_FORCE_READMEM";
+
+/// Whether a [`FORCE_READMEM_ENV`] value asks for memory access.
+fn force_readmem_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// The READREG/WRITEREG address for an access that is exactly one register.
+///
+/// A GVCP register is a 32-bit word on a 32-bit boundary in the low 4 GiB, so
+/// anything else stays READMEM/WRITEMEM. In particular an 8-byte access is
+/// *not* split into two registers: a multi-register READREG has no defined
+/// atomicity, so a latched 64-bit timestamp could tear silently, and a
+/// WRITEREG acknowledgement carries only an index placeholder, so a partial
+/// multi-register write could not even be reported (backlog TC-22).
+fn single_register_address(addr: u64, len: usize) -> Option<u32> {
+    if len != 4 || !addr.is_multiple_of(4) {
+        return None;
+    }
+    u32::try_from(addr).ok()
+}
+
 /// GVCP device handle.
 pub struct GigeDevice {
     socket: UdpSocket,
     remote: SocketAddr,
     request_id: u16,
     rng: Rng,
+    /// Single-register access goes out as READMEM/WRITEMEM instead of
+    /// READREG/WRITEREG. Set by [`FORCE_READMEM_ENV`] at open, or latched for
+    /// the rest of the session once the device refuses a register command.
+    memory_access_only: bool,
 }
 
 /// Stream negotiation outcome describing the values written to the device.
@@ -841,12 +873,32 @@ impl GigeDevice {
         };
         let socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
         socket.connect(addr).await?;
+        let memory_access_only =
+            force_readmem_requested(std::env::var_os(FORCE_READMEM_ENV).as_deref());
+        if memory_access_only {
+            info!(%addr, "{FORCE_READMEM_ENV} is set; using READMEM/WRITEMEM for every register");
+        }
         Ok(Self {
             socket,
             remote: addr,
             request_id: 1,
             rng: Rng::new(),
+            memory_access_only,
         })
+    }
+
+    /// Send every single-register access as READMEM/WRITEMEM from now on.
+    ///
+    /// What [`FORCE_READMEM_ENV`] does at open, for a caller that knows its
+    /// device better than the environment does. There is no way back within
+    /// the session, as there is none from the automatic fallback.
+    pub fn use_memory_access(&mut self) {
+        self.memory_access_only = true;
+    }
+
+    /// Whether single-register access currently goes out as READMEM/WRITEMEM.
+    pub fn memory_access_only(&self) -> bool {
+        self.memory_access_only
     }
 
     /// Claim control channel privilege (CCP).
@@ -854,19 +906,15 @@ impl GigeDevice {
     /// Required by the GigE Vision specification before the device accepts
     /// stream configuration or acquisition commands.
     pub async fn claim_control(&mut self) -> Result<(), GigeError> {
-        self.write_register(
-            consts::CONTROL_CHANNEL_PRIVILEGE as u32,
-            consts::CCP_CONTROL,
-        )
-        .await?;
+        self.write_u32(consts::CONTROL_CHANNEL_PRIVILEGE, consts::CCP_CONTROL)
+            .await?;
         debug!(addr = %self.remote, "claimed control channel privilege");
         Ok(())
     }
 
     /// Release control channel privilege.
     pub async fn release_control(&mut self) -> Result<(), GigeError> {
-        self.write_register(consts::CONTROL_CHANNEL_PRIVILEGE as u32, 0)
-            .await
+        self.write_u32(consts::CONTROL_CHANNEL_PRIVILEGE, 0).await
     }
 
     /// Read `GevHeartbeatTimeout` (milliseconds).
@@ -874,7 +922,7 @@ impl GigeDevice {
     /// This is how long the device will keep control privilege granted with no
     /// GVCP command from the controlling application.
     pub async fn heartbeat_timeout_ms(&mut self) -> Result<u32, GigeError> {
-        self.read_register(consts::HEARTBEAT_TIMEOUT as u32).await
+        self.read_u32(consts::HEARTBEAT_TIMEOUT).await
     }
 
     /// Refresh the device's heartbeat timer, and report whether this
@@ -891,9 +939,7 @@ impl GigeDevice {
     /// register read succeeded and the answer is simply "no". `Err` means the
     /// command itself did not complete.
     pub async fn ping_control_channel(&mut self) -> Result<bool, GigeError> {
-        let privilege = self
-            .read_register(consts::CONTROL_CHANNEL_PRIVILEGE as u32)
-            .await?;
+        let privilege = self.read_u32(consts::CONTROL_CHANNEL_PRIVILEGE).await?;
         Ok(privilege & consts::CCP_CONTROLLER_BITS != 0)
     }
 
@@ -1080,10 +1126,110 @@ impl GigeDevice {
         time::sleep(delay).await;
     }
 
-    /// Read a single 32-bit bootstrap or device register.
+    /// Read `len` bytes at `addr`, as READREG when that is exactly one
+    /// register and READMEM otherwise.
+    ///
+    /// The READREG value is returned big-endian, which is byte-for-byte what
+    /// READMEM returns for the same word: GVCP carries both in network order,
+    /// and interpreting the bytes is GenApi's job, not the transport's.
+    ///
+    /// A device that answers READREG with `NOT_IMPLEMENTED`, or does not
+    /// answer it at all, is switched to READMEM for the rest of the session
+    /// and this access is retried there, so the caller still gets its value.
+    /// Any other refusal — `ACCESS_DENIED`, `BAD_ALIGNMENT` — is the device's
+    /// real answer about this register and is returned as it is.
+    pub async fn read_register_or_mem(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, GigeError> {
+        let register = match single_register_address(addr, len) {
+            Some(register) if !self.memory_access_only => register,
+            _ => return self.read_mem(addr, len).await,
+        };
+        match self.read_register(register).await {
+            Ok(value) => Ok(value.to_be_bytes().to_vec()),
+            Err(GigeError::Status(StatusCode::NotImplemented)) => {
+                self.latch_memory_access("READREG", addr, "NOT_IMPLEMENTED");
+                self.read_mem(addr, len).await
+            }
+            Err(GigeError::Timeout) => {
+                // Silence is ambiguous: the device may ignore READREG, or may
+                // be gone. Latch only once READMEM proves it is still there,
+                // so a cable pull does not cost the session its READREG.
+                let data = self.read_mem(addr, len).await?;
+                self.latch_memory_access("READREG", addr, "no reply");
+                Ok(data)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Write `data` at `addr`, as WRITEREG when that is exactly one register
+    /// and WRITEMEM otherwise.
+    ///
+    /// Falls back to WRITEMEM exactly as [`Self::read_register_or_mem`] falls
+    /// back to READMEM. After a WRITEREG that got no reply the write is sent
+    /// again as WRITEMEM; a device that did execute the first one but lost
+    /// the acknowledgement sees it twice, which is the same exposure the
+    /// command retry loop already has.
+    pub async fn write_register_or_mem(&mut self, addr: u64, data: &[u8]) -> Result<(), GigeError> {
+        let (register, value) = match (single_register_address(addr, data.len()), data) {
+            (Some(register), &[b0, b1, b2, b3]) if !self.memory_access_only => {
+                (register, u32::from_be_bytes([b0, b1, b2, b3]))
+            }
+            _ => return self.write_mem(addr, data).await,
+        };
+        match self.write_register(register, value).await {
+            Ok(()) => Ok(()),
+            Err(GigeError::Status(StatusCode::NotImplemented)) => {
+                self.latch_memory_access("WRITEREG", addr, "NOT_IMPLEMENTED");
+                self.write_mem(addr, data).await
+            }
+            Err(GigeError::Timeout) => {
+                self.write_mem(addr, data).await?;
+                self.latch_memory_access("WRITEREG", addr, "no reply");
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Switch this session to memory access, warning the first time only.
+    fn latch_memory_access(&mut self, command: &str, addr: u64, why: &str) {
+        if self.memory_access_only {
+            return;
+        }
+        self.memory_access_only = true;
+        warn!(
+            device = %self.remote,
+            addr = format!("0x{addr:08x}"),
+            "device refused {command} ({why}); using READMEM/WRITEMEM for the rest of \
+             this session (set {FORCE_READMEM_ENV}=1 to start that way)"
+        );
+    }
+
+    /// Read one 32-bit register through [`Self::read_register_or_mem`].
+    async fn read_u32(&mut self, addr: u64) -> Result<u32, GigeError> {
+        let data = self.read_register_or_mem(addr, 4).await?;
+        let word: [u8; 4] = data.as_slice().try_into().map_err(|_| {
+            GigeError::Protocol(format!("expected 4 register bytes, got {}", data.len()))
+        })?;
+        Ok(u32::from_be_bytes(word))
+    }
+
+    /// Write one 32-bit register through [`Self::write_register_or_mem`].
+    async fn write_u32(&mut self, addr: u64, value: u32) -> Result<(), GigeError> {
+        self.write_register_or_mem(addr, &value.to_be_bytes()).await
+    }
+
+    /// Read a single 32-bit register with READREG, unconditionally.
     ///
     /// Uses GVCP READREG format: 4-byte register address.
     /// The acknowledgement carries the 4-byte register value.
+    ///
+    /// No fallback: prefer [`Self::read_register_or_mem`], which picks the
+    /// command and honours a device that does not implement this one.
     pub async fn read_register(&mut self, addr: u32) -> Result<u32, GigeError> {
         let mut payload = BytesMut::with_capacity(4);
         payload.put_u32(addr);
@@ -1100,10 +1246,12 @@ impl GigeDevice {
         Ok(cursor.get_u32())
     }
 
-    /// Write a single 32-bit bootstrap or device register.
+    /// Write a single 32-bit register with WRITEREG, unconditionally.
     ///
     /// Uses GVCP WRITEREG format: 4-byte register address + 4-byte value.
     /// The acknowledgement carries a 4-byte data index placeholder.
+    ///
+    /// No fallback: prefer [`Self::write_register_or_mem`].
     pub async fn write_register(&mut self, addr: u32, value: u32) -> Result<(), GigeError> {
         let mut payload = BytesMut::with_capacity(8);
         payload.put_u32(addr);
@@ -1197,15 +1345,12 @@ impl GigeDevice {
         port: u16,
     ) -> Result<(), GigeError> {
         info!(%ip, port, "configuring message channel destination");
-        self.write_mem(consts::MESSAGE_DESTINATION_ADDRESS, &ip.octets())
+        self.write_u32(consts::MESSAGE_DESTINATION_ADDRESS, u32::from(ip))
             .await?;
         // GevMCP is a 32-bit register with the port in the low half. Writing
         // only the two port bytes lands them in the *high* half.
-        self.write_mem(
-            consts::MESSAGE_DESTINATION_PORT,
-            &u32::from(port).to_be_bytes(),
-        )
-        .await?;
+        self.write_u32(consts::MESSAGE_DESTINATION_PORT, u32::from(port))
+            .await?;
         Ok(())
     }
 
@@ -1222,9 +1367,9 @@ impl GigeDevice {
     ) -> Result<(), GigeError> {
         info!(channel, %ip, port, "configuring stream destination");
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_ADDRESS);
-        self.write_mem(addr, &ip.octets()).await?;
+        self.write_u32(addr, u32::from(ip)).await?;
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_PORT);
-        self.write_mem(addr, &(port as u32).to_be_bytes()).await?;
+        self.write_u32(addr, u32::from(port)).await?;
         Ok(())
     }
 
@@ -1249,7 +1394,7 @@ impl GigeDevice {
         }
         info!(channel, packet_size, "configuring stream packet size");
         let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
-        self.write_mem(addr, &packet_size.to_be_bytes()).await
+        self.write_u32(addr, packet_size).await
     }
 
     /// Ask the device to emit one GVSP test packet of `packet_size` bytes.
@@ -1274,7 +1419,7 @@ impl GigeDevice {
         let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
         let word = packet_size | SCPS_FIRE_TEST_PACKET | SCPS_DO_NOT_FRAGMENT;
         debug!(channel, packet_size, "requesting GVSP test packet");
-        self.write_mem(addr, &word.to_be_bytes()).await
+        self.write_u32(addr, word).await
     }
 
     /// Read `GevSCPSPacketSize` back and return the size the device holds.
@@ -1286,12 +1431,12 @@ impl GigeDevice {
     /// completes ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112),
     /// backlog SR-02).
     ///
-    /// Deliberately a GVCP READREG rather than a GenApi node read: the write
-    /// side bypasses the `NodeMap`, so a cached `GevSCPSPacketSize` node can
-    /// report the pre-write value and turn this check into a second bug.
+    /// Deliberately a GVCP register read rather than a GenApi node read: the
+    /// write side bypasses the `NodeMap`, so a cached `GevSCPSPacketSize` node
+    /// can report the pre-write value and turn this check into a second bug.
     pub async fn get_stream_packet_size(&mut self, channel: u32) -> Result<u32, GigeError> {
-        let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE) as u32;
-        let raw = self.read_register(addr).await?;
+        let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
+        let raw = self.read_u32(addr).await?;
         Ok(raw & STREAM_PACKET_SIZE_MASK)
     }
 
@@ -1303,7 +1448,7 @@ impl GigeDevice {
     ) -> Result<(), GigeError> {
         debug!(channel, packet_delay, "configuring stream packet delay");
         let addr = Self::stream_reg(channel, consts::STREAM_PACKET_DELAY);
-        self.write_mem(addr, &packet_delay.to_be_bytes()).await
+        self.write_u32(addr, packet_delay).await
     }
 
     /// Negotiate GVSP parameters with the device given the host interface.
@@ -1348,18 +1493,9 @@ impl GigeDevice {
     pub async fn read_persistent_ip(
         &mut self,
     ) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr), GigeError> {
-        let ip = Ipv4Addr::from(
-            self.read_register(consts::PERSISTENT_IP_ADDRESS as u32)
-                .await?,
-        );
-        let subnet = Ipv4Addr::from(
-            self.read_register(consts::PERSISTENT_SUBNET_MASK as u32)
-                .await?,
-        );
-        let gateway = Ipv4Addr::from(
-            self.read_register(consts::PERSISTENT_DEFAULT_GATEWAY as u32)
-                .await?,
-        );
+        let ip = Ipv4Addr::from(self.read_u32(consts::PERSISTENT_IP_ADDRESS).await?);
+        let subnet = Ipv4Addr::from(self.read_u32(consts::PERSISTENT_SUBNET_MASK).await?);
+        let gateway = Ipv4Addr::from(self.read_u32(consts::PERSISTENT_DEFAULT_GATEWAY).await?);
         Ok((ip, subnet, gateway))
     }
 
@@ -1370,15 +1506,12 @@ impl GigeDevice {
         subnet: Ipv4Addr,
         gateway: Ipv4Addr,
     ) -> Result<(), GigeError> {
-        self.write_register(consts::PERSISTENT_IP_ADDRESS as u32, u32::from(ip))
+        self.write_u32(consts::PERSISTENT_IP_ADDRESS, u32::from(ip))
             .await?;
-        self.write_register(consts::PERSISTENT_SUBNET_MASK as u32, u32::from(subnet))
+        self.write_u32(consts::PERSISTENT_SUBNET_MASK, u32::from(subnet))
             .await?;
-        self.write_register(
-            consts::PERSISTENT_DEFAULT_GATEWAY as u32,
-            u32::from(gateway),
-        )
-        .await?;
+        self.write_u32(consts::PERSISTENT_DEFAULT_GATEWAY, u32::from(gateway))
+            .await?;
         info!(%ip, %subnet, %gateway, "wrote persistent IP configuration");
         Ok(())
     }
@@ -1387,10 +1520,9 @@ impl GigeDevice {
     ///
     /// Sets bit 1 (persistent IP) in the `CurrentIPConfiguration` register.
     pub async fn enable_persistent_ip(&mut self) -> Result<(), GigeError> {
-        let current = self.read_register(consts::CURRENT_IP_CONFIG as u32).await?;
+        let current = self.read_u32(consts::CURRENT_IP_CONFIG).await?;
         let updated = current | 0x02; // bit 1 = persistent IP
-        self.write_register(consts::CURRENT_IP_CONFIG as u32, updated)
-            .await?;
+        self.write_u32(consts::CURRENT_IP_CONFIG, updated).await?;
         info!(config = format!("0x{updated:08x}"), "enabled persistent IP");
         Ok(())
     }
@@ -1789,6 +1921,33 @@ mod tests {
             "device reported status ACCESS_DENIED (0x8006)"
         );
         assert_eq!(server.await.expect("join"), 1);
+    }
+
+    #[test]
+    fn only_one_aligned_32_bit_word_is_a_register() {
+        assert_eq!(single_register_address(0x0a00, 4), Some(0x0a00));
+        assert_eq!(single_register_address(0xFFFF_FFFC, 4), Some(0xFFFF_FFFC));
+        // Unaligned: the address stays READMEM, where TC-21 lives.
+        assert_eq!(single_register_address(0x0a02, 4), None);
+        // Not one register wide. Eight bytes is two registers, and is not
+        // split: a multi-register READREG could tear a 64-bit value.
+        assert_eq!(single_register_address(0x0a00, 8), None);
+        assert_eq!(single_register_address(0x0a00, 2), None);
+        assert_eq!(single_register_address(0x0a00, 0), None);
+        // Beyond the 32-bit address a READREG can carry.
+        assert_eq!(single_register_address(0x1_0000_0000, 4), None);
+    }
+
+    #[test]
+    fn force_readmem_env_accepts_anything_but_empty_and_zero() {
+        use std::ffi::OsStr;
+        assert!(!force_readmem_requested(None));
+        assert!(!force_readmem_requested(Some(OsStr::new(""))));
+        assert!(!force_readmem_requested(Some(OsStr::new("0"))));
+        assert!(force_readmem_requested(Some(OsStr::new("1"))));
+        assert!(force_readmem_requested(Some(OsStr::new("true"))));
+        // Only the exact string "0" means off; this is not a number parser.
+        assert!(force_readmem_requested(Some(OsStr::new("00"))));
     }
 
     #[test]

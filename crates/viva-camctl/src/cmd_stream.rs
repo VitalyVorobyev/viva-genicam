@@ -29,6 +29,8 @@ pub struct StreamArgs {
     /// [`StreamArgs::packet_size`].
     pub auto: bool,
     pub save: usize,
+    /// Append every completed EVT block's raw payload to this single file.
+    pub raw_out: Option<PathBuf>,
     pub rgb: bool,
     pub duration_s: u64,
 }
@@ -128,6 +130,17 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     let mut saved_frames = 0usize;
     let mut frame_index = 0usize;
     let mut warned_evs_rgb = false;
+    let mut raw_out = args
+        .raw_out
+        .as_ref()
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("open raw-out file {}", path.display()))
+        })
+        .transpose()?;
     let end_deadline = if args.duration_s > 0 {
         Some(Instant::now() + Duration::from_secs(args.duration_s))
     } else {
@@ -196,6 +209,11 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                                 if args.rgb && !warned_evs_rgb {
                                     warn!("--rgb does not apply to EVT data; preserving raw bytes");
                                     warned_evs_rgb = true;
+                                }
+                                if let Some(file) = raw_out.as_mut() {
+                                    use std::io::Write;
+                                    file.write_all(block.payload.as_ref())
+                                        .with_context(|| format!("write EVT payload to raw-out (block {})", frame_index))?;
                                 }
                                 if saved_frames < args.save {
                                     if let Err(err) = save_evs_block(&block, frame_index) {

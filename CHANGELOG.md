@@ -98,6 +98,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of 1.9.0. The procedure is written into `deny.toml`, because an exception list
   is only defensible against the lock that actually ships.
 
+- **`viva-service` announced every GigE camera with its device id as the serial,
+  and dropped the rest of its identity** (backlog `SVC-07`,
+  [#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
+  `publish_announce` took only a device id and a model, so `serial` carried
+  `cam-<mac hex>` and `name` the bare model — two cameras of one model announced
+  the same `name` and `model` and differed only in a field that was wrong and
+  that no client rendered. The Discovery ACK's serial and user-defined name have
+  been parsed since 0.3.0 and were never plumbed past the library. The announce
+  is now built from the whole `DeviceInfo`: the real serial (empty when the
+  camera reports none), the IP, the MAC, the user-defined name and the
+  manufacturer, with `name` the user-defined name, else the model, else the
+  address. `viva-service-u3v` already sent a real serial; it now sends an empty
+  one rather than `"N/A"` when the descriptor is missing, plus the manufacturer.
+  The reporter has not yet confirmed this on their cameras.
+
 ### Changed
 
 - **A single 32-bit register now goes out as READREG/WRITEREG, not
@@ -156,6 +171,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state without going through GVCP, so a test can check a write landed without
   trusting our own read-back.
 
+- **`DeviceAnnounce` carries the device's identity, and the Zenoh API version is
+  3** (`viva-zenoh-api`, backlog `SVC-07`/`API-13`,
+  [#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)). It gains
+  `ip`, `mac`, `user_name` and `manufacturer`, all `Option<String>` with
+  `#[serde(default)]`, so an announce from a version 2 service still
+  deserialises — tested against a v2-shaped payload. **Breaking for Rust
+  callers**: the struct is now `#[non_exhaustive]`, so it is built with
+  `DeviceAnnounce::new` (or `DeviceAnnounce::for_gige`, below) and the optional
+  fields assigned, and the next field will not be a breaking change. Only
+  `DeviceAnnounce` got the attribute; its sibling payload types did not, and
+  that remainder stays in the backlog as `API-13`.
+
+  Two helpers hold the GigE identity rule in one place: `gige_device_id` (the
+  `cam-<mac hex>` id the service has always keyed by, now written once instead
+  of three times) and `DeviceAnnounce::for_gige`, which builds the whole
+  announce from Discovery ACK fields and is what both the service and Studio's
+  embedded backend now call.
+
 - **`quick-xml` 0.41 → 0.42, which moves the parser from bytes to `&str`**
   (backlog `CI-14`). 0.42 rewrites the API around `&str`: `QName` and the text
   event types wrap it, `AsRef<[u8]>` is gone, and `BytesText`/`BytesCData`/
@@ -194,6 +227,36 @@ workspace and published nowhere: no crate on crates.io and no desktop binary
 carries these changes. They are recorded here because the book they correct
 *is* published on every push to `main`. Nothing in this section changes the
 library.
+
+- **Studio's device list can tell two cameras of the same model apart**
+  (backlog `ST-24`, [#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
+  Each entry in the header dropdown led with the name and model — identical for
+  identical cameras — beside a status dot that was always `idle`. It now leads
+  with the user-defined name, else the serial, else the address, with the model
+  and whichever of serial and address is not already shown on a second line; the
+  connected camera is named the same way. `DeviceSidebar.tsx` and
+  `DeviceCard.tsx` are deleted, along with the card's CSS: neither was rendered
+  anywhere, and `DeviceCard` was the one component that *did* show the serial,
+  which made it the obvious wrong place to fix this.
+
+- **Studio's two backends now give a camera the same identity** (backlog
+  `ST-25`). Embedded mode used the IP as the device id and fell back to the MAC
+  for a missing serial; the Zenoh bridge used `cam-<mac hex>`. Both now build the
+  announce with `DeviceAnnounce::for_gige`, so the id is MAC-derived in either
+  mode — the IP is the one identifier that changes under DHCP, `FORCEIP`, and a
+  persistent-IP write from Studio's own network dialog — and the IP travels as a
+  field. Embedded `connect` resolves the IP from the discovery cache. The
+  network dialog's MAC was being read from the `serial` field, so it showed the
+  serial for any camera that reports one; it reads `mac` now. A repeated
+  discovery event now replaces the entry instead of being ignored, so an address
+  change is shown.
+
+- **`viva-fake-gige` takes `--mac`, `--model`, `--serial` and `--user-name`**
+  (and the matching builder methods), defaulting to the `FAKE_*` constants. Two
+  fakes used to be byte-identical in identity, which could reproduce #137 but
+  not demonstrate the fix. The MAC is on the list because services key a camera
+  by it: two fakes with distinct serials and one MAC are one camera to
+  `viva-service`. The crate is `publish = false`.
 
 - **The planning documents now only describe open work.** `docs/backlog.md` had
   accumulated 69 completed rows, each carrying a post-mortem paragraph, and the

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { deviceDetail, deviceLabel } from "../../device/deviceLabel";
 import type { ConnectionState, DeviceInfo, DisconnectReason } from "../../device/types";
 
 interface DeviceDropdownProps {
@@ -64,8 +65,24 @@ export function DeviceDropdown({
         ? "device-dd__dot--error"
         : "device-dd__dot--idle";
 
+  // Name the connected camera the way the list did, so it stays clear which of
+  // two identical cameras is open.
+  const connectedDevice = isConnected
+    ? devices.find((d) => d.id === connectionState.device_id)
+    : undefined;
+  const connectedName = connectedDevice
+    ? deviceLabel(connectedDevice)
+    : isConnected
+      ? connectionState.device_name
+      : "";
+  const connectedMeta = connectedDevice
+    ? deviceDetail(connectedDevice)
+    : isConnected
+      ? connectionState.model
+      : "";
+
   const label = isConnected
-    ? connectionState.device_name
+    ? connectedName
     : isConnecting
       ? "Connecting\u2026"
       : isReconnecting
@@ -101,8 +118,8 @@ export function DeviceDropdown({
           {/* Connected device */}
           {isConnected && (
             <div className="device-dd__connected">
-              <div className="device-dd__device-name">{connectionState.device_name}</div>
-              <div className="device-dd__device-meta">{connectionState.model}</div>
+              <div className="device-dd__device-name">{connectedName}</div>
+              <div className="device-dd__device-meta">{connectedMeta}</div>
               <button type="button" className="btn--secondary btn--sm" onClick={onDisconnect}>
                 Disconnect
               </button>
@@ -130,8 +147,12 @@ export function DeviceDropdown({
                 onClick={() => handleConnect(d.id)}
               >
                 <span className="device-dd__dot device-dd__dot--idle" />
-                <span className="device-dd__option-name">{d.name}</span>
-                <span className="device-dd__option-model">{d.model}</span>
+                <span className="device-dd__option-text">
+                  <span className="device-dd__option-name">{deviceLabel(d)}</span>
+                  {deviceDetail(d) && (
+                    <span className="device-dd__option-detail">{deviceDetail(d)}</span>
+                  )}
+                </span>
                 {d.transport && (
                   <span className={`device-dd__transport device-dd__transport--${d.transport}`}>
                     {d.transport === "gige" ? "GigE" : d.transport === "usb3" ? "USB3" : d.transport}

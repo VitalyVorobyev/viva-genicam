@@ -490,56 +490,6 @@ input[type="checkbox"] {
 .conn-badge--connected    { background: var(--success-muted); color: var(--success); }
 .conn-badge--error        { background: var(--danger-muted);  color: var(--danger); }
 
-/* Device card */
-.device-card {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: var(--sp-4) var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  transition: border-color var(--transition-fast);
-}
-.device-card:hover { border-color: var(--border); }
-.device-card--connected {
-  border-color: var(--success-border);
-  background: linear-gradient(135deg, var(--bg-elevated) 0%, var(--success-tint) 100%);
-}
-.device-card--connecting {
-  border-color: var(--warning-border);
-  animation: device-card-connecting 1.5s ease-in-out infinite;
-}
-.device-card--recent { background: var(--bg-surface); border-color: var(--border-subtle); opacity: 0.8; }
-.device-card--recent:hover { opacity: 1; border-color: var(--border); }
-
-@keyframes device-card-connecting {
-  0%, 100% { border-color: var(--warning-border); }
-  50%       { border-color: var(--warning); }
-}
-
-.device-card__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-}
-
-.device-card__name { font-size: var(--text-sm); font-weight: var(--fw-semibold); color: var(--text-primary); }
-.device-card__meta { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); font-size: var(--text-xs); color: var(--text-secondary); }
-.device-card__id   { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); word-break: break-all; }
-.device-card__actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
-
-.device-card__status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.device-card__status-dot--connected    { background: var(--success); }
-.device-card__status-dot--connecting   { background: var(--warning); animation: pulse 1.8s ease-in-out infinite; }
-.device-card__status-dot--disconnected { background: var(--text-muted); }
-
 /* ── Feature Browser ─────────────────────────────────────────── */
 
 .feature-browser {
@@ -2611,9 +2561,22 @@ input[type="checkbox"] {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.device-dd__option-name { flex: 1; }
-.device-dd__option-model {
+.device-dd__option-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.device-dd__option-name,
+.device-dd__option-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-dd__option-detail {
   font-size: var(--text-xs);
+  font-family: var(--font-mono);
   color: var(--text-muted);
 }
 

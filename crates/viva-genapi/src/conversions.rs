@@ -347,7 +347,15 @@ pub fn map_bitops_error(name: &str, err: BitOpsError) -> GenApiError {
 ///
 /// This helper is used when writing to a bitfield requires first reading the current
 /// register value, modifying specific bits, and writing back the result.
+///
+/// `readable` is whether the node's access mode permits a read. A write-only
+/// register with a warm cache is still writable — the cached bytes are what
+/// this node last wrote, which is the legal GenICam way to keep the other bits
+/// — but with a cold cache the read would go to a device that refuses it, so
+/// it is refused here instead with an error that says why (GA-31).
 pub fn get_raw_or_read(
+    name: &str,
+    readable: bool,
     cache: &std::cell::RefCell<Option<Vec<u8>>>,
     io: &dyn crate::RegisterIo,
     address: u64,
@@ -359,6 +367,12 @@ pub fn get_raw_or_read(
     {
         return Ok(bytes);
     }
+    if !readable {
+        return Err(GenApiError::MaskedWriteUnreadable {
+            name: name.to_string(),
+            address,
+        });
+    }
     io.read(address, len as usize).map_err(|err| match err {
         GenApiError::Io(_) => err,
         other => other,
@@ -368,6 +382,53 @@ pub fn get_raw_or_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+
+    /// Counts reads and answers every one, so a test can assert that none was
+    /// issued rather than that one failed.
+    struct CountingIo {
+        reads: Cell<usize>,
+    }
+
+    impl crate::RegisterIo for CountingIo {
+        fn read(&self, _addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+            self.reads.set(self.reads.get() + 1);
+            Ok(vec![0; len])
+        }
+
+        fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
+            Ok(())
+        }
+    }
+
+    /// GA-31: a cold cache on an unreadable register is refused without a
+    /// read; a warm one is used; a readable register still reads.
+    #[test]
+    fn read_modify_write_never_reads_a_write_only_register() {
+        let io = CountingIo {
+            reads: Cell::new(0),
+        };
+
+        let cold = RefCell::new(None);
+        let err = get_raw_or_read("Pulse", false, &cold, &io, 0x200B0, 4)
+            .expect_err("a cold write-only register cannot supply its other bits");
+        assert!(
+            matches!(
+                err,
+                GenApiError::MaskedWriteUnreadable { ref name, address: 0x200B0 } if name == "Pulse"
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(io.reads.get(), 0, "no read may reach the transport");
+
+        let warm = RefCell::new(Some(vec![0x80, 0, 0, 0]));
+        let raw = get_raw_or_read("Pulse", false, &warm, &io, 0x200B0, 4).expect("warm cache");
+        assert_eq!(raw, vec![0x80, 0, 0, 0]);
+        assert_eq!(io.reads.get(), 0, "a warm cache needs no read");
+
+        get_raw_or_read("Flag", true, &cold, &io, 0x100, 4).expect("readable register");
+        assert_eq!(io.reads.get(), 1, "a readable register is read as before");
+    }
 
     /// Issue #140 and #112: a `GevTimestampValue`-shaped register whose top bit
     /// is set. Refusing it made the node unreadable on FLIR and Vieworks

@@ -84,4 +84,17 @@ pub enum GenApiError {
         value: i64,
         bit_length: u16,
     },
+    /// A bitfield write needs the rest of its register, and the register is
+    /// write-only with nothing cached.
+    ///
+    /// Writing some bits of a register means sending the whole register, so
+    /// the other bits have to come from somewhere. For a `WO` register they
+    /// cannot come from the device — it refuses the read — and inventing them
+    /// would silently overwrite whatever the device holds. Refused locally,
+    /// before anything reaches the wire (backlog GA-31, issue #135).
+    #[error(
+        "cannot write bitfield node {name}: its register at {address:#X} is write-only, so the \
+         other bits it shares cannot be read back, and none are cached"
+    )]
+    MaskedWriteUnreadable { name: String, address: u64 },
 }

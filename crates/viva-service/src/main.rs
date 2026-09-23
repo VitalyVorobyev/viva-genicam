@@ -119,12 +119,7 @@ async fn run_discovery_loop(
                     let mut active = active_devices.lock().await;
                     if active.contains_key(&device_id) {
                         drop(active);
-                        publish_announce(
-                            &session,
-                            &device_id,
-                            dev_info.model.as_deref().unwrap_or("Unknown"),
-                        )
-                        .await;
+                        publish_announce(&session, &dev_info).await;
                         continue;
                     }
 
@@ -139,12 +134,7 @@ async fn run_discovery_loop(
                                 spawn_device_tasks(session.clone(), handle, shutdown_rx).await;
                             active.insert(device_id.clone(), tasks);
 
-                            publish_announce(
-                                &session,
-                                &device_id,
-                                dev_info.model.as_deref().unwrap_or("Unknown"),
-                            )
-                            .await;
+                            publish_announce(&session, &dev_info).await;
                         }
                         Err(e) => {
                             error!(device_id, error = %e, "failed to connect");
@@ -252,30 +242,36 @@ async fn spawn_device_tasks(
     ]
 }
 
-async fn publish_announce(session: &zenoh::Session, device_id: &str, model: &str) {
-    use viva_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
+async fn publish_announce(session: &zenoh::Session, info: &viva_genicam::gige::DeviceInfo) {
+    use viva_zenoh_api::keys;
 
-    let announce = DeviceAnnounce {
-        id: device_id.to_string(),
-        name: model.to_string(),
-        model: model.to_string(),
-        serial: device_id.to_string(),
-        api_version: Some(API_VERSION),
-    };
-    let key = keys::announce(device_id);
+    let announce = device_announce(info);
+    let key = keys::announce(&announce.id);
     if let Ok(payload) = serde_json::to_vec(&announce) {
         let _ = session.put(&key, payload).await;
     }
 }
 
+/// Build the announce for a discovered camera from its Discovery ACK.
+///
+/// `serial` is the serial the camera reports. It used to be the device id,
+/// which left two cameras of one model with nothing to tell them apart but a
+/// MAC-derived string no client rendered (#137).
+fn device_announce(info: &viva_genicam::gige::DeviceInfo) -> viva_zenoh_api::DeviceAnnounce {
+    viva_zenoh_api::DeviceAnnounce::for_gige(
+        &info.mac,
+        info.ip,
+        info.model.as_deref(),
+        info.serial.as_deref(),
+        info.user_name.as_deref(),
+        info.manufacturer.as_deref(),
+    )
+}
+
+/// Must agree with the `id` of [`device_announce`], which is the key the
+/// service publishes under.
 fn derive_device_id(info: &viva_genicam::gige::DeviceInfo) -> String {
-    let mac = info
-        .mac
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join("");
-    format!("cam-{mac}")
+    viva_zenoh_api::gige_device_id(&info.mac)
 }
 
 fn init_tracing(verbose: u8) {
@@ -295,5 +291,48 @@ fn load_zenoh_config(
     match path {
         Some(p) => Ok(zenoh::Config::from_file(p)?),
         None => Ok(zenoh::Config::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use viva_genicam::gige::DeviceInfo;
+
+    fn discovered(serial: Option<&str>, user_name: Option<&str>) -> DeviceInfo {
+        DeviceInfo {
+            mac: [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE],
+            model: Some("FakeGigE".into()),
+            manufacturer: Some("viva-genicam".into()),
+            serial: serial.map(Into::into),
+            user_name: user_name.map(Into::into),
+            ..DeviceInfo::from_ip(Ipv4Addr::new(192, 168, 1, 10))
+        }
+    }
+
+    #[test]
+    fn announce_carries_the_device_identity_not_the_device_id() {
+        let info = discovered(Some("SN-1"), Some("Left"));
+        let a = device_announce(&info);
+        assert_eq!(a.id, "cam-deadbeefcafe");
+        assert_eq!(a.id, derive_device_id(&info));
+        assert_eq!(a.serial, "SN-1");
+        assert_eq!(a.name, "Left");
+        assert_eq!(a.model, "FakeGigE");
+        assert_eq!(a.ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(a.mac.as_deref(), Some("DE:AD:BE:EF:CA:FE"));
+        assert_eq!(a.user_name.as_deref(), Some("Left"));
+        assert_eq!(a.manufacturer.as_deref(), Some("viva-genicam"));
+        assert_eq!(a.api_version, Some(viva_zenoh_api::API_VERSION));
+    }
+
+    #[test]
+    fn announce_without_serial_or_user_name_leaves_them_empty() {
+        let info = discovered(None, None);
+        let a = device_announce(&info);
+        assert_eq!(a.serial, "", "the device id must not stand in for a serial");
+        assert_eq!(a.user_name, None);
+        assert_eq!(a.name, "FakeGigE");
     }
 }

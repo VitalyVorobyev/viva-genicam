@@ -24,14 +24,32 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 /// - `2` — adds [`FeatureState`] / [`NumericRange`] / [`CommandResult`] for
 ///   live introspection. `NodeValueUpdate` stays wire-compatible; readers that
 ///   understand the new types can consume the new queryables and payloads.
-pub const API_VERSION: u32 = 2;
+/// - `3` — [`DeviceAnnounce`] carries the device's own identity (`ip`, `mac`,
+///   `user_name`, `manufacturer`), and `serial` is the serial the device
+///   reports rather than the service's device id
+///   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)). The
+///   new fields are optional, so a version 2 announce still deserialises.
+pub const API_VERSION: u32 = 3;
 
 /// Periodic announcement published by the camera service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Carries enough of the device's identity for a client to tell two cameras of
+/// the same model apart: the user-defined name, the serial and the address.
+///
+/// `#[non_exhaustive]`: build one with [`DeviceAnnounce::new`] and assign the
+/// optional fields, so that adding the next field is not a breaking change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceAnnounce {
+    /// Service-assigned device id, also the `{id}` segment of every key
+    /// expression in [`keys`]. For GigE Vision it is [`gige_device_id`].
     pub id: String,
+    /// Human-readable name: the user-defined name, else the model.
     pub name: String,
     pub model: String,
+    /// Serial number as the device reports it; empty when it reports none.
+    ///
+    /// Services before API version 3 put the device id here instead.
     pub serial: String,
     /// Zenoh API version supported by this service.
     ///
@@ -39,6 +57,93 @@ pub struct DeviceAnnounce {
     /// field — handled gracefully by the app (warns but still discovers).
     #[serde(default)]
     pub api_version: Option<u32>,
+    /// Current IPv4 address in dotted-quad form. `None` for transports without
+    /// one (USB3 Vision) and from services before API version 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    /// MAC address as `AA:BB:CC:DD:EE:FF`. `None` for transports without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// User-defined device name (the GigE Vision Discovery ACK's user-defined
+    /// name field), when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    /// Manufacturer name, when the device reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+}
+
+impl DeviceAnnounce {
+    /// An announce carrying the required fields and the current
+    /// [`API_VERSION`], with every optional identity field unset.
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        model: impl Into<String>,
+        serial: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            model: model.into(),
+            serial: serial.into(),
+            api_version: Some(API_VERSION),
+            ip: None,
+            mac: None,
+            user_name: None,
+            manufacturer: None,
+        }
+    }
+
+    /// The announce for a GigE Vision camera, from the fields of its Discovery
+    /// ACK.
+    ///
+    /// The one place the GigE identity rule lives, so the service and Studio's
+    /// embedded backend announce the same camera identically: `id` is
+    /// [`gige_device_id`], `name` is the user-defined name, else the model,
+    /// else the address, and `serial` is the device's own (empty when absent).
+    pub fn for_gige(
+        mac: &[u8; 6],
+        ip: std::net::Ipv4Addr,
+        model: Option<&str>,
+        serial: Option<&str>,
+        user_name: Option<&str>,
+        manufacturer: Option<&str>,
+    ) -> Self {
+        let name = user_name
+            .or(model)
+            .map_or_else(|| ip.to_string(), str::to_string);
+        let mut announce = Self::new(
+            gige_device_id(mac),
+            name,
+            model.unwrap_or_default(),
+            serial.unwrap_or_default(),
+        );
+        announce.ip = Some(ip.to_string());
+        announce.mac = Some(
+            mac.iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+        announce.user_name = user_name.map(str::to_string);
+        announce.manufacturer = manufacturer.map(str::to_string);
+        announce
+    }
+}
+
+/// Device id for a GigE Vision camera: `cam-` followed by its MAC address as
+/// twelve lowercase hex digits.
+///
+/// The MAC is the one identifier every GigE Vision device reports, that is
+/// unique on the wire, and that survives an address change — DHCP, `FORCEIP`,
+/// or a persistent IP written from Studio itself. The IP is none of those, and
+/// the serial is optional in the Discovery ACK. The service and Studio's
+/// embedded backend both derive the id here, so a camera keeps one identity in
+/// either mode.
+pub fn gige_device_id(mac: &[u8; 6]) -> String {
+    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    format!("cam-{hex}")
 }
 
 // ── Connection Lifecycle ─────────────────────────────────────────────────────
@@ -425,6 +530,107 @@ mod tests {
         let json = r#"{"id":"cam0","name":"Test","model":"M","serial":"S","api_version":1}"#;
         let a: DeviceAnnounce = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(a.api_version, Some(1));
+    }
+
+    #[test]
+    fn device_announce_round_trips_every_identity_field() {
+        let mut a = DeviceAnnounce::new("cam-deadbeefcafe", "Left", "FakeGigE", "FAKE-001");
+        a.ip = Some("192.168.1.10".into());
+        a.mac = Some("DE:AD:BE:EF:CA:FE".into());
+        a.user_name = Some("Left".into());
+        a.manufacturer = Some("viva-genicam".into());
+        let json = serde_json::to_string(&a).expect("serialize");
+        let back: DeviceAnnounce = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, a);
+        assert_eq!(back.api_version, Some(API_VERSION));
+    }
+
+    #[test]
+    fn device_announce_omits_unset_identity_fields() {
+        let a = DeviceAnnounce::new("cam-u3v-00010002", "U3V", "U3V", "");
+        let json = serde_json::to_string(&a).expect("serialize");
+        for field in ["ip", "mac", "user_name", "manufacturer"] {
+            assert!(!json.contains(&format!("\"{field}\"")), "{field} in {json}");
+        }
+        let back: DeviceAnnounce = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, a);
+    }
+
+    /// What a version 2 service publishes: the device id in `serial` and none
+    /// of the identity fields. It must still deserialise, or upgrading the app
+    /// would make every older service's cameras disappear.
+    #[test]
+    fn device_announce_deserializes_a_version_2_payload() {
+        let v2 = r#"{"id":"cam-deadbeefcafe","name":"FakeGigE","model":"FakeGigE","serial":"cam-deadbeefcafe","api_version":2}"#;
+        let a: DeviceAnnounce = serde_json::from_str(v2).expect("should deserialize");
+        assert_eq!(a.api_version, Some(2));
+        assert_eq!(a.serial, "cam-deadbeefcafe");
+        assert_eq!(a.ip, None);
+        assert_eq!(a.mac, None);
+        assert_eq!(a.user_name, None);
+        assert_eq!(a.manufacturer, None);
+    }
+
+    #[test]
+    fn for_gige_carries_the_device_identity() {
+        let a = DeviceAnnounce::for_gige(
+            &[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE],
+            std::net::Ipv4Addr::new(192, 168, 1, 10),
+            Some("FakeGigE"),
+            Some("FAKE-001"),
+            Some("Left"),
+            Some("viva-genicam"),
+        );
+        assert_eq!(a.id, "cam-deadbeefcafe");
+        assert_eq!(a.name, "Left");
+        assert_eq!(a.model, "FakeGigE");
+        assert_eq!(a.serial, "FAKE-001");
+        assert_eq!(a.ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(a.mac.as_deref(), Some("DE:AD:BE:EF:CA:FE"));
+        assert_eq!(a.user_name.as_deref(), Some("Left"));
+        assert_eq!(a.manufacturer.as_deref(), Some("viva-genicam"));
+        assert_eq!(a.api_version, Some(API_VERSION));
+    }
+
+    #[test]
+    fn for_gige_names_by_user_name_then_model_then_address() {
+        let mac = [0, 1, 2, 3, 4, 5];
+        let ip = std::net::Ipv4Addr::new(10, 0, 0, 7);
+        let name = |model, user_name| {
+            DeviceAnnounce::for_gige(&mac, ip, model, None, user_name, None).name
+        };
+        assert_eq!(name(Some("M"), Some("U")), "U");
+        assert_eq!(name(Some("M"), None), "M");
+        assert_eq!(name(None, None), "10.0.0.7");
+    }
+
+    /// An absent serial stays empty: services before version 3 filled it with
+    /// the device id, which is not a serial and read as one.
+    #[test]
+    fn for_gige_does_not_invent_a_serial() {
+        let a = DeviceAnnounce::for_gige(
+            &[0, 1, 2, 3, 4, 5],
+            std::net::Ipv4Addr::new(10, 0, 0, 7),
+            Some("M"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(a.serial, "");
+        assert_eq!(a.user_name, None);
+        assert_eq!(a.manufacturer, None);
+    }
+
+    #[test]
+    fn gige_device_id_is_lowercase_mac_hex() {
+        assert_eq!(
+            gige_device_id(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE]),
+            "cam-deadbeefcafe"
+        );
+        assert_eq!(
+            gige_device_id(&[0x00, 0x0C, 0xDF, 0x06, 0x5B, 0x2F]),
+            "cam-000cdf065b2f"
+        );
     }
 
     #[test]

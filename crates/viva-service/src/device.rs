@@ -84,13 +84,7 @@ impl DeviceHandle {
     }
 
     fn derive_device_id(info: &gige::DeviceInfo) -> String {
-        let mac = info
-            .mac
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .join("");
-        format!("cam-{mac}")
+        viva_zenoh_api::gige_device_id(&info.mac)
     }
 
     pub fn device_id(&self) -> &str {

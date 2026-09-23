@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use viva_service::device::DeviceOps;
 use viva_service::{nodes, status, xml};
 use viva_u3v::usb::UsbTransfer;
-use viva_zenoh_api::{API_VERSION, DeviceAnnounce, keys};
+use viva_zenoh_api::{DeviceAnnounce, keys};
 
 use crate::device::U3vDeviceHandle;
 
@@ -107,16 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ///
 /// Publishes connected status and initial feature values, then spawns XML,
 /// node-set, node-execute, bulk-read, and acquisition queryables, and a
-/// periodic announce loop.
+/// periodic announce loop publishing `announce`, whose `id` is the device id.
 async fn spawn_service_tasks<T: UsbTransfer + 'static>(
     session: Arc<zenoh::Session>,
     handle: Arc<U3vDeviceHandle<T>>,
-    device_id: String,
-    name: String,
-    model: String,
-    serial: String,
+    announce: DeviceAnnounce,
     shutdown: watch::Receiver<bool>,
 ) {
+    let device_id = announce.id.clone();
     // Publish connected status and initial values.
     status::publish_connected(&session, &device_id).await;
     nodes::publish_initial_values(&session, handle.as_ref()).await;
@@ -164,17 +162,9 @@ async fn spawn_service_tasks<T: UsbTransfer + 'static>(
     // Periodic announce so the studio discovers the device even if it
     // starts after the service (studio subscribes to announce topic).
     let announce_session = session.clone();
-    let announce_device_id = device_id.clone();
     let mut announce_shutdown = shutdown;
     tokio::spawn(async move {
-        let announce = DeviceAnnounce {
-            id: announce_device_id.clone(),
-            name,
-            model,
-            serial,
-            api_version: Some(API_VERSION),
-        };
-        let key = keys::announce(&announce_device_id);
+        let key = keys::announce(&announce.id);
         let Ok(payload) = serde_json::to_vec(&announce) else {
             tracing::error!("serialize announce");
             return;
@@ -222,16 +212,8 @@ async fn run_fake_camera(
         Some(0x82),
     ));
 
-    spawn_service_tasks(
-        session,
-        handle,
-        device_id,
-        "FakeU3V".to_string(),
-        "FakeU3V".to_string(),
-        "FAKE-001".to_string(),
-        shutdown,
-    )
-    .await;
+    let announce = DeviceAnnounce::new(device_id, "FakeU3V", "FakeU3V", "FAKE-001");
+    spawn_service_tasks(session, handle, announce, shutdown).await;
 
     info!("fake U3V camera service ready (use Viva Studio to connect)");
     Ok(())
@@ -287,12 +269,14 @@ async fn run_real_camera(
         .model
         .clone()
         .unwrap_or_else(|| "Unknown".to_string());
-    let serial = device_info
-        .serial
-        .clone()
-        .unwrap_or_else(|| "N/A".to_string());
+    // USB enumeration has no IP, MAC or user-defined name to offer, so the
+    // serial is what tells two cameras of one model apart. Empty when the
+    // string descriptor is absent, as `DeviceAnnounce::serial` specifies.
+    let serial = device_info.serial.clone().unwrap_or_default();
+    let mut announce = DeviceAnnounce::new(device_id, name, model, serial);
+    announce.manufacturer = device_info.manufacturer.clone();
 
-    spawn_service_tasks(session, handle, device_id, name, model, serial, shutdown).await;
+    spawn_service_tasks(session, handle, announce, shutdown).await;
 
     Ok(())
 }

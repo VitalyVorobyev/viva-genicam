@@ -1121,10 +1121,6 @@ impl FrameAssemblyState {
         }
     }
 
-    fn set_trailer_size_y(&mut self, trailer_size_y: u32) {
-        self.trailer_size_y = trailer_size_y;
-    }
-
     /// Check if all packets have been received.
     fn is_complete(&self) -> bool {
         self.bitmap.as_ref().is_some_and(|b| b.is_complete())
@@ -1646,7 +1642,7 @@ impl FrameStream {
                             continue;
                         }
 
-                        active.set_trailer_size_y(size_y);
+                        active.trailer_size_y = size_y;
                         active.set_trailer_packet_id(packet_id);
                         if !active.is_complete() {
                             warn!(

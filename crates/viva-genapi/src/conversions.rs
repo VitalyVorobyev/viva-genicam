@@ -1,19 +1,34 @@
 //! Numeric conversion utilities for register values and bitfields.
 
+use tracing::debug;
 use viva_genapi_xml::{ByteOrder, Sign};
 
 use crate::GenApiError;
 use crate::bitops::BitOpsError;
 use crate::nodes::FloatNode;
 
-/// Convert a big-endian byte slice (up to 8 bytes) to a 64-bit integer.
+/// Convert a register payload (up to 8 bytes) to a 64-bit integer.
+///
+/// `order` is the payload's byte order as declared by `<Endianess>` /
+/// `<Endianness>` / `<ByteOrder>`; GenICam defaults to [`ByteOrder::Big`].
 ///
 /// `sign` decides whether the payload's top bit means "negative" or is just
 /// another value bit. GenICam defaults to [`Sign::Unsigned`], and getting it
 /// wrong is silent right up until a register's top bit is set: a
 /// `GevCurrentIPAddress` of `192.168.1.160` (`0xC0A801A0`) then reads as
 /// `-1062731360`.
-pub fn bytes_to_i64(name: &str, bytes: &[u8], sign: Sign) -> Result<i64, GenApiError> {
+///
+/// A full-width unsigned payload whose top bit is set does not fit `i64`, and
+/// GenApi has nowhere else to put it — `IInteger` *is* `int64` (GenICam
+/// v2.1.1 §2.4). It is reinterpreted as two's complement rather than refused,
+/// which is lossless at the bit level and round-trips through
+/// [`i64_to_bytes`]. See ADR-0022.
+pub fn bytes_to_i64(
+    name: &str,
+    bytes: &[u8],
+    sign: Sign,
+    order: ByteOrder,
+) -> Result<i64, GenApiError> {
     if bytes.is_empty() {
         return Err(GenApiError::Parse(format!(
             "node {name} returned empty payload"
@@ -25,32 +40,46 @@ pub fn bytes_to_i64(name: &str, bytes: &[u8], sign: Sign) -> Result<i64, GenApiE
             bytes.len()
         )));
     }
-    let mut buf = [0u8; 8];
+    // Normalise to big-endian first so sign extension has a single form.
+    let mut be = [0u8; 8];
     let offset = 8 - bytes.len();
-    buf[offset..].copy_from_slice(bytes);
-    if sign.is_signed() && (bytes[0] & 0x80) != 0 {
-        for byte in &mut buf[..offset] {
+    match order {
+        ByteOrder::Big => be[offset..].copy_from_slice(bytes),
+        ByteOrder::Little => {
+            for (i, byte) in bytes.iter().rev().enumerate() {
+                be[offset + i] = *byte;
+            }
+        }
+    }
+    if sign.is_signed() && (be[offset] & 0x80) != 0 {
+        for byte in &mut be[..offset] {
             *byte = 0xFF;
         }
     }
-    let value = i64::from_be_bytes(buf);
-    // A full-width unsigned register can hold values an i64 cannot. GenApi's
-    // IInteger is int64, so there is nowhere to put them; say so rather than
-    // hand back a negative number.
+    let value = i64::from_be_bytes(be);
     if !sign.is_signed() && bytes.len() == 8 && value < 0 {
-        return Err(GenApiError::Parse(format!(
-            "node {name} holds an unsigned 64-bit value larger than i64::MAX"
-        )));
+        // Reinterpreted, not refused — see the note on this function. Logged
+        // because the value a caller sees is negative and the register is not.
+        debug!(
+            node = %name,
+            "unsigned 64-bit register reinterpreted as two's-complement i64"
+        );
     }
     Ok(value)
 }
 
-/// Convert a 64-bit integer to a big-endian byte vector of the given width.
+/// Convert a 64-bit integer to a register payload of the given width and order.
+///
+/// The inverse of [`bytes_to_i64`], and validated against it: a value that does
+/// not survive the round trip does not fit the register. Keeping the two in
+/// step matters more than either alone — a reader that learns byte order while
+/// the writer does not turns every little-endian write into a range error.
 pub fn i64_to_bytes(
     name: &str,
     value: i64,
     width: u32,
     sign: Sign,
+    order: ByteOrder,
 ) -> Result<Vec<u8>, GenApiError> {
     if width == 0 || width > 8 {
         return Err(GenApiError::Parse(format!(
@@ -59,8 +88,11 @@ pub fn i64_to_bytes(
     }
     let width = width as usize;
     let bytes = value.to_be_bytes();
-    let data = bytes[8 - width..].to_vec();
-    let roundtrip = bytes_to_i64(name, &data, sign)?;
+    let mut data = bytes[8 - width..].to_vec();
+    if matches!(order, ByteOrder::Little) {
+        data.reverse();
+    }
+    let roundtrip = bytes_to_i64(name, &data, sign, order)?;
     if roundtrip != value {
         return Err(GenApiError::Range(format!(
             "value {value} does not fit {width} bytes for {name}"
@@ -331,4 +363,118 @@ pub fn get_raw_or_read(
         GenApiError::Io(_) => err,
         other => other,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #140 and #112: a `GevTimestampValue`-shaped register whose top bit
+    /// is set. Refusing it made the node unreadable on FLIR and Vieworks
+    /// hardware; the bits are handed back reinterpreted instead.
+    #[test]
+    fn full_width_unsigned_is_reinterpreted_not_refused() {
+        let all_ones = [0xFFu8; 8];
+        assert_eq!(
+            bytes_to_i64("Ts", &all_ones, Sign::Unsigned, ByteOrder::Big).unwrap(),
+            -1
+        );
+
+        // The exact value quoted in #140.
+        let bytes = 0x8000_0000_0000_002Au64.to_be_bytes();
+        assert_eq!(
+            bytes_to_i64("Ts", &bytes, Sign::Unsigned, ByteOrder::Big).unwrap(),
+            i64::MIN + 42
+        );
+    }
+
+    /// The write half of the same guard: this failed before the fix, which is
+    /// the read-modify-write case on #112's timestamps.
+    #[test]
+    fn full_width_unsigned_round_trips_through_the_encoder() {
+        let encoded = i64_to_bytes("Ts", -1, 8, Sign::Unsigned, ByteOrder::Big).unwrap();
+        assert_eq!(encoded, vec![0xFF; 8]);
+        assert_eq!(
+            bytes_to_i64("Ts", &encoded, Sign::Unsigned, ByteOrder::Big).unwrap(),
+            -1
+        );
+    }
+
+    /// GA-28: 311 plain `<IntReg>` declarations across 16 of the 38 corpus
+    /// documents declare `LittleEndian`, and every one of them decoded
+    /// byte-swapped.
+    #[test]
+    fn little_endian_payloads_decode_and_encode_swapped() {
+        for (width, value) in [
+            (1u32, 0x12i64),
+            (2, 0x1234),
+            (4, 0x1234_5678),
+            (8, 0x1234_5678_9ABC_DEF0),
+        ] {
+            let be = i64_to_bytes("R", value, width, Sign::Unsigned, ByteOrder::Big).unwrap();
+            let le = i64_to_bytes("R", value, width, Sign::Unsigned, ByteOrder::Little).unwrap();
+            let mut reversed = be.clone();
+            reversed.reverse();
+            assert_eq!(le, reversed, "width {width}");
+
+            assert_eq!(
+                bytes_to_i64("R", &be, Sign::Unsigned, ByteOrder::Big).unwrap(),
+                value,
+                "width {width} big"
+            );
+            assert_eq!(
+                bytes_to_i64("R", &le, Sign::Unsigned, ByteOrder::Little).unwrap(),
+                value,
+                "width {width} little"
+            );
+        }
+    }
+
+    /// Sign extension has to happen after the payload is normalised, not
+    /// before: the sign bit of a little-endian value lives in the last byte.
+    #[test]
+    fn sign_extension_follows_byte_order() {
+        // -2 as a 2-byte register: 0xFFFE big-endian, 0xFEFF little-endian.
+        assert_eq!(
+            bytes_to_i64("R", &[0xFF, 0xFE], Sign::Signed, ByteOrder::Big).unwrap(),
+            -2
+        );
+        assert_eq!(
+            bytes_to_i64("R", &[0xFE, 0xFF], Sign::Signed, ByteOrder::Little).unwrap(),
+            -2
+        );
+        // The same bytes read unsigned stay positive.
+        assert_eq!(
+            bytes_to_i64("R", &[0xFF, 0xFE], Sign::Unsigned, ByteOrder::Big).unwrap(),
+            0xFFFE
+        );
+        assert_eq!(
+            bytes_to_i64("R", &[0xFE, 0xFF], Sign::Unsigned, ByteOrder::Little).unwrap(),
+            0xFFFE
+        );
+    }
+
+    /// A value too wide for the register must still be refused — the round-trip
+    /// check is what catches it, and it now runs in both byte orders.
+    #[test]
+    fn out_of_range_values_are_refused_in_both_orders() {
+        for order in [ByteOrder::Big, ByteOrder::Little] {
+            assert!(matches!(
+                i64_to_bytes("R", 0x1_0000, 2, Sign::Unsigned, order),
+                Err(GenApiError::Range(_))
+            ));
+            assert!(matches!(
+                i64_to_bytes("R", -1, 2, Sign::Unsigned, order),
+                Err(GenApiError::Range(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn empty_and_oversized_payloads_are_rejected() {
+        assert!(bytes_to_i64("R", &[], Sign::Unsigned, ByteOrder::Big).is_err());
+        assert!(bytes_to_i64("R", &[0; 9], Sign::Unsigned, ByteOrder::Big).is_err());
+        assert!(i64_to_bytes("R", 0, 0, Sign::Unsigned, ByteOrder::Big).is_err());
+        assert!(i64_to_bytes("R", 0, 9, Sign::Unsigned, ByteOrder::Big).is_err());
+    }
 }

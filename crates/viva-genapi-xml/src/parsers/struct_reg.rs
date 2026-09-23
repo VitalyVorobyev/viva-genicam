@@ -144,6 +144,7 @@ pub fn parse_struct_reg(
                 max,
                 inc: None,
                 unit: None,
+                byte_order: entry.bitfield.byte_order,
                 bitfield: Some(entry.bitfield),
                 sign: entry_sign,
                 selectors: Vec::new(),

@@ -1179,6 +1179,7 @@ mod tests {
             unit: None,
             bitfield: None,
             sign: Default::default(),
+            byte_order: viva_genapi_xml::ByteOrder::Big,
             selectors: vec![],
             selected_if: vec![],
             pvalue: None,

@@ -209,6 +209,8 @@ pub struct IntegerNode {
     pub bitfield: Option<BitField>,
     /// Whether the register payload is signed. GenICam defaults to unsigned.
     pub sign: Sign,
+    /// Byte order of the register payload. GenICam defaults to big-endian.
+    pub byte_order: ByteOrder,
     /// Selector nodes controlling the visibility of this node.
     pub selectors: Vec<String>,
     /// Selector gating rules in the form `(selector, allowed values)`.

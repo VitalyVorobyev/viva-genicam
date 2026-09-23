@@ -25,13 +25,16 @@ than relearning.
 
 **What gates it** (rows in [backlog.md](backlog.md)):
 
-- **GA-20 + GA-28** — the integer codec. An eight-byte unsigned register is
-  unreadable, on two vendors' cameras and two reporters ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112),
-  [#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140)); and a plain `<IntReg>` that declares `LittleEndian` is
-  decoded big-endian anyway, on 311 declarations across 16 of 38 corpus
-  documents. Same two functions, same missing metadata, one release.
-  **GA-11** rides along: the corpus test evaluates against zeros, so it stayed
-  green through both.
+- ~~**The integer codec.**~~ **Done**, see
+  [ADR-0022](adrs/adr0022-integer-register-decoding.md). An eight-byte unsigned
+  register was unreadable on two vendors' cameras and two reporters
+  ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112),
+  [#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140)), and a
+  plain `<IntReg>` declaring `LittleEndian` was decoded big-endian anyway on 311
+  declarations across 16 of 38 corpus documents. Neither reporter has confirmed
+  on their own hardware yet. **GA-11**'s first slice went with it: the corpus
+  test now evaluates each document twice, and the second pass failed on 373
+  nodes across 19 documents before the fix.
 - **TC-22 + TC-23 + GA-31 + DX-11 + SVC-08** — what leaves the host when a
   register is read. Every access is READMEM/WRITEMEM where GVCP has
   READREG/WRITEREG ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)), and a masked write to a write-only
@@ -118,9 +121,9 @@ single-line XML that FLIR and PGR ship, which is how `<Register>`'s count came t
 be wrong by seven declarations and its `<pLength>` split wrong by a factor of
 eight.
 
-**The two at the front of this phase are not from the corpus at all.** GA-20 and
-GA-28 are in the integer codec, they came from users' cameras, and they gate
-0.6.0 — see the top of this file.
+**The two that were at the front of this phase were not from the corpus at
+all.** The integer-codec defects came from users' cameras rather than from
+reading XML, and they have shipped — see the top of this file.
 
 - `pInvalidator` — **18 502 occurrences across 32 of 35 documents**, entirely
   unparsed. Cache invalidation currently fires only on writes made through the
@@ -140,11 +143,13 @@ GA-28 are in the integer codec, they came from users' cameras, and they gate
   declarations first leaves only 21, concentrated in three vendors.
 - GenApi chunk adapter, to replace the hardcoded 4-entry chunk table.
 
-**Also in scope, and now urgent: make the corpus test able to fail.** Its
-`viva-genapi` stage evaluates every node against `NullIo`, which returns zeros,
-so it demonstrates that nothing panics rather than that any value is correct.
-GA-20 and GA-28 are wrong on a union of 448 corpus nodes and the weekly corpus
-workflow stayed green through all of it. GA-11.
+**Also in scope: finish making the corpus test able to fail.** Its
+`viva-genapi` stage now evaluates each document twice — against `NullIo` and
+against a descending byte pattern that sets the top bit in either byte order —
+which is what the integer-codec defects needed to be caught. It still asserts no
+*values*, so it demonstrates that nothing errors rather than that anything is
+right, and a byte-order regression would pass it. Per-document value
+expectations are what remains of GA-11.
 
 ## Not a phase — device classes beyond area-scan
 

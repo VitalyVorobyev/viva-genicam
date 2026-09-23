@@ -34,6 +34,7 @@ pub fn parse_integer(
     }
     let mut access = AccessMode::RW;
     let mut sign = Sign::default();
+    let mut byte_order: Option<ByteOrder> = None;
     let mut min = None;
     let mut max = None;
     let mut inc = None;
@@ -168,7 +169,10 @@ pub fn parse_integer(
                 TAG_ENDIANNESS | TAG_ENDIANESS | TAG_BYTE_ORDER => {
                     let text = read_text_start(reader, e)?;
                     if let Some(order) = ByteOrder::parse(&text) {
+                        // Both: the bitfield needs it to place the bits, and an
+                        // unmasked register has no bitfield to hold it at all.
                         bitfield.note_byte_order(order);
+                        byte_order = Some(order);
                     }
                 }
                 "pSelected" => {
@@ -232,6 +236,7 @@ pub fn parse_integer(
                         && let Some(order) = ByteOrder::parse(&value)
                     {
                         bitfield.note_byte_order(order);
+                        byte_order = Some(order);
                     }
                 }
                 "Selected" => {
@@ -283,6 +288,7 @@ pub fn parse_integer(
         unit,
         bitfield,
         sign,
+        byte_order: byte_order.unwrap_or(ByteOrder::Big),
         selectors,
         selected_if,
         pvalue,

@@ -64,6 +64,24 @@ async fn blocking_set(
     .unwrap()
 }
 
+/// Read raw register bytes through the camera's own transport, bypassing the
+/// nodemap. Used to pin what the device actually stores before asserting what
+/// the codec makes of it.
+async fn blocking_read_register(
+    camera: &Arc<Mutex<Camera<GigeRegisterIo>>>,
+    address: u64,
+    len: usize,
+) -> Vec<u8> {
+    use viva_genicam::genapi::RegisterIo;
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        let cam = cam.lock().unwrap();
+        cam.transport().read(address, len).expect("raw read")
+    })
+    .await
+    .unwrap()
+}
+
 /// Resolve the loopback network interface (platform-independent).
 fn loopback_iface() -> gige::nic::Iface {
     gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback iface")
@@ -1664,5 +1682,67 @@ async fn test_enabling_unknown_event_fails_loudly() {
     assert!(
         text.contains("NoSuchEvent"),
         "error should name the event: {text}"
+    );
+}
+
+/// Issue #140 / #112: an 8-byte register declared `<Sign>Unsigned</Sign>` whose
+/// top bit is set. GenApi integers are `int64`, so there is nowhere else for
+/// the value to go — it is reinterpreted as two's complement rather than
+/// refused, which is what makes the node readable at all.
+///
+/// The fake's node is copied in shape from the FLIR BFS-PGE-31S4C-C
+/// description in the vendor corpus, which is the model #140 was reported on.
+#[tokio::test]
+async fn test_full_width_unsigned_register_is_readable() {
+    let _cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    // Asserted against the bytes the fake stores, not against our own encoder:
+    // a round trip through the codec under test only proves it agrees with
+    // itself.
+    let raw = blocking_read_register(&camera, 0x20078, 8).await;
+    assert_eq!(
+        raw,
+        vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xED, 0x29, 0x79],
+        "fake register bytes are not the expected two's-complement pattern"
+    );
+
+    let value = blocking_get(&camera, "GevIEEE1588OffsetFromMasterLatched_Val")
+        .await
+        .expect("read latched PTP offset");
+    assert_eq!(value, "-1234567");
+}
+
+/// GA-28: a plain `<IntReg>` declaring `<Endianess>LittleEndian</Endianess>`.
+/// 311 such declarations across 16 of the 38 corpus documents were decoded
+/// big-endian, because `NodeDecl::Integer` had nowhere to record the order and
+/// the bitfield that would have carried it does not exist on an unmasked
+/// register.
+#[tokio::test]
+async fn test_little_endian_registers_are_not_byte_swapped() {
+    let _cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    // 0x12345678 little-endian on the wire. Read big-endian it is 0x78563412,
+    // which is a plausible number and not an error — which is why this went
+    // unnoticed.
+    let raw = blocking_read_register(&camera, 0x20118, 4).await;
+    assert_eq!(raw, vec![0xA0, 0x05, 0x00, 0x00]);
+    let width = blocking_get(&camera, "ChunkWidth_Val")
+        .await
+        .expect("read chunk width");
+    assert_eq!(
+        width, "1440",
+        "little-endian 4-byte register was byte-swapped"
+    );
+
+    let raw = blocking_read_register(&camera, 0x20110, 8).await;
+    assert_eq!(raw, vec![0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00]);
+    let ticks = blocking_get(&camera, "ChunkTimestamp_Val")
+        .await
+        .expect("read chunk timestamp");
+    assert_eq!(
+        ticks, "305419896",
+        "little-endian 8-byte register was byte-swapped"
     );
 }

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
-    AccessMode, AddressTerm, Addressing, EnumEntryDecl, EnumValueSrc, FloatEncoding,
+    AccessMode, AddressTerm, Addressing, ByteOrder, EnumEntryDecl, EnumValueSrc, FloatEncoding,
     FormulaBindings, IndexOffset, NodeDecl, PredicateRefs, Sign, SkippedNode, Visibility, XmlModel,
 };
 
@@ -271,7 +271,7 @@ impl NodeMap {
                 integer_sign(node).is_signed(),
             )?
         } else {
-            bytes_to_i64(name, &raw, integer_sign(node))?
+            bytes_to_i64(name, &raw, integer_sign(node), node.byte_order)?
         };
         debug!(node = %name, raw = value, "read integer feature");
         node.cache.replace(Some(value));
@@ -322,7 +322,7 @@ impl NodeMap {
             node.cache.replace(Some(value));
             node.raw_cache.replace(Some(raw));
         } else {
-            let bytes = i64_to_bytes(name, value, len, integer_sign(node))?;
+            let bytes = i64_to_bytes(name, value, len, integer_sign(node), node.byte_order)?;
             debug!(node = %name, raw = value, "write integer feature");
             io.write(address, &bytes).map_err(|err| match err {
                 GenApiError::Io(_) => err,
@@ -389,7 +389,7 @@ impl NodeMap {
             FloatEncoding::ScaledInteger => {
                 // `<Float>`/`<FloatReg>` declare no `<Sign>`; a scaled raw
                 // value is conventionally signed so an offset can go either way.
-                let raw_value = bytes_to_i64(name, &raw, Sign::Signed)?;
+                let raw_value = bytes_to_i64(name, &raw, Sign::Signed, node.byte_order)?;
                 let v = apply_scale(node, raw_value as f64);
                 debug!(node = %name, raw = raw_value, value = v, "read float feature (scaled)");
                 v
@@ -436,7 +436,7 @@ impl NodeMap {
             }
             FloatEncoding::ScaledInteger => {
                 let raw = encode_float(node, value)?;
-                let bytes = i64_to_bytes(name, raw, len, Sign::Signed)?;
+                let bytes = i64_to_bytes(name, raw, len, Sign::Signed, node.byte_order)?;
                 debug!(node = %name, raw, value, "write float feature (scaled)");
                 bytes
             }
@@ -478,8 +478,10 @@ impl NodeMap {
             GenApiError::Io(_) => err,
             other => other,
         })?;
-        // `<Enumeration>` declares no `<Sign>`; entry values may be negative.
-        let raw_value = bytes_to_i64(name, &raw, Sign::Signed)?;
+        // `<Enumeration>` declares no `<Sign>` and no `<Endianess>` — no
+        // document in the vendor corpus declares one — so the GenICam
+        // defaults apply: signed entry values, big-endian payload.
+        let raw_value = bytes_to_i64(name, &raw, Sign::Signed, ByteOrder::Big)?;
         let entry = self.lookup_enum_entry(node, raw_value, io)?;
         debug!(node = %name, raw = raw_value, entry = %entry, "read enum feature");
         node.value_cache.replace(Some(entry.clone()));
@@ -530,7 +532,7 @@ impl NodeMap {
                 entry: entry.to_string(),
             })?;
         let raw = self.resolve_enum_entry_value(node, entry_decl, io)?;
-        let bytes = i64_to_bytes(name, raw, len, Sign::Signed)?;
+        let bytes = i64_to_bytes(name, raw, len, Sign::Signed, ByteOrder::Big)?;
         debug!(node = %name, raw, entry, "write enum feature");
         io.write(address, &bytes).map_err(|err| match err {
             GenApiError::Io(_) => err,
@@ -872,7 +874,7 @@ impl NodeMap {
                 "command node {name} has zero length"
             )));
         }
-        let data = i64_to_bytes(name, cmd_value, node.len, Sign::Signed)?;
+        let data = i64_to_bytes(name, cmd_value, node.len, Sign::Signed, ByteOrder::Big)?;
         debug!(node = %name, "execute command");
         io.write(address, &data).map_err(|err| match err {
             GenApiError::Io(_) => err,
@@ -1644,6 +1646,7 @@ fn build_node(
             unit,
             bitfield,
             sign,
+            byte_order,
             selectors,
             selected_if,
             pvalue,
@@ -1683,6 +1686,7 @@ fn build_node(
                 unit,
                 bitfield,
                 sign,
+                byte_order,
                 selectors,
                 selected_if,
                 pvalue,

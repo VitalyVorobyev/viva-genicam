@@ -124,6 +124,34 @@ async fn test_discovery_finds_fake_camera() {
     );
 }
 
+/// A fake configured with its own identity reports it, so two fakes can stand
+/// in for two cameras of one model (#137) instead of one camera seen twice.
+#[tokio::test]
+async fn test_discovery_reports_a_configured_identity() {
+    let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+    let _cam = common::TestCamera::start_with(|b| {
+        b.mac(mac)
+            .model("OtherModel")
+            .serial("FAKE-002")
+            .user_name("Right")
+    })
+    .await;
+
+    let fake = discover_fake().await;
+    assert_eq!(fake.mac, mac);
+    assert_eq!(fake.model.as_deref(), Some("OtherModel"));
+    assert_eq!(fake.serial.as_deref(), Some("FAKE-002"));
+    assert_eq!(fake.user_name.as_deref(), Some("Right"));
+
+    // The bootstrap registers must agree with the ACK, or a client reading the
+    // MAC after connecting would see a different camera than it discovered.
+    let camera = connect_gige(&fake).await.expect("connect failed");
+    let camera = Arc::new(Mutex::new(camera));
+    let high = blocking_read_register(&camera, 0x0008, 4).await;
+    let low = blocking_read_register(&camera, 0x000C, 4).await;
+    assert_eq!([high[2], high[3], low[0], low[1], low[2], low[3]], mac);
+}
+
 /// Check the fake's Discovery ACK **bytes** against the specification's field
 /// table, without going through `parse_discovery_payload`.
 ///

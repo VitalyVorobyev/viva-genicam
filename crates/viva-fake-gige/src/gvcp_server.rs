@@ -59,6 +59,28 @@ pub const FAKE_SERIAL: &str = "FAKE-001";
 /// User-defined name reported in the Discovery ACK.
 pub const FAKE_USER_NAME: &str = "FakeCamera";
 
+/// The per-instance identity a fake reports: the `FAKE_*` constants unless the
+/// builder overrides them. Two fakes with one identity are indistinguishable,
+/// which reproduces #137 but cannot demonstrate its fix.
+#[derive(Debug, Clone)]
+pub(crate) struct Identity {
+    pub(crate) mac: [u8; 6],
+    pub(crate) model: String,
+    pub(crate) serial: String,
+    pub(crate) user_name: String,
+}
+
+impl Default for Identity {
+    fn default() -> Self {
+        Self {
+            mac: FAKE_MAC,
+            model: FAKE_MODEL.to_string(),
+            serial: FAKE_SERIAL.to_string(),
+            user_name: FAKE_USER_NAME.to_string(),
+        }
+    }
+}
+
 /// Status code for success.
 const STATUS_SUCCESS: u16 = 0x0000;
 /// GigE Vision `GEV_STATUS_NOT_IMPLEMENTED`.
@@ -163,6 +185,7 @@ pub async fn run(
     acq_stop_flag: Arc<AtomicBool>,
     bind_ip: std::net::Ipv4Addr,
     options: ServerOptions,
+    identity: Identity,
 ) {
     let mut buf = [0u8; 2048];
     loop {
@@ -217,12 +240,12 @@ pub async fn run(
 
         match command {
             DISCOVERY_CMD => {
-                let resp = build_discovery_ack(request_id, bind_ip);
+                let resp = build_discovery_ack(request_id, bind_ip, &identity);
                 let _ = socket.send_to(&resp, peer).await;
                 debug!(%peer, "discovery response sent");
             }
             FORCEIP_CMD => {
-                handle_forceip(&socket, peer, request_id, payload, bind_ip).await;
+                handle_forceip(&socket, peer, request_id, payload, bind_ip, identity.mac).await;
             }
             READREG_CMD => {
                 handle_readreg(&socket, peer, request_id, payload, &regs).await;
@@ -265,7 +288,7 @@ pub async fn run(
 }
 
 /// Build a 256-byte discovery ACK payload (GVCP header + device info).
-fn build_discovery_ack(request_id: u16, ip: std::net::Ipv4Addr) -> Vec<u8> {
+fn build_discovery_ack(request_id: u16, ip: std::net::Ipv4Addr, identity: &Identity) -> Vec<u8> {
     // Discovery ack payload is 248 bytes (as defined by the GigE Vision spec).
     let payload_len: u16 = 248;
     let mut buf = BytesMut::with_capacity(8 + payload_len as usize);
@@ -288,8 +311,8 @@ fn build_discovery_ack(request_id: u16, ip: std::net::Ipv4Addr) -> Vec<u8> {
     // 8   Reserved: the padding half of the MAC-high register, 2 bytes only.
     buf.put_slice(&[0u8; 2]);
 
-    // 10  MAC address (6 bytes): fake MAC DE:AD:BE:EF:CA:FE
-    buf.put_slice(&FAKE_MAC);
+    // 10  MAC address (6 bytes): FAKE_MAC DE:AD:BE:EF:CA:FE unless overridden
+    buf.put_slice(&identity.mac);
 
     buf.put_u32(0x0000_0007); // 16  Supported IP config (DHCP + persistent + LLA)
     buf.put_u32(0x0000_0005); // 20  Current IP config
@@ -315,15 +338,15 @@ fn build_discovery_ack(request_id: u16, ip: std::net::Ipv4Addr) -> Vec<u8> {
     // Manufacturer name (32 bytes)
     put_fixed_string(&mut buf, FAKE_MANUFACTURER, 32); // 72
     // Model name (32 bytes)
-    put_fixed_string(&mut buf, FAKE_MODEL, 32); // 104
+    put_fixed_string(&mut buf, &identity.model, 32); // 104
     // Device version (32 bytes)
     put_fixed_string(&mut buf, FAKE_VERSION, 32); // 136
     // Manufacturer specific info (48 bytes)
     put_fixed_string(&mut buf, "Fake camera for testing", 48); // 168
     // Serial number (16 bytes)
-    put_fixed_string(&mut buf, FAKE_SERIAL, 16); // 216
+    put_fixed_string(&mut buf, &identity.serial, 16); // 216
     // User defined name (16 bytes)
-    put_fixed_string(&mut buf, FAKE_USER_NAME, 16); // 232
+    put_fixed_string(&mut buf, &identity.user_name, 16); // 232
 
     buf.to_vec()
 }
@@ -634,6 +657,7 @@ async fn handle_forceip(
     request_id: u16,
     payload: &[u8],
     bind_ip: std::net::Ipv4Addr,
+    fake_mac: [u8; 6],
 ) {
     // FORCEIP payload: 56 bytes
     // [0..2]   reserved
@@ -650,7 +674,6 @@ async fn handle_forceip(
     }
 
     let target_mac = &payload[2..8];
-    let fake_mac: [u8; 6] = FAKE_MAC;
     if target_mac != fake_mac {
         debug!(
             target = ?target_mac,

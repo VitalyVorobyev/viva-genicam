@@ -950,7 +950,7 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         self.pos += 1;
         while let Some(byte) = self.peek() {
-            if byte.is_ascii_alphanumeric() || byte == b'_' {
+            if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.' {
                 self.pos += 1;
             } else {
                 break;
@@ -1576,6 +1576,8 @@ mod tests {
             "(SHUTTERMODE = 0) && (ROLLING = 1)",
             "INDEX = 0",
             "( MAX % UNIT ) ? ( MAX - (  MAX) % UNIT  ) : ( MAX)",
+            "V1.Min",
+            "V1.Max",
         ];
         for formula in formulas {
             parse_expression(formula)

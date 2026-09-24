@@ -29,13 +29,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(windows)]
 use std::thread;
-#[cfg(not(windows))]
-use std::time::SystemTime;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-#[cfg(not(windows))]
-use bytes::Bytes;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 // Used by the receive loop on non-Windows and by the packet-size probe
 // everywhere — the probe runs before the socket is handed to the Windows
@@ -47,6 +43,8 @@ use tracing::{debug, info, warn};
 use viva_pfnc::PixelFormat;
 
 use crate::GenicamError;
+use crate::chunks::ChunkMap;
+use crate::evs::EvsBlock;
 use crate::frame::Frame;
 use crate::time::TimeSync;
 use viva_gige::gvcp::{GigeDevice, StreamParams};
@@ -57,6 +55,142 @@ use viva_gige::nic::{self, DEFAULT_RCVBUF_BYTES, Iface, McOptions};
 use viva_gige::stats::{StreamStats, StreamStatsAccumulator};
 
 pub use viva_gige::gvsp::StreamDest;
+
+/// The semantic payload carried by one complete GVSP block.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum StreamBlock {
+    /// A conventional image payload.
+    Image(Frame),
+    /// A LUCID event-vision payload encoded as EVT 2.1 or EVT 3.0.
+    Evs(EvsBlock),
+}
+
+/// An opaque complete GVSP block with common metadata accessors.
+///
+/// Convert this value into [`StreamBlock`] to inspect the image- or EVS-specific
+/// representation. Keeping the inner field private leaves room for adding
+/// common behavior without exposing storage details here.
+#[derive(Debug, Clone)]
+pub struct GenericStreamBlock {
+    inner: StreamBlock,
+}
+
+impl From<GenericStreamBlock> for StreamBlock {
+    fn from(value: GenericStreamBlock) -> Self {
+        value.inner
+    }
+}
+
+impl GenericStreamBlock {
+    /// Borrow the complete application payload.
+    pub fn payload(&self) -> &Bytes {
+        match &self.inner {
+            StreamBlock::Image(frame) => &frame.payload,
+            StreamBlock::Evs(block) => &block.payload,
+        }
+    }
+
+    /// Host-correlated timestamp, when time synchronization is available.
+    pub fn host_time(&self) -> Option<SystemTime> {
+        match &self.inner {
+            StreamBlock::Image(frame) => frame.ts_host,
+            StreamBlock::Evs(block) => block.ts_host,
+        }
+    }
+
+    /// Image width, or `None` for a payload without image geometry.
+    pub fn width(&self) -> Option<u32> {
+        match &self.inner {
+            StreamBlock::Image(frame) => Some(frame.width),
+            StreamBlock::Evs(_) => None,
+        }
+    }
+
+    /// Image height, or `None` for a payload without image geometry.
+    pub fn height(&self) -> Option<u32> {
+        match &self.inner {
+            StreamBlock::Image(frame) => Some(frame.height),
+            StreamBlock::Evs(_) => None,
+        }
+    }
+
+    #[cfg(windows)]
+    fn device_timestamp(&self) -> Option<u64> {
+        match &self.inner {
+            StreamBlock::Image(frame) => frame.ts_dev,
+            StreamBlock::Evs(block) => block.ts_dev,
+        }
+    }
+
+    #[cfg(windows)]
+    fn set_host_time(&mut self, timestamp: Option<SystemTime>) {
+        match &mut self.inner {
+            StreamBlock::Image(frame) => frame.ts_host = timestamp,
+            StreamBlock::Evs(block) => block.ts_host = timestamp,
+        }
+    }
+
+    fn into_legacy_frame(self) -> Frame {
+        match self.inner {
+            StreamBlock::Image(frame) => frame,
+            StreamBlock::Evs(block) => Frame {
+                payload: block.payload,
+                width: block.leader_size_x,
+                height: block.leader_size_y,
+                pixel_format: block.format.pixel_format(),
+                chunks: block.chunks,
+                ts_dev: block.ts_dev,
+                ts_host: block.ts_host,
+            },
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_completed_block(
+    payload: Bytes,
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
+    chunks: Option<ChunkMap>,
+    timestamp: u64,
+    ts_host: Option<SystemTime>,
+    trailer_size_y: u32,
+) -> GenericStreamBlock {
+    let inner = match pixel_format {
+        PixelFormat::EvsEvt30 => StreamBlock::Evs(EvsBlock {
+            payload,
+            format: crate::evs::EvsFormat::Evt30,
+            ts_dev: Some(timestamp),
+            leader_size_x: width,
+            leader_size_y: height,
+            trailer_size_y,
+            chunks,
+            ts_host,
+        }),
+        PixelFormat::EvsEvt21 => StreamBlock::Evs(EvsBlock {
+            payload,
+            format: crate::evs::EvsFormat::Evt21,
+            ts_dev: Some(timestamp),
+            leader_size_x: width,
+            leader_size_y: height,
+            trailer_size_y,
+            chunks,
+            ts_host,
+        }),
+        _ => StreamBlock::Image(Frame {
+            payload,
+            width,
+            height,
+            pixel_format,
+            chunks,
+            ts_dev: Some(timestamp),
+            ts_host,
+        }),
+    };
+    GenericStreamBlock { inner }
+}
 
 /// Internal packet source abstraction.
 ///
@@ -912,6 +1046,7 @@ struct FrameAssemblyState {
     payload: BytesMut,
     packet_payload_size: usize,
     started: Instant,
+    trailer_size_y: u32,
 }
 
 #[cfg(any(not(windows), test))]
@@ -936,6 +1071,7 @@ impl FrameAssemblyState {
             payload: BytesMut::new(),
             packet_payload_size,
             started: Instant::now(),
+            trailer_size_y: 0,
         }
     }
 
@@ -1015,11 +1151,12 @@ struct WindowsFrameAssembly {
     next_packet_id: u32,
     payload: BytesMut,
     started: Instant,
+    trailer_size_y: u32,
 }
 
 #[cfg(windows)]
 struct WindowsReceiver {
-    frames: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
+    frames: tokio::sync::mpsc::Receiver<Result<GenericStreamBlock, GenicamError>>,
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -1130,6 +1267,7 @@ fn windows_frame_receiver(
                         next_packet_id: 1,
                         payload: BytesMut::new(),
                         started: Instant::now(),
+                        trailer_size_y: 0,
                     });
                 }
                 GvspPacket::Payload {
@@ -1154,38 +1292,47 @@ fn windows_frame_receiver(
                     packet_id,
                     status,
                     chunk_data,
+                    size_y,
                     ..
                 } => {
                     let Some(mut frame) = active.take() else {
                         continue;
                     };
+                    frame.trailer_size_y = size_y;
+                    let is_evs = matches!(
+                        frame.pixel_format,
+                        PixelFormat::EvsEvt30 | PixelFormat::EvsEvt21
+                    );
                     let expected_bytes = frame.width as usize
                         * frame.height as usize
                         * frame.pixel_format.bytes_per_pixel().unwrap_or(1);
                     if frame.block_id != block_id
                         || frame.next_packet_id != packet_id
                         || status != 0
-                        || frame.payload.len() < expected_bytes
+                        || (!is_evs && frame.payload.len() < expected_bytes)
                     {
                         stats.record_drop();
                         continue;
                     }
-                    frame.payload.truncate(expected_bytes);
+                    if !is_evs {
+                        frame.payload.truncate(expected_bytes);
+                    }
                     let chunks = if chunk_data.is_empty() {
                         None
                     } else {
                         crate::chunks::parse_chunk_bytes(chunk_data.as_ref()).ok()
                     };
-                    let completed = Frame {
-                        payload: frame.payload.freeze(),
-                        width: frame.width,
-                        height: frame.height,
-                        pixel_format: frame.pixel_format,
+                    let completed = classify_completed_block(
+                        frame.payload.freeze(),
+                        frame.width,
+                        frame.height,
+                        frame.pixel_format,
                         chunks,
-                        ts_dev: Some(frame.timestamp),
-                        ts_host: None,
-                    };
-                    stats.record_frame(completed.payload.len(), None);
+                        frame.timestamp,
+                        None,
+                        frame.trailer_size_y,
+                    );
+                    stats.record_frame(completed.payload().len(), None);
                     silence.record_frame();
                     if tx.try_send(Ok(completed)).is_err() {
                         stats.record_backpressure_drop();
@@ -1235,7 +1382,7 @@ pub struct FrameStream {
     #[cfg(windows)]
     frame_timeout_ns: Arc<AtomicU64>,
     #[cfg(windows)]
-    frame_rx: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
+    frame_rx: tokio::sync::mpsc::Receiver<Result<GenericStreamBlock, GenicamError>>,
     #[cfg(windows)]
     reader_stop: Arc<AtomicBool>,
     #[cfg(windows)]
@@ -1343,23 +1490,36 @@ impl FrameStream {
         }
     }
 
-    /// Receive the next complete frame.
+    /// Receive the next complete image frame.
     ///
-    /// This method handles packet reception, parsing, and reassembly internally.
-    /// Returns `Ok(Some(frame))` when a complete frame is available, or
-    /// `Ok(None)` if the stream has ended (socket closed).
+    /// This backwards-compatible image API also returns an EVS block as a
+    /// [`Frame`] carrying the raw bytes and its EVT PFNC code. New callers that
+    /// need to distinguish event data should use [`next_block`](Self::next_block).
     pub async fn next_frame(&mut self) -> Result<Option<Frame>, GenicamError> {
+        Ok(self
+            .next_block()
+            .await?
+            .map(GenericStreamBlock::into_legacy_frame))
+    }
+
+    /// Receive and classify the next complete GVSP block.
+    ///
+    /// Unlike [`next_frame`](Self::next_frame), this method distinguishes LUCID
+    /// EVT payloads from conventional images without changing the established
+    /// frame API.
+    pub async fn next_block(&mut self) -> Result<Option<GenericStreamBlock>, GenicamError> {
         #[cfg(windows)]
         {
             return match self.frame_rx.recv().await {
-                Some(Ok(mut frame)) => {
-                    if let Some(timestamp) = frame.ts_dev {
-                        frame.ts_host = self
+                Some(Ok(mut block)) => {
+                    if let Some(timestamp) = block.device_timestamp() {
+                        let ts_host = self
                             .time_sync
                             .as_ref()
                             .map(|time_sync| time_sync.to_host_time(timestamp));
+                        block.set_host_time(ts_host);
                     }
-                    Ok(Some(frame))
+                    Ok(Some(block))
                 }
                 Some(Err(err)) => Err(err),
                 None => Ok(None),
@@ -1463,6 +1623,7 @@ impl FrameStream {
                         packet_id,
                         status,
                         chunk_data,
+                        size_y,
                         ..
                     } => {
                         let Some(mut active) = self.active.take() else {
@@ -1481,6 +1642,7 @@ impl FrameStream {
                             continue;
                         }
 
+                        active.trailer_size_y = size_y;
                         active.set_trailer_packet_id(packet_id);
                         if !active.is_complete() {
                             warn!(
@@ -1514,35 +1676,36 @@ impl FrameStream {
                         // The bitmap tells us what we received; we use the payload as-is.
                         let payload = active.payload.freeze();
 
-                        let frame = Frame {
+                        let block = classify_completed_block(
                             payload,
-                            width: active.width,
-                            height: active.height,
-                            pixel_format: active.pixel_format,
+                            active.width,
+                            active.height,
+                            active.pixel_format,
                             chunks,
-                            ts_dev: Some(active.timestamp),
+                            active.timestamp,
                             ts_host,
-                        };
+                            active.trailer_size_y,
+                        );
 
                         // FrameStream is the sole owner of completed-frame
                         // accounting. Consumers may snapshot this accumulator
                         // through stats_handle(), but must not record the same
                         // frame again.
-                        let latency = frame
+                        let latency = block
                             .host_time()
                             .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                        self.stats.record_frame(frame.payload.len(), latency);
+                        self.stats.record_frame(block.payload().len(), latency);
                         self.silence.record_frame();
 
                         debug!(
                             block_id,
-                            width = frame.width,
-                            height = frame.height,
-                            bytes = frame.payload.len(),
+                            width = block.width(),
+                            height = block.height(),
+                            bytes = block.payload().len(),
                             "frame complete"
                         );
 
-                        return Ok(Some(frame));
+                        return Ok(Some(block));
                     }
                 }
             }
@@ -1820,5 +1983,110 @@ mod tests {
         let state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
         assert!(!state.is_expired(Duration::from_secs(10)));
         assert!(state.is_expired(Duration::ZERO));
+    }
+
+    #[test]
+    fn captured_lucid_evt30_metadata_is_classified_as_evs() {
+        let payload = Bytes::from_static(&[0x8e, 0x8a, 0xff, 0xe0]);
+        let block = classify_completed_block(
+            payload.clone(),
+            1,
+            64_000,
+            PixelFormat::from_code(0x8110_0e30),
+            None,
+            0x0000_422d_66d4_39c8,
+            None,
+            824,
+        );
+
+        assert_eq!(block.payload(), &payload);
+        assert_eq!(block.width(), None);
+        assert_eq!(block.height(), None);
+        let StreamBlock::Evs(evs) = StreamBlock::from(block) else {
+            panic!("EVT 3.0 must not be exposed as an image frame");
+        };
+        assert_eq!(evs.format, crate::evs::EvsFormat::Evt30);
+        assert_eq!(evs.ts_dev, Some(0x0000_422d_66d4_39c8));
+        assert_eq!(evs.leader_size_x, 1);
+        assert_eq!(evs.leader_size_y, 64_000);
+        assert_eq!(evs.trailer_size_y, 824);
+        assert!(evs.chunks.is_none());
+        assert_eq!(evs.payload, payload);
+    }
+
+    #[test]
+    fn evt21_is_classified_as_evs() {
+        let block = classify_completed_block(
+            Bytes::from_static(&[0; 8]),
+            1,
+            64_000,
+            PixelFormat::from_code(0x8140_0e21),
+            None,
+            7,
+            None,
+            8,
+        );
+
+        let StreamBlock::Evs(evs) = StreamBlock::from(block) else {
+            panic!("EVT 2.1 must not be exposed as an image frame");
+        };
+        assert_eq!(evs.format, crate::evs::EvsFormat::Evt21);
+        assert_eq!(evs.payload.len(), 8);
+    }
+
+    #[test]
+    fn unknown_pfnc_code_remains_an_image() {
+        let pixel_format = PixelFormat::from_code(0x0220_ffff);
+        let block = classify_completed_block(
+            Bytes::from_static(&[1, 2, 3, 4]),
+            2,
+            2,
+            pixel_format,
+            None,
+            9,
+            None,
+            2,
+        );
+
+        let StreamBlock::Image(frame) = StreamBlock::from(block) else {
+            panic!("an unknown PFNC code in an IMAGE leader is still an image");
+        };
+        assert_eq!(frame.pixel_format, pixel_format);
+        assert_eq!((frame.width, frame.height), (2, 2));
+        assert_eq!(frame.payload.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn legacy_frame_api_preserves_evt_wire_metadata() {
+        let payload = Bytes::from_static(&[1, 2, 3]);
+        let chunks = [(
+            crate::chunks::ChunkKind::Timestamp,
+            crate::chunks::ChunkValue::U64(11),
+        )]
+        .into_iter()
+        .collect();
+        let block = classify_completed_block(
+            payload.clone(),
+            1,
+            64_000,
+            PixelFormat::EvsEvt30,
+            Some(chunks),
+            11,
+            None,
+            3,
+        );
+
+        let frame = block.into_legacy_frame();
+        assert_eq!(frame.payload, payload);
+        assert_eq!((frame.width, frame.height), (1, 64_000));
+        assert_eq!(frame.pixel_format, PixelFormat::EvsEvt30);
+        assert_eq!(frame.ts_dev, Some(11));
+        assert_eq!(
+            frame
+                .chunks
+                .as_ref()
+                .and_then(|chunks| chunks.get(&crate::chunks::ChunkKind::Timestamp)),
+            Some(&crate::chunks::ChunkValue::U64(11))
+        );
     }
 }

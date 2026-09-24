@@ -29,10 +29,16 @@ pub fn pfnc_to_zenoh(pf: pfnc::PixelFormat) -> ZenohPixelFormat {
 /// what the bridge can name is a separate question, and a narrower one.
 ///
 /// `None` means the frame cannot be length-checked at all — a packed format, or
-/// a code carrying no whole-byte pixel size. Callers must publish such a payload
-/// unmodified: an expected length we cannot compute must not become a length we
-/// enforce.
+/// an event stream whose leader fields are not image geometry. Callers must
+/// publish such a payload unmodified: an expected length we cannot compute must
+/// not become a length we enforce.
 pub fn expected_payload_len(pf: pfnc::PixelFormat, width: u32, height: u32) -> Option<usize> {
+    if matches!(
+        pf,
+        pfnc::PixelFormat::EvsEvt30 | pfnc::PixelFormat::EvsEvt21
+    ) {
+        return None;
+    }
     pf.bytes_per_pixel()
         .map(|bpp| width as usize * height as usize * bpp)
 }
@@ -70,5 +76,20 @@ mod tests {
         let packed = pfnc::PixelFormat::from_code(0x010C_0006);
         assert!(matches!(packed, pfnc::PixelFormat::Unknown(_)));
         assert_eq!(expected_payload_len(packed, 640, 480), None);
+    }
+
+    #[test]
+    fn event_blocks_are_not_sized_as_images() {
+        // The TRT009S-E reports 1 x 64000 in its leader, while the trailer's
+        // Size Y is the variable encoded payload length. Neither event format
+        // may be validated as width * height * event-word-size.
+        assert_eq!(
+            expected_payload_len(pfnc::PixelFormat::EvsEvt30, 1, 64_000),
+            None
+        );
+        assert_eq!(
+            expected_payload_len(pfnc::PixelFormat::EvsEvt21, 1, 64_000),
+            None
+        );
     }
 }

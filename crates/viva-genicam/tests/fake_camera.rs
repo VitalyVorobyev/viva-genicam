@@ -1332,6 +1332,73 @@ async fn test_stream_receives_frames() {
     .unwrap();
 }
 
+/// EVT data uses an IMAGE leader on the TRT009S-E, but its Size X/Size Y
+/// fields do not describe a fixed-size image. Exercise the complete receiver
+/// path with a deliberately short payload relative to EVT 3.0's 16-bit unit:
+/// the block must be delivered as event data, and the established frame API
+/// must continue to expose the same wire bytes for existing callers.
+#[tokio::test]
+async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
+    use viva_genicam::pfnc::PixelFormat;
+    use viva_genicam::stream::StreamBlock;
+
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 4;
+    let _cam = common::TestCamera::start_with(|builder| {
+        builder
+            .width(WIDTH)
+            .height(HEIGHT)
+            .pixel_format(PixelFormat::EvsEvt30.code())
+    })
+    .await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        cam.lock().unwrap().acquisition_start().expect("start");
+    })
+    .await
+    .unwrap();
+
+    let generic = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_block())
+        .await
+        .expect("timeout waiting for EVT block")
+        .expect("stream error")
+        .expect("stream ended without an EVT block");
+    assert_eq!(generic.payload().len(), (WIDTH * HEIGHT) as usize);
+    assert_eq!(generic.width(), None);
+    assert_eq!(generic.height(), None);
+
+    let StreamBlock::Evs(events) = StreamBlock::from(generic) else {
+        panic!("EVT 3.0 data must be classified separately from image frames");
+    };
+    assert_eq!(events.format, viva_genicam::evs::EvsFormat::Evt30);
+    assert_eq!(
+        (events.leader_size_x, events.leader_size_y),
+        (WIDTH, HEIGHT)
+    );
+    assert_eq!(events.trailer_size_y, HEIGHT);
+    assert_eq!(events.payload.len(), (WIDTH * HEIGHT) as usize);
+    assert!(events.ts_dev.is_some());
+
+    let legacy = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+        .await
+        .expect("timeout waiting for legacy EVT frame")
+        .expect("stream error")
+        .expect("stream ended without a legacy EVT frame");
+    assert_eq!(legacy.pixel_format, PixelFormat::EvsEvt30);
+    assert_eq!((legacy.width, legacy.height), (WIDTH, HEIGHT));
+    assert_eq!(legacy.payload.len(), (WIDTH * HEIGHT) as usize);
+
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        cam.lock().unwrap().acquisition_stop().expect("stop");
+    })
+    .await
+    .unwrap();
+}
+
 /// Chunk data survives the whole round trip: enable it through GenApi, receive
 /// a frame, decode the trailer.
 ///

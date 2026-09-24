@@ -79,6 +79,7 @@ pub use viva_u3v as u3v;
 
 pub mod chunks;
 pub mod events;
+pub mod evs;
 pub mod frame;
 pub mod stream;
 pub mod time;

@@ -29,6 +29,8 @@ pub enum PixelFormat {
     BayerBG16 = 0x0110_0011,
     RGB8Packed = 0x0218_0014,
     BGR8Packed = 0x0218_0015,
+    EvsEvt30 = 0x8110_0E30,
+    EvsEvt21 = 0x8140_0E21,
     /// Unknown PFNC code reported by the device.
     Unknown(u32),
 }
@@ -57,6 +59,8 @@ impl PixelFormat {
             0x0110_0011 => PixelFormat::BayerBG16,
             0x0218_0014 => PixelFormat::RGB8Packed,
             0x0218_0015 => PixelFormat::BGR8Packed,
+            0x8110_0E30 => PixelFormat::EvsEvt30,
+            0x8140_0E21 => PixelFormat::EvsEvt21,
             other => PixelFormat::Unknown(other),
         }
     }
@@ -84,6 +88,8 @@ impl PixelFormat {
             PixelFormat::BayerBG16 => 0x0110_0011,
             PixelFormat::RGB8Packed => 0x0218_0014,
             PixelFormat::BGR8Packed => 0x0218_0015,
+            PixelFormat::EvsEvt30 => 0x8110_0E30,
+            PixelFormat::EvsEvt21 => 0x8140_0E21,
             PixelFormat::Unknown(code) => code,
         }
     }
@@ -113,6 +119,8 @@ impl PixelFormat {
             | PixelFormat::BayerRG16
             | PixelFormat::BayerGB16
             | PixelFormat::BayerBG16 => Some(2),
+            PixelFormat::EvsEvt30 => Some(2),
+            PixelFormat::EvsEvt21 => Some(8),
             PixelFormat::Unknown(code) => PixelFormat::bytes_from_code(code),
         }
     }
@@ -167,6 +175,8 @@ impl PixelFormat {
             "BayerBG16" => PixelFormat::BayerBG16,
             "RGB8Packed" | "RGB8" => PixelFormat::RGB8Packed,
             "BGR8Packed" | "BGR8" => PixelFormat::BGR8Packed,
+            "EVT3_0" => PixelFormat::EvsEvt30,
+            "EVT2_1" => PixelFormat::EvsEvt21,
             _ => PixelFormat::Unknown(0),
         }
     }
@@ -225,6 +235,8 @@ impl fmt::Display for PixelFormat {
             PixelFormat::BayerBG16 => f.write_str("BayerBG16"),
             PixelFormat::RGB8Packed => f.write_str("RGB8Packed"),
             PixelFormat::BGR8Packed => f.write_str("BGR8Packed"),
+            PixelFormat::EvsEvt30 => f.write_str("EVT3_0"),
+            PixelFormat::EvsEvt21 => f.write_str("EVT2_1"),
             PixelFormat::Unknown(code) => write!(f, "Unknown(0x{code:08X})"),
         }
     }
@@ -257,6 +269,8 @@ mod tests {
             PixelFormat::BayerBG16,
             PixelFormat::RGB8Packed,
             PixelFormat::BGR8Packed,
+            PixelFormat::EvsEvt30,
+            PixelFormat::EvsEvt21,
         ];
 
         for fmt in formats {
@@ -287,7 +301,20 @@ mod tests {
         assert_eq!(PixelFormat::BayerRG8.bytes_per_pixel(), Some(1));
         assert_eq!(PixelFormat::BayerRG16.bytes_per_pixel(), Some(2));
         assert_eq!(PixelFormat::BayerGR16.bytes_per_pixel(), Some(2));
+        assert_eq!(PixelFormat::EvsEvt30.bytes_per_pixel(), Some(2));
+        assert_eq!(PixelFormat::EvsEvt21.bytes_per_pixel(), Some(8));
         assert_eq!(PixelFormat::Unknown(0).bytes_per_pixel(), None);
+    }
+
+    #[test]
+    fn event_format_names_roundtrip() {
+        for (name, format) in [
+            ("EVT3_0", PixelFormat::EvsEvt30),
+            ("EVT2_1", PixelFormat::EvsEvt21),
+        ] {
+            assert_eq!(PixelFormat::from_name(name), format);
+            assert_eq!(format.to_string(), name);
+        }
     }
 
     /// Every named format must agree with the size encoded in its own code,
@@ -315,6 +342,8 @@ mod tests {
             PixelFormat::BayerBG16,
             PixelFormat::RGB8Packed,
             PixelFormat::BGR8Packed,
+            PixelFormat::EvsEvt30,
+            PixelFormat::EvsEvt21,
         ];
 
         for fmt in formats {

@@ -95,6 +95,14 @@ while IFS=$'\t' read -r name url issue; do
   fi
 done <<<"$USER_CONTRIBUTED"
 
+# Local hardware export used for the Lucid Triton2 EVT integration. The XML is
+# intentionally not committed because the corpus contains vendor copyright;
+# copy it into /tmp before running this script when validating that camera.
+if [ -f /tmp/trt009s-e-formatted.xml ]; then
+  cp /tmp/trt009s-e-formatted.xml "$TARGET/Lucid_TRT009S.xml"
+  echo "    Lucid_TRT009S.xml (local /tmp export)"
+fi
+
 # Same, but the vendor tool exports the description as a ZIP. The member name is
 # a firmware build number and carries no model information, so we rename on
 # extraction.

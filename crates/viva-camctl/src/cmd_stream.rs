@@ -6,7 +6,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
+use viva_genicam::evs::{EvsBlock, EvsFormat};
 use viva_genicam::pfnc::PixelFormat;
+use viva_genicam::stream::StreamBlock;
 use viva_genicam::{Frame, FrameStream, StreamBuilder, StreamDest};
 
 use viva_gige::nic::IfaceSelector;
@@ -125,6 +127,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     camera.acquisition_start().context("start acquisition")?;
     let mut saved_frames = 0usize;
     let mut frame_index = 0usize;
+    let mut warned_evs_rgb = false;
     let end_deadline = if args.duration_s > 0 {
         Some(Instant::now() + Duration::from_secs(args.duration_s))
     } else {
@@ -163,23 +166,46 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                 interrupted = true;
                 break;
             }
-            received = frame_stream.next_frame() => {
+            received = frame_stream.next_block() => {
                 match received {
-                    Ok(Some(mut frame)) => {
-                        // FrameStream has already counted this frame. Mapping its
-                        // host timestamp here enriches frame metadata only and
-                        // must not trigger another record_frame() call.
-                        if let Some(timestamp) = frame.ts_dev {
-                            frame.ts_host = Some(camera.map_dev_ts(timestamp));
-                        }
-                        frame_index += 1;
+                    Ok(Some(block)) => {
+                        match StreamBlock::from(block) {
+                            StreamBlock::Image(mut frame) => {
+                                // FrameStream has already counted this frame. Mapping its
+                                // host timestamp here enriches frame metadata only and
+                                // must not trigger another record_frame() call.
+                                if let Some(timestamp) = frame.ts_dev {
+                                    frame.ts_host = Some(camera.map_dev_ts(timestamp));
+                                }
+                                frame_index += 1;
 
-                        if saved_frames < args.save {
-                            if let Err(err) = save_frame(&frame, frame_index, args.rgb) {
-                                warn!(error = %err, frame = frame_index, "failed to save frame");
-                            } else {
-                                saved_frames += 1;
+                                if saved_frames < args.save {
+                                    if let Err(err) = save_frame(&frame, frame_index, args.rgb) {
+                                        warn!(error = %err, frame = frame_index, "failed to save frame");
+                                    } else {
+                                        saved_frames += 1;
+                                    }
+                                }
                             }
+                            StreamBlock::Evs(mut block) => {
+                                if let Some(timestamp) = block.ts_dev {
+                                    block.ts_host = Some(camera.map_dev_ts(timestamp));
+                                }
+                                frame_index += 1;
+
+                                if args.rgb && !warned_evs_rgb {
+                                    warn!("--rgb does not apply to EVT data; preserving raw bytes");
+                                    warned_evs_rgb = true;
+                                }
+                                if saved_frames < args.save {
+                                    if let Err(err) = save_evs_block(&block, frame_index) {
+                                        warn!(error = %err, block = frame_index, "failed to save EVT block");
+                                    } else {
+                                        saved_frames += 1;
+                                    }
+                                }
+                            }
+                            _ => warn!("received a GVSP block kind this CLI does not support"),
                         }
                     }
                     Err(err) => {
@@ -240,5 +266,22 @@ fn save_frame(frame: &Frame, index: usize, rgb: bool) -> Result<PathBuf> {
     let path = PathBuf::from(format!("frame_{index:04}.{ext}"));
     common::save_image(&buffer, &path)?;
     info!(file = %path.display(), "saved frame");
+    Ok(path)
+}
+
+fn save_evs_block(block: &EvsBlock, index: usize) -> Result<PathBuf> {
+    let ext = match block.format {
+        EvsFormat::Evt30 => "evt3",
+        EvsFormat::Evt21 => "evt21",
+        _ => "evt",
+    };
+    let path = PathBuf::from(format!("block_{index:04}.{ext}"));
+    common::save_image(block.payload.as_ref(), &path)?;
+    info!(
+        file = %path.display(),
+        format = ?block.format,
+        bytes = block.payload.len(),
+        "saved raw EVT block"
+    );
     Ok(path)
 }

@@ -176,7 +176,10 @@ pub enum GvspPacket {
         /// Payload type the device is closing off, from the trailer payload.
         /// Carries the chunk flag (`0x4001`) that the leader's copy loses.
         payload_type: u16,
-        /// Actual number of lines delivered, for variable-height payloads.
+        /// Raw Size Y value from the trailer.
+        ///
+        /// This is the number of delivered lines for image payloads. A captured
+        /// LUCID TRT009S-E EVT stream uses it for the encoded payload length.
         size_y: u32,
         chunk_data: Bytes,
     },
@@ -680,6 +683,87 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extended-ID leader captured from a LUCID TRT009S-E producing EVT 3.0.
+    /// Keeping this literal makes the event-stream path rest on hardware bytes,
+    /// not on a packet generated from our own interpretation.
+    #[test]
+    fn lucid_evt30_capture_uses_an_image_leader() {
+        #[rustfmt::skip]
+        const LEADER: [u8; 56] = [
+            0x00, 0x00,             // status
+            0x00, 0x00,             // 16-bit block-id compatibility field
+            0x81,                   // extended-ID leader
+            0x00, 0x00, 0x00,       // 24-bit packet-id compatibility field
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // block id
+            0x00, 0x00, 0x00, 0x00, // packet id
+            0x00, 0x00,             // reserved
+            0x00, 0x01,             // IMAGE payload type
+            0x00, 0x00, 0x42, 0x2d, 0x66, 0xd4, 0x39, 0xc8, // timestamp
+            0x81, 0x10, 0x0e, 0x30, // EVT 3.0 data format
+            0x00, 0x00, 0x00, 0x01, // size X
+            0x00, 0x00, 0xfa, 0x00, // size Y (64000)
+            0x00, 0x00, 0x00, 0x00, // offset X
+            0x00, 0x00, 0x00, 0x00, // offset Y
+            0x00, 0x00, 0x00, 0x00, // padding X/Y
+        ];
+
+        let GvspPacket::Leader {
+            block_id,
+            packet_id,
+            payload_type,
+            timestamp,
+            width,
+            height,
+            pixel_format,
+        } = parse_packet(&LEADER).expect("parse captured LUCID leader")
+        else {
+            panic!("expected leader");
+        };
+
+        assert_eq!(block_id, 1);
+        assert_eq!(packet_id, 0);
+        assert_eq!(payload_type, PAYLOAD_TYPE_IMAGE);
+        assert_eq!(timestamp, 0x0000_422d_66d4_39c8);
+        assert_eq!(pixel_format, 0x8110_0e30);
+        assert_eq!((width, height), (1, 64_000));
+    }
+
+    /// Trailer paired with [`lucid_evt30_capture_uses_an_image_leader`].
+    #[test]
+    fn lucid_evt30_capture_trailer_reports_payload_bytes() {
+        #[rustfmt::skip]
+        const TRAILER: [u8; 28] = [
+            0x00, 0x00,             // status
+            0x00, 0x00,             // 16-bit block-id compatibility field
+            0x82,                   // extended-ID trailer
+            0x00, 0x00, 0x00,       // 24-bit packet-id compatibility field
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // block id
+            0x00, 0x00, 0x00, 0x02, // packet id
+            0x00, 0x00,             // reserved
+            0x00, 0x01,             // IMAGE payload type
+            0x00, 0x00, 0x03, 0x38, // captured payload length (824)
+        ];
+
+        let GvspPacket::Trailer {
+            block_id,
+            packet_id,
+            status,
+            payload_type,
+            size_y,
+            chunk_data,
+        } = parse_packet(&TRAILER).expect("parse captured LUCID trailer")
+        else {
+            panic!("expected trailer");
+        };
+
+        assert_eq!(block_id, 1);
+        assert_eq!(packet_id, 2);
+        assert_eq!(status, 0);
+        assert_eq!(payload_type, PAYLOAD_TYPE_IMAGE as u16);
+        assert_eq!(size_y, 824);
+        assert!(chunk_data.is_empty());
+    }
 
     #[test]
     fn parse_multiple_chunks() {

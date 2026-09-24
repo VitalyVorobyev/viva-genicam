@@ -29,7 +29,18 @@ pub enum PixelFormat {
     BayerBG16 = 0x0110_0011,
     RGB8Packed = 0x0218_0014,
     BGR8Packed = 0x0218_0015,
+    /// Prophesee EVT 3.0 event stream, as a Lucid Triton2 EVS sends it
+    /// ([#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)).
+    ///
+    /// **Vendor-defined, not PFNC**: bit 31 of the code is set, which is how
+    /// PFNC marks a format outside its own table. The stream carries events,
+    /// not pixels, so [`PixelFormat::bytes_per_pixel`] answers the size of one
+    /// event *word* (16 bits) — the depth the code's own bits 23-16 declare,
+    /// and the same answer [`PixelFormat::Unknown`] would derive for it. A
+    /// block's length is not `width * height` times that.
     EvsEvt30 = 0x8110_0E30,
+    /// Prophesee EVT 2.1 event stream, 64-bit event words. Vendor-defined; see
+    /// [`PixelFormat::EvsEvt30`].
     EvsEvt21 = 0x8140_0E21,
     /// Unknown PFNC code reported by the device.
     Unknown(u32),

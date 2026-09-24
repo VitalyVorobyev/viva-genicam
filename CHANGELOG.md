@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Event-vision streams from Lucid Triton2 EVS cameras**
+  ([#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139), contributed by
+  @richbai90; [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)).
+  The first non-image payload this library receives. A Triton2 EVS (Sony IMX636)
+  streams Prophesee EVT 3.0 or EVT 2.1 event data over GVSP under vendor-defined
+  format codes, and `FrameStream::next_block` now returns it as a
+  `StreamBlock::Evs(EvsBlock)` carrying the encoded bytes exactly as sent, beside
+  `StreamBlock::Image` for ordinary frames. `next_frame` is unchanged for image
+  cameras. `viva-camctl stream` handles both. `viva_pfnc::PixelFormat` names the
+  two codes `EvsEvt30`/`EvsEvt21`; both are vendor-defined (bit 31 set), and
+  `bytes_per_pixel` answers the size of one event word, not of a pixel. Tested
+  against golden bytes from a real TRT009S-E capture. `viva-service` still
+  publishes an event block on the image topic, which is `DC-05` and ours to
+  settle.
+
 ### Fixed
 
 - **Setting one bit of a write-only register read the register first, and the

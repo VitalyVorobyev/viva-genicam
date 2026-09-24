@@ -1423,6 +1423,56 @@ mod tests {
         );
     }
 
+    /// GA-31 (#135): setting one bit of a write-only register must not read the
+    /// register for the others. `ensure_writable_now` rightly permits a write
+    /// to `WO`, but the bitfield write was implemented as a read, which the
+    /// device refuses — so the caller saw a transport error for a feature the
+    /// XML says is writable. Both shapes the corpus uses are checked: a
+    /// `<StructEntry>` inheriting `WO` from its `<StructReg>`, and a
+    /// `<MaskedIntReg>` declared `WO` itself.
+    #[test]
+    fn masked_write_to_a_write_only_register_does_not_read_it() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <StructReg Comment="pulse">
+                    <Address>0x600</Address><Length>4</Length>
+                    <AccessMode>WO</AccessMode><Endianess>BigEndian</Endianess>
+                    <StructEntry Name="Pulse0"><Bit>0</Bit></StructEntry>
+                </StructReg>
+                <MaskedIntReg Name="Trigger">
+                    <Address>0x604</Address><Length>4</Length>
+                    <AccessMode>WO</AccessMode><Bit>3</Bit>
+                    <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+                </MaskedIntReg>
+            </RegisterDescription>
+        "#;
+        let mut nodemap =
+            NodeMap::try_from_xml(viva_genapi_xml::parse(XML).expect("parse")).expect("nodemap");
+        // Registers present, so a read *would* succeed against this mock: the
+        // test fails on the read count, not on a read miss.
+        let io = MockIo::with_registers(&[(0x600, vec![0; 4]), (0x604, vec![0; 4])]);
+
+        // `Trigger` is written 0 because a `<MaskedIntReg>` without `<Min>`
+        // encodes as signed today, and a 1-bit signed field cannot hold 1 —
+        // a separate defect, and one that fails before the read would.
+        for (node, address, value) in [("Pulse0", 0x600u64, 1), ("Trigger", 0x604, 0)] {
+            let err = nodemap
+                .set_integer(node, value, &io)
+                .expect_err("a cold write-only bitfield cannot be written");
+            assert!(
+                matches!(err, GenApiError::MaskedWriteUnreadable { ref name, address: a }
+                    if name == node && a == address),
+                "{node}: got {err:?}"
+            );
+            assert_eq!(io.read_count(address), 0, "{node}: no read may be issued");
+            assert_eq!(
+                io.regs.borrow().get(&address),
+                Some(&vec![0; 4]),
+                "{node}: nothing may be written either"
+            );
+        }
+    }
+
     /// A `<StructReg>` bit reads as 1, not -1.
     ///
     /// Entries used to declare the full `i64` range, which looked like a

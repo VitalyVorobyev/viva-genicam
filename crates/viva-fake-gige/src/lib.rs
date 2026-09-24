@@ -31,8 +31,8 @@
 mod gvcp_server;
 
 pub use gvcp_server::{
-    FAKE_DEVICE_KEY, FAKE_GROUP_KEY, FAKE_GROUP_MASK, FAKE_MAC, FAKE_MANUFACTURER, FAKE_MODEL,
-    FAKE_SERIAL, FAKE_USER_NAME, FAKE_VERSION,
+    CommandCounters, FAKE_DEVICE_KEY, FAKE_GROUP_KEY, FAKE_GROUP_MASK, FAKE_MAC, FAKE_MANUFACTURER,
+    FAKE_MODEL, FAKE_SERIAL, FAKE_USER_NAME, FAKE_VERSION, GvcpCommand, RegisterCommandRefusal,
 };
 mod gvsp_sender;
 pub mod registers;
@@ -60,6 +60,7 @@ pub struct FakeCameraBuilder {
     heartbeat_timeout_ms: Option<u32>,
     max_packet_size: Option<u32>,
     max_on_wire: Option<u32>,
+    refuse_register_commands: Option<RegisterCommandRefusal>,
 }
 
 /// PFNC pixel format codes.
@@ -80,6 +81,7 @@ impl Default for FakeCameraBuilder {
             heartbeat_timeout_ms: None,
             max_packet_size: None,
             max_on_wire: None,
+            refuse_register_commands: None,
         }
     }
 }
@@ -172,6 +174,18 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Refuse every READREG and WRITEREG, as a device that implements only the
+    /// memory commands would (default: serve them).
+    ///
+    /// The only way to exercise a controller's fallback from register to
+    /// memory access without hardware that lacks the register commands. The
+    /// refused command changes nothing on the device, so a test can tell a
+    /// write that fell back from one that was silently lost.
+    pub fn refuse_register_commands(mut self, refusal: RegisterCommandRefusal) -> Self {
+        self.refuse_register_commands = Some(refusal);
+        self
+    }
+
     /// Report a different `GevHeartbeatTimeout` than the 3 000 ms default.
     ///
     /// A shorter window keeps a test that has to wait one out from dominating
@@ -199,6 +213,7 @@ impl FakeCameraBuilder {
 
         let acq_start = Arc::new(Notify::new());
         let acq_stop_flag = Arc::new(AtomicBool::new(false));
+        let counters = Arc::new(CommandCounters::default());
 
         // Bind GVCP control socket. On macOS `SO_REUSEADDR` is a no-op for UDP,
         // so also set `SO_REUSEPORT` to let a fresh socket rebind the port while
@@ -224,8 +239,12 @@ impl FakeCameraBuilder {
             let acq_start = acq_start.clone();
             let acq_stop = acq_stop_flag.clone();
             let bind_ip = self.bind_ip;
+            let options = gvcp_server::ServerOptions {
+                counters: counters.clone(),
+                refuse_register_commands: self.refuse_register_commands,
+            };
             tokio::spawn(async move {
-                gvcp_server::run(socket, regs, acq_start, acq_stop, bind_ip).await;
+                gvcp_server::run(socket, regs, acq_start, acq_stop, bind_ip, options).await;
             })
         };
 
@@ -243,7 +262,8 @@ impl FakeCameraBuilder {
         Ok(FakeCamera {
             gvcp_handle: Some(gvcp_handle),
             gvsp_handle: Some(gvsp_handle),
-            _regs: regs,
+            regs,
+            counters,
             local_addr,
         })
     }
@@ -256,7 +276,8 @@ impl FakeCameraBuilder {
 pub struct FakeCamera {
     gvcp_handle: Option<JoinHandle<()>>,
     gvsp_handle: Option<JoinHandle<()>>,
-    _regs: Arc<Mutex<registers::RegisterMap>>,
+    regs: Arc<Mutex<registers::RegisterMap>>,
+    counters: Arc<CommandCounters>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -279,6 +300,23 @@ impl FakeCamera {
     /// The port the GVCP socket is listening on.
     pub fn port(&self) -> u16 {
         self.local_addr.port()
+    }
+
+    /// Which register-access commands this camera has received, and where.
+    ///
+    /// For tests that must assert *how* a value reached the device: READREG
+    /// and READMEM return identical bytes, so a test that checks only the
+    /// value cannot tell them apart.
+    pub fn commands(&self) -> &CommandCounters {
+        &self.counters
+    }
+
+    /// Read `len` bytes of device state directly, bypassing GVCP.
+    ///
+    /// Not subject to access modes and not counted, so a test can check what a
+    /// write actually stored without trusting the client's own read-back.
+    pub async fn peek(&self, addr: u64, len: usize) -> Vec<u8> {
+        self.regs.lock().await.read(addr, len)
     }
 
     /// Stop the fake camera and wait for its background tasks to exit.

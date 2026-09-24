@@ -312,7 +312,8 @@ impl NodeMap {
         }
         if let Some(bitfield) = node.bitfield {
             let encoded = encode_bitfield_value(name, value, bitfield.bit_length, node.min < 0)?;
-            let mut raw = get_raw_or_read(&node.raw_cache, io, address, len)?;
+            let readable = !matches!(node.access, AccessMode::WO);
+            let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
             insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
             debug!(node = %name, raw = value, "write integer feature");
             io.write(address, &raw).map_err(|err| match err {
@@ -840,7 +841,8 @@ impl NodeMap {
             .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
         let encoded = if value { 1 } else { 0 };
-        let mut raw = get_raw_or_read(&node.raw_cache, io, address, len)?;
+        let readable = !matches!(node.access, AccessMode::WO);
+        let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
         insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
         debug!(node = %name, raw = encoded, value, "write boolean feature");
         io.write(address, &raw).map_err(|err| match err {

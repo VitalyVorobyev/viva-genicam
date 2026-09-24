@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Setting one bit of a write-only register read the register first, and the
+  camera refused the read** ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135),
+  backlog `GA-31`). Reads of `WO` nodes were already refused before reaching the
+  wire; the gap was on the write side. A bitfield write is a read-modify-write,
+  and `set_integer`/`set_bool` fetched the rest of the register with an
+  unguarded read whenever the raw cache was cold — so a `<StructEntry>` under a
+  `<StructReg AccessMode="WO">`, which inherits `WO` and always has a bitfield,
+  sent a READMEM the device rejected. That write now fails locally with
+  `GenApiError::MaskedWriteUnreadable`, which names the node and the register,
+  and nothing is sent. A warm cache is still used, since that is the legal
+  GenICam way to keep the other bits. This is our diagnosis of a path that
+  matches the report, not a confirmation of the reporter's case: the report
+  names no node and carries no log.
+
+- **`viva-camctl set` reported failure after writing a write-only feature**
+  (backlog `DX-11`, found while tracing #135). It read every node back after
+  writing it, and a `WO` node refuses that read — so the command failed after
+  the write had succeeded, and on a real camera put a rejected request on the
+  wire too. The read-back now happens only for readable nodes; a write-only one
+  prints `wrote <name> = <value> (write-only node; not read back)`, and `--json`
+  gives `"value": null, "write_only": true`.
+
 - **An eight-byte register declared `<Sign>Unsigned</Sign>` could not be read at
   all** once its top bit was set — `node <name> holds an unsigned 64-bit value
   larger than i64::MAX`. Reported on two vendors' cameras by two people: a
@@ -77,6 +99,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is only defensible against the lock that actually ships.
 
 ### Changed
+
+- **A single 32-bit register now goes out as READREG/WRITEREG, not
+  READMEM/WRITEMEM** ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136),
+  backlog `TC-22`). The reporter saw it in Wireshark: a write to
+  `GevSCPSPacketSize` left the host as `WRITEMEM_CMD`. Every `RegisterIo`
+  access did, and so did seven bootstrap writes in `GigeDevice` — stream
+  destination, port, packet size, test packet and delay, and the message channel
+  address and port — while `get_stream_packet_size` read the same register back
+  with READREG. `GigeDevice::read_register_or_mem`/`write_register_or_mem` now
+  pick the command: READREG/WRITEREG when the access is exactly four bytes at a
+  four-byte-aligned address below 4 GiB, READMEM/WRITEMEM otherwise. The
+  READREG value is re-serialised big-endian, which is byte-for-byte what READMEM
+  returned, so nothing above the transport sees a difference. An 8-byte register
+  is deliberately **not** split into two READREGs: a multi-register READREG has
+  no defined atomicity, so a latched 64-bit timestamp could tear silently. For
+  the same reason this does not address `BAD_ALIGNMENT` on #112's event
+  registers (`TC-21`).
+
+  **A device that refuses the register commands falls back, once per session.**
+  A READREG or WRITEREG answered `NOT_IMPLEMENTED`, or not answered at all,
+  switches that `GigeDevice` to READMEM/WRITEMEM for the rest of the session,
+  logs one `WARN` naming the address, and retries the same access so the caller
+  still succeeds. A timeout latches only after the memory retry succeeds, so a
+  camera that has simply gone away does not cost the session its register
+  commands. `ACCESS_DENIED`, `BAD_ALIGNMENT` and every other status are real
+  answers and are returned as they are. Setting **`VIVA_GIGE_FORCE_READMEM`** to
+  any non-empty value other than `0` starts every session on memory access, for a
+  device that answers READREG wrongly rather than refusing it;
+  `GigeDevice::use_memory_access` does the same in code. The CCP claim, the
+  heartbeat and the persistent-IP helpers go through the same path, so they fall
+  back with everything else. `GigeDevice::read_register`/`write_register` remain,
+  unconditionally READREG/WRITEREG. The `viva_gige::time::ControlChannel` impl,
+  whose `read_register`/`write_register` forwarded to READMEM/WRITEMEM despite
+  the name, now dispatches too.
+
+  **Not yet seen on hardware.** The CCP claim and the heartbeat have always used
+  WRITEREG and READREG, so cameras already answer those two; feature registers
+  over READREG are new, and a device that mishandles them is what the fallback
+  and the environment variable exist to survive.
+
+- **`viva-fake-gige` can now disagree with the host about register access**
+  (backlog `TC-23`, [ADR-0019](docs/adrs/adr0019-transport-conformance-and-spec-derived-fakes.md)).
+  It counts every READREG, WRITEREG, READMEM and WRITEMEM per address
+  (`FakeCamera::commands`), so a test can assert which command left the host —
+  READREG and READMEM return the same bytes, so a value check cannot. It fires
+  the GVSP test packet from WRITEREG as well as WRITEMEM; without that, moving
+  `request_test_packet` to WRITEREG would have silently stopped the path probe.
+  It refuses a read of any register its XML declares `WO` with `ACCESS_DENIED`,
+  through either command, where before a READMEM of a write-only address
+  returned the stored bytes; and it gains a write-only `<StructReg>` with two
+  `<StructEntry>` bits at `0x200B0`, the first write-only bitfield in the fake
+  and the shape our reading of #135 points at. `FakeCameraBuilder::refuse_register_commands`
+  answers READREG/WRITEREG with `NOT_IMPLEMENTED` or not at all, which is the
+  only way to test the fallback without hardware. `FakeCamera::peek` reads device
+  state without going through GVCP, so a test can check a write landed without
+  trusting our own read-back.
 
 - **`quick-xml` 0.41 → 0.42, which moves the parser from bytes to `&str`**
   (backlog `CI-14`). 0.42 rewrites the API around `&str`: `QName` and the text

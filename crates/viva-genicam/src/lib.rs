@@ -749,6 +749,11 @@ pub struct ChunkConfig {
 /// **Note:** `block_in_place` requires a multi-thread runtime.  Using a
 /// `current_thread` runtime will still panic.
 ///
+/// An access of exactly one aligned 32-bit register goes out as
+/// READREG/WRITEREG, anything else as READMEM/WRITEMEM; see
+/// [`GigeDevice::read_register_or_mem`](gige::GigeDevice::read_register_or_mem)
+/// for the fallback a device that refuses the register commands gets.
+///
 /// # Control channel keepalive
 ///
 /// Constructing the adapter spawns a background task that keeps the device's
@@ -802,7 +807,7 @@ impl GigeRegisterIo {
 impl RegisterIo for GigeRegisterIo {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
         let mut device = self.lock()?;
-        let fut = device.read_mem(addr, len);
+        let fut = device.read_register_or_mem(addr, len);
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::task::block_in_place(|| self.handle.block_on(fut))
         } else {
@@ -813,7 +818,7 @@ impl RegisterIo for GigeRegisterIo {
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
         let mut device = self.lock()?;
-        let fut = device.write_mem(addr, data);
+        let fut = device.write_register_or_mem(addr, data);
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::task::block_in_place(|| self.handle.block_on(fut))
         } else {

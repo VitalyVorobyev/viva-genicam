@@ -58,6 +58,13 @@ impl TestCamera {
             _guard: guard,
         }
     }
+
+    /// The running fake, for tests that inspect what reached it on the wire.
+    #[allow(dead_code)]
+    pub fn fake(&self) -> &FakeCamera {
+        // `camera` is only taken in `drop`, so it is always present here.
+        self.camera.as_ref().expect("fake camera is running")
+    }
 }
 
 impl Drop for TestCamera {

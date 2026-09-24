@@ -5630,7 +5630,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viva-genapi"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -5639,7 +5639,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genapi-xml"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "quick-xml",
  "serde",
@@ -5650,7 +5650,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gencp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -5659,7 +5659,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genicam"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5677,7 +5677,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gige"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5694,15 +5694,15 @@ dependencies = [
 
 [[package]]
 name = "viva-pfnc"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "viva-sfnc"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "viva-u3v"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "rusb",
@@ -5714,7 +5714,7 @@ dependencies = [
 
 [[package]]
 name = "viva-zenoh-api"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",

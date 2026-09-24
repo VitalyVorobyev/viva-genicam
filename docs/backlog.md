@@ -34,12 +34,6 @@ how to file a row rather than about any one defect:
   became obvious when a real JAI emitted the identical `remaining=6`, which is
   what showed the fake was not the variable.
 
-## REL — Releases
-
-| ID | Task | Priority | Size | Status | Notes |
-|----|------|----------|------|--------|-------|
-| REL-08 | Cut 0.6.0 | P0 | S | planned | **Minor, not a patch**, for three independent reasons. `NodeDecl::Integer` **has gained** `byte_order` ([ADR-0022](adrs/adr0022-integer-register-decoding.md)) and `#[non_exhaustive]` sits on the `NodeDecl` *enum* rather than the variant (`crates/viva-genapi-xml/src/lib.rs:607`), so struct-variant literals broke — one in the studio workspace, the other two sites there being patterns with `..` rather than constructions. `DeviceAnnounce` **has gained** four fields and `#[non_exhaustive]`, so struct literals of it outside the crate broke. And `^0.5` resolves to any 0.5.x, so a patch that changes what 448 registers decode to would reach dependents on their next `cargo update` — the same trap that forced 0.4.0 to be a minor. The integer codec, register access (READREG/WRITEREG dispatch, the write-only masked write), device identity (#137) and the feature snapshot's handling of write-only and command nodes have shipped: **the gates are cleared**. `NodeMap` also gained `is_write_only` and `command_targets`, additive. Six version touchpoints **plus** the intra-workspace caret ranges, which a minor makes unsatisfiable |
-
 ## TC — Transport conformance (roadmap Phase 1, ADR-0019)
 
 The GVCP/GVSP audit ADR-0018 never reached. Opcodes cross-checked against

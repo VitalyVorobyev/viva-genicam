@@ -13,47 +13,6 @@ they will close — the evidence hierarchy in
 [CLAUDE.md](../CLAUDE.md#evidence-hierarchy) decides that, and it routinely
 promotes something out of a later phase because a user with hardware appeared.
 
-## Next release — 0.6.0
-
-A minor, not a patch. Three reasons, and only the third is about semver strictly:
-`NodeDecl::Integer` gains a field and `#[non_exhaustive]` sits on the enum rather
-than the variant; `DeviceAnnounce` has gained fields and `#[non_exhaustive]`, so
-struct literals of it no longer compile outside the crate; and `^0.5` resolves to any 0.5.x, so a patch that changes what 448 registers
-decode to would reach dependents on their next `cargo update`. 0.4.0 had to
-become a minor for exactly that reason, and the lesson is worth restating rather
-than relearning.
-
-**What gated it** (rows in [backlog.md](backlog.md)) — all cleared; `REL-08`
-cuts the release:
-
-- ~~**The integer codec.**~~ **Done**, see
-  [ADR-0022](adrs/adr0022-integer-register-decoding.md). An eight-byte unsigned
-  register was unreadable on two vendors' cameras and two reporters
-  ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112),
-  [#140](https://github.com/VitalyVorobyev/viva-genicam/issues/140)), and a
-  plain `<IntReg>` declaring `LittleEndian` was decoded big-endian anyway on 311
-  declarations across 16 of 38 corpus documents. Neither reporter has confirmed
-  on their own hardware yet. **GA-11**'s first slice went with it: the corpus
-  test now evaluates each document twice, and the second pass failed on 373
-  nodes across 19 documents before the fix.
-- ~~**What leaves the host when a register is read.**~~ **Done.** A single 32-bit register now goes out as READREG/WRITEREG, with a
-  per-session fallback to memory access and a `VIVA_GIGE_FORCE_READMEM` escape
-  hatch ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)); a masked write to a write-only register is refused
-  locally instead of reading it first, and `viva-camctl set` no longer reads a
-  write-only node back ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)). The fake now counts commands per
-  address, refuses reads of `WO` registers and can refuse READREG, so it can
-  contradict us on both. A feature snapshot no longer reads a write-only node
-  or a command's register: it reports them with a null value instead of
-  failing or dropping them. Neither reporter has confirmed on hardware.
-- ~~**Device identity.**~~ **Done.** Two identical cameras were indistinguishable
-  in Studio ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), because the service announced the device id as
-  the serial and dropped the user-defined name and the address. The reporter has
-  not confirmed on their cameras yet.
-
-**What does not gate it.** The Lucid event-camera contribution
-([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)) depends on a contributor's judgement and their hardware; take
-it if it converges first, but a release does not wait on a fork's CI.
-
 ## Phase 1 — Transport conformance (ADR-0019)
 
 ADR-0018 audited the GenApi layer against the specification and found eight

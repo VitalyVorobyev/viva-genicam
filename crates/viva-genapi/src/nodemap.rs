@@ -16,11 +16,12 @@ use crate::conversions::{
 };
 use crate::nodes::{
     BooleanNode, CategoryNode, CommandNode, ConverterNode, EnumMapping, EnumNode, FloatNode,
-    IntConverterNode, IntegerNode, Node, RegisterNode, SkNode, StringNode,
+    FormulaVar, IntConverterNode, IntegerNode, Node, RegisterNode, SkNode, StringNode,
 };
 use crate::swissknife::{
-    AstNode as SkAst, EvalError as SkEvalError, EvalMode, Value as SkValue, collect_identifiers,
-    evaluate as eval_ast, is_builtin_constant, parse_expression, substitute,
+    AstNode as SkAst, EvalError as SkEvalError, EvalMode, Value as SkValue, VarAttr,
+    collect_identifiers, evaluate as eval_ast, is_builtin_constant, parse_expression,
+    split_qualified, substitute,
 };
 use crate::{GenApiError, RegisterIo, SkOutput};
 
@@ -383,7 +384,12 @@ impl NodeMap {
             return Err(GenApiError::Range(name.to_string()));
         }
         if let Some(bitfield) = node.bitfield {
-            let encoded = encode_bitfield_value(name, value, bitfield.bit_length, node.min < 0)?;
+            let encoded = encode_bitfield_value(
+                name,
+                value,
+                bitfield.bit_length,
+                integer_sign(node).is_signed(),
+            )?;
             let readable = !matches!(node.access, AccessMode::WO);
             let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
             insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
@@ -1251,18 +1257,19 @@ impl NodeMap {
         &self,
         name: &str,
         ast: &SkAst,
-        vars: &[(String, String)],
+        vars: &[FormulaVar],
         overrides: &[(&str, SkValue)],
         mode: EvalMode,
         io: &dyn RegisterIo,
         stack: &mut HashSet<String>,
     ) -> Result<SkValue, GenApiError> {
         let mut values: HashMap<String, SkValue> = HashMap::new();
-        for (var, provider) in vars {
-            if overrides.iter().any(|(ident, _)| ident == var) {
+        for var in vars {
+            if overrides.iter().any(|(ident, _)| *ident == var.name) {
                 continue;
             }
-            values.insert(var.clone(), self.resolve_value(provider, io, stack)?);
+            let value = self.resolve_formula_var(name, var, io, stack)?;
+            values.insert(var.name.clone(), value);
         }
         for (ident, value) in overrides {
             values.insert((*ident).to_string(), *value);
@@ -1335,6 +1342,118 @@ impl NodeMap {
                 .map(SkValue::Int),
             Some(_) => Err(GenApiError::Type(provider.to_string())),
             None => Err(GenApiError::NodeNotFound(provider.to_string())),
+        }
+    }
+
+    /// Resolve one formula variable: the provider's value, or the property of
+    /// it that a `.Min` / `.Max` / `.Inc` / `.Entry.<Name>` extension selects.
+    fn resolve_formula_var(
+        &self,
+        formula: &str,
+        var: &FormulaVar,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<SkValue, GenApiError> {
+        match &var.attr {
+            VarAttr::Value => self.resolve_value(&var.provider, io, stack),
+            VarAttr::Entry(entry) => {
+                let node = match self.nodes.get(&var.provider) {
+                    Some(Node::Enum(node)) => node,
+                    Some(_) => return Err(GenApiError::Type(var.provider.clone())),
+                    None => return Err(GenApiError::NodeNotFound(var.provider.clone())),
+                };
+                let decl = node
+                    .entries
+                    .iter()
+                    .find(|decl| decl.name == *entry)
+                    .ok_or_else(|| GenApiError::EnumNoSuchEntry {
+                        node: var.provider.clone(),
+                        entry: entry.clone(),
+                    })?;
+                self.resolve_enum_entry_value(node, decl, io)
+                    .map(SkValue::Int)
+            }
+            attr => self.resolve_limit(formula, var, attr, io, stack),
+        }
+    }
+
+    /// Resolve `.Min`, `.Max` or `.Inc` of a formula variable's node.
+    ///
+    /// `<pMin>` / `<pMax>` win over a static bound. A node that declares no
+    /// bound of its own but delegates through `<pValue>` takes the bound of
+    /// the node it delegates to: an `<Integer>` fronting an `<IntReg>` would
+    /// otherwise report the `i64::MIN` / `i64::MAX` placeholders that stand
+    /// in for "not declared". That delegation rule is our reading; the
+    /// standard defines the extensions but not this case. An undeclared
+    /// integer increment is 1. A `<Float>` has no increment in this model,
+    /// so `.Inc` on one is an evaluation error rather than a guess.
+    fn resolve_limit(
+        &self,
+        formula: &str,
+        var: &FormulaVar,
+        attr: &VarAttr,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<SkValue, GenApiError> {
+        let mut current = var.provider.as_str();
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return Err(GenApiError::ExprEval {
+                    name: formula.to_string(),
+                    msg: format!("{}: cyclic <pValue> chain at {current}", var.name),
+                });
+            }
+            match self.nodes.get(current) {
+                Some(Node::Integer(node)) => {
+                    let (pointer, declared) = match attr {
+                        VarAttr::Min => (node.p_min.as_deref(), Some(node.min)),
+                        VarAttr::Max => (node.p_max.as_deref(), Some(node.max)),
+                        _ => (None, node.inc),
+                    };
+                    if let Some(pointer) = pointer {
+                        return self.resolve_value(pointer, io, stack);
+                    }
+                    let undeclared = match attr {
+                        VarAttr::Min => node.min == i64::MIN,
+                        VarAttr::Max => node.max == i64::MAX,
+                        _ => node.inc.is_none(),
+                    };
+                    if undeclared && let Some(pvalue) = node.pvalue.as_deref() {
+                        current = pvalue;
+                        continue;
+                    }
+                    return Ok(SkValue::Int(declared.unwrap_or(1)));
+                }
+                Some(Node::Float(node)) => {
+                    let (declared, undeclared) = match attr {
+                        VarAttr::Min => (Some(node.min), node.min == f64::MIN),
+                        VarAttr::Max => (Some(node.max), node.max == f64::MAX),
+                        _ => (None, true),
+                    };
+                    if undeclared && let Some(pvalue) = node.pvalue.as_deref() {
+                        current = pvalue;
+                        continue;
+                    }
+                    return declared
+                        .map(SkValue::Float)
+                        .ok_or_else(|| GenApiError::ExprEval {
+                            name: formula.to_string(),
+                            msg: format!("{}: Float {current} declares no increment", var.name),
+                        });
+                }
+                Some(other) => {
+                    return Err(GenApiError::ExprEval {
+                        name: formula.to_string(),
+                        msg: format!(
+                            "{}: {} {current} has no minimum, maximum or increment",
+                            var.name,
+                            other.kind_name()
+                        ),
+                    });
+                }
+                None => return Err(GenApiError::NodeNotFound(current.to_string())),
+            }
         }
     }
 
@@ -1516,7 +1635,7 @@ impl NodeMap {
         &self,
         name: &str,
         ast_to: &SkAst,
-        vars_to: &[(String, String)],
+        vars_to: &[FormulaVar],
         p_value: &str,
         value: SkValue,
         mode: EvalMode,
@@ -1524,7 +1643,7 @@ impl NodeMap {
     ) -> Result<(String, SkValue), GenApiError> {
         let mut stack = HashSet::new();
         let mut overrides = vec![("FROM", value)];
-        if vars_to.iter().any(|(var, _)| var == "OLD") {
+        if vars_to.iter().any(|var| var.name == "OLD") {
             let old = self.resolve_value(p_value, io, &mut stack)?;
             overrides.push(("OLD", old));
         }
@@ -1976,31 +2095,31 @@ fn build_node(
                 msg: err.to_string(),
             })?;
             substitute(&mut ast, &formula_bindings(&name, &decl.bindings)?);
+            let vars = formula_vars(&name, &variables, &[&ast])?;
             let mut used = HashSet::new();
             collect_identifiers(&ast, &mut used);
             for ident in &used {
                 // `E` and `PI` are language constants, not variables, so
                 // they legitimately appear without a `<pVariable>`.
-                if !variables.iter().any(|(var, _)| var == ident) && !is_builtin_constant(ident) {
+                if !vars.iter().any(|var| var.name == *ident) && !is_builtin_constant(ident) {
                     return Err(GenApiError::UnknownVariable {
                         name: name.clone(),
                         var: ident.clone(),
                     });
                 }
             }
-            for (_, provider) in &variables {
-                dependents
-                    .entry(provider.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
+            register_formula_dependencies(
+                dependents,
+                &name,
+                vars.iter().map(|var| var.provider.as_str()),
+            );
             register_predicate_dependencies(dependents, &name, &predicates);
             let node = SkNode {
                 name: name.clone(),
                 meta,
                 output,
                 ast,
-                vars: variables,
+                vars,
                 predicates,
                 cache: std::cell::RefCell::new(None),
             };
@@ -2021,26 +2140,17 @@ fn build_node(
                     msg: format!("FormulaFrom: {err}"),
                 })?;
             substitute(&mut ast_from, &bindings);
-            // Register dependencies for all variable providers
-            for (_, provider) in &decl.variables_to {
-                dependents
-                    .entry(provider.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
-            for (_, provider) in &decl.variables_from {
-                if !decl.variables_to.iter().any(|(_, p)| p == provider) {
-                    dependents
-                        .entry(provider.clone())
-                        .or_default()
-                        .push(name.clone());
-                }
-            }
-            // Also depend on p_value
-            dependents
-                .entry(decl.p_value.clone())
-                .or_default()
-                .push(name.clone());
+            let vars_to = formula_vars(&name, &decl.variables_to, &[&ast_to])?;
+            let vars_from = formula_vars(&name, &decl.variables_from, &[&ast_from])?;
+            register_formula_dependencies(
+                dependents,
+                &name,
+                vars_to
+                    .iter()
+                    .chain(&vars_from)
+                    .map(|var| var.provider.as_str())
+                    .chain([decl.p_value.as_str()]),
+            );
             register_predicate_dependencies(dependents, &name, &decl.predicates);
             let node = ConverterNode {
                 name: name.clone(),
@@ -2048,8 +2158,8 @@ fn build_node(
                 p_value: decl.p_value,
                 ast_to,
                 ast_from,
-                vars_to: decl.variables_to,
-                vars_from: decl.variables_from,
+                vars_to,
+                vars_from,
                 unit: decl.unit,
                 output: decl.output,
                 predicates: decl.predicates,
@@ -2072,24 +2182,17 @@ fn build_node(
                     msg: format!("FormulaFrom: {err}"),
                 })?;
             substitute(&mut ast_from, &bindings);
-            for (_, provider) in &decl.variables_to {
-                dependents
-                    .entry(provider.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
-            for (_, provider) in &decl.variables_from {
-                if !decl.variables_to.iter().any(|(_, p)| p == provider) {
-                    dependents
-                        .entry(provider.clone())
-                        .or_default()
-                        .push(name.clone());
-                }
-            }
-            dependents
-                .entry(decl.p_value.clone())
-                .or_default()
-                .push(name.clone());
+            let vars_to = formula_vars(&name, &decl.variables_to, &[&ast_to])?;
+            let vars_from = formula_vars(&name, &decl.variables_from, &[&ast_from])?;
+            register_formula_dependencies(
+                dependents,
+                &name,
+                vars_to
+                    .iter()
+                    .chain(&vars_from)
+                    .map(|var| var.provider.as_str())
+                    .chain([decl.p_value.as_str()]),
+            );
             register_predicate_dependencies(dependents, &name, &decl.predicates);
             let node = IntConverterNode {
                 name: name.clone(),
@@ -2097,8 +2200,8 @@ fn build_node(
                 p_value: decl.p_value,
                 ast_to,
                 ast_from,
-                vars_to: decl.variables_to,
-                vars_from: decl.variables_from,
+                vars_to,
+                vars_from,
                 unit: decl.unit,
                 predicates: decl.predicates,
                 cache: std::cell::RefCell::new(None),
@@ -2163,6 +2266,85 @@ fn build_node(
 /// camera, which is precisely the case `<Sign>` exists to decide.
 fn integer_sign(node: &IntegerNode) -> Sign {
     node.sign
+}
+
+/// Resolve the variables a formula reads from its `<pVariable>` declarations.
+///
+/// Every declaration becomes a [`FormulaVar`]; one whose `Name` carries an
+/// extension — the standard's own example is
+/// `<pVariable Name="Gain.Max">Gain</pVariable>` — reads that property of its
+/// node rather than its value. An identifier in `asts` that is not declared as
+/// written but qualifies a declared plain variable (`V1.Min` with `V1`
+/// declared) is added too. Identifiers that match neither are left out; the
+/// caller decides whether that is an error.
+///
+/// An extension the standard does not define fails the build with
+/// [`GenApiError::UnknownVariableExtension`], which sends the node to
+/// [`NodeMap::skipped`] rather than evaluating it to a wrong number.
+fn formula_vars(
+    node: &str,
+    declared: &[(String, String)],
+    asts: &[&SkAst],
+) -> Result<Vec<FormulaVar>, GenApiError> {
+    let qualified = |var: &str, extension: &str, provider: &str| {
+        VarAttr::parse(extension)
+            .map(|attr| FormulaVar {
+                name: var.to_string(),
+                provider: provider.to_string(),
+                attr,
+            })
+            .ok_or_else(|| GenApiError::UnknownVariableExtension {
+                name: node.to_string(),
+                var: var.to_string(),
+                extension: extension.to_string(),
+            })
+    };
+    let mut vars = Vec::with_capacity(declared.len());
+    for (var, provider) in declared {
+        vars.push(match split_qualified(var) {
+            Some((_, extension)) => qualified(var, extension, provider)?,
+            None => FormulaVar {
+                name: var.clone(),
+                provider: provider.clone(),
+                attr: VarAttr::Value,
+            },
+        });
+    }
+    let mut used = HashSet::new();
+    for ast in asts {
+        collect_identifiers(ast, &mut used);
+    }
+    let mut used: Vec<String> = used.into_iter().collect();
+    used.sort();
+    for ident in used {
+        if declared.iter().any(|(var, _)| *var == ident) {
+            continue;
+        }
+        let Some((base, extension)) = split_qualified(&ident) else {
+            continue;
+        };
+        if let Some((_, provider)) = declared.iter().find(|(var, _)| var == base) {
+            vars.push(qualified(&ident, extension, provider)?);
+        }
+    }
+    Ok(vars)
+}
+
+/// Record `node` as a dependent of every distinct provider its formula reads.
+fn register_formula_dependencies<'a>(
+    dependents: &mut HashMap<String, Vec<String>>,
+    node: &str,
+    providers: impl IntoIterator<Item = &'a str>,
+) {
+    let mut seen = HashSet::new();
+    for provider in providers {
+        if seen.insert(provider) {
+            dependents
+                .entry(provider.to_string())
+                .or_default()
+                .push(node.to_string());
+        }
+    }
 }
 
 /// Resolve a formula's `<Constant>` and named `<Expression>` declarations into

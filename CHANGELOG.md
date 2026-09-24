@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Formulas can read a variable's minimum, maximum, increment or enumeration
+  entry** (backlog `GA-29`, from
+  [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)). GenICam
+  Standard v2.1.1 §2.8.13 lets a `<SwissKnife>`, `<IntSwissKnife>`,
+  `<Converter>` or `<IntConverter>` formula qualify a `<pVariable>` with
+  `.Min`, `.Max`, `.Inc`, `.Value` or `.Entry.<Name>`. #139 admitted `.` into
+  formula identifiers, but nothing resolved the result: `V1.Min` with only `V1`
+  declared failed to build with `UnknownVariable`, and the standard's own
+  spelling, `<pVariable Name="Gain.Max">Gain</pVariable>`, built but read
+  `Gain`'s *value* — so its `MidRange` example, `(Gain.Max - Gain.Min) / 2`,
+  evaluated to 0. Both spellings now read the named property. A bound comes
+  from `<pMin>`/`<pMax>` when declared, else `<Min>`/`<Max>`, else from the
+  node's `<pValue>` target; an undeclared integer increment is 1; `.Inc` on a
+  `<Float>` is an evaluation error, since floats carry no increment in this
+  model. Any other extension sends the node to `NodeMap::skipped()` with the
+  new `GenApiError::UnknownVariableExtension` instead of evaluating it.
+  `SkNode::vars` and the converters' `vars_to`/`vars_from` are now
+  `Vec<FormulaVar>`, which names the property each identifier reads. None of
+  the 6 390 formula elements in our 38-document vendor corpus uses either
+  spelling, so corpus results are unchanged; the
+  Triton2 description that motivated this is not in the corpus, so which
+  spelling it uses is not verified. `<Float>` `<pMin>`/`<pMax>` and `<Integer>`
+  `<pInc>` are still not parsed, so those bounds read as undeclared (`GA-33`).
+
+### Fixed
+
+- **A one-bit unsigned `<MaskedIntReg>` could be cleared but not set** (backlog
+  `GA-32`, found while writing the #135 test; not reported). The write path
+  took a bitfield's signedness from `min < 0`, while the read path used
+  `<Sign>`. `<Min>` is optional and defaults to `i64::MIN`, so every bitfield
+  without one was encoded as signed on write: a one-bit field accepted only -1
+  and 0, writing 1 failed with `ValueTooWide`, and an n-bit field refused the
+  upper half of its unsigned range. Writes now use the declared `<Sign>`, as
+  reads do. In our vendor corpus every one of the 9 032 unsigned
+  `<MaskedIntReg>` declarations omits `<Min>`; 1 275 of them, in 31 documents,
+  declare `RW` or `WO`, and 302 of those are a single bit.
+
 ## [0.6.0] - 2026-09-24
 
 Three behaviour changes need a read before upgrading, all under the headings

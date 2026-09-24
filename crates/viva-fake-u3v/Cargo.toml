@@ -10,5 +10,5 @@ publish = false
 
 [dependencies]
 bytes = { workspace = true }
-viva-u3v = { version = "0.5", path = "../viva-u3v" }
-viva-gencp = { version = "0.5", path = "../viva-gencp" }
+viva-u3v = { version = "0.6", path = "../viva-u3v" }
+viva-gencp = { version = "0.6", path = "../viva-gencp" }

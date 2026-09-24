@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-24
+
+Three behaviour changes need a read before upgrading, all under the headings
+below. Integer registers now decode with their declared byte order and sign, so
+311 little-endian `<IntReg>` declarations in our vendor corpus return different
+— correct — values, and a full-width unsigned register is read as two's
+complement instead of failing. A single 32-bit register now goes out as
+READREG/WRITEREG, falling back to memory access per session, with
+`VIVA_GIGE_FORCE_READMEM` as an escape hatch. And `viva_zenoh_api::DeviceAnnounce`
+is `#[non_exhaustive]` at API version 3. Most fixes here answer reports from
+real hardware (#112, #135, #136, #137, #140); the little-endian one was found
+while tracing #140. None is confirmed on the reporters' hardware yet.
+
 ### Added
 
 - **Event-vision streams from Lucid Triton2 EVS cameras**
@@ -1575,7 +1588,8 @@ Initial public release of the viva-genicam workspace.
 - `viva-fake-gige` -- In-process fake GigE Vision camera for self-contained integration testing (no external dependencies required)
 - `viva-fake-u3v` -- In-process fake USB3 Vision camera for testing
 
-[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.6.0
 [0.5.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.5.0
 [0.4.1]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.4.1
 [0.4.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.4.0

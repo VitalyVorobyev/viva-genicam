@@ -22,9 +22,9 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 
-viva-genicam = { version = "0.5", path = "../viva-genicam", features = ["u3v-usb"] }
-viva-gige = { version = "0.5", path = "../viva-gige" }
-viva-sfnc = { version = "0.5", path = "../viva-sfnc" }
-viva-pfnc = { version = "0.5", path = "../viva-pfnc" }
-viva-genapi-xml = { version = "0.5", path = "../viva-genapi-xml" }
-viva-u3v = { version = "0.5", path = "../viva-u3v", features = ["usb"] }
+viva-genicam = { version = "0.6", path = "../viva-genicam", features = ["u3v-usb"] }
+viva-gige = { version = "0.6", path = "../viva-gige" }
+viva-sfnc = { version = "0.6", path = "../viva-sfnc" }
+viva-pfnc = { version = "0.6", path = "../viva-pfnc" }
+viva-genapi-xml = { version = "0.6", path = "../viva-genapi-xml" }
+viva-u3v = { version = "0.6", path = "../viva-u3v", features = ["usb"] }

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "viva-genicam"
-version = "0.5.0"
+version = "0.6.0"
 description = "Pure-Rust GenICam stack for Python: discover, control, and stream GigE Vision / USB3 Vision cameras"
 readme = "README.md"
 # MIT for the project's own code; the binary wheel statically links

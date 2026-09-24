@@ -115,6 +115,7 @@ All keys prefixed with `genicam/devices/{device_id}/`:
 | `acquisition/status` | Service → App | Acquisition state with FPS |
 | `image` | Service → Streamer | Binary: 16-byte FrameHeader + raw pixels |
 | `image/meta` | Service → App | JSON: pixel_format, width, height, payload_size |
+| `evs` | Service → subscribers | Binary: 24-byte EvsHeader + encoded events (event-vision cameras only) |
 
 Full specification: [`docs/studio/zenoh-api.md`](zenoh-api.md)
 

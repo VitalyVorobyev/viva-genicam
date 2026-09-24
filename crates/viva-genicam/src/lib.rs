@@ -101,9 +101,10 @@ use tracing::{debug, info, warn};
 
 pub use chunks::{ChunkKind, ChunkMap, ChunkValue, parse_chunk_bytes};
 pub use events::{Event, EventStream};
+pub use evs::{EvsBlock, EvsFormat};
 pub use frame::Frame;
 pub use gige::action::{AckSummary, ActionParams};
-pub use stream::{FrameStream, Stream, StreamBuilder, StreamDest};
+pub use stream::{FrameStream, GenericStreamBlock, Stream, StreamBlock, StreamBuilder, StreamDest};
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub use stream::{U3vFrameStream, U3vStreamBuilder};

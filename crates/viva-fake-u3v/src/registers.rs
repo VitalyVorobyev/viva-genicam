@@ -15,6 +15,25 @@ pub const REG_ACQ_FRAME_RATE: u64 = 0x2002c;
 pub const REG_EXPOSURE_TIME: u64 = 0x20030;
 pub const REG_DEVICE_MODEL: u64 = 0x20200;
 pub const REG_DEVICE_VENDOR: u64 = 0x20220;
+/// Backs `ActionDeviceKey`, an `Integer` that reaches this `WO` register
+/// through `<pValue>` -- the shape of [#112]'s `ActionDeviceKey`. USB3 Vision
+/// has no action commands; the node is here for its access mode: a write-only
+/// feature that is not a command.
+///
+/// [#112]: https://github.com/VitalyVorobyev/viva-genicam/issues/112
+pub const REG_ACTION_DEVICE_KEY: u64 = 0x20040;
+/// Backs the `TriggerSoftware` command. Declared `RW`, as 213 of the 490
+/// command targets in the vendor corpus are, so the fake serves a read of it
+/// -- only [`FakeU3vTransport::reads`](crate::FakeU3vTransport::reads) shows
+/// whether a client read a command register it had no reason to read.
+pub const REG_TRIGGER_SOFTWARE: u64 = 0x20044;
+
+/// Registers the XML declares `WO`. A read touching any of them is refused
+/// with `ACCESS_DENIED`, as a real device refuses it.
+///
+/// Listed explicitly rather than derived from the XML, so the fake can
+/// disagree with our parser (ADR-0019).
+pub const WRITE_ONLY_REGISTERS: &[u64] = &[REG_ACQ_START, REG_ACQ_STOP, REG_ACTION_DEVICE_KEY];
 
 /// XML blob address in the register space.
 pub const XML_BLOB_BASE: u64 = 0x1_0000;
@@ -109,8 +128,18 @@ impl RegisterMap {
         map.write_f64(REG_EXPOSURE_TIME, 10000.0);
         map.write_string(REG_DEVICE_MODEL, "FakeU3V", 32);
         map.write_string(REG_DEVICE_VENDOR, "FakeCorp", 32);
+        map.write_u32(REG_ACTION_DEVICE_KEY, 0);
+        map.write_u32(REG_TRIGGER_SOFTWARE, 0);
 
         map
+    }
+
+    /// Whether `[addr, addr + len)` touches a register the XML declares `WO`.
+    pub fn is_write_only(&self, addr: u64, len: usize) -> bool {
+        let end = addr.saturating_add(len as u64);
+        WRITE_ONLY_REGISTERS
+            .iter()
+            .any(|&reg| reg < end && addr < reg + 4)
     }
 
     pub fn read(&self, addr: u64, len: usize) -> Vec<u8> {
@@ -293,6 +322,8 @@ fn generate_xml() -> String {
     <pFeature>AcquisitionMode</pFeature>
     <pFeature>AcquisitionStart</pFeature>
     <pFeature>AcquisitionStop</pFeature>
+    <pFeature>TriggerSoftware</pFeature>
+    <pFeature>ActionDeviceKey</pFeature>
   </Category>
 
   <Enumeration Name="AcquisitionMode" NameSpace="Standard">
@@ -328,6 +359,37 @@ fn generate_xml() -> String {
   </Command>
   <IntReg Name="AcquisitionStopReg">
     <Address>0x20028</Address>
+    <Length>4</Length>
+    <AccessMode>WO</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </IntReg>
+
+  <!-- A command whose register is RW: nothing refuses a read of it, so only
+       the transport's read log tells whether a client read it. -->
+  <Command Name="TriggerSoftware" NameSpace="Standard">
+    <pValue>TriggerSoftwareReg</pValue>
+    <CommandValue>1</CommandValue>
+  </Command>
+  <IntReg Name="TriggerSoftwareReg">
+    <Address>0x20044</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </IntReg>
+
+  <!-- A write-only feature that is not a command, write-only only through
+       the register it delegates to. -->
+  <Integer Name="ActionDeviceKey" NameSpace="Standard">
+    <Min>0</Min>
+    <Max>4294967295</Max>
+    <pValue>ActionDeviceKeyReg</pValue>
+  </Integer>
+  <IntReg Name="ActionDeviceKeyReg">
+    <Address>0x20040</Address>
     <Length>4</Length>
     <AccessMode>WO</AccessMode>
     <pPort>Device</pPort>

@@ -8,7 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod evs_header;
 pub mod frame_header;
+pub use evs_header::{EVS_HEADER_SIZE, EVS_MAGIC, EvsFormat, EvsHeader, EvsHeaderError};
 pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 
 // ── Discovery ────────────────────────────────────────────────────────────────
@@ -29,7 +31,13 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 ///   reports rather than the service's device id
 ///   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)). The
 ///   new fields are optional, so a version 2 announce still deserialises.
-pub const API_VERSION: u32 = 3;
+/// - `4` — event-vision blocks move off [`keys::image`] onto their own key,
+///   [`keys::evs`], framed by an [`EvsHeader`]
+///   ([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)).
+///   Nothing else changes, but a version 3 client subscribed only to `image`
+///   no longer receives anything from an event camera, and the version is
+///   what tells it why.
+pub const API_VERSION: u32 = 4;
 
 /// Periodic announcement published by the camera service.
 ///
@@ -502,6 +510,19 @@ pub mod keys {
 
     pub fn image_meta(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/image/meta")
+    }
+
+    /// Key expression for event-vision blocks.
+    /// Direction: Service -> subscribers (`put` per block). Payload is a
+    /// [`super::EvsHeader`] followed by the encoded events.
+    ///
+    /// Event data never goes on [`image`]: it has no image geometry, and
+    /// before API version 4 an event block was published there as a
+    /// 1 × N "image" in a format clients decode as `Unknown`. Named `evs`,
+    /// not `events`, so it cannot be mistaken for GenICam device events
+    /// (GVCP `EVENT` messages such as `EventExposureEnd`).
+    pub fn evs(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/evs")
     }
 
     /// Extract node name from `genicam/devices/{id}/nodes/{name}/{suffix}`

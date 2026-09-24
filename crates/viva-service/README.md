@@ -29,7 +29,7 @@ cargo run -p viva-service -- --iface en0 -vv
 
 ## Zenoh API
 
-Cameras are exposed under `viva-genicam/devices/{id}/`:
+Cameras are exposed under `genicam/devices/{id}/`:
 
 | Endpoint | Description |
 |----------|-------------|
@@ -41,6 +41,7 @@ Cameras are exposed under `viva-genicam/devices/{id}/`:
 | `nodes/bulk/read` | Queryable for batch reads |
 | `acquisition/control` | Start/stop acquisition |
 | `image` | Raw frame data with binary header |
+| `evs` | Event-vision blocks (EVT 3.0 / 2.1) with a 24-byte binary header; never sent on `image` |
 
 Wire types are defined in [`viva-zenoh-api`](https://crates.io/crates/viva-zenoh-api).
 

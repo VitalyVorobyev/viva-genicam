@@ -229,6 +229,11 @@ pub struct NumericRange {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FeatureState {
     /// Current feature value, typed according to `kind`.
+    ///
+    /// `null` when the feature has no value to read: a Category, a Command, a
+    /// node declared `WO`, or the register a command writes through. Such a
+    /// feature is still reported, with its access mode, so a client can offer
+    /// the write or the execute without a value to show.
     pub value: serde_json::Value,
     /// Live access mode.
     pub access_mode: String,

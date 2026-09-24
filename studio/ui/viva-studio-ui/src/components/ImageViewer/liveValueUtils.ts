@@ -25,6 +25,6 @@ export function getLiveString(
   name: string,
 ): string | null {
   const entry = liveValues.get(name);
-  if (entry === undefined) return null;
+  if (entry === undefined || entry.value === null) return null;
   return String(entry.value);
 }

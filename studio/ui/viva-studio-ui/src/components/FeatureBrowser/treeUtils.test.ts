@@ -44,4 +44,9 @@ describe("formatLiveValue", () => {
   it("test_formatLiveValue_boolean_false", () => {
     expect(formatLiveValue(entry(false))).toBe("false");
   });
+
+  it("test_formatLiveValue_null_is_no_value", () => {
+    // A write-only or command node: nothing to show, not the text "null".
+    expect(formatLiveValue({ value: null, access_mode: "WO" })).toBeNull();
+  });
 });

@@ -68,6 +68,20 @@ fn ensure_readable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
     Ok(())
 }
 
+/// The node `node` takes its value from through `<pValue>`, if it delegates.
+fn value_provider(node: &Node) -> Option<&str> {
+    match node {
+        Node::Integer(n) => n.pvalue.as_deref(),
+        Node::Float(n) => n.pvalue.as_deref(),
+        Node::Enum(n) => n.pvalue.as_deref(),
+        Node::Boolean(n) => n.pvalue.as_deref(),
+        Node::Command(n) => n.pvalue.as_deref(),
+        Node::Converter(n) => Some(n.p_value.as_str()),
+        Node::IntConverter(n) => Some(n.p_value.as_str()),
+        _ => None,
+    }
+}
+
 /// Refuse a register bound to a port we do not route.
 ///
 /// `<pPort>` selects which port a register's address is relative to. Absent, or
@@ -138,6 +152,64 @@ impl NodeMap {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Return the names of the nodes a [`Node::Command`] executes through.
+    ///
+    /// A command reaches its register through `<pValue>`, and the target may
+    /// delegate again through its own `<pValue>` — an integer's, or an
+    /// `<IntConverter>`'s. The whole chain that [`NodeMap::exec_command`]
+    /// writes along is returned, found from the declarations rather than from
+    /// node names.
+    ///
+    /// None of these nodes holds a value worth displaying. Writing one
+    /// triggers an action; reading it is at best meaningless and on some
+    /// devices significant, and many declare it `WO`. A feature snapshot
+    /// should report them without reading them (backlog ST-21, issue #112).
+    pub fn command_targets(&self) -> HashSet<String> {
+        let mut targets = HashSet::new();
+        for node in self.nodes.values() {
+            let Node::Command(cmd) = node else {
+                continue;
+            };
+            if let Some(first) = cmd.pvalue.as_deref() {
+                targets.extend(self.value_chain(first).into_iter().map(str::to_string));
+            }
+        }
+        targets
+    }
+
+    /// Whether reading `name` is refused because a node on its value path is
+    /// declared `WO`: the node itself, or one it takes its value from through
+    /// `<pValue>`.
+    ///
+    /// The declared mode of `name` alone is not enough. A feature can be `RW`
+    /// — or declare no access mode at all — and delegate to a `WO` register:
+    /// GigE Vision's `ActionDeviceKey` does exactly that on a Vieworks camera
+    /// in issue #112, and its read failed one hop down. Returns `false` for an
+    /// unknown name.
+    pub fn is_write_only(&self, name: &str) -> bool {
+        self.value_chain(name).into_iter().any(|link| {
+            self.nodes
+                .get(link)
+                .is_some_and(|node| matches!(node.access_mode(), Some(AccessMode::WO)))
+        })
+    }
+
+    /// `start` followed by each node it takes its value from through
+    /// `<pValue>`, until a node that delegates no further. A `<pValue>` cycle
+    /// ends the chain rather than looping.
+    fn value_chain<'a>(&'a self, start: &'a str) -> Vec<&'a str> {
+        let mut chain = vec![start];
+        let mut current = start;
+        while let Some(next) = self.nodes.get(current).and_then(value_provider) {
+            if chain.contains(&next) {
+                break;
+            }
+            chain.push(next);
+            current = next;
+        }
+        chain
     }
 
     /// Return names of nodes visible at the given level or below.

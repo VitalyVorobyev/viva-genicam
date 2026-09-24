@@ -114,7 +114,9 @@ export function FeaturePanel({
           <div className="feature-panel__meta">
             <span className={`kind-badge ${kindClass}`}>{kindLabel}</span>
             <span className="feature-panel__raw-name">{selectedNode.name}</span>
-            {liveValue !== undefined && (
+            {/* A command or write-only node has no value: show its access
+                mode alone, not the text "null". */}
+            {liveValue !== undefined && liveValue.value !== null && (
               <span className="live-badge">
                 <span className="live-badge__dot" />
                 <span className="live-badge__value">{String(liveValue.value)}</span>

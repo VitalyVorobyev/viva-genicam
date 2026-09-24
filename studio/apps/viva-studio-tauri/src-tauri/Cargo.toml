@@ -26,5 +26,8 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zenoh = "1"
 
+[dev-dependencies]
+viva-genapi-xml = { path = "../../../../crates/viva-genapi-xml" }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

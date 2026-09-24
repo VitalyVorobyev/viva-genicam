@@ -1,10 +1,11 @@
 //! Per-device state wrapping `Camera<GigeRegisterIo>`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::{debug, warn};
-use viva_genicam::genapi::{AccessMode, Node, SkOutput};
+use viva_genicam::genapi::{AccessMode, Node, NodeMap, RegisterIo, SkOutput};
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
     Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
@@ -64,6 +65,12 @@ pub struct DeviceHandle {
     /// is what let the receive path drift into resolving it a second way, and
     /// wrongly (backlog `SVC-06`).
     iface: Option<Iface>,
+    /// Nodes a command executes through, from [`NodeMap::command_targets`].
+    ///
+    /// Computed once at connect: a snapshot consults it for every feature, and
+    /// a reconnect in [`DeviceHandle::refresh_connection`] reopens the same
+    /// device and therefore the same XML.
+    command_targets: Arc<HashSet<String>>,
 }
 
 impl DeviceHandle {
@@ -74,12 +81,14 @@ impl DeviceHandle {
     ) -> Result<Self, GenicamError> {
         let (camera, xml) = connect_gige_with_xml(info).await?;
         let device_id = Self::derive_device_id(info);
+        let command_targets = Arc::new(camera.nodemap().command_targets());
         Ok(Self {
             camera: Arc::new(Mutex::new(camera)),
             raw_xml: xml,
             device_id,
             info: info.clone(),
             iface,
+            command_targets,
         })
     }
 
@@ -277,12 +286,13 @@ impl DeviceOps for DeviceHandle {
     /// default implementation returned.
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         let cam = self.camera.clone();
+        let command_targets = self.command_targets.clone();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || {
             let cam = cam
                 .lock()
                 .map_err(|_| "camera mutex poisoned".to_string())?;
-            build_feature_state(&cam, &name)
+            build_feature_state(cam.nodemap(), cam.transport(), &command_targets, &name)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -291,20 +301,23 @@ impl DeviceOps for DeviceHandle {
 
 /// Build a [`FeatureState`] snapshot using typed NodeMap reads.
 ///
-/// Shared between GigE (`DeviceHandle`) and any other transport that wraps
-/// [`Camera<GigeRegisterIo>`]. The service's Zenoh queryables call this to
-/// produce the authoritative snapshot the UI consumes.
+/// Takes the nodemap and transport rather than a [`Camera`], so any transport
+/// can use it. The service's Zenoh queryables call this to produce the
+/// authoritative snapshot the UI consumes.
+///
+/// `command_targets` is [`NodeMap::command_targets`]: the nodes a command
+/// writes through, which are reported but never read.
 fn build_feature_state(
-    camera: &Camera<GigeRegisterIo>,
+    nodemap: &NodeMap,
+    transport: &dyn RegisterIo,
+    command_targets: &HashSet<String>,
     name: &str,
 ) -> Result<FeatureState, String> {
-    let nodemap = camera.nodemap();
     let node = nodemap
         .node(name)
         .ok_or_else(|| format!("Node '{name}' not found"))?;
 
     let kind = node.kind_name().to_string();
-    let transport = camera.transport();
 
     // Resolve the live implementation/availability/access state. Each call
     // degrades to a permissive default on evaluation error so a single bad
@@ -317,15 +330,31 @@ fn build_feature_state(
         tracing::warn!(%name, error = %e, "is_available eval failed");
         true
     });
+    // Read a value only from a node that has one to give. A write-only node
+    // refuses the read -- `viva-genapi` refuses it locally, a device answers
+    // ACCESS_DENIED -- and a command's backing register holds a trigger, not a
+    // value; some devices even treat reading one as significant. Both used to
+    // be read: the `?` below turned one `WO` node into a failed snapshot
+    // (SVC-08, #135), and a command register was read for a value it does not
+    // hold (ST-21, #112).
+    // They are reported with their access mode and a null value instead, so
+    // the UI still offers the write or the execute. Declarations decide, not
+    // the live mode: an unavailable node reports `RO` but stays unreadable.
+    let write_only = nodemap.is_write_only(name);
+    let has_value = !write_only && !command_targets.contains(name);
+
     let effective = nodemap.effective_access_mode(name, transport).ok();
     let access_mode = match effective.or_else(|| node.access_mode()) {
         Some(AccessMode::RO) => "RO".to_string(),
+        // Declared `RW` but delegating to a `WO` register: say what it is.
+        Some(AccessMode::RW) if write_only => "WO".to_string(),
         Some(AccessMode::RW) => "RW".to_string(),
         Some(AccessMode::WO) => "WO".to_string(),
         None => "NA".to_string(),
     };
 
     let value = match node {
+        _ if !has_value => serde_json::Value::Null,
         Node::Integer(_) => nodemap
             .get_integer(name, transport)
             .map(|v| serde_json::Value::Number(v.into()))
@@ -424,7 +453,7 @@ fn build_feature_state(
             .available_enum_entries(name, transport)
             .or_else(|e| {
                 tracing::warn!(%name, error = %e, "available_enum_entries eval failed");
-                camera.enum_entries(name).map_err(|e| format!("{e}"))
+                nodemap.enum_entries(name).map_err(|e| format!("{e}"))
             })
             .ok()
     } else {
@@ -447,4 +476,139 @@ fn f64_to_json(v: f64) -> serde_json::Value {
     serde_json::Number::from_f64(v)
         .map(serde_json::Value::Number)
         .unwrap_or_else(|| serde_json::Value::String(v.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use viva_genicam::genapi::{GenApiError, NodeMap, RegisterIo};
+
+    use super::build_feature_state;
+
+    /// A write-only integer, an integer delegating to a write-only register
+    /// (the `ActionDeviceKey` shape from #112), a command reaching an `RW`
+    /// register through `<pValue>` -- the shape 213 of the 490 command
+    /// targets in the vendor corpus take -- and one ordinary feature.
+    const XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+            <Integer Name="Width">
+                <Address>0x100</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>0</Min>
+                <Max>4096</Max>
+            </Integer>
+            <Integer Name="ActionDeviceKey">
+                <pValue>ActionDeviceKeyReg</pValue>
+            </Integer>
+            <IntReg Name="ActionDeviceKeyReg">
+                <Address>0x400</Address>
+                <Length>4</Length>
+                <AccessMode>WO</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="SoftwarePulse">
+                <Address>0x200</Address>
+                <Length>4</Length>
+                <AccessMode>WO</AccessMode>
+                <Min>0</Min>
+                <Max>1</Max>
+            </Integer>
+            <Command Name="AcquisitionStart">
+                <pValue>AcquisitionStartReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="AcquisitionStartReg">
+                <Address>0x300</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+
+    /// Serves `Width` and records every read address, so a test can tell a
+    /// read that never happened from one whose failure was swallowed.
+    #[derive(Default)]
+    struct RecordingIo {
+        reads: RefCell<Vec<u64>>,
+    }
+
+    impl RegisterIo for RecordingIo {
+        fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+            self.reads.borrow_mut().push(addr);
+            let mut bytes = vec![0; len];
+            if addr == 0x100 && len == 4 {
+                bytes.copy_from_slice(&640u32.to_be_bytes());
+            }
+            Ok(bytes)
+        }
+
+        fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
+            Ok(())
+        }
+    }
+
+    /// SVC-08 and ST-21: one snapshot over every node succeeds, the write-only
+    /// node and the command register are reported without a value, and
+    /// neither address is read.
+    #[test]
+    fn a_snapshot_reports_unreadable_nodes_without_reading_them() {
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let targets = nodemap.command_targets();
+        let io = RecordingIo::default();
+
+        let names = [
+            "Width",
+            "ActionDeviceKey",
+            "ActionDeviceKeyReg",
+            "SoftwarePulse",
+            "AcquisitionStart",
+            "AcquisitionStartReg",
+        ];
+        let states: HashMap<&str, _> = names
+            .into_iter()
+            .map(|name| {
+                let state = build_feature_state(&nodemap, &io, &targets, name)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                (name, state)
+            })
+            .collect();
+
+        assert_eq!(states["Width"].value, serde_json::json!(640));
+
+        let pulse = &states["SoftwarePulse"];
+        assert_eq!(pulse.access_mode, "WO");
+        assert_eq!(pulse.kind, "Integer");
+        assert!(pulse.value.is_null());
+        assert!(pulse.numeric.is_some(), "a WO integer keeps its range");
+
+        for name in ["ActionDeviceKey", "ActionDeviceKeyReg"] {
+            let state = &states[name];
+            assert_eq!(state.access_mode, "WO", "{name}");
+            assert!(state.value.is_null(), "{name}");
+        }
+
+        let command = &states["AcquisitionStart"];
+        assert_eq!(command.kind, "Command");
+        assert_eq!(command.access_mode, "WO");
+        assert!(command.value.is_null());
+
+        let register = &states["AcquisitionStartReg"];
+        assert_eq!(register.access_mode, "RW", "reported as declared");
+        assert!(register.value.is_null());
+
+        let reads = io.reads.borrow();
+        assert!(!reads.contains(&0x200), "read the WO register: {reads:x?}");
+        assert!(!reads.contains(&0x400), "read the WO register: {reads:x?}");
+        assert!(
+            !reads.contains(&0x300),
+            "read the command register: {reads:x?}"
+        );
+    }
 }

@@ -9,7 +9,7 @@ import type { FeatureState, NodeValueEntry } from "./types";
  */
 function featureStateToEntry(state: FeatureState): NodeValueEntry {
   const entry: NodeValueEntry = {
-    value: state.value as number | string | boolean,
+    value: state.value,
     access_mode: state.access_mode,
   };
   if (state.numeric) {
@@ -26,13 +26,14 @@ function featureStateToEntry(state: FeatureState): NodeValueEntry {
  * be wrong (see the `viva-genapi` numeric-dispatch handoff). The goal here is
  * only to keep obviously broken payloads out of the UI cache.
  */
-function sanitizeValue(value: unknown): number | string | boolean {
+function sanitizeValue(value: unknown): number | string | boolean | null {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
       return String(value); // "NaN" / "Infinity" render as text, not garbage
     }
   }
-  return value as number | string | boolean;
+  // `null` passes through: a command or write-only node has no value.
+  return value as number | string | boolean | null;
 }
 
 export function useNodeValues() {
@@ -49,7 +50,7 @@ export function useNodeValues() {
       if (cancelled) return;
       listen<{
         node_name: string;
-        value: number | string | boolean;
+        value: number | string | boolean | null;
         access_mode: string;
         /** `FeatureState` payload added in API v2. Missing on older backends. */
         state?: FeatureState;

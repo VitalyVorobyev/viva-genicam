@@ -37,3 +37,4 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 viva-fake-gige = { path = "../viva-fake-gige" }
+viva-genapi-xml = { path = "../viva-genapi-xml" }

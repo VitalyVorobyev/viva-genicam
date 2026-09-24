@@ -67,4 +67,14 @@ describe("buildLiveValuePreset", () => {
     // The result is a plain value record with no extra fields.
     expect(Object.keys(result)).toEqual(["ExposureTime"]);
   });
+
+  it("test_buildLiveValuePreset_skips_features_without_a_value", () => {
+    // Commands and write-only nodes carry `null`: nothing to restore.
+    const map = new Map<string, NodeValueEntry>([
+      ["Width", entry(640)],
+      ["AcquisitionStart", { value: null, access_mode: "WO" }],
+      ["UserSetLoadReg", { value: null, access_mode: "WO" }],
+    ]);
+    expect(buildLiveValuePreset(map)).toEqual({ Width: 640 });
+  });
 });

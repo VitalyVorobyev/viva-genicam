@@ -33,6 +33,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling it uses is not verified. `<Float>` `<pMin>`/`<pMax>` and `<Integer>`
   `<pInc>` are still not parsed, so those bounds read as undeclared (`GA-33`).
 
+- **`viva_genicam` re-exports the stream-block types** at the crate root:
+  `StreamBlock`, `GenericStreamBlock`, `EvsBlock` and `EvsFormat`, which
+  [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139) added only
+  under `viva_genicam::stream` and `viva_genicam::evs` (backlog `DC-05`).
+
+- **`viva-fake-u3v` refuses a read of a write-only register and records every
+  read.** A ReadMem or ReadRegister touching a register its XML declares `WO`
+  is answered `ACCESS_DENIED`, as `viva-fake-gige` already did, and
+  `FakeU3vTransport::reads()` / `was_read()` show which addresses a client
+  asked for. Its XML gains a write-only `ActionDeviceKey` and a
+  `TriggerSoftware` command whose register is `RW`, so a read of it is served
+  and only the log can show it happened.
+
+### Changed
+
+- **`viva-service` publishes event-vision blocks on their own topic,
+  `genicam/devices/{id}/evs`, and never on `image`** (backlog `DC-05`;
+  [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138),
+  [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)). The
+  acquisition loop called `next_frame`, so a Lucid Triton2 EVS block reached
+  the image topic as a 1×64000 frame under a pixel format the bridge maps to
+  `Unknown`. It now reads `next_block`: an image is published exactly as
+  before, and an event block goes to `evs` behind a new 24-byte
+  `viva_zenoh_api::EvsHeader` — event format, a per-acquisition block counter,
+  the device timestamp when present, and the payload length — followed by the
+  encoded events as the camera sent them. `EvsHeader` is `#[non_exhaustive]`
+  and built with `EvsHeader::new`. The key is `evs` rather than `events` so it
+  cannot be mistaken for GenICam device events. **`API_VERSION` is now 4**: a
+  version 3 client that subscribes only to `image` receives nothing from an
+  event camera, and the version is how it can tell why. Studio does not
+  display event data. Tested against `viva-fake-gige` streaming the EVT 3.0
+  vendor code, not against the reporter's camera.
+
 ### Fixed
 
 - **A one-bit unsigned `<MaskedIntReg>` could be cleared but not set** (backlog
@@ -45,6 +78,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads do. In our vendor corpus every one of the 9 032 unsigned
   `<MaskedIntReg>` declarations omits `<Min>`; 1 275 of them, in 31 documents,
   declare `RW` or `WO`, and 302 of those are a single bit.
+
+- **A USB3 Vision feature snapshot reported every feature as `RW` of kind
+  `Unknown` with no range, read write-only features, and read command
+  registers** (backlog `SVC-02`). `U3vDeviceHandle` never overrode
+  `DeviceOps::get_feature_state`, so the service's placeholder answered for
+  every U3V camera, and it read each node through `get_feature` — so a
+  write-only node failed its own snapshot and a command's register was read,
+  the two defects 0.6.0 removed from the GigE path (`SVC-08`, `ST-21`). Both
+  handles now call one function, `viva_service::device::camera_feature_state`,
+  generic over the transport, so the U3V snapshot carries the real kind,
+  access mode, range and enum entries and reports write-only and command
+  nodes with `"value": null` without reading them. The test asserts on the
+  fake device's own read log.
 
 ## [0.6.0] - 2026-09-24
 

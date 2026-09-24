@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
-use viva_genicam::FrameStream;
 use viva_genicam::gige::nic::Iface;
+use viva_genicam::{EvsBlock, EvsFormat, Frame, FrameStream, GenericStreamBlock, StreamBlock};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
-    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, ImageMeta, NodeOpResponse,
-    keys,
+    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, EvsFormat as ZenohEvsFormat,
+    EvsHeader, ImageMeta, NodeOpResponse, keys,
 };
 use zenoh::Session;
 
@@ -242,115 +242,32 @@ async fn handle_stop(
     }
 }
 
-/// Main frame reading loop: reads frames from GigE stream and publishes to Zenoh.
+/// Main frame reading loop: reads blocks from the GigE stream and publishes
+/// them to Zenoh — images on [`keys::image`], event-vision blocks on
+/// [`keys::evs`].
 async fn frame_loop(
     session: Arc<Session>,
     device_id: String,
     frame_stream: &mut FrameStream,
     mut stop: watch::Receiver<bool>,
 ) {
-    let image_key = keys::image(&device_id);
     let status_key = keys::acquisition_status(&device_id);
-    let mut seq: u32 = 0;
+    let mut publisher = BlockPublisher::new(&device_id);
     let mut frames_acquired: u64 = 0;
     let mut fps_start = tokio::time::Instant::now();
     let mut fps_frame_count: u64 = 0;
     let fps_interval = std::time::Duration::from_secs(1);
-    let mut logged_first_gvsp_frame = false;
-    let mut logged_first_image_publish = false;
-    let mut logged_payload_trim = false;
-    let mut logged_unsized_format = false;
 
     loop {
         tokio::select! {
-            result = frame_stream.next_frame() => {
+            result = frame_stream.next_block() => {
                 match result {
-                    Ok(Some(frame)) => {
-                        if !logged_first_gvsp_frame {
-                            info!(
-                                device_id,
-                                width = frame.width,
-                                height = frame.height,
-                                pixel_format = ?frame.pixel_format,
-                                payload = frame.payload.len(),
-                                "first GVSP frame received"
-                            );
-                            logged_first_gvsp_frame = true;
-                        }
-
-                        let zenoh_pf = pfnc_to_zenoh(frame.pixel_format);
-                        let expected = expected_payload_len(
-                            frame.pixel_format,
-                            frame.width,
-                            frame.height,
-                        );
-
-                        if expected.is_none() && !logged_unsized_format {
-                            warn!(
-                                device_id,
-                                pixel_format = %frame.pixel_format,
-                                "payload cannot be sized from image geometry; publishing \
-                                 it unmodified and without a length check"
-                            );
-                            logged_unsized_format = true;
-                        }
-
-                        let image_bytes = match expected {
-                            Some(expected) if frame.payload.len() < expected => {
-                                warn!(
-                                    device_id,
-                                    seq,
-                                    actual = frame.payload.len(),
-                                    expected,
-                                    "dropping undersized frame payload"
-                                );
-                                continue;
-                            }
-                            Some(expected) if frame.payload.len() > expected => {
-                                if !logged_payload_trim {
-                                    warn!(
-                                        device_id,
-                                        actual = frame.payload.len(),
-                                        expected,
-                                        "trimming trailing bytes from frame payload before Zenoh publish"
-                                    );
-                                    logged_payload_trim = true;
-                                }
-                                &frame.payload[..expected]
-                            }
-                            // Either the length is exactly right, or we have no
-                            // business claiming to know it. Publish it whole.
-                            _ => frame.payload.as_ref(),
+                    Ok(Some(block)) => {
+                        let Some((key, payload)) = publisher.frame(block) else {
+                            continue;
                         };
+                        publisher.put(&session, &key, payload).await;
 
-                        let header = FrameHeader {
-                            pixel_format: zenoh_pf,
-                            width: frame.width,
-                            height: frame.height,
-                            seq,
-                        };
-                        let encoded_header = header.encode();
-
-                        let mut payload = Vec::with_capacity(
-                            encoded_header.len() + image_bytes.len(),
-                        );
-                        payload.extend_from_slice(&encoded_header);
-                        payload.extend_from_slice(image_bytes);
-                        let payload_len = payload.len();
-
-                        if let Err(e) = session.put(&image_key, payload).await {
-                            warn!(device_id, error = %e, "failed to publish frame");
-                        } else if !logged_first_image_publish {
-                            info!(
-                                device_id,
-                                seq,
-                                bytes = payload_len,
-                                "published first image frame to Zenoh"
-                            );
-                            logged_first_image_publish = true;
-                        }
-
-                        seq = seq.wrapping_add(1);
                         frames_acquired += 1;
                         fps_frame_count += 1;
 
@@ -391,6 +308,195 @@ async fn frame_loop(
     }
 
     info!(device_id, frames_acquired, "frame loop exited");
+}
+
+/// Turns stream blocks into Zenoh `(key, payload)` pairs, one topic per kind
+/// of block, and keeps each topic's sequence counter.
+///
+/// Separated from the loop so the dispatch — which block goes on which topic,
+/// framed how — can be tested without a Zenoh session.
+struct BlockPublisher {
+    device_id: String,
+    image_key: String,
+    evs_key: String,
+    image_seq: u32,
+    evs_seq: u32,
+    logged_first_gvsp_frame: bool,
+    logged_first_publish: bool,
+    logged_payload_trim: bool,
+    logged_unsized_format: bool,
+    logged_first_evs_block: bool,
+    logged_unknown_block: bool,
+}
+
+impl BlockPublisher {
+    fn new(device_id: &str) -> Self {
+        Self {
+            device_id: device_id.to_string(),
+            image_key: keys::image(device_id),
+            evs_key: keys::evs(device_id),
+            image_seq: 0,
+            evs_seq: 0,
+            logged_first_gvsp_frame: false,
+            logged_first_publish: false,
+            logged_payload_trim: false,
+            logged_unsized_format: false,
+            logged_first_evs_block: false,
+            logged_unknown_block: false,
+        }
+    }
+
+    /// The key and framed payload for one block, or `None` when it is dropped.
+    fn frame(&mut self, block: GenericStreamBlock) -> Option<(String, Vec<u8>)> {
+        match StreamBlock::from(block) {
+            StreamBlock::Image(frame) => self.frame_image(&frame),
+            StreamBlock::Evs(events) => self.frame_evs(&events),
+            // `StreamBlock` is `#[non_exhaustive]`. A kind this service does
+            // not know is not an image, so it must not go on the image topic.
+            _ => {
+                if !self.logged_unknown_block {
+                    warn!(
+                        device_id = self.device_id,
+                        "dropping a stream block of a kind this service cannot publish"
+                    );
+                    self.logged_unknown_block = true;
+                }
+                None
+            }
+        }
+    }
+
+    fn frame_image(&mut self, frame: &Frame) -> Option<(String, Vec<u8>)> {
+        let device_id = self.device_id.as_str();
+        if !self.logged_first_gvsp_frame {
+            info!(
+                device_id,
+                width = frame.width,
+                height = frame.height,
+                pixel_format = ?frame.pixel_format,
+                payload = frame.payload.len(),
+                "first GVSP frame received"
+            );
+            self.logged_first_gvsp_frame = true;
+        }
+
+        let zenoh_pf = pfnc_to_zenoh(frame.pixel_format);
+        let expected = expected_payload_len(frame.pixel_format, frame.width, frame.height);
+
+        if expected.is_none() && !self.logged_unsized_format {
+            warn!(
+                device_id,
+                pixel_format = %frame.pixel_format,
+                "payload cannot be sized from image geometry; publishing \
+                 it unmodified and without a length check"
+            );
+            self.logged_unsized_format = true;
+        }
+
+        let image_bytes = match expected {
+            Some(expected) if frame.payload.len() < expected => {
+                warn!(
+                    device_id,
+                    seq = self.image_seq,
+                    actual = frame.payload.len(),
+                    expected,
+                    "dropping undersized frame payload"
+                );
+                return None;
+            }
+            Some(expected) if frame.payload.len() > expected => {
+                if !self.logged_payload_trim {
+                    warn!(
+                        device_id,
+                        actual = frame.payload.len(),
+                        expected,
+                        "trimming trailing bytes from frame payload before Zenoh publish"
+                    );
+                    self.logged_payload_trim = true;
+                }
+                &frame.payload[..expected]
+            }
+            // Either the length is exactly right, or we have no
+            // business claiming to know it. Publish it whole.
+            _ => frame.payload.as_ref(),
+        };
+
+        let header = FrameHeader {
+            pixel_format: zenoh_pf,
+            width: frame.width,
+            height: frame.height,
+            seq: self.image_seq,
+        };
+        self.image_seq = self.image_seq.wrapping_add(1);
+        Some((
+            self.image_key.clone(),
+            framed(&header.encode(), image_bytes),
+        ))
+    }
+
+    /// An event-vision block goes on its own topic, never on `image`
+    /// (backlog `DC-05`): it has no image geometry, and the leader's Size X /
+    /// Size Y do not describe one.
+    fn frame_evs(&mut self, events: &EvsBlock) -> Option<(String, Vec<u8>)> {
+        let device_id = self.device_id.as_str();
+        let format = evs_format_to_zenoh(events.format);
+        let Ok(payload_len) = u32::try_from(events.payload.len()) else {
+            warn!(
+                device_id,
+                bytes = events.payload.len(),
+                "dropping an event block too large for its header's length field"
+            );
+            return None;
+        };
+        if !self.logged_first_evs_block {
+            info!(
+                device_id,
+                format = format.as_str(),
+                bytes = payload_len,
+                key = self.evs_key,
+                "first event-vision block received; publishing event blocks on their own key"
+            );
+            self.logged_first_evs_block = true;
+        }
+
+        let header = EvsHeader::new(format, self.evs_seq, events.ts_dev, payload_len);
+        self.evs_seq = self.evs_seq.wrapping_add(1);
+        Some((
+            self.evs_key.clone(),
+            framed(&header.encode(), &events.payload),
+        ))
+    }
+
+    async fn put(&mut self, session: &Session, key: &str, payload: Vec<u8>) {
+        let bytes = payload.len();
+        if let Err(e) = session.put(key, payload).await {
+            warn!(device_id = self.device_id, key, error = %e, "failed to publish block");
+        } else if !self.logged_first_publish {
+            info!(
+                device_id = self.device_id,
+                key, bytes, "published first stream block to Zenoh"
+            );
+            self.logged_first_publish = true;
+        }
+    }
+}
+
+/// A header followed by its payload, as one Zenoh message.
+fn framed(header: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(header.len() + body.len());
+    payload.extend_from_slice(header);
+    payload.extend_from_slice(body);
+    payload
+}
+
+fn evs_format_to_zenoh(format: EvsFormat) -> ZenohEvsFormat {
+    match format {
+        EvsFormat::Evt30 => ZenohEvsFormat::Evt30,
+        EvsFormat::Evt21 => ZenohEvsFormat::Evt21,
+        // `EvsFormat` is `#[non_exhaustive]`; the header's `Unknown` exists
+        // for exactly this.
+        _ => ZenohEvsFormat::Unknown,
+    }
 }
 
 /// The host interface that will receive this device's GVSP traffic.

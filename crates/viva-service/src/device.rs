@@ -32,8 +32,8 @@ pub trait DeviceOps: Send + Sync + 'static {
     /// Read the full live state of a feature: value, access mode, kind, range,
     /// available enum entries, unit. Default implementation projects from
     /// [`DeviceOps::get_feature`] with `kind: "Unknown"` and no range/enum
-    /// data; GigE's [`DeviceHandle`] overrides with typed reads against the
-    /// NodeMap.
+    /// data; every handle that holds a [`Camera`] — GigE's [`DeviceHandle`]
+    /// and `U3vDeviceHandle` — overrides it with [`camera_feature_state`].
     ///
     /// Transports that cannot introspect (e.g. remote Zenoh relays) keep the
     /// default implementation — the UI renders "range unknown" / falls back to
@@ -285,18 +285,40 @@ impl DeviceOps for DeviceHandle {
     /// the actual device access mode rather than the hardcoded `"RW"` the
     /// default implementation returned.
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
-        let cam = self.camera.clone();
-        let command_targets = self.command_targets.clone();
-        let name = name.to_string();
-        tokio::task::spawn_blocking(move || {
-            let cam = cam
-                .lock()
-                .map_err(|_| "camera mutex poisoned".to_string())?;
-            build_feature_state(cam.nodemap(), cam.transport(), &command_targets, &name)
-        })
-        .await
-        .map_err(|e| e.to_string())?
+        camera_feature_state(&self.camera, &self.command_targets, name).await
     }
+}
+
+/// [`build_feature_state`] for a camera shared behind a mutex, on the blocking
+/// pool.
+///
+/// Generic over the transport so every [`DeviceOps`] implementation that holds
+/// a [`Camera`] answers [`DeviceOps::get_feature_state`] the same way: GigE's
+/// [`DeviceHandle`] and the USB3 Vision service's handle both call this, which
+/// is what keeps the write-only and command-register rules from drifting apart
+/// between transports (backlog `SVC-02`).
+///
+/// `command_targets` is [`NodeMap::command_targets`], computed once when the
+/// camera is opened.
+pub async fn camera_feature_state<T>(
+    camera: &Arc<Mutex<Camera<T>>>,
+    command_targets: &Arc<HashSet<String>>,
+    name: &str,
+) -> Result<FeatureState, String>
+where
+    T: RegisterIo + Send + 'static,
+{
+    let cam = camera.clone();
+    let command_targets = command_targets.clone();
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || {
+        let cam = cam
+            .lock()
+            .map_err(|_| "camera mutex poisoned".to_string())?;
+        build_feature_state(cam.nodemap(), cam.transport(), &command_targets, &name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Build a [`FeatureState`] snapshot using typed NodeMap reads.
@@ -307,7 +329,7 @@ impl DeviceOps for DeviceHandle {
 ///
 /// `command_targets` is [`NodeMap::command_targets`]: the nodes a command
 /// writes through, which are reported but never read.
-fn build_feature_state(
+pub fn build_feature_state(
     nodemap: &NodeMap,
     transport: &dyn RegisterIo,
     command_targets: &HashSet<String>,

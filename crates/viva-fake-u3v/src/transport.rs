@@ -40,6 +40,9 @@ struct TransportState {
     pending_ack: Option<Vec<u8>>,
     /// Frame counter for stream.
     frame_count: u64,
+    /// `(address, length)` of every register read the device was asked for,
+    /// served or refused, in order.
+    reads: Vec<(u64, usize)>,
 }
 
 impl FakeU3vTransport {
@@ -50,8 +53,33 @@ impl FakeU3vTransport {
                 registers: RegisterMap::new(width, height, pixel_format),
                 pending_ack: None,
                 frame_count: 0,
+                reads: Vec::new(),
             }),
         }
+    }
+
+    /// `(address, length)` of every ReadMem/ReadRegister received so far,
+    /// including the ones refused for touching a write-only register.
+    ///
+    /// The device's own record, so a test can tell a read that never happened
+    /// from one whose failure the client swallowed.
+    pub fn reads(&self) -> Vec<(u64, usize)> {
+        self.state.lock().unwrap().reads.clone()
+    }
+
+    /// Forget the reads recorded so far, e.g. the XML fetch at open.
+    pub fn clear_reads(&self) {
+        self.state.lock().unwrap().reads.clear();
+    }
+
+    /// Whether any recorded read touched the 4-byte register at `addr`.
+    pub fn was_read(&self, addr: u64) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .reads
+            .iter()
+            .any(|&(a, len)| a < addr + 4 && addr < a.saturating_add(len as u64))
     }
 }
 
@@ -83,8 +111,7 @@ impl UsbTransfer for FakeU3vTransport {
                 // ReadMem: payload = [8-byte addr][2-byte reserved][2-byte count]
                 let addr = u64::from_be_bytes(payload[0..8].try_into().unwrap());
                 let count = u16::from_be_bytes(payload[10..12].try_into().unwrap()) as usize;
-                let mem = state.registers.read(addr, count);
-                build_ack(StatusCode::Success, OpCode::ReadMem, request_id, &mem)
+                read_ack(&mut state, OpCode::ReadMem, request_id, addr, count)
             }
             0x0086 => {
                 // WriteMem: payload = [8-byte addr][data...]
@@ -96,8 +123,7 @@ impl UsbTransfer for FakeU3vTransport {
             0x0080 => {
                 // ReadRegister: payload = [8-byte addr]
                 let addr = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-                let mem = state.registers.read(addr, 4);
-                build_ack(StatusCode::Success, OpCode::ReadRegister, request_id, &mem)
+                read_ack(&mut state, OpCode::ReadRegister, request_id, addr, 4)
             }
             0x0082 => {
                 // WriteRegister: payload = [8-byte addr][4-byte value]
@@ -134,6 +160,23 @@ impl UsbTransfer for FakeU3vTransport {
         buf[..n].copy_from_slice(&ack[..n]);
         Ok(n)
     }
+}
+
+/// Record a read and answer it, refusing one that touches a `WO` register with
+/// `ACCESS_DENIED` as a device does.
+fn read_ack(
+    state: &mut TransportState,
+    opcode: OpCode,
+    request_id: u16,
+    addr: u64,
+    len: usize,
+) -> Vec<u8> {
+    state.reads.push((addr, len));
+    if state.registers.is_write_only(addr, len) {
+        return build_ack(StatusCode::AccessDenied, opcode, request_id, &[]);
+    }
+    let mem = state.registers.read(addr, len);
+    build_ack(StatusCode::Success, opcode, request_id, &mem)
 }
 
 /// Build a U3V ack packet.
@@ -306,6 +349,34 @@ mod tests {
         assert!(xml.contains("RegisterDescription"));
         assert!(xml.contains("Width"));
         assert!(xml.contains("Height"));
+    }
+
+    /// The fake refuses what a device refuses, and records the attempt.
+    #[test]
+    fn a_write_only_register_read_is_refused_and_recorded() {
+        use crate::registers::REG_ACQ_START;
+
+        let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
+        let mut device = U3vDevice::open(transport.clone(), 0x81, 0x01, None, None).unwrap();
+        transport.clear_reads();
+
+        let err = device
+            .read_mem(REG_ACQ_START, 4)
+            .expect_err("a WO register must refuse a read");
+        assert!(
+            matches!(
+                err,
+                U3vError::Status {
+                    status: StatusCode::AccessDenied
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(transport.was_read(REG_ACQ_START));
+
+        device
+            .write_mem(REG_ACQ_START, &1u32.to_be_bytes())
+            .expect("a WO register still accepts a write");
     }
 
     #[test]

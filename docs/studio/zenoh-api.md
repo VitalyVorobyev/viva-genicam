@@ -24,7 +24,7 @@ opaque string without `/`).
     "name": "Left",
     "model": "SPC-3000",
     "serial": "SN12345678",
-    "api_version": 3,
+    "api_version": 4,
     "ip": "192.168.1.10",
     "mac": "00:0C:DF:06:5B:2F",
     "user_name": "Left",
@@ -43,7 +43,7 @@ opaque string without `/`).
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional (`null`/absent means the service is pre-versioning). The app
-  compares this against `viva_zenoh_api::API_VERSION` (currently `3`). On mismatch or
+  compares this against `viva_zenoh_api::API_VERSION` (currently `4`). On mismatch or
   absence, the app emits an `api-version-mismatch` Tauri event (see below) and still
   discovers the device — no hard rejection.
 
@@ -216,7 +216,7 @@ opaque string without `/`).
   ```
 - **Rust type:** request: `AcquisitionControlRequest { command: AcquisitionCommand }`; response: `NodeOpResponse` — both in `viva-zenoh-api`. `AcquisitionCommand` serializes as `"start"` or `"stop"` (`#[serde(rename_all = "lowercase")]`).
 - **Semantics:** Start/stop hardware acquisition. On success the service begins/stops
-  publishing to `image`.
+  publishing to `image` — or to `evs`, for an event-vision camera.
 
 ### `genicam/devices/{device_id}/acquisition/status`
 
@@ -309,6 +309,37 @@ Codes are **only appended** — never reordered. Unknown codes map to `PixelForm
   - `payload_size` — `width × height × bytes_per_pixel` for the given format.
     See `PixelFormat::bytes_per_pixel()` for the authoritative mapping.
 
+### `genicam/devices/{device_id}/evs`
+
+- **Direction:** Service → subscribers (Studio does not consume it yet)
+- **Mechanism:** `put` per event block
+- **Payload:** 24-byte binary [`EvsHeader`] immediately followed by the encoded events,
+  exactly as the camera sent them.
+- **Semantics:** An event-vision camera (a LUCID Triton2 EVS streaming Prophesee EVT 3.0 or
+  EVT 2.1, [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)) sends events,
+  not pixels. Its blocks go here and **never** on `image`: they have no image geometry, and
+  the GVSP leader's Size X / Size Y do not describe one. Services before API version 4
+  published them on `image` as a `1 × N` frame in a format that decodes as `Unknown`.
+  Named `evs` rather than `events` so it cannot be confused with GenICam device events.
+
+#### Binary event-block header layout (24 bytes, all fields little-endian)
+
+| Offset | Size | Field         | Description                                            |
+|--------|------|---------------|--------------------------------------------------------|
+| 0      | 2    | `magic`       | `0x5645` LE (`[0x45, 0x56]`, `"EV"`) — event marker    |
+| 2      | 1    | `version`     | Header layout version; currently `1`                   |
+| 3      | 1    | `format`      | `0` Unknown, `1` EVT 3.0, `2` EVT 2.1; codes only appended |
+| 4      | 4    | `seq`         | Event-block counter, from `0` per acquisition, `u32` LE |
+| 8      | 8    | `timestamp`   | Device timestamp, `u64` LE; valid only if flag bit 0   |
+| 16     | 4    | `payload_len` | Bytes of event data that follow, `u32` LE              |
+| 20     | 1    | `flags`       | Bit 0: `timestamp` is present                          |
+| 21     | 3    | reserved      | Zero                                                   |
+
+- **Rust types:** `EvsHeader` (build with `EvsHeader::new`; `#[non_exhaustive]`),
+  `EvsFormat`, `EvsHeaderError`, `EVS_MAGIC`, `EVS_HEADER_SIZE` — in
+  `viva_zenoh_api::evs_header`. `EvsHeader::decode` rejects a message whose `payload_len`
+  disagrees with the bytes that follow.
+
 ---
 
 ## Timing Guarantees
@@ -319,6 +350,7 @@ Codes are **only appended** — never reordered. Unknown codes map to `PixelForm
 | `nodes/*/value` | On parameter change (up to ~100 Hz for fast nodes) |
 | `acquisition/status` | On change |
 | `image` | At acquisition frame rate |
+| `evs` | Per event block, while an event-vision camera acquires |
 | `image/meta` | On acquisition start; on Width, Height, or PixelFormat change during active acquisition |
 
 Device is considered lost if `announce` is not received for 6 seconds.

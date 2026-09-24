@@ -22,6 +22,7 @@
 mod registers;
 mod transport;
 
+pub use registers::{REG_TRIGGER_SOFTWARE, WRITE_ONLY_REGISTERS};
 pub use transport::FakeU3vTransport;
 
 use std::sync::Arc;

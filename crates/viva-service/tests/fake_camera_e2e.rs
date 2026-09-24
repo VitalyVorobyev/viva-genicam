@@ -17,9 +17,11 @@ use viva_service::status;
 use viva_service::xml;
 
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
-use viva_fake_gige::{FakeCamera, GvcpCommand};
+use viva_fake_gige::{FakeCamera, FakeCameraBuilder, GvcpCommand};
 use viva_zenoh_api::frame_header::FrameHeader;
-use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse, keys};
+use viva_zenoh_api::{
+    AcquisitionCommand, AcquisitionControlRequest, EvsFormat, EvsHeader, NodeOpResponse, keys,
+};
 
 // ---------------------------------------------------------------------------
 // Fake camera guard with global port lock
@@ -38,17 +40,24 @@ struct TestCamera {
 
 impl TestCamera {
     async fn start() -> Self {
+        Self::start_with(|builder| builder).await
+    }
+
+    /// Start a fake camera with extra builder customization on top of the
+    /// standard loopback configuration.
+    async fn start_with<F>(customize: F) -> Self
+    where
+        F: Fn(FakeCameraBuilder) -> FakeCameraBuilder,
+    {
         let guard = camera_lock().lock_owned().await;
         let camera = loop {
-            match FakeCamera::builder()
+            let builder = FakeCamera::builder()
                 .bind_ip([127, 0, 0, 1].into())
                 .port(3956)
                 .width(640)
                 .height(480)
-                .fps(30)
-                .build()
-                .await
-            {
+                .fps(30);
+            match customize(builder).build().await {
                 Ok(cam) => break cam,
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -549,5 +558,95 @@ async fn e2e_snapshot_reports_write_only_and_command_nodes_without_reading_them(
                 "{command:?} of write-only register {addr:#x} reached the wire"
             );
         }
+    }
+}
+
+/// An event-vision stream is published on `evs`, framed by an `EvsHeader`,
+/// and nothing reaches the image topic (DC-05, #138/#139).
+///
+/// The fake streams EVT 3.0 under the vendor format code the TRT009S-E uses.
+/// Before DC-05 each block went out on `image` as a 16 × 4 "image" whose
+/// pixel format decoded as `Unknown`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_event_blocks_are_published_on_their_own_topic() {
+    use viva_genicam::pfnc::PixelFormat;
+
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 4;
+    let _cam = TestCamera::start_with(|builder| {
+        builder
+            .width(WIDTH)
+            .height(HEIGHT)
+            .pixel_format(PixelFormat::EvsEvt30.code())
+    })
+    .await;
+
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .expect("discovery failed");
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = spawn_service_tasks(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let image_sub = session
+        .declare_subscriber(keys::image(&device_id))
+        .await
+        .unwrap();
+    let evs_sub = session
+        .declare_subscriber(keys::evs(&device_id))
+        .await
+        .unwrap();
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Start).await;
+    assert!(resp.ok, "AcquisitionStart failed: {:?}", resp.error);
+
+    let mut seqs = Vec::new();
+    for _ in 0..3 {
+        let sample = tokio::time::timeout(Duration::from_secs(5), evs_sub.recv_async())
+            .await
+            .expect("timeout waiting for an event block on the evs topic")
+            .expect("subscriber closed");
+        let payload = sample.payload().to_bytes();
+        let (header, events) = EvsHeader::decode(&payload).expect("EvsHeader decode");
+        assert_eq!(header.format, EvsFormat::Evt30);
+        assert_eq!(header.payload_len as usize, (WIDTH * HEIGHT) as usize);
+        assert_eq!(events.len(), header.payload_len as usize);
+        assert!(header.timestamp.is_some(), "the GVSP leader carries one");
+        seqs.push(header.seq);
+    }
+    assert!(
+        seqs.windows(2).all(|w| w[1] == w[0].wrapping_add(1)),
+        "event block seq must count blocks: {seqs:?}"
+    );
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Stop).await;
+    assert!(resp.ok, "AcquisitionStop failed: {:?}", resp.error);
+
+    // Three blocks arrived on `evs` while `image` was subscribed throughout;
+    // an event block published on `image` would be waiting here.
+    let stray = tokio::time::timeout(Duration::from_millis(500), image_sub.recv_async()).await;
+    assert!(
+        stray.is_err(),
+        "an event stream published {} bytes on the image topic",
+        stray
+            .ok()
+            .and_then(Result::ok)
+            .map_or(0, |s| s.payload().len())
+    );
+
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 }

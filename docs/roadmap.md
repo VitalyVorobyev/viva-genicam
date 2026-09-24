@@ -135,11 +135,12 @@ work is everything that assumes the reassembled bytes are pixels. The contributo
 read the wire with a capture, which is precisely the evidence this section says it
 is waiting for.
 
-The open question is not how to parse the block; it is **which topic a non-image
-stream belongs on**, because `viva-service` currently publishes one as a 1×64000
-image with an unnamed format. That is DC-05, and it is ours rather than the
-contributor's — it is a service design decision, not something to ask of somebody
-who owns one camera.
+The open question was not how to parse the block; it was **which topic a non-image
+stream belongs on**, because `viva-service` published one as a 1×64000 image with
+an unnamed format. That was ours rather than the contributor's to settle, and it
+is settled: event blocks go on their own `evs` topic behind an `EvsHeader`, never
+on `image` (Zenoh API version 4). What remains of DC-05 is a Python `next_block`
+and a test for the Windows receiver.
 
 This is deliberately not a numbered phase. The concrete defects are tracked in
 `backlog.md`'s `DC` section, and only the ones verified against code rather than
@@ -191,9 +192,6 @@ whichever breaking release is not already spoken for.
 
 - **Announce cadence exceeds Studio's expiry window** — the GigE service
   re-announces roughly every 7 s against a 6 s expiry, so devices can flicker.
-- **U3V introspection is typeless** — `U3vDeviceHandle` never overrides
-  `get_feature_state`, so every U3V camera reports `kind: "Unknown"` and no
-  ranges.
 - **U3V service streaming never configures the SIRM** or enables streaming.
 - **M10** — real-service integration (studio against viva-service, not mocks).
 - **M11** — release prep: DMG/AppImage/MSI packaging, service sidecar.

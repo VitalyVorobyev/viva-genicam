@@ -58,6 +58,18 @@ pub enum GenApiError {
     /// A SwissKnife expression referenced an unknown variable.
     #[error("unknown variable '{var}' referenced by {name}")]
     UnknownVariable { name: String, var: String },
+    /// A formula qualified a `<pVariable>` with an extension the GenApi
+    /// standard does not define — anything but `.Value`, `.Min`, `.Max`,
+    /// `.Inc` or `.Entry.<Name>`.
+    #[error("{name}: variable '{var}' has unknown extension '.{extension}'")]
+    UnknownVariableExtension {
+        /// The formula node.
+        name: String,
+        /// The qualified identifier as written.
+        var: String,
+        /// The part after the variable name's first `.`.
+        extension: String,
+    },
     /// Raw register value did not correspond to any enum entry.
     #[error("enum {node} has no entry for raw value {value}")]
     EnumValueUnknown { node: String, value: i64 },

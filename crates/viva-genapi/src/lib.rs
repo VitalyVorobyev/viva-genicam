@@ -13,10 +13,10 @@ pub use error::GenApiError;
 pub use io::{NullIo, RegisterIo};
 pub use nodemap::NodeMap;
 pub use nodes::{
-    BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, IntegerNode, Node, NodeMeta,
-    RegisterNode, Representation, SkNode, Visibility,
+    BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, FormulaVar, IntegerNode, Node,
+    NodeMeta, RegisterNode, Representation, SkNode, Visibility,
 };
-pub use swissknife::{AstNode, EvalMode, Value};
+pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
 pub use viva_genapi_xml::{AccessMode, SkOutput, SkippedNode};
 
 #[cfg(test)]
@@ -1553,10 +1553,7 @@ mod tests {
         // test fails on the read count, not on a read miss.
         let io = MockIo::with_registers(&[(0x600, vec![0; 4]), (0x604, vec![0; 4])]);
 
-        // `Trigger` is written 0 because a `<MaskedIntReg>` without `<Min>`
-        // encodes as signed today, and a 1-bit signed field cannot hold 1 —
-        // a separate defect, and one that fails before the read would.
-        for (node, address, value) in [("Pulse0", 0x600u64, 1), ("Trigger", 0x604, 0)] {
+        for (node, address, value) in [("Pulse0", 0x600u64, 1), ("Trigger", 0x604, 1)] {
             let err = nodemap
                 .set_integer(node, value, &io)
                 .expect_err("a cold write-only bitfield cannot be written");
@@ -1572,6 +1569,96 @@ mod tests {
                 "{node}: nothing may be written either"
             );
         }
+    }
+
+    /// GA-32: a bitfield write is encoded with the node's declared `<Sign>`.
+    ///
+    /// The write side used to infer signedness from `min < 0`, and `<Min>`
+    /// defaults to `i64::MIN`. An unsigned one-bit `<MaskedIntReg>` without
+    /// `<Min>` — the shape real documents use — was therefore encoded as a
+    /// signed one-bit field, whose range is `-1..=0`: writing 1 failed with
+    /// `ValueTooWide`, a flag that could only be cleared. The assertions are
+    /// on the register bytes, not on our own read-back.
+    #[test]
+    fn unsigned_masked_int_reg_without_min_accepts_every_unsigned_value() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <MaskedIntReg Name="Flag">
+                    <Address>0x700</Address><Length>4</Length>
+                    <AccessMode>RW</AccessMode><Bit>3</Bit>
+                    <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+                </MaskedIntReg>
+                <MaskedIntReg Name="Nibble">
+                    <Address>0x704</Address><Length>4</Length>
+                    <AccessMode>RW</AccessMode><LSB>31</LSB><MSB>28</MSB>
+                    <Endianess>BigEndian</Endianess>
+                </MaskedIntReg>
+            </RegisterDescription>
+        "#;
+        let mut nodemap =
+            NodeMap::try_from_xml(viva_genapi_xml::parse(XML).expect("parse")).expect("nodemap");
+        let io = MockIo::with_registers(&[(0x700, vec![0; 4]), (0x704, vec![0; 4])]);
+
+        nodemap.set_integer("Flag", 1, &io).expect("set the flag");
+        // Big-endian bit 3 counts from the MSB.
+        assert_eq!(io.regs.borrow()[&0x700], 0x1000_0000u32.to_be_bytes());
+
+        // No `<Sign>` at all is unsigned too; 15 is the top of a 4-bit field
+        // and was refused as too wide for a signed one.
+        nodemap.set_integer("Nibble", 15, &io).expect("set 15");
+        assert_eq!(io.regs.borrow()[&0x704], 0x0000_000Fu32.to_be_bytes());
+
+        for (node, value, bit_length) in [("Flag", 2, 1), ("Flag", -1, 1), ("Nibble", 16, 4)] {
+            let err = nodemap
+                .set_integer(node, value, &io)
+                .expect_err("out of the unsigned field's range");
+            assert!(
+                matches!(err, GenApiError::ValueTooWide { ref name, value: v, bit_length: b }
+                    if name == node && v == value && b == bit_length),
+                "{node} = {value}: got {err:?}"
+            );
+        }
+        assert_eq!(io.regs.borrow()[&0x700], 0x1000_0000u32.to_be_bytes());
+        assert_eq!(io.regs.borrow()[&0x704], 0x0000_000Fu32.to_be_bytes());
+    }
+
+    /// The other half of GA-32: a `<Sign>Signed</Sign>` bitfield without
+    /// `<Min>` still encodes two's complement at both ends of its range, and
+    /// refuses the first value past either end.
+    #[test]
+    fn signed_masked_int_reg_encodes_twos_complement_at_the_range_edges() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <MaskedIntReg Name="Offset">
+                    <Address>0x710</Address><Length>4</Length>
+                    <AccessMode>RW</AccessMode><LSB>31</LSB><MSB>28</MSB>
+                    <Sign>Signed</Sign><Endianess>BigEndian</Endianess>
+                </MaskedIntReg>
+            </RegisterDescription>
+        "#;
+        let mut nodemap =
+            NodeMap::try_from_xml(viva_genapi_xml::parse(XML).expect("parse")).expect("nodemap");
+        // Bits outside the field are set, so the write must preserve them.
+        let io = MockIo::with_registers(&[(0x710, 0xABCD_EF00u32.to_be_bytes().to_vec())]);
+
+        for (value, word) in [(-8, 0xABCD_EF08u32), (7, 0xABCD_EF07), (-1, 0xABCD_EF0F)] {
+            nodemap.set_integer("Offset", value, &io).expect("in range");
+            assert_eq!(io.regs.borrow()[&0x710], word.to_be_bytes(), "{value}");
+        }
+        for value in [8, -9] {
+            let err = nodemap
+                .set_integer("Offset", value, &io)
+                .expect_err("out of the signed field's range");
+            assert!(
+                matches!(err, GenApiError::ValueTooWide { value: v, bit_length: 4, .. } if v == value),
+                "{value}: got {err:?}"
+            );
+        }
+
+        // A fresh nodemap decodes the device's bytes, not a cached value.
+        let nodemap =
+            NodeMap::try_from_xml(viva_genapi_xml::parse(XML).expect("parse")).expect("nodemap");
+        assert_eq!(nodemap.get_integer("Offset", &io).expect("read"), -1);
     }
 
     /// A `<StructReg>` bit reads as 1, not -1.
@@ -2191,6 +2278,287 @@ mod tests {
         assert!(
             !visible.contains(&"InvisibleNode"),
             "Invisible node must NOT be visible at Guru level"
+        );
+    }
+
+    /// GA-29 fixture: formulas reading `.Min`, `.Max`, `.Inc`, `.Value` and
+    /// `.Entry.<Name>` of their `<pVariable>` nodes, in both spellings the
+    /// standard allows — qualified in the formula only (`V1.Min`), and
+    /// qualified in the declaration (`<pVariable Name="G.Max">`), which is
+    /// GenICam Standard v2.1.1 §2.8.13's own `MidRange` example.
+    const QUALIFIED_VARIABLE_FIXTURE: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Gain">
+                <pValue>GainReg</pValue>
+                <Min>16</Min><Max>1024</Max><Inc>4</Inc>
+            </Integer>
+            <IntReg Name="GainReg">
+                <Address>0x100</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="Width">
+                <pValue>WidthReg</pValue>
+                <pMax>WidthMaxReg</pMax>
+            </Integer>
+            <IntReg Name="WidthReg">
+                <Address>0x104</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntReg Name="WidthMaxReg">
+                <Address>0x108</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="Height">
+                <pValue>HeightReg</pValue>
+            </Integer>
+            <Integer Name="HeightReg">
+                <Value>480</Value><Min>2</Min><Max>2048</Max><Inc>2</Inc>
+            </Integer>
+            <FloatReg Name="Exposure">
+                <Address>0x110</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>12.5</Min><Max>1000000.0</Max>
+                <Endianess>BigEndian</Endianess>
+            </FloatReg>
+            <Enumeration Name="Mode">
+                <Address>0x120</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <EnumEntry Name="Off" Value="0" />
+                <EnumEntry Name="Continuous" Value="7" />
+            </Enumeration>
+
+            <IntSwissKnife Name="GainMin">
+                <pVariable Name="V1">Gain</pVariable>
+                <Formula>V1.Min</Formula>
+            </IntSwissKnife>
+            <IntSwissKnife Name="GainMax">
+                <pVariable Name="V1">Gain</pVariable>
+                <Formula>V1.Max</Formula>
+            </IntSwissKnife>
+            <IntSwissKnife Name="GainInc">
+                <pVariable Name="V1">Gain</pVariable>
+                <Formula>V1.Inc</Formula>
+            </IntSwissKnife>
+            <IntSwissKnife Name="GainValue">
+                <pVariable Name="V1">Gain</pVariable>
+                <Formula>V1.Value * 1000 + V1</Formula>
+            </IntSwissKnife>
+            <IntSwissKnife Name="GainMidRange">
+                <pVariable Name="G.Max">Gain</pVariable>
+                <pVariable Name="G.Min">Gain</pVariable>
+                <Formula>(G.Max - G.Min) / 2</Formula>
+            </IntSwissKnife>
+            <IntSwissKnife Name="WidthHeadroom">
+                <pVariable Name="W">Width</pVariable>
+                <Formula>W.Max - W</Formula>
+            </IntSwissKnife>
+            <IntSwissKnife Name="HeightRange">
+                <pVariable Name="H">Height</pVariable>
+                <Formula>H.Min * 1000000 + H.Max * 10 + H.Inc</Formula>
+            </IntSwissKnife>
+            <SwissKnife Name="ExposureSpan">
+                <pVariable Name="E1">Exposure</pVariable>
+                <Formula>E1.Max - E1.Min</Formula>
+            </SwissKnife>
+            <SwissKnife Name="ExposureInc">
+                <pVariable Name="E1">Exposure</pVariable>
+                <Formula>E1.Inc</Formula>
+            </SwissKnife>
+            <IntSwissKnife Name="IsContinuous">
+                <pVariable Name="M">Mode</pVariable>
+                <Formula>M = M.Entry.Continuous</Formula>
+            </IntSwissKnife>
+            <Converter Name="GainDb">
+                <pVariable Name="V1">Gain</pVariable>
+                <FormulaTo>FROM * V1.Inc</FormulaTo>
+                <FormulaFrom>TO / V1.Inc</FormulaFrom>
+                <pValue>GainReg</pValue>
+                <Slope>Increasing</Slope>
+            </Converter>
+        </RegisterDescription>
+    "#;
+
+    fn qualified_variable_io() -> MockIo {
+        MockIo::with_registers(&[
+            (0x100, 64u32.to_be_bytes().to_vec()),
+            (0x104, 640u32.to_be_bytes().to_vec()),
+            (0x108, 1920u32.to_be_bytes().to_vec()),
+            (0x110, 250.0f32.to_be_bytes().to_vec()),
+            (0x120, 7u32.to_be_bytes().to_vec()),
+        ])
+    }
+
+    fn build_qualified_variable_nodemap() -> NodeMap {
+        let nodemap = NodeMap::try_from_xml(
+            viva_genapi_xml::parse(QUALIFIED_VARIABLE_FIXTURE).expect("parse"),
+        )
+        .expect("nodemap");
+        assert!(
+            nodemap.skipped().is_empty(),
+            "nothing may be skipped: {:?}",
+            nodemap.skipped()
+        );
+        nodemap
+    }
+
+    /// GA-29: `V1.Min`, `V1.Max`, `V1.Inc` and `V1.Value` read the
+    /// corresponding property of the node behind `V1`, in integer arithmetic.
+    #[test]
+    fn qualified_variables_read_min_max_inc_and_value() {
+        let nodemap = build_qualified_variable_nodemap();
+        let io = qualified_variable_io();
+        for (node, expected) in [
+            ("GainMin", 16),
+            ("GainMax", 1024),
+            ("GainInc", 4),
+            ("GainValue", 64_064),
+            ("GainMidRange", 504),
+        ] {
+            assert_eq!(
+                nodemap.get_integer(node, &io).expect(node),
+                expected,
+                "{node}"
+            );
+        }
+    }
+
+    /// The same extensions on a `<FloatReg>` evaluate in floating point, and a
+    /// float with no increment reports that rather than inventing one.
+    #[test]
+    fn qualified_variables_read_float_bounds() {
+        let nodemap = build_qualified_variable_nodemap();
+        let io = qualified_variable_io();
+        let span = nodemap.get_float("ExposureSpan", &io).expect("span");
+        assert!((span - 999_987.5).abs() < 1e-9, "got {span}");
+
+        let err = nodemap
+            .get_float("ExposureInc", &io)
+            .expect_err("a Float without an increment");
+        assert!(
+            matches!(err, GenApiError::ExprEval { ref name, ref msg }
+                if name == "ExposureInc" && msg.contains("no increment")),
+            "got {err:?}"
+        );
+    }
+
+    /// `<pMax>` wins over the placeholder bound, and a node that declares no
+    /// bound of its own takes its `<pValue>` target's.
+    #[test]
+    fn qualified_variables_follow_p_max_and_p_value() {
+        let nodemap = build_qualified_variable_nodemap();
+        let io = qualified_variable_io();
+        assert_eq!(
+            nodemap.get_integer("WidthHeadroom", &io).expect("headroom"),
+            1920 - 640
+        );
+        assert_eq!(
+            nodemap.get_integer("HeightRange", &io).expect("range"),
+            2_000_000 + 20_480 + 2
+        );
+    }
+
+    /// A formula reading `W.Max` must see a new maximum after the register
+    /// behind `<pMax>` is written, and the dependency graph must say so —
+    /// the qualified variable's node is recorded like a plain one.
+    #[test]
+    fn qualified_variable_is_invalidated_when_its_bound_changes() {
+        let mut nodemap = build_qualified_variable_nodemap();
+        let io = qualified_variable_io();
+        assert_eq!(
+            nodemap.get_integer("WidthHeadroom", &io).expect("before"),
+            1280
+        );
+
+        assert!(
+            nodemap
+                .dependents("WidthMaxReg")
+                .contains(&"Width".to_string())
+        );
+        assert!(
+            nodemap
+                .dependents("Width")
+                .contains(&"WidthHeadroom".to_string())
+        );
+
+        nodemap
+            .set_integer("WidthMaxReg", 4096, &io)
+            .expect("raise the maximum");
+        assert_eq!(
+            nodemap.get_integer("WidthHeadroom", &io).expect("after"),
+            3456
+        );
+    }
+
+    /// `.Entry.<Name>` reads the numeric value of that enumeration entry.
+    #[test]
+    fn qualified_variable_reads_an_enum_entry_value() {
+        let nodemap = build_qualified_variable_nodemap();
+        let io = qualified_variable_io();
+        assert_eq!(nodemap.get_integer("IsContinuous", &io).expect("7 = 7"), 1);
+        io.write(0x120, &0u32.to_be_bytes()).expect("switch off");
+        let nodemap = build_qualified_variable_nodemap();
+        assert_eq!(nodemap.get_integer("IsContinuous", &io).expect("0 = 7"), 0);
+    }
+
+    /// Converters resolve qualified variables in both directions.
+    #[test]
+    fn converter_resolves_qualified_variables() {
+        let mut nodemap = build_qualified_variable_nodemap();
+        let io = qualified_variable_io();
+        assert_eq!(nodemap.get_converter("GainDb", &io).expect("read"), 16.0);
+        nodemap.set_converter("GainDb", 20.0, &io).expect("write");
+        assert_eq!(io.regs.borrow()[&0x100], 80u32.to_be_bytes());
+    }
+
+    /// An extension the standard does not define sends the node to
+    /// `skipped()` at build time, in the formula and in the declaration alike,
+    /// while its neighbours still build.
+    #[test]
+    fn unknown_variable_extension_is_skipped_not_evaluated() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="Gain"><Value>3</Value><Min>0</Min><Max>9</Max></Integer>
+                <IntSwissKnife Name="InFormula">
+                    <pVariable Name="V1">Gain</pVariable>
+                    <Formula>V1.Minimum</Formula>
+                </IntSwissKnife>
+                <IntSwissKnife Name="InDeclaration">
+                    <pVariable Name="V1.Mean">Gain</pVariable>
+                    <Formula>V1.Mean</Formula>
+                </IntSwissKnife>
+                <IntSwissKnife Name="Undeclared">
+                    <pVariable Name="V1">Gain</pVariable>
+                    <Formula>V2.Max</Formula>
+                </IntSwissKnife>
+                <IntSwissKnife Name="Fine">
+                    <pVariable Name="V1">Gain</pVariable>
+                    <Formula>V1.Max</Formula>
+                </IntSwissKnife>
+            </RegisterDescription>
+        "#;
+        let nodemap =
+            NodeMap::try_from_xml(viva_genapi_xml::parse(XML).expect("parse")).expect("nodemap");
+        let skipped: Vec<(&str, &str)> = nodemap
+            .skipped()
+            .iter()
+            .map(|node| (node.name.as_deref().unwrap_or(""), node.error.as_str()))
+            .collect();
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        for (node, fragment) in [
+            ("InFormula", "'V1.Minimum' has unknown extension '.Minimum'"),
+            ("InDeclaration", "'V1.Mean' has unknown extension '.Mean'"),
+            ("Undeclared", "unknown variable 'V2.Max'"),
+        ] {
+            assert!(
+                skipped
+                    .iter()
+                    .any(|(name, error)| *name == node && error.contains(fragment)),
+                "{node}: {skipped:?}"
+            );
+        }
+        assert_eq!(
+            nodemap.get_integer("Fine", &crate::NullIo).expect("builds"),
+            9
         );
     }
 }

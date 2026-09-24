@@ -8,7 +8,7 @@ use viva_genapi_xml::{
 };
 pub use viva_genapi_xml::{NodeMeta, PredicateRefs, Representation, SkOutput, Visibility};
 
-use crate::swissknife::{AstNode, Value};
+use crate::swissknife::{AstNode, Value, VarAttr};
 
 /// Node kinds supported by the Tier-1 subset.
 #[derive(Debug)]
@@ -319,6 +319,23 @@ pub struct BooleanNode {
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
 }
 
+/// One variable a formula reads: the identifier it appears as, the node
+/// behind it, and which property of that node it denotes.
+///
+/// A plain `<pVariable Name="V1">Gain</pVariable>` becomes
+/// `{ name: "V1", provider: "Gain", attr: Value }`. `V1.Max` in the formula
+/// adds `{ name: "V1.Max", provider: "Gain", attr: Max }`, and so does a
+/// declaration spelled `<pVariable Name="V1.Max">Gain</pVariable>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormulaVar {
+    /// Identifier as written in the formula.
+    pub name: String,
+    /// Node the `<pVariable>` points at.
+    pub provider: String,
+    /// Property of `provider` the identifier reads.
+    pub attr: VarAttr,
+}
+
 /// SwissKnife node evaluating an arithmetic expression referencing other nodes.
 ///
 /// `<IntSwissKnife>` (`output` = [`SkOutput::Integer`]) evaluates in integer
@@ -334,8 +351,8 @@ pub struct SkNode {
     pub output: SkOutput,
     /// Parsed expression AST.
     pub ast: AstNode,
-    /// Mapping of variable identifiers to provider node names.
-    pub vars: Vec<(String, String)>,
+    /// The variables the formula reads, qualified ones included.
+    pub vars: Vec<FormulaVar>,
     /// Predicate refs gating implementation / availability.
     pub predicates: PredicateRefs,
     /// Cached value alongside the generation it was computed in.
@@ -395,9 +412,9 @@ pub struct ConverterNode {
     /// Parsed `<FormulaFrom>`: raw value → feature value, evaluated on read.
     pub ast_from: AstNode,
     /// Variable mappings for `<FormulaTo>` (the write direction).
-    pub vars_to: Vec<(String, String)>,
+    pub vars_to: Vec<FormulaVar>,
     /// Variable mappings for `<FormulaFrom>` (the read direction).
-    pub vars_from: Vec<(String, String)>,
+    pub vars_from: Vec<FormulaVar>,
     /// Optional engineering unit.
     pub unit: Option<String>,
     /// Desired output type.
@@ -426,9 +443,9 @@ pub struct IntConverterNode {
     /// Parsed `<FormulaFrom>`: raw value → feature value, evaluated on read.
     pub ast_from: AstNode,
     /// Variable mappings for `<FormulaTo>` (the write direction).
-    pub vars_to: Vec<(String, String)>,
+    pub vars_to: Vec<FormulaVar>,
     /// Variable mappings for `<FormulaFrom>` (the read direction).
-    pub vars_from: Vec<(String, String)>,
+    pub vars_from: Vec<FormulaVar>,
     /// Optional engineering unit.
     pub unit: Option<String>,
     /// Predicate refs gating implementation / availability / lock state.

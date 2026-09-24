@@ -275,6 +275,69 @@ pub fn is_builtin_constant(name: &str) -> bool {
     builtin_constant(name).is_some()
 }
 
+/// The property of a `<pVariable>`'s node that a formula identifier reads.
+///
+/// GenICam Standard v2.1.1, §2.8.13 (SwissKnife, IntSwissKnife, Converter,
+/// and IntConverter): "you can access the minimum, maximum, and increment of a
+/// node by using the variable name extensions .Min, .Max, .Inc, and – for
+/// completeness – also .Value. In addition .Entry.Name is allowed which
+/// accesses the integer value of an EnumEntry described by Name."
+///
+/// The standard's own example puts the extension in the declaration —
+/// `<pVariable Name="Gain.Max">Gain</pVariable>` — and a formula may also
+/// qualify a plainly declared variable (`V1.Min` with only `V1` declared).
+/// Both resolve to the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VarAttr {
+    /// The node's value — what a plain identifier reads.
+    Value,
+    /// The node's minimum (`<pMin>` or `<Min>`).
+    Min,
+    /// The node's maximum (`<pMax>` or `<Max>`).
+    Max,
+    /// The node's increment (`<Inc>`, 1 when undeclared).
+    Inc,
+    /// The integer value of the enumeration entry with this `Name`.
+    Entry(String),
+}
+
+impl VarAttr {
+    /// Parse the extension after a variable name's first `.`: `Value`, `Min`,
+    /// `Max`, `Inc` or `Entry.<EntryName>`.
+    ///
+    /// The keyword is matched case-insensitively, since formula variables are
+    /// conventionally upper case; the entry name is matched exactly. Returns
+    /// `None` for anything else.
+    pub fn parse(extension: &str) -> Option<Self> {
+        let (keyword, rest) = match extension.split_once('.') {
+            Some((keyword, rest)) => (keyword, Some(rest)),
+            None => (extension, None),
+        };
+        let attr = match (keyword.to_ascii_lowercase().as_str(), rest) {
+            ("value", None) => VarAttr::Value,
+            ("min", None) => VarAttr::Min,
+            ("max", None) => VarAttr::Max,
+            ("inc", None) => VarAttr::Inc,
+            ("entry", Some(entry)) if !entry.is_empty() && !entry.contains('.') => {
+                VarAttr::Entry(entry.to_string())
+            }
+            _ => return None,
+        };
+        Some(attr)
+    }
+}
+
+/// Split a qualified identifier such as `V1.Min` at its first `.`.
+///
+/// Returns `None` for a plain identifier. The lexer admits `.` inside an
+/// identifier (a number such as `1.5` never reaches here, because it starts
+/// with a digit), so this is where a variable is told apart from its
+/// extension.
+pub fn split_qualified(ident: &str) -> Option<(&str, &str)> {
+    ident.split_once('.')
+}
+
 /// Evaluate an [`AstNode`] using the provided variable resolver.
 ///
 /// The resolver receives variable identifiers and must return their value.
@@ -1583,6 +1646,56 @@ mod tests {
             parse_expression(formula)
                 .unwrap_or_else(|err| panic!("failed to parse {formula:?}: {err}"));
         }
+    }
+
+    /// GA-29: `.` is admitted into identifiers for `V1.Min`, and must not take
+    /// number literals with it.
+    #[test]
+    fn qualified_identifiers_and_decimal_literals_lex_apart() {
+        let ast = parse_expression("V1.Max - 1.5 + .5").expect("parse");
+        let mut ids = HashSet::new();
+        collect_identifiers(&ast, &mut ids);
+        assert_eq!(ids, HashSet::from(["V1.Max".to_string()]));
+
+        let value = evaluate(
+            &ast,
+            &mut |name| match name {
+                "V1.Max" => Ok(Value::Int(10)),
+                other => Err(EvalError::UnknownVariable(other.to_string())),
+            },
+            EvalMode::Float,
+        )
+        .expect("evaluate");
+        assert_eq!(value, Value::Float(9.0));
+        assert!(matches!(
+            parse_expression("1.5").expect("parse"),
+            AstNode::Literal(Value::Float(v)) if v == 1.5
+        ));
+    }
+
+    #[test]
+    fn var_attr_parses_the_standard_extensions_only() {
+        assert_eq!(VarAttr::parse("Value"), Some(VarAttr::Value));
+        assert_eq!(VarAttr::parse("Min"), Some(VarAttr::Min));
+        assert_eq!(VarAttr::parse("MAX"), Some(VarAttr::Max));
+        assert_eq!(VarAttr::parse("inc"), Some(VarAttr::Inc));
+        assert_eq!(
+            VarAttr::parse("Entry.Continuous"),
+            Some(VarAttr::Entry("Continuous".into()))
+        );
+        for bad in [
+            "",
+            "Minimum",
+            "Entry",
+            "Entry.",
+            "Entry.A.B",
+            "Min.Max",
+            "Value.X",
+        ] {
+            assert_eq!(VarAttr::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(split_qualified("V1.Min"), Some(("V1", "Min")));
+        assert_eq!(split_qualified("V1"), None);
     }
 
     #[test]

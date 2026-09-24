@@ -4,9 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  # Resume a release that stopped partway. Every step below is idempotent, so a
+  # re-run publishes only what crates.io does not already have. A plain re-run
+  # of the failed tag run cannot do that: it replays that run's workflow file.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish, e.g. v0.6.0"
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   publish:
@@ -22,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
@@ -31,7 +41,7 @@ jobs:
 
       - name: Verify versions match tag (vX.Y.Z)
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE_TAG#v}"
           WS_VER=$(cargo metadata --no-deps --format-version 1 \
             | python3 -c "
           import sys, json
@@ -75,12 +85,35 @@ jobs:
         run: |
           set -euo pipefail
 
+          VERSION="${RELEASE_TAG#v}"
+
+          # The sparse-index path of a crate name of four or more characters.
+          index_url() {
+            echo "https://index.crates.io/${1:0:2}/${1:2:2}/$1"
+          }
+
+          on_index() {
+            curl -fsS -A "viva-genicam-ci/${GITHUB_RUN_ID}" "$(index_url "$1")" 2>/dev/null \
+              | grep -q "\"vers\":\"${VERSION}\""
+          }
+
           publish() {
+            if on_index "$1"; then
+              echo "$1 ${VERSION} is already on crates.io; skipping."
+              return
+            fi
             echo "::group::Publishing $1"
             cargo publish -p "$1" --locked
             echo "::endgroup::"
-            echo "Waiting for crates.io index propagation..."
-            sleep 30
+            # Wait for the index rather than for a fixed time. 0.6.0 stopped
+            # after nine crates because viva-pfnc took longer than a flat 30 s
+            # to appear, and the next crate could not resolve `^0.6` against it.
+            for _ in $(seq 1 60); do
+              on_index "$1" && return
+              sleep 10
+            done
+            echo "::error::$1 ${VERSION} did not appear on the crates.io index within 10 minutes"
+            exit 1
           }
 
           # Level 0: no internal dependencies

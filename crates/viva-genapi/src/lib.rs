@@ -1125,6 +1125,107 @@ mod tests {
         assert_eq!(payload, vec![0, 0, 0, 1]);
     }
 
+    /// A command's backing nodes are found by following the `<pValue>` chain
+    /// `exec_command` writes along — through an integer and an
+    /// `<IntConverter>` — and not by recognising a name like `...Reg`.
+    #[test]
+    fn command_targets_follow_the_pvalue_chain() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Command Name="AcquisitionStart">
+                    <pValue>AcquisitionStartCtl</pValue>
+                    <CommandValue>1</CommandValue>
+                </Command>
+                <Integer Name="AcquisitionStartCtl">
+                    <pValue>AcquisitionStartConv</pValue>
+                </Integer>
+                <IntConverter Name="AcquisitionStartConv">
+                    <pValue>AcquisitionStartBacking</pValue>
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO</FormulaFrom>
+                </IntConverter>
+                <IntReg Name="AcquisitionStartBacking">
+                    <Address>0x600</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Command Name="DirectCommand">
+                    <Address>0x500</Address>
+                    <Length>4</Length>
+                </Command>
+                <IntReg Name="UnrelatedReg">
+                    <Address>0x700</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        assert!(nodemap.skipped().is_empty(), "{:?}", nodemap.skipped());
+
+        let mut targets: Vec<String> = nodemap.command_targets().into_iter().collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            [
+                "AcquisitionStartBacking",
+                "AcquisitionStartConv",
+                "AcquisitionStartCtl"
+            ]
+        );
+    }
+
+    /// A feature that delegates to a `WO` register is write-only however it
+    /// declares itself — the `ActionDeviceKey` shape from issue #112, whose
+    /// read failed one hop down.
+    #[test]
+    fn a_node_delegating_to_a_write_only_register_is_write_only() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Integer Name="ActionDeviceKey">
+                    <pValue>ActionDeviceKeyReg</pValue>
+                </Integer>
+                <IntReg Name="ActionDeviceKeyReg">
+                    <Address>0x90C</Address>
+                    <Length>4</Length>
+                    <AccessMode>WO</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Integer Name="Width">
+                    <pValue>WidthReg</pValue>
+                </Integer>
+                <IntReg Name="WidthReg">
+                    <Address>0x100</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Integer Name="LoopA">
+                    <pValue>LoopB</pValue>
+                </Integer>
+                <Integer Name="LoopB">
+                    <pValue>LoopA</pValue>
+                </Integer>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+
+        assert!(nodemap.is_write_only("ActionDeviceKeyReg"));
+        assert!(nodemap.is_write_only("ActionDeviceKey"));
+        assert!(!nodemap.is_write_only("Width"));
+        assert!(!nodemap.is_write_only("WidthReg"));
+        assert!(!nodemap.is_write_only("LoopA"), "a cycle terminates");
+        assert!(!nodemap.is_write_only("NoSuchNode"));
+    }
+
     #[test]
     fn indirect_address_resolution() {
         let mut nodemap = build_indirect_nodemap();

@@ -159,6 +159,13 @@ opaque string without `/`).
   }
   ```
   Enumeration nodes also carry `"enum_available": ["Off", "Once"]`.
+  A feature with nothing to read — a Category, a Command, a node declared
+  `WO`, or the register a command writes through — carries `"value": null`
+  and is never read from the device. It is still reported, with its access
+  mode, so the client can offer the write or the execute:
+  ```json
+  { "value": null, "access_mode": "WO", "kind": "Command", "is_implemented": true, "is_available": true }
+  ```
 - **Rust type:** `FeatureState` in `viva_zenoh_api`
 - **Semantics:** Authoritative live state of a feature. `min/max/inc` apply to the current selector context; `enum_available` is the set of entries the device reports as currently implemented/available. The legacy `nodes/{name}/value` key continues to be published in parallel for backward compatibility and is populated from the same `FeatureState` via `FeatureState::to_node_value_update`. Clients that speak API v2 should prefer this key.
 
@@ -188,7 +195,7 @@ opaque string without `/`).
   }
   ```
 - **Rust type:** request: `BulkReadRequest`; response: `HashMap<String, FeatureState>` — types in `viva_zenoh_api`
-- **Semantics:** Batch introspection. Names that cannot be read are silently omitted (same as `nodes/bulk/read`).
+- **Semantics:** Batch introspection. Names whose state cannot be built are silently omitted (same as `nodes/bulk/read`); write-only and command nodes are not among them — they are reported with `"value": null`.
 
 ---
 

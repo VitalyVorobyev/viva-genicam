@@ -48,6 +48,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints `wrote <name> = <value> (write-only node; not read back)`, and `--json`
   gives `"value": null, "write_only": true`.
 
+- **A write-only feature was missing from `viva-service`'s feature snapshot,
+  and a command's register was read for a value it does not hold**
+  (backlog `SVC-08`, [#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135);
+  `ST-21`, [#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112)).
+  `build_feature_state` read every node's value with `?`, so a write-only node
+  returned an error instead of a `FeatureState`: the introspect queryable
+  answered with an error, and the bulk queryables dropped the feature from the
+  snapshot Studio asks for on connect. A command's backing register was read
+  like any other node, and in the vendor corpus 213 of the 490 `<pValue>`
+  targets of `<Command>` nodes are declared `RW`, so such a read would reach
+  the device. Now none of these is read. A write-only node, a Command, and
+  every node a command writes through are reported with their access mode and
+  `"value": null`, so a client can still offer the write or the execute. Two
+  new `NodeMap` methods decide from the declarations, not from node names:
+  **`is_write_only()`** is true when the node or anything it takes its value
+  from through `<pValue>` is declared `WO`, and **`command_targets()`**
+  follows each command's `<pValue>` chain as `exec_command` writes along it.
+  A node declared `RW` that delegates to a `WO` register is reported as `WO`.
+  The `FeatureState::value` contract documents `null`; `API_VERSION` stays 3,
+  since 3 is unreleased. #135 names no node, so this is the third path we have
+  found that matches it, not a confirmation. #112's attached Studio log has
+  18 `access denied for node` warnings from the bulk read, one per node: 17
+  registers refusing their own read, `pAcquisitionStartReg`,
+  `pTriggerSoftwareReg`, `pActionDeviceKeyReg` and the like, and
+  `ActionDeviceKey`, whose read failed at `pActionDeviceKeyReg` one hop down.
+  `viva-genapi` raises that text only when it refuses to read a node declared
+  `WO`, so we infer all 18 were local refusals — log noise rather than wire
+  traffic — and all 18 are now write-only by `is_write_only()`. We do not have
+  that camera's XML, so which of them are command targets is inferred from
+  their names only.
+
 - **An eight-byte register declared `<Sign>Unsigned</Sign>` could not be read at
   all** once its top bit was set — `node <name> holds an unsigned 64-bit value
   larger than i64::MAX`. Reported on two vendors' cameras by two people: a
@@ -244,6 +275,19 @@ workspace and published nowhere: no crate on crates.io and no desktop binary
 carries these changes. They are recorded here because the book they correct
 *is* published on every push to `main`. Nothing in this section changes the
 library.
+
+- **Studio shows write-only features and stops reading command registers**
+  (backlog `SVC-08`, `ST-21`; the library half is under Fixed). Embedded mode's
+  own copy of `build_feature_state` had the same defects, and there the symptom
+  was quieter: `bulk_feature_state` logged a WARN and left the feature out of
+  the connect-time snapshot, so a write-only feature had no live state, and an
+  Apply to one reported an error after the write had succeeded, because the
+  refreshed state could not be read. It now applies the same rule as the
+  service. The UI's `FeatureState.value` and `NodeValueEntry.value` admit
+  `null`: the tree and the feature header show no value instead of the text
+  `null` — which a Command's live badge used to show — the write and execute
+  controls stay available, and a live-value preset leaves those features out
+  rather than exporting `null` for them.
 
 - **Studio's device list can tell two cameras of the same model apart**
   (backlog `ST-24`, [#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).

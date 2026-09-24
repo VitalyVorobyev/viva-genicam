@@ -3398,6 +3398,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "viva-fake-gige",
+ "viva-genapi-xml",
  "viva-genicam",
  "viva-zenoh-api",
  "zenoh",

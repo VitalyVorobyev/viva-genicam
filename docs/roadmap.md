@@ -23,7 +23,8 @@ decode to would reach dependents on their next `cargo update`. 0.4.0 had to
 become a minor for exactly that reason, and the lesson is worth restating rather
 than relearning.
 
-**What gates it** (rows in [backlog.md](backlog.md)):
+**What gated it** (rows in [backlog.md](backlog.md)) — all cleared; `REL-08`
+cuts the release:
 
 - ~~**The integer codec.**~~ **Done**, see
   [ADR-0022](adrs/adr0022-integer-register-decoding.md). An eight-byte unsigned
@@ -35,15 +36,15 @@ than relearning.
   on their own hardware yet. **GA-11**'s first slice went with it: the corpus
   test now evaluates each document twice, and the second pass failed on 373
   nodes across 19 documents before the fix.
-- ~~**What leaves the host when a register is read.**~~ **Done** except
-  **SVC-08**. A single 32-bit register now goes out as READREG/WRITEREG, with a
+- ~~**What leaves the host when a register is read.**~~ **Done.** A single 32-bit register now goes out as READREG/WRITEREG, with a
   per-session fallback to memory access and a `VIVA_GIGE_FORCE_READMEM` escape
   hatch ([#136](https://github.com/VitalyVorobyev/viva-genicam/issues/136)); a masked write to a write-only register is refused
   locally instead of reading it first, and `viva-camctl set` no longer reads a
   write-only node back ([#135](https://github.com/VitalyVorobyev/viva-genicam/issues/135)). The fake now counts commands per
   address, refuses reads of `WO` registers and can refuse READREG, so it can
-  contradict us on both. Neither reporter has confirmed on hardware.
-  **SVC-08** — one `WO` node failing a whole feature snapshot — still gates.
+  contradict us on both. A feature snapshot no longer reads a write-only node
+  or a command's register: it reports them with a null value instead of
+  failing or dropping them. Neither reporter has confirmed on hardware.
 - ~~**Device identity.**~~ **Done.** Two identical cameras were indistinguishable
   in Studio ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), because the service announced the device id as
   the serial and dropped the user-defined name and the address. The reporter has
@@ -229,10 +230,6 @@ whichever breaking release is not already spoken for.
 
 ## Services & Studio
 
-- **The announce carries the wrong identity** — the GigE service reports the
-  device id as the serial and drops the user-defined name and the address, so two
-  identical cameras are indistinguishable in Studio. Gates 0.6.0; see the top of
-  this file.
 - **Announce cadence exceeds Studio's expiry window** — the GigE service
   re-announces roughly every 7 s against a 6 s expiry, so devices can flicker.
 - **U3V introspection is typeless** — `U3vDeviceHandle` never overrides

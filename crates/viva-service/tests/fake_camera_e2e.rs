@@ -17,7 +17,7 @@ use viva_service::status;
 use viva_service::xml;
 
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
-use viva_fake_gige::FakeCamera;
+use viva_fake_gige::{FakeCamera, GvcpCommand};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse, keys};
 
@@ -476,4 +476,78 @@ async fn e2e_feature_state_reflects_predicates() {
         .enum_available
         .expect("PixelFormat enum_available should be populated");
     assert_eq!(entries, vec!["RGB8".to_string()]);
+}
+
+/// A feature snapshot of every node the fake declares succeeds, write-only and
+/// command nodes included, and none of them is read on the wire (SVC-08,
+/// ST-21).
+///
+/// This is what Studio asks for on connect: the whole graph, in one bulk
+/// request. One `WO` node used to fail its own snapshot, so the feature went
+/// missing; and a command's backing register was read for a value it does not
+/// hold. The fake refuses a read of any `WO` register with ACCESS_DENIED, and
+/// its counters show whether a read was even attempted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_snapshot_reports_write_only_and_command_nodes_without_reading_them() {
+    let cam = TestCamera::start().await;
+
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = DeviceHandle::connect(dev_info, Some(loopback_iface()))
+        .await
+        .expect("connect failed");
+
+    // The node list, from the XML the service itself fetched.
+    let model = viva_genapi_xml::parse(handle.raw_xml()).expect("parse fake XML");
+    let nodemap = viva_genicam::genapi::NodeMap::try_from_xml(model).expect("build nodemap");
+    let mut names: Vec<&str> = nodemap.node_names().collect();
+    names.sort_unstable();
+
+    let fake = cam.camera.as_ref().expect("fake camera running");
+    fake.commands().reset();
+
+    let mut failed = Vec::new();
+    let mut states = std::collections::HashMap::new();
+    for name in &names {
+        match handle.get_feature_state(name).await {
+            Ok(state) => {
+                states.insert(*name, state);
+            }
+            Err(e) => failed.push(format!("{name}: {e}")),
+        }
+    }
+    assert!(failed.is_empty(), "snapshot failed for: {failed:#?}");
+
+    // Declared `WO` in the fake's XML: two commands, a command register and a
+    // bit of a write-only `<StructReg>`.
+    for name in [
+        "AcquisitionStart",
+        "UserSetLoad",
+        "UserSetLoadReg",
+        "SoftwareSignal0Pulse",
+    ] {
+        let state = &states[name];
+        assert_eq!(state.access_mode, "WO", "{name}");
+        assert!(state.value.is_null(), "{name} has a value: {}", state.value);
+    }
+    assert_eq!(states["AcquisitionStart"].kind, "Command");
+    assert_eq!(states["SoftwareSignal0Pulse"].kind, "Integer");
+
+    // Ordinary features still carry their values.
+    assert_eq!(states["Width"].value, serde_json::json!(640));
+
+    for &addr in viva_fake_gige::registers::WRITE_ONLY_REGISTERS {
+        for command in [GvcpCommand::ReadReg, GvcpCommand::ReadMem] {
+            assert_eq!(
+                fake.commands().at(command, addr),
+                0,
+                "{command:?} of write-only register {addr:#x} reached the wire"
+            );
+        }
+    }
 }

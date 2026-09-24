@@ -852,8 +852,9 @@ function highlightMatch(text: string, query: string): React.ReactNode {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** `null` (a write-only or command node) stays `null`: there is no draft to seed. */
 function liveValueToNodeValue(
-  raw: number | string | boolean
+  raw: number | string | boolean | null
 ): import("../../xml_model/values").NodeValue {
   return raw as import("../../xml_model/values").NodeValue;
 }

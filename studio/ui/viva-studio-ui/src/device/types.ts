@@ -49,7 +49,8 @@ export interface StreamerInfo {
  * the UI migration is complete.
  */
 export interface NodeValueEntry {
-  value: number | string | boolean;
+  /** `null` when the feature has nothing to read; see {@link FeatureState}. */
+  value: number | string | boolean | null;
   access_mode: string;
   /** Optional runtime minimum constraint reported by the camera service. */
   min?: number;
@@ -78,6 +79,10 @@ export interface NumericRange {
  *   "Enumeration", "Boolean", "Command", "Category", "SwissKnife", "Converter",
  *   "IntConverter", "StringReg"). Tolerate unknown kinds.
  * - `access_mode` uses GenICam spelling: `"RO"`, `"RW"`, `"WO"`, `"NA"`.
+ * - `value` is `null` when the feature has nothing to read: a Category, a
+ *   Command, a node declared `WO`, or the register a command writes through.
+ *   The backend never reads those, but still reports them so the UI can offer
+ *   the write or the execute. Show no value for them, not the text "null".
  * - `is_implemented` / `is_available` default to `true` when the service does
  *   not yet evaluate them.
  * - `numeric` is present only for Integer/Float nodes with a resolvable range.
@@ -87,7 +92,7 @@ export interface NumericRange {
  *   static XML enum list as the source of dropdown options.
  */
 export interface FeatureState {
-  value: number | string | boolean;
+  value: number | string | boolean | null;
   access_mode: string;
   kind: string;
   is_implemented: boolean;

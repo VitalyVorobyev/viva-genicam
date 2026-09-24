@@ -5753,6 +5753,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "viva-genapi-xml",
  "viva-genicam",
  "viva-zenoh-api",
  "viva_streamer",

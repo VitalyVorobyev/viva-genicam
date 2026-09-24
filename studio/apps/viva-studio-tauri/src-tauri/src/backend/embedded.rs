@@ -11,7 +11,7 @@
 //! blocking thread via `spawn_blocking` and a `std::sync::Mutex` protects
 //! concurrent access.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use bytes::Bytes;
 use tauri::Emitter;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{info, warn};
-use viva_genicam::genapi::{AccessMode, Node};
+use viva_genicam::genapi::{AccessMode, Node, NodeMap, RegisterIo};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
 use viva_zenoh_api::{DeviceAnnounce, FeatureState, NumericRange};
 
@@ -43,11 +43,26 @@ use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig};
 /// for a genuinely non-`Send` field added later.
 struct ConnectedCamera {
     camera: Camera<GigeRegisterIo>,
+    /// Nodes a command executes through ([`NodeMap::command_targets`]),
+    /// computed once at connect because every feature snapshot consults it.
+    command_targets: HashSet<String>,
     /// Kept for logging and disconnect matching.
     #[allow(dead_code)]
     device_id: String,
     #[allow(dead_code)]
     xml: String,
+}
+
+impl ConnectedCamera {
+    /// Snapshot one feature of this camera.
+    fn feature_state(&self, name: &str) -> Result<FeatureState, String> {
+        build_feature_state(
+            self.camera.nodemap(),
+            self.camera.transport(),
+            &self.command_targets,
+            name,
+        )
+    }
 }
 
 /// State for an active image acquisition session.
@@ -180,8 +195,10 @@ impl DeviceBackend for EmbeddedBackend {
                 .camera
                 .lock()
                 .map_err(|_| "Camera mutex poisoned".to_string())?;
+            let command_targets = camera.nodemap().command_targets();
             *guard = Some(ConnectedCamera {
                 camera,
+                command_targets,
                 device_id: device_id.to_string(),
                 xml,
             });
@@ -220,7 +237,7 @@ impl DeviceBackend for EmbeddedBackend {
         // Camera::get() calls RegisterIo::read() which uses block_on() internally.
         // block_in_place converts the current async thread to a blocking thread,
         // allowing nested block_on to work without panic.
-        tokio::task::block_in_place(|| build_feature_state(&connected.camera, &name))
+        tokio::task::block_in_place(|| connected.feature_state(&name))
     }
 
     async fn set_feature(&self, name: &str, value: &serde_json::Value) -> Result<(), String> {
@@ -268,7 +285,7 @@ impl DeviceBackend for EmbeddedBackend {
         let result = tokio::task::block_in_place(|| {
             let mut result = HashMap::with_capacity(names.len());
             for name in names {
-                match build_feature_state(&connected.camera, name) {
+                match connected.feature_state(name) {
                     Ok(state) => {
                         result.insert(name.clone(), state);
                     }
@@ -681,22 +698,39 @@ async fn discover_gige_devices() -> Vec<DeviceInfo> {
 /// themselves be buggy in `viva-genapi` — see
 /// [ADR-0010](../../../../../docs/adrs/adr0010-feature-state-contract.md) —
 /// but at least we now dispatch to the right one.
+///
+/// `command_targets` is [`NodeMap::command_targets`]: the nodes a command
+/// writes through, which are reported but never read.
 fn build_feature_state(
-    camera: &Camera<GigeRegisterIo>,
+    nodemap: &NodeMap,
+    transport: &dyn RegisterIo,
+    command_targets: &HashSet<String>,
     name: &str,
 ) -> Result<FeatureState, String> {
-    let nodemap = camera.nodemap();
     let node = nodemap
         .node(name)
         .ok_or_else(|| format!("Node '{name}' not found"))?;
 
     let kind = node.kind_name().to_string();
-    let access_mode = access_mode_string(node);
-    let transport = camera.transport();
 
-    // Typed value read by node kind. Categories and Commands have no readable
-    // value; return JSON null for those.
+    // Read a value only from a node that has one to give; mirrors
+    // `viva-service`. Categories and Commands have none. A write-only node —
+    // declared `WO`, or delegating to a `WO` register — refuses the read, and
+    // a command's backing register holds a trigger, not a value; reading one
+    // is at best meaningless (ST-21, #112). Both used to be read, and the
+    // failure dropped the feature from a bulk read with a WARN (SVC-08, #135).
+    // They are reported with a null value instead, so the UI still offers the
+    // write or the execute.
+    let write_only = nodemap.is_write_only(name);
+    let has_value = !write_only && !command_targets.contains(name);
+    let access_mode = match node.access_mode() {
+        // Declared `RW` but delegating to a `WO` register: say what it is.
+        Some(AccessMode::RW) if write_only => "WO".to_string(),
+        _ => access_mode_string(node),
+    };
+
     let value = match node {
+        _ if !has_value => serde_json::Value::Null,
         Node::Integer(_) => nodemap
             .get_integer(name, transport)
             .map(|v| serde_json::Value::Number(v.into()))
@@ -786,11 +820,11 @@ fn build_feature_state(
     };
 
     let enum_available = if matches!(node, Node::Enum(_)) {
-        // `Camera::enum_entries` forwards to the NodeMap's enumeration table
-        // and returns the full set. `NodeMap::available_enum_entries` now
+        // `NodeMap::enum_entries` returns the full set from the enumeration
+        // table. `NodeMap::available_enum_entries` now
         // exists and applies the `pIsAvailable` gating this comment used to
         // describe as future work — switching to it is backlog ST-18.
-        camera.enum_entries(name).ok()
+        nodemap.enum_entries(name).ok()
     } else {
         None
     };
@@ -944,7 +978,11 @@ fn camera_bayer_pattern(pf: viva_genicam::pfnc::PixelFormat) -> viva_streamer::b
 
 #[cfg(test)]
 mod tests {
-    use super::camera_stream_info;
+    use std::cell::RefCell;
+
+    use viva_genicam::genapi::{GenApiError, NodeMap, RegisterIo};
+
+    use super::{build_feature_state, camera_stream_info};
 
     #[test]
     fn stream_info_preserves_camera_pixel_format() {
@@ -954,5 +992,110 @@ mod tests {
         assert_eq!(info.height, 1536);
         assert_eq!(info.pixel_format, "BayerRG8");
         assert_eq!(info.encoding, "BMP");
+    }
+
+    /// A write-only integer, an integer delegating to a write-only register
+    /// (`ActionDeviceKey`, as in #112's log), a command reaching an `RW`
+    /// register through `<pValue>`, and one ordinary feature.
+    const XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+            <Integer Name="Width">
+                <Address>0x100</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>0</Min>
+                <Max>4096</Max>
+            </Integer>
+            <Integer Name="ActionDeviceKey">
+                <pValue>ActionDeviceKeyReg</pValue>
+            </Integer>
+            <IntReg Name="ActionDeviceKeyReg">
+                <Address>0x400</Address>
+                <Length>4</Length>
+                <AccessMode>WO</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="SoftwarePulse">
+                <Address>0x200</Address>
+                <Length>4</Length>
+                <AccessMode>WO</AccessMode>
+                <Min>0</Min>
+                <Max>1</Max>
+            </Integer>
+            <Command Name="AcquisitionStart">
+                <pValue>AcquisitionStartReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="AcquisitionStartReg">
+                <Address>0x300</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+
+    /// Serves `Width` and records every read address.
+    #[derive(Default)]
+    struct RecordingIo {
+        reads: RefCell<Vec<u64>>,
+    }
+
+    impl RegisterIo for RecordingIo {
+        fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+            self.reads.borrow_mut().push(addr);
+            let mut bytes = vec![0; len];
+            if addr == 0x100 && len == 4 {
+                bytes.copy_from_slice(&640u32.to_be_bytes());
+            }
+            Ok(bytes)
+        }
+
+        fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
+            Ok(())
+        }
+    }
+
+    /// SVC-08 and ST-21: a write-only node and a command's register are
+    /// reported, with a null value, instead of being read — the read used to
+    /// fail and `bulk_feature_state` dropped the feature with a WARN.
+    #[test]
+    fn unreadable_nodes_are_reported_without_being_read() {
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let targets = nodemap.command_targets();
+        let io = RecordingIo::default();
+        let state = |name: &str| {
+            build_feature_state(&nodemap, &io, &targets, name)
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+
+        assert_eq!(state("Width").value, serde_json::json!(640));
+
+        let pulse = state("SoftwarePulse");
+        assert_eq!(pulse.access_mode, "WO");
+        assert!(pulse.value.is_null());
+
+        let key = state("ActionDeviceKey");
+        assert_eq!(key.access_mode, "WO");
+        assert!(key.value.is_null());
+
+        let command = state("AcquisitionStart");
+        assert_eq!(command.kind, "Command");
+        assert!(command.value.is_null());
+
+        let register = state("AcquisitionStartReg");
+        assert_eq!(register.access_mode, "RW");
+        assert!(register.value.is_null());
+
+        let reads = io.reads.borrow();
+        assert!(!reads.contains(&0x200), "read the WO register: {reads:x?}");
+        assert!(!reads.contains(&0x400), "read the WO register: {reads:x?}");
+        assert!(
+            !reads.contains(&0x300),
+            "read the command register: {reads:x?}"
+        );
     }
 }

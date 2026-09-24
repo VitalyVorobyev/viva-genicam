@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use viva_zenoh_api::{AcquisitionStatus, ImageMeta};
+use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, ImageMeta};
 
 /// Payload for the `disconnect-reason` Tauri event emitted on unexpected loss of device.
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +36,37 @@ pub struct DeviceInfo {
     /// Transport type: "gige", "usb3", or "zenoh" (remote service).
     #[serde(default = "default_transport")]
     pub transport: String,
+    /// Current IPv4 address, when the transport has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    /// MAC address as `AA:BB:CC:DD:EE:FF`, when the transport has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// User-defined device name, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+}
+
+impl DeviceInfo {
+    /// The UI's view of an announce. Both backends go through here — the
+    /// embedded one builds its announce with `DeviceAnnounce::for_gige`, the
+    /// same rule the service uses — so a camera shows one identity in either
+    /// mode (ST-25).
+    pub fn from_announce(announce: DeviceAnnounce, transport: &str) -> Self {
+        Self {
+            id: announce.id,
+            name: announce.name,
+            model: announce.model,
+            serial: announce.serial,
+            transport: transport.to_string(),
+            ip: announce.ip,
+            mac: announce.mac,
+            user_name: announce.user_name,
+            manufacturer: announce.manufacturer,
+        }
+    }
 }
 
 fn default_transport() -> String {
@@ -212,5 +243,44 @@ impl ZenohState {
             .await
             .clone()
             .ok_or_else(|| "Zenoh session not initialized".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_announce_carries_the_identity_fields_to_the_ui() {
+        let announce = DeviceAnnounce::for_gige(
+            &[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE],
+            std::net::Ipv4Addr::new(192, 168, 1, 10),
+            Some("FakeGigE"),
+            Some("FAKE-001"),
+            Some("Left"),
+            Some("viva-genicam"),
+        );
+        let info = DeviceInfo::from_announce(announce, "gige");
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json["id"], "cam-deadbeefcafe");
+        assert_eq!(json["serial"], "FAKE-001");
+        assert_eq!(json["ip"], "192.168.1.10");
+        assert_eq!(json["mac"], "DE:AD:BE:EF:CA:FE");
+        assert_eq!(json["user_name"], "Left");
+        assert_eq!(json["manufacturer"], "viva-genicam");
+        assert_eq!(json["transport"], "gige");
+    }
+
+    /// A version 2 service's announce has none of the identity fields; the UI
+    /// type marks them optional, so they must be absent rather than `null`.
+    #[test]
+    fn from_announce_omits_what_an_old_service_did_not_send() {
+        let v2 = r#"{"id":"cam-deadbeefcafe","name":"M","model":"M","serial":"cam-deadbeefcafe","api_version":2}"#;
+        let announce: DeviceAnnounce = serde_json::from_str(v2).expect("deserialize");
+        let json =
+            serde_json::to_value(DeviceInfo::from_announce(announce, "zenoh")).expect("serialize");
+        for field in ["ip", "mac", "user_name", "manufacturer"] {
+            assert!(json.get(field).is_none(), "{field} present in {json}");
+        }
     }
 }

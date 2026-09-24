@@ -39,9 +39,13 @@ export function useDevice() {
       if (cancelled) return;
 
       // Subscribe to device-discovery events
+      // Replace rather than ignore a known id: the id outlives an address
+      // change, so a later announce can carry a new `ip`.
       const u1 = await listen<DeviceInfo>("device-discovered", (e) => {
         setDevices((prev) =>
-          prev.some((d) => d.id === e.payload.id) ? prev : [...prev, e.payload]
+          prev.some((d) => d.id === e.payload.id)
+            ? prev.map((d) => (d.id === e.payload.id ? e.payload : d))
+            : [...prev, e.payload]
         );
       });
 

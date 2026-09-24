@@ -61,6 +61,7 @@ pub struct FakeCameraBuilder {
     max_packet_size: Option<u32>,
     max_on_wire: Option<u32>,
     refuse_register_commands: Option<RegisterCommandRefusal>,
+    identity: gvcp_server::Identity,
 }
 
 /// PFNC pixel format codes.
@@ -82,6 +83,7 @@ impl Default for FakeCameraBuilder {
             max_packet_size: None,
             max_on_wire: None,
             refuse_register_commands: None,
+            identity: gvcp_server::Identity::default(),
         }
     }
 }
@@ -195,6 +197,41 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Report `mac` instead of [`FAKE_MAC`], in the Discovery ACK and the
+    /// bootstrap MAC registers alike.
+    ///
+    /// Services key a GigE camera by its MAC, so two fakes that should appear
+    /// as two cameras need two MACs, not only two serials.
+    pub fn mac(mut self, mac: [u8; 6]) -> Self {
+        self.identity.mac = mac;
+        self
+    }
+
+    /// Report `model` instead of [`FAKE_MODEL`] in the Discovery ACK.
+    ///
+    /// The field is 32 bytes on the wire; a longer name is truncated.
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.identity.model = model.into();
+        self
+    }
+
+    /// Report `serial` instead of [`FAKE_SERIAL`] in the Discovery ACK.
+    ///
+    /// The field is 16 bytes on the wire; a longer serial is truncated.
+    pub fn serial(mut self, serial: impl Into<String>) -> Self {
+        self.identity.serial = serial.into();
+        self
+    }
+
+    /// Report `user_name` instead of [`FAKE_USER_NAME`] in the Discovery ACK.
+    /// An empty string reports no user-defined name, as an unnamed camera does.
+    ///
+    /// The field is 16 bytes on the wire; a longer name is truncated.
+    pub fn user_name(mut self, user_name: impl Into<String>) -> Self {
+        self.identity.user_name = user_name.into();
+        self
+    }
+
     /// Start the fake camera and return a handle.
     pub async fn build(self) -> Result<FakeCamera, std::io::Error> {
         let mut register_map =
@@ -209,6 +246,7 @@ impl FakeCameraBuilder {
             register_map.set_max_on_wire(max);
         }
         register_map.enforce_heartbeat(self.enforce_heartbeat);
+        register_map.set_mac(self.identity.mac);
         let regs = Arc::new(Mutex::new(register_map));
 
         let acq_start = Arc::new(Notify::new());
@@ -243,8 +281,12 @@ impl FakeCameraBuilder {
                 counters: counters.clone(),
                 refuse_register_commands: self.refuse_register_commands,
             };
+            let identity = self.identity;
             tokio::spawn(async move {
-                gvcp_server::run(socket, regs, acq_start, acq_stop, bind_ip, options).await;
+                gvcp_server::run(
+                    socket, regs, acq_start, acq_stop, bind_ip, options, identity,
+                )
+                .await;
             })
         };
 

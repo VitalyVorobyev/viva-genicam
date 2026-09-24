@@ -20,18 +20,30 @@ opaque string without `/`).
 - **Payload (JSON):**
   ```json
   {
-    "id": "cam0",
-    "name": "Sony IMX421 GigE Camera",
+    "id": "cam-000cdf065b2f",
+    "name": "Left",
     "model": "SPC-3000",
     "serial": "SN12345678",
-    "api_version": 2
+    "api_version": 3,
+    "ip": "192.168.1.10",
+    "mac": "00:0C:DF:06:5B:2F",
+    "user_name": "Left",
+    "manufacturer": "Sony"
   }
   ```
 - **Rust type:** `DeviceAnnounce` in `viva-zenoh-api`
 - **Semantics:** The app subscribes to `genicam/devices/*/announce`. Any device not seen
   for more than 6 seconds is considered lost and removed from the discovered list.
+- **Identity:** for GigE Vision, `id` is `cam-` plus the MAC as lowercase hex
+  (`viva_zenoh_api::gige_device_id`) — the one identifier that survives an address
+  change. `name` is the user-defined name, else the model, else the address. `serial` is
+  the device's own serial, empty when it reports none (services before version 3 put the
+  device id there). `ip`, `mac`, `user_name` and `manufacturer` are optional and absent
+  when unknown; USB3 Vision has no `ip` or `mac`. The app labels a device by its
+  user-defined name, else serial, else address, so identical cameras stay distinguishable
+  ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional (`null`/absent means the service is pre-versioning). The app
-  compares this against `viva_zenoh_api::API_VERSION` (currently `2`). On mismatch or
+  compares this against `viva_zenoh_api::API_VERSION` (currently `3`). On mismatch or
   absence, the app emits an `api-version-mismatch` Tauri event (see below) and still
   discovers the device — no hard rejection.
 

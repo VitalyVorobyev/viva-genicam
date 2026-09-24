@@ -14,13 +14,12 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let key = viva_zenoh_api::keys::announce(&config.device_id);
-    let announce = DeviceAnnounce {
-        id: config.device_id.clone(),
-        name: config.device_name.clone(),
-        model: config.model.clone(),
-        serial: config.serial.clone(),
-        api_version: Some(viva_zenoh_api::API_VERSION),
-    };
+    let announce = DeviceAnnounce::new(
+        config.device_id.clone(),
+        config.device_name.clone(),
+        config.model.clone(),
+        config.serial.clone(),
+    );
     let payload = match serde_json::to_vec(&announce) {
         Ok(p) => p,
         Err(e) => {

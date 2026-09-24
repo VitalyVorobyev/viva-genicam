@@ -17,8 +17,8 @@ promotes something out of a later phase because a user with hardware appeared.
 
 A minor, not a patch. Three reasons, and only the third is about semver strictly:
 `NodeDecl::Integer` gains a field and `#[non_exhaustive]` sits on the enum rather
-than the variant; `DeviceAnnounce` gains fields and has no `#[non_exhaustive]` at
-all; and `^0.5` resolves to any 0.5.x, so a patch that changes what 448 registers
+than the variant; `DeviceAnnounce` has gained fields and `#[non_exhaustive]`, so
+struct literals of it no longer compile outside the crate; and `^0.5` resolves to any 0.5.x, so a patch that changes what 448 registers
 decode to would reach dependents on their next `cargo update`. 0.4.0 had to
 become a minor for exactly that reason, and the lesson is worth restating rather
 than relearning.
@@ -44,9 +44,10 @@ than relearning.
   address, refuses reads of `WO` registers and can refuse READREG, so it can
   contradict us on both. Neither reporter has confirmed on hardware.
   **SVC-08** — one `WO` node failing a whole feature snapshot — still gates.
-- **SVC-07 + ST-24 + API-13** — two identical cameras are indistinguishable in
-  Studio ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), because the service announces the device id as the
-  serial and drops the user-defined name and the address.
+- ~~**Device identity.**~~ **Done.** Two identical cameras were indistinguishable
+  in Studio ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)), because the service announced the device id as
+  the serial and dropped the user-defined name and the address. The reporter has
+  not confirmed on their cameras yet.
 
 **What does not gate it.** The Lucid event-camera contribution
 ([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)) depends on a contributor's judgement and their hardware; take

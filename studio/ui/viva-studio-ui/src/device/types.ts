@@ -2,12 +2,22 @@
 // Kept in sync with the Tauri backend serialization.
 
 export interface DeviceInfo {
+  /** Stable device id; for GigE `cam-<mac hex>` in both embedded and remote mode. */
   id: string;
+  /** User-defined name, else the model, else the address. */
   name: string;
   model: string;
+  /** Serial as the device reports it; empty when it reports none. */
   serial: string;
   /** Transport type: "gige", "usb3", or "zenoh" (remote service). */
   transport?: string;
+  /** Current IPv4 address; absent for USB3 and from services before API v3. */
+  ip?: string;
+  /** MAC address as `AA:BB:CC:DD:EE:FF`. */
+  mac?: string;
+  /** User-defined device name, when one is set. */
+  user_name?: string;
+  manufacturer?: string;
 }
 
 export type ConnectionState =

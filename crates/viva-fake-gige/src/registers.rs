@@ -1199,6 +1199,16 @@ impl RegisterMap {
         self.write(HEARTBEAT_TIMEOUT, &timeout_ms.to_be_bytes());
     }
 
+    /// Report `mac` from the bootstrap MAC registers instead of [`FAKE_MAC`],
+    /// so they agree with a Discovery ACK built from the same identity.
+    pub fn set_mac(&mut self, mac: [u8; 6]) {
+        let high = u32::from(u16::from_be_bytes([mac[0], mac[1]]));
+        let low = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+        self.regs
+            .insert(DEVICE_MAC_HIGH, high.to_be_bytes().to_vec());
+        self.regs.insert(DEVICE_MAC_LOW, low.to_be_bytes().to_vec());
+    }
+
     /// The heartbeat window this device reports, in milliseconds.
     pub fn heartbeat_timeout_ms(&self) -> u32 {
         let data = self.read(HEARTBEAT_TIMEOUT, 4);
@@ -1503,6 +1513,17 @@ mod tests {
         assert_eq!(&high[..2], &[0, 0], "top two bytes are reserved");
         let mac = [high[2], high[3], low[0], low[1], low[2], low[3]];
         assert_eq!(mac, FAKE_MAC);
+    }
+
+    #[test]
+    fn set_mac_rewrites_the_bootstrap_mac() {
+        let mut regs = map();
+        let other = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+        regs.set_mac(other);
+        let high = regs.read(DEVICE_MAC_HIGH, 4);
+        let low = regs.read(DEVICE_MAC_LOW, 4);
+        assert_eq!(&high[..2], &[0, 0], "top two bytes are reserved");
+        assert_eq!([high[2], high[3], low[0], low[1], low[2], low[3]], other);
     }
 
     #[test]

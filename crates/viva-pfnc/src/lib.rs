@@ -33,15 +33,17 @@ pub enum PixelFormat {
     /// ([#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)).
     ///
     /// **Vendor-defined, not PFNC**: bit 31 of the code is set, which is how
-    /// PFNC marks a format outside its own table. The stream carries events,
+    /// PFNC marks a format outside its own table — hence the `VendorLucid`
+    /// prefix, so a Lucid extension cannot read as a standard format name.
+    /// The stream carries events,
     /// not pixels, so [`PixelFormat::bytes_per_pixel`] answers the size of one
     /// event *word* (16 bits) — the depth the code's own bits 23-16 declare,
     /// and the same answer [`PixelFormat::Unknown`] would derive for it. A
     /// block's length is not `width * height` times that.
-    EvsEvt30 = 0x8110_0E30,
+    VendorLucidEvsEvt30 = 0x8110_0E30,
     /// Prophesee EVT 2.1 event stream, 64-bit event words. Vendor-defined; see
-    /// [`PixelFormat::EvsEvt30`].
-    EvsEvt21 = 0x8140_0E21,
+    /// [`PixelFormat::VendorLucidEvsEvt30`].
+    VendorLucidEvsEvt21 = 0x8140_0E21,
     /// Unknown PFNC code reported by the device.
     Unknown(u32),
 }
@@ -70,8 +72,8 @@ impl PixelFormat {
             0x0110_0011 => PixelFormat::BayerBG16,
             0x0218_0014 => PixelFormat::RGB8Packed,
             0x0218_0015 => PixelFormat::BGR8Packed,
-            0x8110_0E30 => PixelFormat::EvsEvt30,
-            0x8140_0E21 => PixelFormat::EvsEvt21,
+            0x8110_0E30 => PixelFormat::VendorLucidEvsEvt30,
+            0x8140_0E21 => PixelFormat::VendorLucidEvsEvt21,
             other => PixelFormat::Unknown(other),
         }
     }
@@ -99,8 +101,8 @@ impl PixelFormat {
             PixelFormat::BayerBG16 => 0x0110_0011,
             PixelFormat::RGB8Packed => 0x0218_0014,
             PixelFormat::BGR8Packed => 0x0218_0015,
-            PixelFormat::EvsEvt30 => 0x8110_0E30,
-            PixelFormat::EvsEvt21 => 0x8140_0E21,
+            PixelFormat::VendorLucidEvsEvt30 => 0x8110_0E30,
+            PixelFormat::VendorLucidEvsEvt21 => 0x8140_0E21,
             PixelFormat::Unknown(code) => code,
         }
     }
@@ -130,8 +132,8 @@ impl PixelFormat {
             | PixelFormat::BayerRG16
             | PixelFormat::BayerGB16
             | PixelFormat::BayerBG16 => Some(2),
-            PixelFormat::EvsEvt30 => Some(2),
-            PixelFormat::EvsEvt21 => Some(8),
+            PixelFormat::VendorLucidEvsEvt30 => Some(2),
+            PixelFormat::VendorLucidEvsEvt21 => Some(8),
             PixelFormat::Unknown(code) => PixelFormat::bytes_from_code(code),
         }
     }
@@ -186,8 +188,8 @@ impl PixelFormat {
             "BayerBG16" => PixelFormat::BayerBG16,
             "RGB8Packed" | "RGB8" => PixelFormat::RGB8Packed,
             "BGR8Packed" | "BGR8" => PixelFormat::BGR8Packed,
-            "EVT3_0" => PixelFormat::EvsEvt30,
-            "EVT2_1" => PixelFormat::EvsEvt21,
+            "EVT3_0" => PixelFormat::VendorLucidEvsEvt30,
+            "EVT2_1" => PixelFormat::VendorLucidEvsEvt21,
             _ => PixelFormat::Unknown(0),
         }
     }
@@ -246,8 +248,8 @@ impl fmt::Display for PixelFormat {
             PixelFormat::BayerBG16 => f.write_str("BayerBG16"),
             PixelFormat::RGB8Packed => f.write_str("RGB8Packed"),
             PixelFormat::BGR8Packed => f.write_str("BGR8Packed"),
-            PixelFormat::EvsEvt30 => f.write_str("EVT3_0"),
-            PixelFormat::EvsEvt21 => f.write_str("EVT2_1"),
+            PixelFormat::VendorLucidEvsEvt30 => f.write_str("EVT3_0"),
+            PixelFormat::VendorLucidEvsEvt21 => f.write_str("EVT2_1"),
             PixelFormat::Unknown(code) => write!(f, "Unknown(0x{code:08X})"),
         }
     }
@@ -280,8 +282,8 @@ mod tests {
             PixelFormat::BayerBG16,
             PixelFormat::RGB8Packed,
             PixelFormat::BGR8Packed,
-            PixelFormat::EvsEvt30,
-            PixelFormat::EvsEvt21,
+            PixelFormat::VendorLucidEvsEvt30,
+            PixelFormat::VendorLucidEvsEvt21,
         ];
 
         for fmt in formats {
@@ -312,16 +314,16 @@ mod tests {
         assert_eq!(PixelFormat::BayerRG8.bytes_per_pixel(), Some(1));
         assert_eq!(PixelFormat::BayerRG16.bytes_per_pixel(), Some(2));
         assert_eq!(PixelFormat::BayerGR16.bytes_per_pixel(), Some(2));
-        assert_eq!(PixelFormat::EvsEvt30.bytes_per_pixel(), Some(2));
-        assert_eq!(PixelFormat::EvsEvt21.bytes_per_pixel(), Some(8));
+        assert_eq!(PixelFormat::VendorLucidEvsEvt30.bytes_per_pixel(), Some(2));
+        assert_eq!(PixelFormat::VendorLucidEvsEvt21.bytes_per_pixel(), Some(8));
         assert_eq!(PixelFormat::Unknown(0).bytes_per_pixel(), None);
     }
 
     #[test]
     fn event_format_names_roundtrip() {
         for (name, format) in [
-            ("EVT3_0", PixelFormat::EvsEvt30),
-            ("EVT2_1", PixelFormat::EvsEvt21),
+            ("EVT3_0", PixelFormat::VendorLucidEvsEvt30),
+            ("EVT2_1", PixelFormat::VendorLucidEvsEvt21),
         ] {
             assert_eq!(PixelFormat::from_name(name), format);
             assert_eq!(format.to_string(), name);
@@ -353,8 +355,8 @@ mod tests {
             PixelFormat::BayerBG16,
             PixelFormat::RGB8Packed,
             PixelFormat::BGR8Packed,
-            PixelFormat::EvsEvt30,
-            PixelFormat::EvsEvt21,
+            PixelFormat::VendorLucidEvsEvt30,
+            PixelFormat::VendorLucidEvsEvt21,
         ];
 
         for fmt in formats {

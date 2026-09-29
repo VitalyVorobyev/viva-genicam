@@ -35,7 +35,7 @@ pub fn pfnc_to_zenoh(pf: pfnc::PixelFormat) -> ZenohPixelFormat {
 pub fn expected_payload_len(pf: pfnc::PixelFormat, width: u32, height: u32) -> Option<usize> {
     if matches!(
         pf,
-        pfnc::PixelFormat::EvsEvt30 | pfnc::PixelFormat::EvsEvt21
+        pfnc::PixelFormat::VendorLucidEvsEvt30 | pfnc::PixelFormat::VendorLucidEvsEvt21
     ) {
         return None;
     }
@@ -84,11 +84,11 @@ mod tests {
         // Size Y is the variable encoded payload length. Neither event format
         // may be validated as width * height * event-word-size.
         assert_eq!(
-            expected_payload_len(pfnc::PixelFormat::EvsEvt30, 1, 64_000),
+            expected_payload_len(pfnc::PixelFormat::VendorLucidEvsEvt30, 1, 64_000),
             None
         );
         assert_eq!(
-            expected_payload_len(pfnc::PixelFormat::EvsEvt21, 1, 64_000),
+            expected_payload_len(pfnc::PixelFormat::VendorLucidEvsEvt21, 1, 64_000),
             None
         );
     }

@@ -227,8 +227,8 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 #     cd studio/apps/viva-studio-tauri && cargo tauri dev
 
 # FORCEIP / persistent IP against the fake (T1: cargo run -p viva-fake-gige)
-cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force --iface 127.0.0.1
-cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --iface 127.0.0.1
+cargo run -p viva-camctl -- --iface 127.0.0.1 set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force
+cargo run -p viva-camctl -- --iface 127.0.0.1 set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
 ```
 
 **Important**: both sides need their own Zenoh config, and neither is

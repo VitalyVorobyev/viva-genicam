@@ -15,8 +15,7 @@ User-facing documentation lives in the mdBook (`book/`); decision history in
 - **Pre-1.0**: no backward-compatibility guarantees. Clear design and structure
   take priority over API stability, and breaking releases are expected — in
   practice every minor so far has become breaking because a user's camera needed
-  it rather than because we planned the window. The [roadmap](roadmap.md) names
-  the release in flight and what gates it.
+  it rather than because we planned the window.
 
 ## Layered architecture
 
@@ -77,7 +76,7 @@ Implementations:
   spawns a task that reads `GevHeartbeatTimeout` and refreshes the device's
   timer at a quarter of it, and dropping one retires that task. Holding the
   transport is therefore sufficient to hold control privilege — nothing above
-  this layer runs a heartbeat (SR-05; three consumers used to).
+  this layer runs a heartbeat.
 - `MockIo` — in-memory register map for tests.
 - `NullIo` — no-op backend for offline XML browsing (studio, wasm).
 
@@ -85,9 +84,9 @@ Implementations:
 tracks the dependency graph for cache invalidation. Supports `pValue`
 delegation: Integer/Float/Enum/Boolean/Command nodes can delegate to `IntReg`
 or other backing nodes. The `Node` enum covers Integer, Float, Enum, Boolean,
-Command, Category, SwissKnife, Converter, IntConverter, String. Introspection
-API (`node_names()`, `dependents()`, `categories()`, `kind_name()`,
-`access_mode()`) serves external consumers such as the studio.
+Command, Category, SwissKnife, Converter, IntConverter, String, Register.
+Introspection API (`node_names()`, `dependents()`, `categories()`,
+`kind_name()`, `access_mode()`) serves external consumers such as the studio.
 
 **`GigeDevice`** (`viva-gige`) — async UDP wrapper for GVCP discovery/control
 and GVSP streaming. Uses the proper GVCP wire format (0x42 key byte, 4-byte
@@ -127,8 +126,8 @@ publication.
 
 Each crate defines its own typed error enum; errors crossing crate boundaries
 carry their source (`#[source]` chains) rather than flattening into strings.
-Existing `Transport(String)`-style variants are acknowledged debt slated for
-the 0.4.0 consolidation ([roadmap](roadmap.md) Phase 5). Panics must never
+Existing `Transport(String)`-style variants are acknowledged debt, tracked as
+API-03 in [roadmap](roadmap.md) Phase 5. Panics must never
 cross a public API in response to remote input — a malformed camera XML or a
 hostile packet is an `Err`, not a crash.
 
@@ -139,19 +138,12 @@ strategy: no hardware, CI-friendly, deterministic, and fast enough to run the
 full integration suite on every push
 (see [ADR-0013](adrs/adr0013-fake-camera-first-testing.md)).
 
-**Realism policy** (hard-learned): a fake must implement the *standard's*
-semantics, not mirror the implementation's assumptions. This has now failed
-three times, each time with producer and consumer agreeing with each other and
-jointly disagreeing with the standard, so every test passed:
-
-1. The fake's GVSP sender and our receiver shared the same wrong SCPS
-   interpretation (both ignored the 36-byte IP+UDP+GVSP overhead).
-2. The fake accepted unaligned READMEM that real Hikrobot hardware rejects.
-3. The fake emitted the Discovery ACK MAC at the same wrong offset the parser
-   read it from (#57).
-
-[ADR-0019](adrs/adr0019-transport-conformance-and-spec-derived-fakes.md) turns
-the policy into an enforced one. Consequences:
+**Realism policy**: a fake must implement the *standard's* semantics, not
+mirror the implementation's assumptions — fake and client that share a wrong
+assumption pass every test together
+([ADR-0013](adrs/adr0013-fake-camera-first-testing.md),
+[ADR-0019](adrs/adr0019-transport-conformance-and-spec-derived-fakes.md) record
+the cases). Consequences:
 
 - Fake behavior is derived from the spec text, not from what our receiver
   happens to send.

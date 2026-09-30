@@ -73,6 +73,12 @@ done
 # UTF-8 byte-order mark (#122). Every other one starts at `<`, which is why a
 # BOM went unnoticed until a user hit it.
 #
+# The scanCONTROL 850050 (a laser profile scanner) came without a bug report:
+# it was asked for while merging the contributor's unrelated PFNC patch (#93).
+# Its four <Register> nodes, FileAccessBuffer among them (the node #70's JAI
+# also skipped), are evidence for backlog GA-09 and are why the same contributor
+# asked for NodeMap::register_address in #92.
+#
 # Gist URLs are pinned to a revision SHA. The bare `/raw` form follows the
 # latest revision, so an edit upstream would silently change what the corpus
 # tests run against.
@@ -98,6 +104,10 @@ done <<<"$USER_CONTRIBUTED"
 # Same, but the vendor tool exports the description as a ZIP. The member name is
 # a firmware build number and carries no model information, so we rename on
 # extraction.
+#
+# The first four FLIR documents are stand-ins attached to #45. The fifth,
+# BFS-PGE-31S4C-C, is the #45 reporter's own camera, dumped with
+# `viva-camctl xml` after 0.3.0 fixed the defect that made it unopenable.
 #   name<TAB>url<TAB>member<TAB>issue
 USER_CONTRIBUTED_ZIP=$(
   cat <<'EOF'

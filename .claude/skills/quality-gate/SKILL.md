@@ -40,9 +40,9 @@ only thing that covers it is CI's `tauri-lint` job. Run:
 cd studio/apps/viva-studio-tauri/src-tauri && cargo clippy --all-targets -- -D warnings
 ```
 
-Adding a variant to a public enum broke this and nothing local caught it
-(#105 → #106). Run it whenever a public `enum`, trait or signature changes in
-the library workspace, not only when `studio/` files are edited.
+Run it whenever a public `enum`, trait or signature changes in the library
+workspace, not only when `studio/` files are edited — a new public enum variant
+can break this crate with nothing else local noticing.
 
 ## `crates/viva-pygenicam` is a FOURTH workspace — lint it separately
 
@@ -54,9 +54,8 @@ It is `exclude`d from the root workspace (`Cargo.toml`), so
 cd crates/viva-pygenicam && cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
 
-A new clippy lint in a rustc release turned three workspaces red at once and
-this was the one the local gates missed, because it is the only one this file
-did not name.
+Run it on every toolchain update too: a new clippy lint can turn it red while
+every other local gate stays green.
 
 ## The Python bindings are not covered by `cargo test` (run them when the pyo3
 ## surface changes)
@@ -66,11 +65,10 @@ a `#[pyo3]` signature is only checked by the `Python wheels` CI workflow. There
 is no compile-time link between the pyo3 function and the hand-written wrapper
 in `crates/viva-pygenicam/python/viva_genicam/`, which calls it **positionally**.
 
-Renaming an argument in `src/camera.rs` without renaming it in `camera.py`,
-`_native.pyi`, the tests and the examples produced a silent misconfiguration
-rather than a `TypeError` — Python's `bool` subclasses `int`, so `False` arrived
-as `0` (#104 → #106). When touching the pyo3 surface, grep the whole crate plus
-`book/src/python/` for the old name before pushing.
+A renamed or reordered argument that is not updated in `camera.py`,
+`_native.pyi`, the tests and the examples is a silent misconfiguration, not a
+`TypeError` (Python's `bool` subclasses `int`). When touching the pyo3 surface,
+grep the whole crate plus `book/src/python/` for the old name before pushing.
 
 ## Notes
 

@@ -1348,7 +1348,7 @@ async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
         builder
             .width(WIDTH)
             .height(HEIGHT)
-            .pixel_format(PixelFormat::EvsEvt30.code())
+            .pixel_format(PixelFormat::VendorLucidEvsEvt30.code())
     })
     .await;
     let device_info = discover_fake().await;
@@ -1387,7 +1387,7 @@ async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
         .expect("timeout waiting for legacy EVT frame")
         .expect("stream error")
         .expect("stream ended without a legacy EVT frame");
-    assert_eq!(legacy.pixel_format, PixelFormat::EvsEvt30);
+    assert_eq!(legacy.pixel_format, PixelFormat::VendorLucidEvsEvt30);
     assert_eq!((legacy.width, legacy.height), (WIDTH, HEIGHT));
     assert_eq!(legacy.payload.len(), (WIDTH * HEIGHT) as usize);
 

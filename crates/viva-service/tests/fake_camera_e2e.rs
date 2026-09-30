@@ -577,7 +577,7 @@ async fn e2e_event_blocks_are_published_on_their_own_topic() {
         builder
             .width(WIDTH)
             .height(HEIGHT)
-            .pixel_format(PixelFormat::EvsEvt30.code())
+            .pixel_format(PixelFormat::VendorLucidEvsEvt30.code())
     })
     .await;
 

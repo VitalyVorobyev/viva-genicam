@@ -159,7 +159,7 @@ fn classify_completed_block(
     trailer_size_y: u32,
 ) -> GenericStreamBlock {
     let inner = match pixel_format {
-        PixelFormat::EvsEvt30 => StreamBlock::Evs(EvsBlock {
+        PixelFormat::VendorLucidEvsEvt30 => StreamBlock::Evs(EvsBlock {
             payload,
             format: crate::evs::EvsFormat::Evt30,
             ts_dev: Some(timestamp),
@@ -169,7 +169,7 @@ fn classify_completed_block(
             chunks,
             ts_host,
         }),
-        PixelFormat::EvsEvt21 => StreamBlock::Evs(EvsBlock {
+        PixelFormat::VendorLucidEvsEvt21 => StreamBlock::Evs(EvsBlock {
             payload,
             format: crate::evs::EvsFormat::Evt21,
             ts_dev: Some(timestamp),
@@ -1301,7 +1301,7 @@ fn windows_frame_receiver(
                     frame.trailer_size_y = size_y;
                     let is_evs = matches!(
                         frame.pixel_format,
-                        PixelFormat::EvsEvt30 | PixelFormat::EvsEvt21
+                        PixelFormat::VendorLucidEvsEvt30 | PixelFormat::VendorLucidEvsEvt21
                     );
                     let expected_bytes = frame.width as usize
                         * frame.height as usize
@@ -2069,7 +2069,7 @@ mod tests {
             payload.clone(),
             1,
             64_000,
-            PixelFormat::EvsEvt30,
+            PixelFormat::VendorLucidEvsEvt30,
             Some(chunks),
             11,
             None,
@@ -2079,7 +2079,7 @@ mod tests {
         let frame = block.into_legacy_frame();
         assert_eq!(frame.payload, payload);
         assert_eq!((frame.width, frame.height), (1, 64_000));
-        assert_eq!(frame.pixel_format, PixelFormat::EvsEvt30);
+        assert_eq!(frame.pixel_format, PixelFormat::VendorLucidEvsEvt30);
         assert_eq!(frame.ts_dev, Some(11));
         assert_eq!(
             frame

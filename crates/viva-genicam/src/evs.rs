@@ -18,8 +18,8 @@ pub enum EvsFormat {
 impl EvsFormat {
     pub(crate) const fn pixel_format(self) -> PixelFormat {
         match self {
-            Self::Evt30 => PixelFormat::EvsEvt30,
-            Self::Evt21 => PixelFormat::EvsEvt21,
+            Self::Evt30 => PixelFormat::VendorLucidEvsEvt30,
+            Self::Evt21 => PixelFormat::VendorLucidEvsEvt21,
         }
     }
 }

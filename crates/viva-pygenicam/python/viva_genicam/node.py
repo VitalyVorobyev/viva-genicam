@@ -20,6 +20,7 @@ class NodeKind(str, Enum):
     CONVERTER = "Converter"
     INT_CONVERTER = "IntConverter"
     STRING_REG = "StringReg"
+    REGISTER = "Register"
 
     @classmethod
     def _coerce(cls, value: str) -> "NodeKind | str":

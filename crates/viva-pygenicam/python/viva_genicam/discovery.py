@@ -96,7 +96,9 @@ def discover(
             its OS name (``"en0"``, or a GUID on Windows). ``viva-camctl
             --iface`` and ``viva-service --iface`` accept the same two
             spellings.
-        all: If True, enumerate all system interfaces and merge results.
+        all: If True, also search the loopback interface (where a local fake
+            camera answers). Every routable non-loopback interface is
+            searched either way.
 
     Returns:
         A list of ``GigeDeviceInfo`` — may be empty.

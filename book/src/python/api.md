@@ -93,11 +93,12 @@ class NodeKind(str, Enum):
     CONVERTER     = "Converter"
     INT_CONVERTER = "IntConverter"
     STRING_REG    = "StringReg"
+    REGISTER      = "Register"
 
 @dataclass(frozen=True)
 class NodeInfo:
     name: str
-    kind: str                          # a NodeKind value, or "Register"
+    kind: str                          # a NodeKind value
     access: Optional[str]              # declared: "RO" | "RW" | "WO" | None
     visibility: str                    # "Beginner" | "Expert" | "Guru" | "Invisible"
     display_name: Optional[str]
@@ -112,8 +113,7 @@ class NodeInfo:
     def to_dict(self) -> dict: ...
 ```
 
-`kind` is a plain string. Raw `<Register>` nodes report `"Register"`, which
-has no `NodeKind` member. See
+`kind` is a plain string holding a `NodeKind` value. See
 [Control & introspection → Node metadata](control.md#node-metadata) for what
 `effective_access` means.
 

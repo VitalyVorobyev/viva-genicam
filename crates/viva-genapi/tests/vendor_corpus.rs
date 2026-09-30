@@ -55,8 +55,8 @@ const EXPECTED_SKIPS: &[(&str, &str)] = &[
 /// Use `""` as the substring to allow a tag unconditionally.
 const EXPECTED_SKIP_REASONS: &[(&str, &str)] = &[
     // GA-09 phase two: `<pLength>`, a register length resolved from another
-    // node at runtime. 21 of the corpus's 63 `<Register>` declarations use it;
-    // the other 42 are supported and must now build.
+    // node at runtime. 22 of the corpus's 64 `<Register>` declarations use it
+    // (recounted 2026-09-30); the other 42 are supported and must build.
     ("Register", "<pLength>"),
 ];
 

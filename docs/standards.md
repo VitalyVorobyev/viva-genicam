@@ -45,7 +45,7 @@ Both GigE Vision and USB3 Vision use GenCP for their control channels.
 GigE Vision adds two protocols on top of GenCP:
 
 - **GVCP** (Control Protocol) -- UDP-based device discovery, register access, event delivery, and action commands. Cameras listen on port 3956.
-- **GVSP** (Streaming Protocol) -- UDP-based image transfer with packet reassembly and resend support.
+- **GVSP** (Streaming Protocol) -- UDP-based image transfer with packet reassembly; packet resend is specified but not yet wired into the receive path.
 
 **In viva-genicam:** `viva-gige` implements both protocols.
 

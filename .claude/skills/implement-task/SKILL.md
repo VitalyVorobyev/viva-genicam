@@ -14,7 +14,8 @@ Argument: a backlog ID (e.g. `SR-01`). Drives the task from plan to PR.
   the task touches.
 - Read any ADR the task touches (`docs/adrs/README.md` index).
 - Use codegraph (`codegraph_context`, `codegraph_trace`) to scope the
-  affected code — do not grep-explore what the index already knows.
+  affected code — do not grep-explore what the index already knows. If the
+  codegraph MCP server is unavailable, scope with an Explore subagent or grep.
 
 ## 2. Plan
 
@@ -50,5 +51,6 @@ needed) until all gates pass.
 
 ## 6. After merge
 
-Update the task's row in `docs/backlog.md` to status `done`, and include
-that change in the next PR (or a small docs PR) — never as a direct push.
+Delete the task's row from `docs/backlog.md` in the same PR (the backlog's
+rule: it lists only open work); `CHANGELOG.md` records what shipped. Never
+push to main directly.

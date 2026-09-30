@@ -5,19 +5,22 @@ description: Cut a release: version bump across all touchpoints, changelog, PR, 
 
 # Release
 
-Follow CLAUDE.md "Version Bumps" — one version shared by all workspace
-crates plus the Python package. `studio/` crates are unpublished and not
-versioned by this process.
+One version is shared by all workspace crates plus the Python package; this
+skill is the canonical list of where it lives. `studio/` crates are unpublished
+and not versioned by this process.
 
 ## 1. Bump — all six touchpoints together
 
-1. `Cargo.toml` — `[workspace.package] version`
+1. `Cargo.toml` — `[workspace.package] version` (every crate with
+   `version.workspace = true` picks it up)
 2. `crates/viva-pygenicam/Cargo.toml` — `[package] version` (does not
    inherit from the workspace)
-3. `crates/viva-pygenicam/pyproject.toml` — `[project] version`
+3. `crates/viva-pygenicam/pyproject.toml` — `[project] version` (what PyPI
+   reads)
 4. `crates/viva-pygenicam/python/viva_genicam/__init__.py` — `__version__`
 5. `CHANGELOG.md` — rename `[Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`,
    add a fresh empty `[Unreleased]` section, add the footer link line
+   (Keep a Changelog categories: Added / Changed / Fixed / …)
 6. **Intra-workspace dependency ranges** in every `crates/*/Cargo.toml`
    and `studio/**/Cargo.toml` — `viva-foo = { version = "0.2", path = ... }`.
    These are caret ranges, so a minor bump makes them unsatisfiable once
@@ -27,7 +30,7 @@ versioned by this process.
 A missed file breaks the wheel build or publishes wrong metadata.
 
 Do **not** add a version-pinned install snippet to a README — both use
-`cargo add viva-genicam` precisely so there is no eighth thing to forget.
+`cargo add viva-genicam` precisely so there is no seventh thing to forget.
 See "Version Bumps" in `CLAUDE.md`.
 
 ## 2. Verify locally

@@ -89,6 +89,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A feature read after a command or a related write could answer from a
+  stale cache** (backlog `GA-24`, the gap noted on
+  [#120](https://github.com/VitalyVorobyev/viva-genicam/issues/120) and
+  [#121](https://github.com/VitalyVorobyev/viva-genicam/issues/121)).
+  `<pInvalidator>` — a register's "when that node changes, my cached value is
+  stale" — was dropped by the parser, so nothing but a write to a node's own
+  `pValue`, address or predicate providers ever refreshed it: after
+  `execute("UserSetLoad")`, `get("ExposureTime")` kept returning the value
+  from before the reset until you reconnected. Register nodes (`IntReg`,
+  `MaskedIntReg`, `FloatReg`, `StringReg`, `Register`, and every entry of a
+  `StructReg`) now keep their invalidators, and the nodemap refreshes them —
+  and, transitively, the features built on them — when an invalidator is
+  written. `NodeDecl::Integer`/`Float`, `StringDecl` and `RegisterDecl` gain
+  an `invalidators` field. The vendor corpus declares 21 477 of these in 35 of
+  38 documents; in the FLIR BFS-PGE-31S4C description, 171 registers name
+  `UserSetLoad`'s register directly. Values a camera changes on its own, such
+  as `ExposureTime` under auto exposure, are governed by `<Cachable>` and
+  `<PollingTime>`, which are still not honoured (`GA-05`). The fake camera's
+  `ExposureTime` now sits behind a `FloatReg` that declares the invalidation
+  the way FLIR's does, so the integration test checks the refreshed value
+  rather than only the device register.
+
 - **A one-bit unsigned `<MaskedIntReg>` could be cleared but not set** (backlog
   `GA-32`, found while writing the #135 test; not reported). The write path
   took a bitfield's signedness from `min < 0`, while the read path used

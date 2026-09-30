@@ -62,6 +62,23 @@ fn register_predicate_dependencies(
     }
 }
 
+/// Record `node_name` as stale whenever any of its `<pInvalidator>` nodes changes.
+///
+/// An invalidator is often also the node's address or selector provider, so a
+/// pair that is already recorded is not pushed again.
+fn register_invalidator_dependencies(
+    dependents: &mut HashMap<String, Vec<String>>,
+    node_name: &str,
+    invalidators: &[String],
+) {
+    for provider in invalidators {
+        let list = dependents.entry(provider.clone()).or_default();
+        if !list.iter().any(|dependent| dependent == node_name) {
+            list.push(node_name.to_string());
+        }
+    }
+}
+
 fn ensure_readable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
     if matches!(access, AccessMode::WO) {
         return Err(GenApiError::Access(name.to_string()));
@@ -1847,6 +1864,7 @@ fn build_node(
             p_min,
             value,
             predicates,
+            invalidators,
         } => {
             if let Some(ref addr) = addressing {
                 register_addressing_dependency(dependents, &name, addr);
@@ -1867,6 +1885,7 @@ fn build_node(
                     .push(name.clone());
             }
             register_predicate_dependencies(dependents, &name, &predicates);
+            register_invalidator_dependencies(dependents, &name, &invalidators);
             let node = IntegerNode {
                 name: name.clone(),
                 meta,
@@ -1908,6 +1927,7 @@ fn build_node(
             encoding,
             byte_order,
             predicates,
+            invalidators,
         } => {
             if let Some(ref addr) = addressing {
                 register_addressing_dependency(dependents, &name, addr);
@@ -1922,6 +1942,7 @@ fn build_node(
                     .push(name.clone());
             }
             register_predicate_dependencies(dependents, &name, &predicates);
+            register_invalidator_dependencies(dependents, &name, &invalidators);
             let node = FloatNode {
                 name: name.clone(),
                 meta,
@@ -2212,6 +2233,7 @@ fn build_node(
             let name = decl.name;
             register_addressing_dependency(dependents, &name, &decl.addressing);
             register_predicate_dependencies(dependents, &name, &decl.predicates);
+            register_invalidator_dependencies(dependents, &name, &decl.invalidators);
             let node = StringNode {
                 name: name.clone(),
                 meta: decl.meta,
@@ -2226,6 +2248,7 @@ fn build_node(
             let name = decl.name;
             register_addressing_dependency(dependents, &name, &decl.addressing);
             register_predicate_dependencies(dependents, &name, &decl.predicates);
+            register_invalidator_dependencies(dependents, &name, &decl.invalidators);
             let node = RegisterNode {
                 name: name.clone(),
                 meta: decl.meta,

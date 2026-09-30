@@ -74,6 +74,8 @@ pub const TAG_P_IS_IMPLEMENTED: &str = "pIsImplemented";
 pub const TAG_P_IS_AVAILABLE: &str = "pIsAvailable";
 /// XML element referencing a node whose value locks the feature (RW→RO).
 pub const TAG_P_IS_LOCKED: &str = "pIsLocked";
+/// XML element naming a node whose change makes a register's cached value stale.
+pub const TAG_P_INVALIDATOR: &str = "pInvalidator";
 
 /// Handle a `<pIsImplemented>` / `<pIsAvailable>` / `<pIsLocked>` element.
 ///
@@ -99,6 +101,31 @@ pub fn handle_predicate_start(
     let trimmed = text.trim();
     if !trimmed.is_empty() {
         *slot = Some(trimmed.to_string());
+    }
+    Ok(true)
+}
+
+/// Handle a `<pInvalidator>` element on a register node.
+///
+/// Returns `true` when the element was consumed (caller should continue),
+/// `false` when the element name does not match and the caller should fall
+/// through to its own handling.
+///
+/// A register may declare any number of these — the vendor corpus has nodes
+/// with nineteen — so each non-empty reference is appended in declaration
+/// order. Empty text is ignored, as in [`handle_predicate_start`].
+pub fn handle_invalidator_start(
+    reader: &mut Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    invalidators: &mut Vec<String>,
+) -> Result<bool, XmlError> {
+    if event.name().as_ref() != TAG_P_INVALIDATOR {
+        return Ok(false);
+    }
+    let text = read_text_start(reader, event)?;
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        invalidators.push(trimmed.to_string());
     }
     Ok(true)
 }

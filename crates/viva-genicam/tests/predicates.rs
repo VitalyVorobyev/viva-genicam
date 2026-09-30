@@ -283,17 +283,15 @@ async fn execute_command_through_pvalue_changes_device_state() {
         .expect("UserSetLoad should execute");
     }
 
-    // Read the register through the transport rather than through
-    // `Camera::get`. Two reasons, and both are the point of the test:
+    // Both reads are asserted, and they prove different things:
     //
-    //  * It asserts what the *camera* did, not what our nodemap believes. A
-    //    command that only returns `Ok` can be "verified" by a test that proves
-    //    nothing.
-    //  * `Camera::get` would still answer 20000 here. FLIR's `UserSetLoad`
-    //    declares `<pInvalidator>` on every feature it resets, and we parse
-    //    none of them (backlog `GA-24`), so nothing tells the cache it is
-    //    stale. That gap is real and filed; it must not also hide whether the
-    //    execute reached the device.
+    //  * The transport read asserts what the *camera* did, not what our
+    //    nodemap believes. A command that only returns `Ok` can be "verified"
+    //    by a test that proves nothing.
+    //  * The `Camera::get` read asserts that our cache learned about it.
+    //    Nothing we wrote touched `ExposureTime`; what makes it stale is the
+    //    `<pInvalidator>` on its register, which names `UserSetLoad`'s pValue
+    //    register the way FLIR's XML does (backlog `GA-24`).
     let raw = {
         let cam = camera.clone();
         tokio::task::spawn_blocking(move || {
@@ -310,5 +308,15 @@ async fn execute_command_through_pvalue_changes_device_state() {
         restored,
         viva_fake_gige::registers::DEFAULT_EXPOSURE_US,
         "UserSetLoad should have restored the default exposure on the device"
+    );
+
+    let reported = get_feature(&camera, "ExposureTime").await;
+    let reported: f64 = reported
+        .parse()
+        .unwrap_or_else(|_| panic!("ExposureTime should be a float, got {reported}"));
+    assert_eq!(
+        reported,
+        viva_fake_gige::registers::DEFAULT_EXPOSURE_US,
+        "Camera::get should re-read ExposureTime after UserSetLoad, not answer from a stale cache"
     );
 }

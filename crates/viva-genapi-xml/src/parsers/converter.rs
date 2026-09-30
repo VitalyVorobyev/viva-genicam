@@ -3,7 +3,7 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{NodeMetaBuilder, TAG_P_VALUE, handle_predicate_start};
+use super::{NodeMetaBuilder, TAG_P_VALUE, handle_invalidator_start, handle_predicate_start};
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
 use crate::{
@@ -329,6 +329,7 @@ pub fn parse_string(
     let mut addressing = AddressingBuilder::new(&name);
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
+    let mut invalidators = Vec::new();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -361,7 +362,9 @@ pub fn parse_string(
                     access = AccessMode::parse(&text)?;
                 }
                 _ => {
-                    if handle_predicate_start(reader, e, &mut predicates)? {
+                    if handle_predicate_start(reader, e, &mut predicates)?
+                        || handle_invalidator_start(reader, e, &mut invalidators)?
+                    {
                         // handled
                     } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
@@ -398,5 +401,6 @@ pub fn parse_string(
         addressing,
         access,
         predicates,
+        invalidators,
     }))
 }

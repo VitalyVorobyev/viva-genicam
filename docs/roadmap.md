@@ -90,9 +90,9 @@ eight.
 all.** The integer-codec defects came from users' cameras rather than from
 reading XML, and they have shipped — see the top of this file.
 
-- `pInvalidator` — **18 502 occurrences across 32 of 35 documents**, entirely
-  unparsed. Cache invalidation currently fires only on writes made through the
-  NodeMap.
+- `pInvalidator` — **21 477 occurrences across 35 of 38 documents**. Parsed on
+  register nodes and wired into cache invalidation (GA-24); invalidation still
+  fires only on writes made through the NodeMap.
 - `Cachable` (2 735 / 32) and `PollingTime` (327 / 28) — unparsed, so every
   readable node is cached until a dependency is written.
 - `pSelected` (1 534 / 31) — parsed with the direction inverted relative to the

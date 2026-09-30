@@ -119,9 +119,11 @@ def test_execute_runs_a_command_and_changes_the_camera(camera):
     camera.set("UserSetSelector", "Default")
     camera.execute("UserSetLoad")
 
-    # Re-connect rather than re-read: `UserSetLoad` declares no <pInvalidator>
-    # in the fake, and we would not parse one if it did (backlog GA-24), so the
-    # open camera's cache still holds 20000. A fresh nodemap reads the device.
+    # The open camera re-reads: the fake's exposure register names
+    # UserSetLoad's register in <pInvalidator>, as FLIR's XML does (GA-24).
+    assert camera.get("ExposureTime").startswith("5000")
+
+    # And a fresh nodemap agrees, so the device itself was reset.
     cams = vg.discover(timeout_ms=1500, all=True)
     reopened = vg.connect_gige(next(c for c in cams if c.ip.startswith("127.")))
     assert reopened.get("ExposureTime").startswith("5000")

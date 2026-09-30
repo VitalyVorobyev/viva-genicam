@@ -1187,6 +1187,7 @@ mod tests {
             p_min: None,
             value: None,
             predicates: Default::default(),
+            invalidators: vec![],
         };
         assert_eq!(decl_name(&int_decl), "W");
 

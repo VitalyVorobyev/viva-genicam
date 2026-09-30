@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-30
+
+Three changes need a read before upgrading. **`viva_zenoh_api::API_VERSION` is
+4**: event-vision blocks are published on `genicam/devices/{id}/evs`, never on
+`image`. **`PixelFormat::EvsEvt30`/`EvsEvt21` are renamed**
+`VendorLucidEvsEvt30`/`VendorLucidEvsEvt21`. And `NodeDecl::Integer`/`Float`,
+`StringDecl` and `RegisterDecl` **gain an `invalidators` field**, so code that
+builds them with struct literals, or destructures them without `..`, must add
+it. The most visible fix is `<pInvalidator>`: a read after `UserSetLoad`, or
+after any write the camera's XML links to a register, now refreshes instead of
+answering from the cache — the caveat given on #120 and #121, not yet
+confirmed on the reporter's hardware.
+
 ### Added
+
+- **Python `NodeKind.REGISTER`**, matching the `"Register"` kind that
+  `Node::kind_name()` already reported for raw `<Register>` nodes.
 
 - **Formulas can read a variable's minimum, maximum, increment or enumeration
   entry** (backlog `GA-29`, from
@@ -134,6 +150,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   access mode, range and enum entries and reports write-only and command
   nodes with `"value": null` without reading them. The test asserts on the
   fake device's own read log.
+
+### Documentation — not part of any published crate's code
+
+- **The book and crate READMEs were checked against the code**
+  ([#159](https://github.com/VitalyVorobyev/viva-genicam/pull/159)). Commands
+  that failed when copied are fixed (`grab_gige --ip`, `stream --count/--output`,
+  a `viva-genicam` README snippet that did not compile, a wrong Zenoh key
+  prefix, `viva-camctl` described as unpublished), and the packet-size pages
+  now say the default keeps the camera's `GevSCPSPacketSize` rather than
+  following the interface MTU. A new section covers event-vision capture with
+  `--save` and `--raw-out`. Each topic that was repeated across chapters now
+  has one home.
 
 ## [0.6.0] - 2026-09-24
 
@@ -1716,7 +1744,8 @@ Initial public release of the viva-genicam workspace.
 - `viva-fake-gige` -- In-process fake GigE Vision camera for self-contained integration testing (no external dependencies required)
 - `viva-fake-u3v` -- In-process fake USB3 Vision camera for testing
 
-[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.7.0
 [0.6.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.6.0
 [0.5.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.5.0
 [0.4.1]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.4.1

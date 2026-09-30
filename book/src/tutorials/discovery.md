@@ -102,8 +102,8 @@ Three entry points exist, and the difference matters more than it looks:
 
 | Function | Scans |
 |---|---|
-| `gige::discover(timeout)` | Every routable interface the library can enumerate |
-| `gige::discover_on_interface(timeout, name)` | One named interface |
+| `gige::discover(timeout)` | Every IPv4 interface the library can enumerate, except loopback |
+| `gige::discover_on_interface(timeout, name)` | One named interface — loopback too, if you name it |
 | `gige::discover_all(timeout)` | Every interface **including loopback** |
 
 Use `discover_all` only when you are talking to the [fake
@@ -131,16 +131,20 @@ If neither `viva-camctl list` nor `list_cameras` finds anything:
    another cable or port.
 2. **Subnets** — host NIC and camera must share a subnet. Two NICs on the same
    subnet confuse routing; avoid it.
-3. **Firewall** — allow UDP broadcast on the camera NIC. On Windows the
-   executable must be permitted for both "Private" and "Public" profiles. On
-   Linux with firewalld, GVCP replies arrive from source port 3956 and need an
-   explicit rule; see
+3. **Firewall** — the camera's reply is inbound UDP from port 3956, and a
+   default-deny policy drops it silently. On Windows, allow the program on the
+   network profile the camera NIC uses — see
+   [Networking → Windows](../networking.md#22-windows). On Linux with
+   firewalld, add the rule in
    [Letting the reply back in](../networking.md#33-letting-the-reply-back-in-firewalld).
 4. **Multiple NICs** — force the right one with `--iface <host-ip>`, or disable
    the others temporarily to confirm that NIC selection is the problem.
-5. **Vendor tools** — if the vendor's viewer sees the camera and `viva-camctl`
-   does not, compare which NIC and IP the vendor tool uses, and check whether it
-   reconfigured the camera's address (DHCP, or a "force IP" button).
+5. **Link-local addresses** — a camera on `169.254.x.y` needs the host to have
+   a link-local address too; see
+   [Link-local (APIPA) cameras](../networking.md#3-link-local-apipa-cameras).
+6. **Vendor tools** — if the vendor's viewer sees the camera and `viva-camctl`
+   does not, see
+   [Vendor tool works, viva-genicam does not](../networking.md#83-vendor-tool-works-viva-genicam-does-not).
 
 Still failing? Capture the details and send them:
 

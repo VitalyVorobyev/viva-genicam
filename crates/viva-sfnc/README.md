@@ -20,9 +20,8 @@ Provides well-known feature name strings so you never have to hard-code `"Exposu
 
 ## Usage
 
-```toml
-[dependencies]
-viva-sfnc = "0.1"
+```bash
+cargo add viva-sfnc
 ```
 
 ```rust

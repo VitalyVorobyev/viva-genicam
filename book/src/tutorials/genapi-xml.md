@@ -75,7 +75,7 @@ how a vendor encoded something, or adding support for a construct
 cargo run -p viva-camctl -- xml --ip 192.168.0.10 --out camera.xml
 ```
 
-This stops before the nodemap is built, so it works on a camera the library
+This never parses the document, so it works on a camera the library
 cannot open — which is the only camera anyone ever needs it for. If you are
 reporting a problem, send this: see
 [Reporting a camera we can't open](../reporting.md).
@@ -121,17 +121,13 @@ be fast and to survive schema extensions that are not implemented yet.
 
 ### Skipped nodes
 
-A construct the parser cannot handle no longer fails the whole document — it
+A construct the parser cannot handle does not fail the whole document — it
 goes into `XmlModel::skipped`, and the corresponding GenApi-level list is
 `NodeMap::skipped()`. Both are logged.
 
-This matters because a single unhandled construct used to make a camera
-unopenable — that is exactly what
-[#35](https://github.com/VitalyVorobyev/viva-genicam/issues/35) and
-[#45](https://github.com/VitalyVorobyev/viva-genicam/issues/45) were. Degrading
-to "this one feature is missing" is far better than "this camera does not work",
-and the corpus tests fail on any skip that is not on their allowlist, so new
-gaps surface rather than accumulate.
+Degrading to "this one feature is missing" is far better than "this camera does
+not work", and the vendor-corpus tests fail on any skip that is not on their
+allowlist, so new gaps surface rather than accumulate.
 
 ---
 

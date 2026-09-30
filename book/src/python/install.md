@@ -28,7 +28,7 @@ viva-camctl report --ip 192.168.0.10 --out viva-report.txt   # bug-report bundle
 viva-camctl xml    --ip 192.168.0.10 --out camera.xml        # just the GenApi XML
 ```
 
-Both `report` and `xml` stop before building the nodemap, so they work on a camera the library **cannot** open — which is the only camera anyone reports. Attach the output to a GitHub issue.
+Neither `report` nor `xml` needs the camera to open — `xml` never parses the document, and `report` records a parse failure instead of stopping — so both work on a camera the library **cannot** open, which is the only camera anyone reports. Attach the output to a GitHub issue; see [Reporting a camera we can't open](../reporting.md).
 
 ## Verify the install
 
@@ -72,7 +72,7 @@ Expected output:
 2. Discovering ...
    found FakeGigE @ 127.0.0.1
 3. Connecting ...
-   connected; XML is 16115 bytes, 53 features
+   connected; XML is … bytes, … features
 4. Reading features:
    Width          = 640
    Height         = 480

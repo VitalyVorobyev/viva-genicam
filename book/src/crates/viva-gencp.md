@@ -59,13 +59,6 @@ a user sees when something fails.
 | `GenericError` | Device reported an error with nothing more specific | — |
 | `Unknown(u16)` | Not in this table, or transport-specific; carries the raw value |  |
 
-Two of these were decoded wrongly until 0.3.1. `0x8004` was reported as
-`DeviceBusy` and `0x8005` as a generic error, and `0x8006` had no name at all —
-so a FLIR camera refusing a register write told the reporter of
-[#45](https://github.com/VitalyVorobyev/viva-genicam/issues/45) only
-`io error: device reported status Unknown(32774)`. Two codes were mislabelled
-and a third was unnameable; the table above is the corrected one.
-
 The distinction between `WriteProtect` and `AccessDenied` is worth keeping in
 mind when debugging: the first means the register never accepts writes, the
 second means it would but not right now.
@@ -74,10 +67,9 @@ second means it would but not right now.
 
 GenCP lets a device say "still working" rather than answering immediately. It
 signals that with a **command id** — `PENDING_ACK_COMMAND`, `0x0805` — not with
-a status code. Reading it as a status is a mistake this codebase made and
-corrected: it meant a device denying access got retried a hundred times and
-then reported as a pending-ack failure, while a genuine pending ack was never
-recognised.
+a status code, so a transport has to check the acknowledge's command id before
+it interprets the status. Confusing the two turns an access-denied answer into
+a pending acknowledge, or the other way round.
 
 ---
 
@@ -97,7 +89,7 @@ let ack = decode_ack(&buf)?;        // -> GenCpAck
 match ack.header.status {
     StatusCode::Success => { /* ack.payload */ }
     StatusCode::Busy => { /* the one status worth retrying */ }
-    other => return Err(other.into()),
+    other => return Err(format!("device reported {other}").into()),
 }
 ```
 
@@ -125,10 +117,9 @@ that status has a name of its own rather than being folded into
 
 Encode/decode is exactly the kind of code that should be tested against the
 **specification**, not against the parser. Fixtures derived from the parser
-assert that the code agrees with itself: on the pending-ack bug above, the
-fake and the client shared one wrong assumption and the test asserted it back.
-See [ADR-0018](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0018-genapi-conformance-over-convenience.md)
-and backlog TC-04.
+only assert that the code agrees with itself: when a fake camera and the client
+share one wrong assumption, the test asserts it back. See
+[ADR-0018](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0018-genapi-conformance-over-convenience.md).
 
 ---
 

@@ -18,9 +18,8 @@ Provides buffer builders, parsers, status codes, and command/acknowledgment help
 
 ## Usage
 
-```toml
-[dependencies]
-viva-gencp = "0.1"
+```bash
+cargo add viva-gencp
 ```
 
 ```rust

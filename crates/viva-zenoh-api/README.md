@@ -10,24 +10,26 @@ This crate defines the data contract between a camera service (`viva-service`) a
 
 ## Features
 
-- **Discovery** -- `DeviceAnnounce`, `DeviceStatus`
-- **Node values** -- `NodeValueUpdate`, `NodeSetRequest`, `NodeOpResponse`, bulk read types
-- **Acquisition** -- `AcquisitionCommand`, `AcquisitionStatus`
-- **Image framing** -- `PixelFormat`, `ImageMeta`, `FrameHeader` (16-byte binary header)
-- **Key expressions** -- helper functions for building Zenoh topic paths
+- **Versioning** -- `API_VERSION`, published by the service so a client can detect a contract mismatch
+- **Discovery** -- `DeviceAnnounce`, `DeviceStatus`, `DeviceXmlResponse`
+- **Node values** -- `NodeValueUpdate`, `NodeSetRequest`, `NodeOpResponse`, `BulkReadRequest` / `BulkReadResponse`
+- **Live feature state** -- `FeatureState` (value, effective access mode, availability, numeric range, available enum entries), `NumericRange`, `CommandResult`
+- **Acquisition** -- `AcquisitionControlRequest`, `AcquisitionCommand`, `AcquisitionStatus`
+- **Image framing** -- `PixelFormat`, `ImageMeta`, `FrameHeader` (16-byte binary header on `image`)
+- **Event-vision framing** -- `EvsHeader` (24-byte binary header) and `EvsFormat`, for blocks published on `keys::evs`
+- **Key expressions** -- the `keys` module builds every topic path, e.g. `keys::node_value`, `keys::image`, `keys::evs`
 
 ## Usage
 
-```toml
-[dependencies]
-viva-zenoh-api = "0.1"
+```bash
+cargo add viva-zenoh-api
 ```
 
 ```rust
-use viva_zenoh_api::{DeviceAnnounce, NodeValueUpdate, keys};
+use viva_zenoh_api::keys;
 
 let key = keys::node_value("camera-01", "ExposureTime");
-assert_eq!(key, "viva-genicam/devices/camera-01/nodes/ExposureTime/value");
+assert_eq!(key, "genicam/devices/camera-01/nodes/ExposureTime/value");
 ```
 
 ## Documentation

@@ -37,7 +37,7 @@ This chapter orients you in the standards and shows how they map to the crates i
 - Selectors (e.g., `GainSelector`) change the **addressing** or **active branch** so the same feature name maps to different underlying registers or computed paths.
 
 ## 3) Streaming: GVSP
-- **UDP** packets carry payloads (image data/metadata). The host reassembles frames, handles **resend** requests, negotiates **packet size/MTU**, and may introduce **packet delay** to avoid NIC/driver overflow.
+- **UDP** packets carry payloads (image data/metadata). The host reassembles frames, chooses a **packet size** that fits the path MTU, and may introduce **packet delay** to avoid NIC/driver overflow. GVSP also defines packet **resend**; this library does not request resends yet.
 - **Chunks**: optional metadata blocks (e.g., `Timestamp`, `ExposureTime`) can be enabled and parsed alongside image data.
 - **Time mapping**: devices often use **tick counters**; the host maintains a mapping between device ticks and host time for cross‑correlation.
 
@@ -45,15 +45,15 @@ This chapter orients you in the standards and shows how they map to the crates i
 | Concept | Crate | Responsibility |
 |---|---|---|
 | GenCP (encode/decode, status) | `viva-gencp` | Message formats, errors, helpers for control-path operations |
-| GVCP/GVSP (GigE Vision) | `viva-gige` | Discovery, control channel, streaming engine, resend/MTU/delay, events/actions |
+| GVCP/GVSP (GigE Vision) | `viva-gige` | Discovery, control channel, GVSP packet handling, MTU/packet size/delay, events/actions |
 | GenApi XML loader | `viva-genapi-xml` | Fetch XML via control path and parse schema‑lite into an internal representation |
 | NodeMap & evaluation | `viva-genapi` | Node types (incl. **SwissKnife**), dependency resolution, selector routing, value get/set |
 | Public façade | `viva-genicam` | End‑user API combining transport + NodeMap + utilities (examples live here) |
 
-## 5) USB3 Vision (preview)
-- Similar split between control and data paths, but with **USB3** transport and different discovery/endpoint mechanics. The higher‑level GenApi and NodeMap concepts remain the same.
+## 5) USB3 Vision
+- Similar split between control and data paths, but with **USB3** transport (`viva-u3v`): GenCP over USB bulk endpoints for control, and a separate bulk endpoint for image data. Discovery is USB enumeration rather than a broadcast. The higher‑level GenApi and NodeMap concepts remain the same.
 
 ## 6) What to read next
-- **Architecture Overview** for a code‑level view of modules, traits, and async/concurrency.
-- **Crate Guides** for deep dives (APIs, examples, edge cases).
-- **Tutorials** to configure features and receive frames end‑to‑end.
+- [Architecture Overview](architecture.md) for a code‑level view of modules, traits, and async/concurrency.
+- [Crates](crates/README.md) for deep dives (APIs, examples, edge cases).
+- [Tutorials](tutorials/README.md) to configure features and receive frames end‑to‑end.

@@ -66,24 +66,24 @@ needs the camera to open successfully — that is what they are for — so both
 still produce output when nothing else does. Attach the file to an
 [issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose).
 
-## Streaming (early GVSP)
+## Streaming
 
 ```bash
-# Receive a GVSP stream. Default leaves GevSCPSPacketSize alone (ADR-0021).
-# --auto: NIC MTU then path bisect. --packet-size: explicit ceiling.
+# Receive a GVSP stream and save 2 frames to the current directory.
+# By default the camera's GevSCPSPacketSize is kept; --auto sizes packets from
+# the NIC MTU, --packet-size N sets an explicit ceiling.
 cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 ```
 
-See [Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-and-mtu)
-and [ADR-0021](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0021-gvsp-packet-size-policy.md).
+See [Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-and-mtu).
 
 ## Windows specifics
 
-* Run the terminal **as Administrator** the first time to let the firewall prompt appear.
-* Add inbound **UDP rules** for discovery and streaming.
-* Enable **jumbo frames** per NIC if your network supports it (helps at high FPS).
+The firewall prompt, NIC power saving and jumbo frames are the usual obstacles;
+see [Networking → Windows](networking.md#22-windows).
 
 ## Next steps
 
-* Read the **Primer** for the concepts behind discovery, control, and streaming.
-* Jump to the **Tutorial: Discover devices** for a step‑by‑step walkthrough with troubleshooting tips.
+* Read the [Primer](primer.md) for the concepts behind discovery, control, and streaming.
+* Jump to the [Discovery tutorial](tutorials/discovery.md) for a step‑by‑step walkthrough with troubleshooting tips.
+* No camera yet? [Testing without hardware](tutorials/fake-camera.md) runs everything against an in-process fake.

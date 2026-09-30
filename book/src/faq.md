@@ -1,222 +1,118 @@
-# FAQ
+# FAQ & Troubleshooting
 
-This page collects short answers to questions that come up often when using
-`viva-genicam` or bringing up a new camera.
-
-If you are stuck, also check:
-
-- [Discovery](./tutorials/discovery.md)
-- [Streaming](./tutorials/streaming.md)
-- [Networking](./networking.md)
-
-and the issues in the GitHub repository.
+Short answers to questions that come up often when using `viva-genicam` or
+bringing up a new camera. Each one links to the chapter that covers it in
+full.
 
 ---
 
-## “Discovery finds no cameras. What do I check first?”
+## "Discovery finds no cameras. What do I check first?"
 
-Run:
-
-```bash
-cargo run -p viva-camctl -- list
-```
-
-If it shows nothing:
-1.	Physical link
-	- Are the link LEDs lit on camera, NIC, and switch?
-	- Try a different cable or port.
-2.	IP addresses
-	- Host NIC and camera must be on the same subnet (e.g. 192.168.0.x/24).
-	- Avoid having two NICs on the same subnet; routing will get confused.
-3.	Firewall
-    - Allow UDP broadcast/unicast on the NIC used for cameras.
-    - On Windows, make sure the binary is allowed on the relevant network
-profile (Private / Domain).
-4.	Multiple NICs
-	- Use --iface to force the interface. It takes the host NIC's IPv4
-address or its OS name, whichever you have:
+Run `viva-camctl list`. If nothing appears, check in this order: the link LEDs,
+that the host NIC and the camera share a subnet, that the firewall lets the
+discovery reply in, and — on a multi-NIC host — that you name the right
+interface:
 
 ```bash
-cargo run -p viva-camctl -- list --iface 192.168.0.5
-cargo run -p viva-camctl -- list --iface eth0
+cargo run -p viva-camctl -- list --iface 192.168.0.5   # host NIC by IPv4 address
+cargo run -p viva-camctl -- list --iface eth0          # or by OS name
 ```
 
-If the camera's address starts with `169.254.`, it is using link-local (APIPA)
-addressing — see
-[Networking §3](./networking.md#3-link-local-apipa-cameras), which covers the
-host address and the two firewall rules that case needs.
+The full checklist is in
+[Discovery → Troubleshooting checklist](./tutorials/discovery.md#troubleshooting-checklist).
+If the camera's address starts with `169.254.`, go to
+[Networking → Link-local (APIPA) cameras](./networking.md#3-link-local-apipa-cameras)
+instead. If none of it helps, [send us the report bundle](./reporting.md).
 
-See also: [Discovery tutorial](./tutorials/discovery.md) and
-[Networking](./networking.md). If none of it helps,
-[send us the camera's own account of itself](./reporting.md).
+---
 
-⸻
+## "The vendor viewer works but viva-genicam doesn't. Why?"
 
-## “The vendor viewer works but viva-genicam doesn’t. Why?”
+Usually because the two tools differ in which host NIC they use, where the
+camera is told to stream, or the packet size and delay they set. See
+[Networking → Vendor tool works, viva-genicam does not](./networking.md#83-vendor-tool-works-viva-genicam-does-not)
+for what to compare.
 
-Common causes:
-- Different NIC / interface:
-    - The vendor tool may be using a different NIC or IP selection strategy.
-    - Compare which local IP it uses and pass that as --iface to viva-camctl.
-- Different stream destination:
-    - The camera might be configured to stream to a specific IP/port.
-    - Ensure viva-genicam uses the same host IP and port, or reset the camera
-configuration to defaults.
-- Different MTU / packet size / packet delay:
-	- Vendor tools sometimes auto-tune these.
-	- Try matching their settings using GenApi features (packet size, frame rate,
-inter-packet delay).
+---
 
-When in doubt:
-- Capture logs with RUST_LOG=debug and compare behaviour at the same frame
-rate and resolution.
+## "Does this work on Windows?"
 
-See: [Streaming](./tutorials/streaming.md)￼and [Networking](./networking.md).
+Yes — Windows, Linux and macOS are all supported. On Windows the usual
+obstacles are the firewall prompt and NIC power-saving settings; see
+[Networking → Windows](./networking.md#22-windows).
 
-⸻
+---
 
-## “Does this work on Windows?”
+## "How do I set exposure, gain, pixel format, etc.?"
 
-Yes. Windows is a first-class target alongside Linux and macOS.
-
-Notes:
-- Make sure the firewall allows discovery and streaming:
-	- When Windows asks whether to allow the executable on Private/Public
-networks, allow it on the profile you use for the camera network.
-- Configure the NIC for the camera network with a static IPv4 address,
-separate from your office/internet NIC.
-- For high-throughput setups:
-	- Consider enabling jumbo frames on the camera NIC.
-	- Disable power-saving features that can introduce latency.
-
-See: [Networking](./networking.md) for NIC configuration details.
-
-⸻
-
-## “How do I set exposure, gain, pixel format, etc.?”
-
-Use the GenApi features via viva-camctl or the viva-genicam crate.
-
-Examples with viva-camctl:
+By feature name, with `viva-camctl set` or `Camera::set` in Rust:
 
 ```bash
-# Read ExposureTime
-cargo run -p viva-camctl -- \
-  get --ip 192.168.0.10 --name ExposureTime
-
-# Set ExposureTime to 5000 (units depend on camera, often microseconds)
-cargo run -p viva-camctl -- \
-  set --ip 192.168.0.10 --name ExposureTime --value 5000
-
-# Set PixelFormat by name
-cargo run -p viva-camctl -- \
-  set --ip 192.168.0.10 --name PixelFormat --value Mono8
+cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
 ```
 
-For more, see: [Registers & features](./tutorials/registers.md).
+[Registers & features](./tutorials/registers.md) covers reading, writing, why a
+write can be refused, and the Rust side.
 
-⸻
+---
 
-## “What are selectors and why do my changes seem to disappear?”
+## "What are selectors and why do my changes seem to disappear?"
 
-Many cameras use selectors to multiplex multiple logical settings onto one
-feature. Example:
-- GainSelector = All, Red, Green, Blue, …
-- Gain = value for the currently selected channel.
+A selector such as `GainSelector` chooses which channel a feature like `Gain`
+refers to. Setting `Gain` without first setting the selector changes whichever
+channel is currently selected. See
+[Registers & features → Work with selectors](./tutorials/registers.md#step-2--work-with-selectors).
 
-If you set Gain without first setting GainSelector, you might be modifying
-a different “row” than you expect.
+---
 
-Typical sequence:
+## "Do I need to care about the GenApi XML?"
+
+For most applications, no: you use features by name and the NodeMap handles
+the mapping. Look at the XML when a feature behaves differently from its
+documentation, or when you are debugging selectors or SwissKnife formulas. See
+the [GenApi XML tutorial](./tutorials/genapi-xml.md) and the
+[`viva-genapi` chapter](./crates/viva-genapi.md).
+
+---
+
+## "How do I save frames and look at them?"
+
+`viva-camctl stream` saves the first `--save N` frames (default 1) to the
+current directory as `frame_0001.pgm` (`Mono8`) or `frame_0001.ppm` (other
+formats, or always with `--rgb`):
 
 ```bash
-cargo run -p viva-camctl -- \
-  set --ip 192.168.0.10 --name GainSelector --value Red
-
-cargo run -p viva-camctl -- \
-  set --ip 192.168.0.10 --name Gain --value 5.0
+cargo run -p viva-camctl -- stream \
+  --ip 192.168.0.10 --iface 192.168.0.5 --save 100 --duration-s 10
 ```
 
-See: [Registers & features](./tutorials/registers.md) and the `selectors_demo`
-example in the viva-genicam crate.
+Without `--duration-s` the stream runs until Ctrl+C. Both formats are plain
+NetPBM, readable by most image viewers, OpenCV and Pillow. Event-vision cameras
+produce `block_NNNN.evt3` / `.evt21` files instead; see
+[Streaming → Event-vision cameras](./tutorials/streaming.md#23-event-vision-cameras).
 
-⸻
+---
 
-## “Do I need to care about the GenApi XML?”
+## "How do I generate documentation?"
 
-For most applications, no:
-- You can use features by name and let viva-genapi handle the mapping.
-
-You should look at the XML when:
-- A feature behaves differently from the SFNC / vendor documentation.
-- You are debugging selector or SwissKnife behaviour.
-- You are contributing to viva-genapi or genapi-xml.
-
-See: [GenApi XML tutorial](./tutorials/genapi-xml.md)￼and the crate chapters
-for `viva-genapi-xml` and `viva-genapi` when they are filled in.
-
-⸻
-
-## “How do I save frames and look at them?”
-
-With viva-camctl:
-- Use stream with an option like --count / --output (exact flags depend
-on the CLI):
+From the repository root:
 
 ```bash
-cargo run -p viva-camctl -- \
-  stream --ip 192.168.0.10 --iface 192.168.0.5 \
-  --count 100 --output ./frames
+cargo install mdbook          # if not already installed
+mdbook build book             # this book, into book/book/
+
+cargo doc --workspace --all-features --no-deps   # Rust API docs, into target/doc/
 ```
 
-This typically saves a sequence of frames in a simple format (e.g. raw, PGM/PPM)
-that you can inspect with:
-- Image viewers.
-- Python + NumPy + OpenCV.
-- Your own Rust tools.
+---
 
-See: [Streaming](./tutorials/streaming.md).
+## "Where should I report bugs or ask questions?"
 
-⸻
-
-## “How do I generate documentation?”
-- mdBook (this book):
-	- From the repository root:
-```bash
-cargo install mdbook  # if not already installed
-mdbook build book
-```
-	- The rendered HTML will be under book/book/.
-- Rust API docs:
-	- From the repository root:
-```bash
-cargo doc --workspace --all-features
-```
-	- The rendered HTML will be under target/doc/.
-
-Many users publish these via GitHub Pages or another static host; see the
-repository CI configuration for details.
-
-⸻
-
-## “Where should I report bugs or ask questions?”
-
-If the problem is that a camera does not work, start with
+If a camera does not work, start with
 [Reporting a camera we can't open](./reporting.md) — it gives you two commands
-that collect everything we need, and explains why your device is the most
-valuable evidence this project can get.
+that collect everything we need.
 
-Otherwise:
-
-- For bugs or feature requests, open an issue in the GitHub repository with:
-    - A clear description of the problem.
-    - Your OS, Rust version, and camera model.
-    - A minimal reproduction if possible (CLI commands or small Rust snippet).
-    - Relevant logs (e.g. RUST_LOG=debug output).
-- For questions that may be general (not specific to this project), link to:
-    - The camera’s data sheet or GenICam XML snippet if relevant.
-    - Any vendor tools you used to compare behaviour.
-
-Good issues make it much easier to improve the crates for everyone.
-
----
+For anything else, open an issue on
+[GitHub](https://github.com/VitalyVorobyev/viva-genicam/issues) with what you
+ran and what happened, your OS and camera model, and logs from
+`RUST_LOG=debug` or `viva-camctl -vv`.

@@ -1,6 +1,11 @@
 # API reference
 
-Every public symbol exported from `viva_genicam`.
+Every public symbol exported from `viva_genicam`, plus the
+`viva_genicam.testing` module.
+
+```python
+vg.__version__            # "X.Y.Z", the installed package version
+```
 
 ## Discovery
 
@@ -88,23 +93,29 @@ class NodeKind(str, Enum):
     CONVERTER     = "Converter"
     INT_CONVERTER = "IntConverter"
     STRING_REG    = "StringReg"
+    REGISTER      = "Register"
 
 @dataclass(frozen=True)
 class NodeInfo:
     name: str
-    kind: str
-    access: Optional[str]              # "RO" | "RW" | "WO" | None
+    kind: str                          # a NodeKind value
+    access: Optional[str]              # declared: "RO" | "RW" | "WO" | None
     visibility: str                    # "Beginner" | "Expert" | "Guru" | "Invisible"
     display_name: Optional[str]
     description: Optional[str]
     tooltip: Optional[str]
+    effective_access: Optional[str] = None   # live; set by node_info() only
 
     @property
-    def readable(self) -> bool: ...
+    def readable(self) -> bool: ...    # from the declared access
     @property
     def writable(self) -> bool: ...
     def to_dict(self) -> dict: ...
 ```
+
+`kind` is a plain string holding a `NodeKind` value. See
+[Control & introspection → Node metadata](control.md#node-metadata) for what
+`effective_access` means.
 
 ## FrameStream
 
@@ -133,6 +144,35 @@ class Frame:
     def to_numpy(self) -> numpy.ndarray: ...        # natural shape per pixel format
     def to_rgb8(self) -> numpy.ndarray: ...         # always (H, W, 3) uint8
 ```
+
+## Testing
+
+```python
+from viva_genicam.testing import FakeGigeCamera
+
+class FakeGigeCamera:
+    def __init__(
+        self,
+        width: int = 640,
+        height: int = 480,
+        fps: int = 30,
+        bind_ip: str = "127.0.0.1",
+        port: int = 3956,
+        pixel_format: str = "Mono8",
+    ) -> None: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    ip: str
+    port: int
+    def device_info(self, timeout_ms: int = 1500) -> GigeDeviceInfo: ...
+    def __enter__(self) -> "FakeGigeCamera": ...    # calls start()
+    def __exit__(self, *exc) -> None: ...            # calls stop()
+```
+
+An in-process fake GigE Vision camera, for tests and demos without hardware.
+Keep `port=3956`: discovery only looks there, so `device_info()` and
+`vg.connect_gige` cannot find a fake bound elsewhere, and only one fake per
+host can hold that port at a time.
 
 ## Exceptions
 

@@ -14,17 +14,16 @@
 </p>
 
 > **Status -- pre-1.0, and working.** Users have run discovery, control and
-> streaming against real GigE Vision cameras from FLIR, Hikrobot and JAI, on
-> Linux, Windows and macOS. The protocol layers are implemented against the EMVA
-> specifications and covered by ~370 automated tests, in-process fake cameras,
-> and a corpus of 35 real vendor GenApi XML descriptions.
+> streaming against real GigE Vision cameras from several vendors, on Linux,
+> Windows and macOS. The protocol layers are implemented against the EMVA
+> specifications and covered by automated tests against in-process fake
+> cameras, and by a corpus of dozens of real vendor GenApi XML descriptions.
 >
 > What pre-1.0 means in practice: the API still changes between releases, and
-> **there is no camera in CI** -- every hardware confirmation so far came from a
-> user with a device we do not own. So a camera nobody has tried yet may well hit
-> something. If yours does, [open an issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose):
-> that is how every camera-specific bug here has been found and fixed, and it has
-> worked every time.
+> **there is no camera in CI** -- hardware confirmations come from users with
+> their own devices. So a camera nobody has tried yet may well hit something. If
+> yours does, [open an issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose):
+> that is how camera-specific bugs here get found and fixed.
 
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
@@ -35,8 +34,8 @@
 ## Features
 
 - **Discovery** -- find GigE Vision cameras via GVCP broadcast; USB3 Vision cameras via USB enumeration
-- **Control** -- read and write device registers and GenApi features (Integer, Float, Enum, Boolean, Command, String, SwissKnife, Converter)
-- **Streaming** -- GigE: GVSP reassembly with backpressure (packet resend is implemented but not yet wired into the receive path); U3V: async frame iterator over USB bulk reads
+- **Control** -- read and write device registers and GenApi features (Integer, Float, Enumeration, Boolean, Command, String, Register, SwissKnife, Converter, IntConverter)
+- **Streaming** -- GigE: GVSP reassembly with backpressure, plus raw capture from event-vision cameras (packet resend is not wired into the receive path yet); U3V: async frame iterator over USB bulk reads
 - **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
 - **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)
@@ -125,7 +124,7 @@ cam.set_exposure_time_us(10_000.0)
 
 with cam.stream() as frames:
     for frame in frames:
-        arr = frame.to_numpy()           # NumPy (H, W) or (H, W, 3) uint8
+        arr = frame.to_numpy()           # shape and dtype follow the pixel format
         break
 ```
 
@@ -136,7 +135,7 @@ See [`book/src/python.md`](book/src/python.md) for the full Python API.
 - **[GenICam standards introduction](docs/standards.md)** -- what GenApi, GenCP, GVCP, SFNC, and PFNC are and how they map to crates
 - **[Book (mdBook)](https://vitalyvorobyev.github.io/viva-genicam/)** -- tutorials, architecture, networking cookbook
 - **[API reference (docs.rs)](https://docs.rs/viva-genicam)** -- generated Rust API docs
-- **[Examples](crates/viva-genicam/examples/)** -- 18 runnable examples covering discovery, streaming, events, chunks, and more. The book's Rust snippets are pulled from these files, so what you read there is code that compiles in CI
+- **[Examples](crates/viva-genicam/examples/)** -- runnable examples covering discovery, streaming, events, chunks, and more. The book's Rust snippets are pulled from these files, so what you read there is code that compiles in CI
 - **[System design](docs/design.md)** -- architecture, key abstractions, data flows, design tenets
 - **[Decision records](docs/adrs/)** -- why the big choices were made
 - **[Roadmap](docs/roadmap.md)** -- what's planned
@@ -168,8 +167,8 @@ cargo run -p viva-genicam --example get_set_feature -- --name Gain --value 3.0
 # Fetch and inspect the camera's GenApi XML
 cargo run -p viva-genicam --example fetch_xml
 
-# Grab frames
-cargo run -p viva-genicam --example grab_gige
+# Grab frames from the first camera found, on the host NIC you name
+cargo run -p viva-genicam --example grab_gige -- --iface 192.168.0.5
 
 # Zero-hardware demo (uses built-in fake camera)
 cargo run -p viva-genicam --example demo_fake_camera
@@ -198,7 +197,7 @@ cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
 # Write a feature
 cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
 
-# Stream frames. Default preserves the camera's GevSCPSPacketSize (ADR-0021).
+# Stream frames. By default the camera's GevSCPSPacketSize is kept.
 # --auto: set from NIC MTU, then path-probe / bisect. --packet-size N: explicit ceiling.
 cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 # Cap for a known narrow path (e.g. a switch that only forwards ~9K frames):
@@ -213,8 +212,13 @@ cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --
 # Configure persistent IP
 cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
 
+# Event-vision camera: append every EVT block to one file
+cargo run -p viva-camctl -- stream --ip 192.168.0.10 --save 0 --raw-out capture.evt3 --duration-s 10
+
 # USB3 Vision: discover, read/write features, stream
 cargo run -p viva-camctl -- list-usb
+cargo run -p viva-camctl -- get-usb --name ExposureTime
+cargo run -p viva-camctl -- set-usb --name ExposureTime --value 5000
 cargo run -p viva-camctl -- stream-usb --save 3
 ```
 
@@ -252,7 +256,7 @@ cargo run -p viva-genicam --example demo_fake_camera
 
 - **No devices found** -- check NIC/interface selection and host firewall (UDP broadcast on port 3956)
 - **Frame drops at high FPS** -- enable jumbo frames, raise `SO_RCVBUF`, enable inter-packet delay
-- **Windows** -- run as admin, allow UDP in firewall rules
+- **Windows** -- allow the program through the firewall and check NIC power settings; see the book's [Networking guide](https://vitalyvorobyev.github.io/viva-genicam/networking.html#22-windows)
 
 ## License
 

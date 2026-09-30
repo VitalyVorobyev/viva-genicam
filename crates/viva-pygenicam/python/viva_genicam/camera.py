@@ -150,8 +150,8 @@ def connect_gige(device_info: GigeDeviceInfo, iface: Optional[str] = None) -> Ca
     """Connect to a GigE Vision camera.
 
     ``iface`` accepts either one of the host interface's IPv4 addresses or its
-    OS name; omit it to let the OS pick the interface that routes to the
-    camera.
+    OS name. Omit it to use the interface the camera was discovered on, or
+    failing that the host interface whose subnet contains the camera's IP.
     """
     native = _native.connect_gige(device_info._handle, iface)
     return Camera(native)

@@ -19,9 +19,8 @@ Implements bootstrap register parsing, GenCP-over-USB control, device descriptor
 
 ## Usage
 
-```toml
-[dependencies]
-viva-u3v = { version = "0.1", features = ["usb"] }
+```bash
+cargo add viva-u3v --features usb
 ```
 
 ```rust

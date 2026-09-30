@@ -21,7 +21,7 @@ cam.set_exposure_time_us(10_000.0)
 
 with cam.stream() as frames:
     for frame in frames:
-        arr = frame.to_numpy()          # NumPy (H, W) or (H, W, 3) uint8
+        arr = frame.to_numpy()          # shape and dtype follow the pixel format
         print(frame.width, frame.height, frame.pixel_format)
         break
 ```

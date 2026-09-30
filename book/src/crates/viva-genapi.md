@@ -78,8 +78,9 @@ A node's address is not always a constant. It can be:
 
 This matters because it is where the interesting bugs live. A parser can accept
 a document perfectly and the address model still be wrong, which is why the
-[vendor corpus test](../testing.md) does not stop at parsing: it builds a
-`NodeMap` from each real document and evaluates every node.
+[vendor corpus test](../reporting.md#what-happens-to-it) does not stop at
+parsing: it builds a `NodeMap` from each real document and evaluates every
+node.
 
 ### Selectors
 
@@ -132,12 +133,10 @@ value:
 | `version()` | The document's schema version |
 | `skipped()` | Nodes that could not be built |
 
-`skipped()` is the important one. A construct this crate cannot handle no
-longer fails the whole document — it lands here, and the parser's own losses
-(`XmlModel::skipped`) are carried along with it, so a consumer sees both.
-Before that, a single unhandled node made a camera unopenable: that is exactly
-what [#35](https://github.com/VitalyVorobyev/viva-genicam/issues/35) and
-[#45](https://github.com/VitalyVorobyev/viva-genicam/issues/45) were.
+`skipped()` is the important one. A construct this crate cannot handle does
+not fail the whole document — it lands here, and the parser's own losses
+(`XmlModel::skipped`) are carried along with it, so a consumer sees both. The
+camera still opens, minus the features that could not be built.
 
 ---
 

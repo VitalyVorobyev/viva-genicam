@@ -10,16 +10,15 @@ Maps numeric pixel format codes to human-readable names, bit depths, and layout 
 
 ## Features
 
-- **PixelFormat enum** -- Mono8, Mono16, BayerRG8, BayerGB8, BayerBG8, BayerGR8, RGB8Packed, BGR8Packed
-- **Code conversion** -- `from_code(u32)` and `code() -> u32` for PFNC numeric values
+- **PixelFormat enum** -- the monochrome, Bayer (8- and 16-bit), packed RGB/BGR, confidence and 3D-coordinate formats, two vendor-defined event-vision formats, and `Unknown(u32)` for any other code. The enum is `#[non_exhaustive]`; see the API reference for the current list
+- **Code and name conversion** -- `from_code(u32)`, `code() -> u32` and `from_name(&str)`
 - **Layout helpers** -- `bytes_per_pixel()`, `is_bayer()`, `cfa_pattern()`
 - **Optional serde** -- enable the `serde` feature for serialization support
 
 ## Usage
 
-```toml
-[dependencies]
-viva-pfnc = "0.1"
+```bash
+cargo add viva-pfnc
 ```
 
 ```rust

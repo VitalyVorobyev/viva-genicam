@@ -10,7 +10,7 @@ It focuses on:
 - Common **pitfalls and troubleshooting**.
 
 It is not a replacement for vendor or A3 documentation, but gives you enough
-background to make `viva-camctl` and the `viva-genicam` examples work reliably.  [oai_citation:0‡Wikipedia](https://en.wikipedia.org/wiki/GigE_Vision?utm_source=chatgpt.com)  
+background to make `viva-camctl` and the `viva-genicam` examples work reliably.
 
 If you have not yet done so, first go through:
 
@@ -32,13 +32,15 @@ The simplest and most robust setup:
 ```
 
 Characteristics:
+
 - One camera, one host, one NIC.
 - No other traffic on that link.
 - Easy to reason about MTU and packet delay.
 
 Recommended when:
-- You’re bringing up a new camera.
-- You’re debugging issues and want to remove variables.
+
+- You're bringing up a new camera.
+- You're debugging issues and want to remove variables.
 
 ### 1.2. One or more cameras through a switch
 
@@ -53,11 +55,13 @@ Common in real systems:
 ```
 
 Characteristics:
+
 - Multiple cameras share the link to the host.
-- Switch must handle the aggregate throughput.
-- Switch configuration (buffer sizes, jumbo frames, spanning tree) matters.  ￼
+- The switch must handle the aggregate throughput.
+- Switch configuration (buffer sizes, jumbo frames, spanning tree) matters.
 
 Recommended when:
+
 - You need more than one camera.
 - You need long cable runs or multi-drop layouts.
 
@@ -70,48 +74,66 @@ For high throughput or separation from office traffic:
 ```
 
 Characteristics:
-- Camera traffic isolated from general network.
+
+- Camera traffic isolated from the general network.
 - Easier to tune MTU, QoS, and firewall rules.
-- In discovery and streaming, you may need to specify --iface (see §7).
+- In discovery and streaming, you may need to specify `--iface` (see
+  [§7](#7-using---iface-and-discovery-quirks)).
 
 Recommended for:
+
 - High data rates.
 - Multi-camera setups.
 - Systems that must not be disturbed by office network traffic.
 
-⸻
+---
 
 ## 2. IP addressing basics
 
-GigE Vision uses standard IPv4 + UDP. Each device needs a valid IPv4 address; the
-host and camera(s) must share a subnet.  ￼
+GigE Vision uses standard IPv4 + UDP. Each device needs a valid IPv4 address,
+and the host and camera(s) must share a subnet.
 
 ### 2.1. Choose a camera subnet
 
 Pick a private network, for example:
-- 192.168.0.0/24 (addresses 192.168.0.1–192.168.0.254)
-- 10.0.0.0/24
+
+- `192.168.0.0/24` (addresses 192.168.0.1–192.168.0.254)
+- `10.0.0.0/24`
 
 Decide on:
-- One address for your host NIC (e.g. 192.168.0.5).
-- One address per camera (e.g. 192.168.0.10, 192.168.0.11, …).
+
+- One address for your host NIC (e.g. `192.168.0.5`).
+- One address per camera (e.g. `192.168.0.10`, `192.168.0.11`, …).
 
 Make sure this subnet does not conflict with your office / internet network.
 
 ### 2.2. Windows
-1.	Open Network & Internet Settings → Change adapter options.
-2.	Right-click the NIC used for cameras → Properties.
-3.	Select Internet Protocol Version 4 (TCP/IPv4) → Properties.
-4.	Choose Use the following IP address:
-	- IP address: e.g. 192.168.0.5
-	- Subnet mask: 255.255.255.0
-	- Gateway: leave empty (for isolated camera networks).
-5.	Turn off any “energy saving” features for this NIC in the driver settings if
-possible (they can introduce latency/jitter).
 
-On first run, Windows firewall may pop up asking whether to allow the binary on
-Private / Public networks. Allow it on the relevant profile so UDP broadcasts
-work.
+Give the camera NIC a static address:
+
+1. Open Network & Internet Settings → Change adapter options.
+2. Right-click the NIC used for cameras → Properties.
+3. Select Internet Protocol Version 4 (TCP/IPv4) → Properties.
+4. Choose "Use the following IP address":
+   - IP address: e.g. `192.168.0.5`
+   - Subnet mask: `255.255.255.0`
+   - Gateway: leave empty (for isolated camera networks).
+
+Then check the three things that most often stop a camera working on Windows:
+
+- **Firewall.** On first run Windows may ask whether to allow the program on
+  Private / Public networks. Allow it on the profile the camera network uses —
+  if in doubt, both. Discovery replies and the GVSP stream are both inbound UDP
+  (the stream arrives on port `10040` by default, or whatever you pass to
+  `--port`), so a firewall that blocks them breaks discovery or streaming even
+  though nothing reports an error. Running the terminal as Administrator the
+  first time makes sure the prompt can appear.
+- **Power saving.** Turn off "energy efficient Ethernet" and similar options in
+  the NIC driver's advanced settings, and keep the power plan on high
+  performance; they add latency and jitter.
+- **Jumbo frames and receive buffers.** If the whole path supports them, enable
+  "Jumbo Packet" in the NIC's advanced settings (see [§4](#4-mtu-and-jumbo-frames)),
+  and raise the receive buffers — they default low on many desktop NICs.
 
 ### 2.3. Linux
 
@@ -125,20 +147,26 @@ sudo ip addr add 192.168.0.5/24 dev eth1
 sudo ip link set eth1 up
 ```
 
-To make this permanent, use your distro’s network configuration tools (e.g.
-Netplan on Ubuntu, ifcfg files on RHEL, etc.).
+To make this permanent, use your distro's network configuration tools (e.g.
+Netplan on Ubuntu, NetworkManager connection files on RHEL).
+
+If the host runs firewalld, discovery replies and the stream need explicit
+rules — see [§3.3](#33-letting-the-reply-back-in-firewalld); the same two rules
+apply outside the link-local range with your own subnet in place of
+`169.254.0.0/16`.
 
 ### 2.4. macOS
 
 Use System Settings → Network:
-1.	Select the camera NIC (e.g. USB Ethernet).
-2.	Set “Configure IPv4” to “Manually”.
-3.	Enter:
-	- IP address: 192.168.0.5
-	- Subnet mask: 255.255.255.0
-4.	Leave router/gateway empty for a dedicated camera network.
 
-⸻
+1. Select the camera NIC (e.g. USB Ethernet).
+2. Set "Configure IPv4" to "Manually".
+3. Enter:
+   - IP address: `192.168.0.5`
+   - Subnet mask: `255.255.255.0`
+4. Leave router/gateway empty for a dedicated camera network.
+
+---
 
 ## 3. Link-local (APIPA) cameras
 
@@ -152,20 +180,17 @@ The library discovers such cameras on all platforms, but the **host** must hold
 a link-local address of its own first, and on Linux the firewall usually has to
 be told to let the reply back in.
 
-> Most of this section comes from a bring-up performed by
-> [@InsuJeong496](https://github.com/InsuJeong496) on a JAI FS-3200T-10GE-NNC
-> and written up in
-> [issue #57](https://github.com/VitalyVorobyev/viva-genicam/issues/57#issuecomment-5127958912).
-> Their results: discovery succeeded, the MAC parsed correctly, the GenApi XML
-> downloaded, 1 065 features loaded, and end-to-end streaming worked once the
-> two firewall rules below were in place — with no vendor driver installed.
+> This section is based on a bring-up write-up by
+> [@InsuJeong496](https://github.com/InsuJeong496) in
+> [issue #57](https://github.com/VitalyVorobyev/viva-genicam/issues/57#issuecomment-5127958912),
+> which streamed from a link-local camera on Linux with the two firewall rules
+> below and no vendor driver installed.
 
 ### 3.1. What is fixed and what is yours
 
-The single most useful thing in that report was the distinction between the
-values the protocol fixes and the values that belong to one particular machine.
-Copying an address out of someone else's guide is the usual reason these
-recipes fail.
+Recipes like this one mix values the protocol fixes with values that belong to
+one particular machine. Copying an address out of someone else's guide is the
+usual reason they fail.
 
 Fixed — do not change these:
 
@@ -263,21 +288,22 @@ If the first line is missing, the host has no link-local address on that NIC
 (§3.2). If the first line appears but the second never does, suspect the
 firewall (§3.3).
 
-⸻
+---
 
 ## 4. MTU and jumbo frames
 
 MTU (Maximum Transmission Unit) determines the largest Ethernet frame size.
 Standard MTU is 1500 bytes; jumbo frames extend this (e.g. 9000 bytes). For
 large images, jumbo frames can significantly reduce protocol overhead and CPU
-load.  ￼
+load.
 
 ### 4.1. When to care
 
 You probably need to look at MTU when:
+
 - Frame sizes are large (multi-megapixel).
 - Frame rates are high (tens or hundreds of FPS).
-- You see lots of packet drops or resends at otherwise reasonable loads.
+- You see frame drops at otherwise reasonable loads.
 
 For simple bring-up and low/moderate data rates, standard MTU=1500 usually
 works.
@@ -285,94 +311,95 @@ works.
 ### 4.2. Enabling jumbo frames
 
 All components in the path must agree:
+
 - Camera
 - Switch (if present)
 - Host NIC
 
-The host NIC MTU is **not** the path MTU. A jumbo-capable NIC (e.g. 16128-byte
-jumbo / IPv4 MTU 16114) behind a switch that only forwards ~9216-byte frames
-will still let both ends *configure* a 16114-byte `GevSCPSPacketSize`; the
-switch drops the oversized GVSP datagrams and the stream shows `frames=0`.
-Direct camera↔NIC links on that same host have streamed at **16114**. When in
-doubt, cap with `viva-camctl stream --packet-size 9000` (or lower) rather than
-trusting the NIC alone. See [Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-and-mtu)
-and [ADR-0021](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0021-gvsp-packet-size-policy.md).
+The host NIC MTU is **not** the path MTU. A jumbo-capable NIC behind a switch
+with a smaller frame limit still lets both ends *configure* a large
+`GevSCPSPacketSize`; the switch then drops the oversized GVSP datagrams and the
+stream shows `frames=0`. When in doubt, cap the size with
+`viva-camctl stream --packet-size 9000` (or lower) rather than trusting the NIC
+alone. How the library chooses and verifies the packet size is covered in
+[Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-and-mtu).
 
 Typical steps:
-- Camera: set `GevSCPSPacketSize` or similar feature to a value below the
-path MTU (e.g. 8192 for MTU 9000). You can use `viva-camctl set` or
-`--packet-size` on `stream`.
-- Switch: enable jumbo frames in the management UI (name and steps vary by
-vendor). Confirm the switch’s *actual* max frame size — “jumbo” is not one
-number.
-- Host NIC:
-    - Windows: NIC properties → Advanced → Jumbo Packet or similar.
-    - Linux: sudo ip link set dev eth1 mtu 9000
-    - macOS: some drivers expose MTU setting in the network settings; others do
-not support jumbo frames.
 
-After changing MTU, confirm with:
+- **Camera:** set `GevSCPSPacketSize` (or the vendor's equivalent feature) to a
+  value below the path MTU (e.g. 8192 for MTU 9000), with `viva-camctl set` or
+  `--packet-size` on `stream`.
+- **Switch:** enable jumbo frames in the management UI (name and steps vary by
+  vendor). Confirm the switch's *actual* maximum frame size — "jumbo" is not
+  one number.
+- **Host NIC:**
+  - Windows: NIC properties → Advanced → "Jumbo Packet" or similar.
+  - Linux: `sudo ip link set dev eth1 mtu 9000`
+  - macOS: some drivers expose an MTU setting in the network settings; others
+    do not support jumbo frames.
+
+After changing MTU, confirm it took effect:
 
 ```bash
 # Linux example
 ip link show eth1
 ```
 
-and check that TX/RX MTU matches your expectation.
-
-⸻
+---
 
 ## 5. Packet delay and flow control
 
-Some cameras allow configuring inter-packet delay or packet interval:
-- Without delay:
-    - Camera sends packets as fast as possible.
-    - High instantaneous bursts can overwhelm NICs / switches.
-- With modest delay:
-    - Traffic is smoother at the cost of a small increase in latency.
+Some cameras allow configuring an inter-packet delay (`GevSCPD`) or packet
+interval:
 
-If you see high packet loss or many resends at high frame rates:
-1.	Try slightly increasing the inter-packet delay.
-2.	Observe:
-    - Does the drop/resend rate decrease?
-    - Is overall throughput still sufficient?
+- Without delay, the camera sends packets as fast as possible, and the bursts
+  can overwhelm NICs and switches.
+- With a modest delay, traffic is smoother at the cost of a small increase in
+  latency.
 
-Some vendors also expose “frame rate limits” or “burst size” options. These can
-also be used to ease pressure on the network at the cost of lower peak FPS.  ￼
+If you see frame drops at high frame rates:
 
-⸻
+1. Try slightly increasing the inter-packet delay.
+2. Check whether the drop rate decreases, and whether overall throughput is
+   still sufficient.
+
+Some vendors also expose "frame rate limits" or "burst size" options. These can
+also ease pressure on the network at the cost of lower peak FPS.
+
+---
 
 ## 6. Multi-camera considerations
 
-When running multiple cameras:
-- Total throughput is roughly the sum of each camera’s stream.
-- The **bottleneck** can be:
-    - The switch’s uplink to the host.
-    - The host NIC’s capacity.
-    - Host CPU / memory bandwidth.
+When running multiple cameras, total throughput is roughly the sum of each
+camera's stream, and the **bottleneck** can be:
+
+- The switch's uplink to the host.
+- The host NIC's capacity.
+- Host CPU / memory bandwidth.
 
 Practical tips:
+
 - Prefer a dedicated NIC for cameras.
-- For 2–4 high-speed cameras, consider:
-    - Multi-port NICs.
-    - Separating cameras onto different NICs if possible.
-- Stagger packet timing:
-    - Slightly different inter-packet delays for each camera.
-    - Slightly different frame rates, where acceptable.
+- For 2–4 high-speed cameras, consider multi-port NICs, or separating cameras
+  onto different NICs.
+- Stagger packet timing: slightly different inter-packet delays per camera, or
+  slightly different frame rates where acceptable.
 
 Monitor:
-- Per-camera stats (drops, resends, throughput).
+
+- Per-camera statistics: drops and throughput.
 - Host CPU usage.
 - Switch port statistics if your hardware exposes them.
 
-⸻
+---
 
 ## 7. Using --iface and discovery quirks
 
 On systems with more than one active NIC, automatic interface selection might
 pick the wrong one. `--iface` forces the choice, and means the same thing
 everywhere: in `viva-camctl`, in `viva-service`, in the Python `iface=`
-argument and in the Rust examples. It names the **host** NIC, by either
+argument and in the Rust examples. It names the **host** NIC, by either:
+
 - one of its IPv4 addresses — `--iface 192.168.0.5`, or
 - its OS name — `--iface eth0`, or a GUID like
   `{6394C55F-F630-4BC7-92D2-7AC320C73D1C}` on Windows.
@@ -381,71 +408,71 @@ Use whichever you have; the address is usually easier to find, and on Windows
 much easier. A value that resolves to nothing prints every interface the
 library can see, which is the fastest way to learn the GUID.
 
-If discovery only works when you specify --iface, but not without it:
-- You likely have:
-    - Multiple NICs on overlapping subnets, or
-    - A default route that prefers a different interface.
-- This is not unusual; be explicit for production setups.
+If discovery only works when you specify `--iface`, you likely have multiple
+NICs on overlapping subnets, or a default route that prefers a different
+interface. This is not unusual; be explicit in production setups.
 
-⸻
+---
 
 ## 8. Troubleshooting checklist
 
-Use this checklist when things don’t work as expected.
-
 ### 8.1. Discovery fails
 
-See also the troubleshooting section in Discovery￼.
-- Check link LEDs on camera, switch, and NIC.
-- Confirm IP addressing:
-    - Host and camera on same subnet.
-    - No conflicting IPs.
-- Check firewall:
-    - Allow UDP broadcast / unicast on the camera NIC.
-- Temporarily:
-    - Disable other NICs to simplify routing.
-    - Try a direct cable instead of a switch.
-
+Work through the
+[Discovery troubleshooting checklist](./tutorials/discovery.md#troubleshooting-checklist).
 If the camera has a `169.254.x.y` address, go to
 [§3 Link-local (APIPA) cameras](#3-link-local-apipa-cameras) instead — the
-causes there are specific and the fixes are two commands.
+causes there are specific and the fixes are two commands. If none of this
+helps, the camera itself is the evidence we need: see
+[Reporting a camera we can't open](./reporting.md).
 
-If none of this helps, the camera itself is the evidence we need:
-see [Reporting a camera we can't open](./reporting.md).
+### 8.2. Streaming is unstable (drops)
 
-### 8.2. Streaming is unstable (drops / resends)
-- Check MTU vs packet size; avoid exceeding path MTU.
-- For high data rates:
-    - Enable jumbo frames end-to-end (camera, switch, NIC).
-- Reduce stress:
-    - Lower frame rate or ROI.
-    - Increase inter-packet delay slightly.
-- Ensure dedicated NIC and switch where possible.
-- Watch host CPU; if it’s near 100%, consider:
-    - Better NIC / driver.
-    - Moving processing off to another thread / core.
+- Check packet size against the path MTU; see [§4.2](#42-enabling-jumbo-frames).
+- For high data rates, enable jumbo frames end to end (camera, switch, NIC).
+- Reduce stress: lower the frame rate or ROI, or increase the inter-packet
+  delay slightly.
+- Use a dedicated NIC and switch where possible.
+- Watch host CPU; if it is near 100%, consider a better NIC or driver, or
+  moving processing to another thread or core.
 
 ### 8.3. Vendor tool works, viva-genicam does not
-Compare:
-- Which NIC / IP the vendor tool uses.
-   - The camera’s configured stream destination (IP/port).
-   - The vendor tool might:
-- Use a different MTU / packet size.
-   - Adjust inter-packet delay automatically.
-   - Try to replicate those parameters with viva-camctl and the NodeMap.
 
-⸻
+When the vendor's viewer sees the camera or streams from it and
+`viva-camctl` does not, compare what the two tools actually do:
 
-9. Recap
+- **Which host NIC and IP** the vendor tool uses. Pass the same one to
+  `viva-camctl` with `--iface`.
+- **Whether the vendor tool changed the camera's address** — DHCP, or a
+  "force IP" button. Run `viva-camctl list` again afterwards.
+- **Where the camera streams to.** The vendor tool may leave the camera
+  configured with its own destination IP and port; make sure `viva-camctl` uses
+  a host IP and port the firewall allows, or reset the camera to defaults.
+- **Packet size and inter-packet delay.** Vendor tools often tune these
+  automatically. Note the `GevSCPSPacketSize` and `GevSCPD` values the vendor
+  tool shows, then reproduce them with `viva-camctl stream --packet-size N` and
+  `viva-camctl set`.
+- **Control privilege.** Close the vendor tool first: while it holds the
+  control channel, nothing else can configure the camera.
 
-After this chapter you should:
-	•	Understand basic GigE Vision network topologies and when to use each.
-	•	Be able to configure a host NIC and camera addresses on Windows, Linux, and macOS.
-	•	Know when and how to enable jumbo frames and adjust packet delay.
-	•	Have a structured approach to debugging discovery and streaming issues.
-
-For protocol-level details and tuning options exposed by this project:
-	•	See viva-gige￼ for transport internals.
-	•	See the Streaming tutorial￼ for concrete CLI and Rust examples.
+Capture logs with `-vv` (or `RUST_LOG=debug`) at the same frame rate and
+resolution, and if it still makes no sense,
+[send us the report bundle](./reporting.md).
 
 ---
+
+## 9. Recap
+
+After this chapter you should:
+
+- Understand basic GigE Vision network topologies and when to use each.
+- Be able to configure a host NIC and camera addresses on Windows, Linux, and
+  macOS.
+- Know when and how to enable jumbo frames and adjust packet delay.
+- Have a structured approach to debugging discovery and streaming issues.
+
+For protocol-level details and tuning options exposed by this project:
+
+- See [`viva-gige`](./crates/viva-gige.md) for transport internals.
+- See the [Streaming tutorial](./tutorials/streaming.md) for concrete CLI and
+  Rust examples.

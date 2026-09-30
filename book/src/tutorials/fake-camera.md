@@ -22,7 +22,7 @@ Discovering cameras (2 s timeout) ...
     IP: 127.0.0.1  Model: FakeGigE  Manufacturer: viva-genicam
 
 Connecting to 127.0.0.1 ...
-  Connected. GenApi XML: 22246 bytes, 64 features.
+  Connected. GenApi XML: … bytes, … features.
 
 Reading camera features:
   Width = 640
@@ -53,21 +53,9 @@ Demo complete. All operations succeeded without hardware.
 
 ## Running integration tests
 
-All integration tests use the fake camera automatically:
-
-```bash
-# Full workspace test suite (includes fake camera tests)
-cargo test --workspace
-
-# Just the camera integration tests
-cargo test -p viva-genicam --test fake_camera
-
-# Zenoh service end-to-end tests
-cargo test -p viva-service --test fake_camera_e2e
-
-# The USB3 Vision equivalent, against viva-fake-u3v
-cargo test -p viva-genicam --test fake_u3v_camera --features u3v
-```
+The workspace's integration tests use the fake cameras automatically, so
+`cargo test --workspace` needs no hardware. The individual suites are listed in
+[Running the tests](../testing.md).
 
 ## Using the fake camera in your own code
 
@@ -113,15 +101,18 @@ until Ctrl+C. This is the way to test interactively with `viva-camctl`, or with
 # Terminal 1: start the fake camera
 cargo run -p viva-fake-gige
 
-# Custom dimensions and frame rate
-cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15
+# Custom dimensions, frame rate and pixel format (mono8 or rgb8)
+cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15 --pixel-format rgb8
 ```
 
 Output:
 ```
-Fake camera running on 127.0.0.1:3956 (640x480 Mono8 @ 30 fps)
+Fake camera running on 127.0.0.1:3956 (640x480 MONO8 @ 30 fps)
+Identity: model '…', serial '…', user name '…'
 Press Ctrl+C to stop.
 ```
+
+`cargo run -p viva-fake-gige -- --help` lists the remaining options.
 
 ## Using the CLI with the fake camera
 

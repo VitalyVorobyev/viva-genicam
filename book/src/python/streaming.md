@@ -62,13 +62,19 @@ The `stream()` call accepts GigE-specific knobs:
 ```python
 cam.stream(
     iface="en0",               # NIC override — or "192.168.0.5"
-    packet_size=1500,          # omit to follow the interface's probed MTU
+    auto_packet_size=True,     # size packets from the NIC MTU (or packet_size=N)
     multicast="239.255.42.99", # subscribe to a multicast group instead of unicast
     destination_port=34567,    # fix the streaming UDP port
 )
 ```
 
 None of these are required. `iface=` is auto-resolved by subnet match if you omit it; the rest fall back to the camera's defaults.
+
+Packet size has three settings. Omit both arguments and the camera's current
+`GevSCPSPacketSize` is kept. `auto_packet_size=True` sets it from the host
+NIC's MTU; `packet_size=N` writes `N` as a ceiling. Pass at most one of the
+two. In every case a test-packet probe may lower the size if the network path
+drops it — see [Streaming → Packet size and MTU](../tutorials/streaming.md#41-packet-size-and-mtu).
 
 `iface=` takes the host NIC's IPv4 address or its OS name, the same two spellings `viva-camctl --iface` and `viva-service --iface` accept — so the address you read off `discover()` is a legal value here.
 

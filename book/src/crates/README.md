@@ -47,28 +47,28 @@ have chapters of their own: [`viva-gige`](viva-gige.md),
 At a high level, the crates compose like this:
 
 ```text
-           ┌───────────────┐      ┌────────────────┐
-           │   viva-gencp      │      │   viva-genapi  │
-           │ GenCP encode  │      │ NodeMap,       │
-           │ / decode      │      │ SwissKnife,    │
-           └─────┬─────────┘      │ selectors      │
-                 │                └──────┬─────────┘
-                 │                       │
-           ┌─────▼─────────┐      ┌──────▼─────────┐
-           │   viva-gige     │      │  viva-genapi-xml    │
-           │ GVCP / GVSP   │      │ XML loading &  │
-           │ packet I/O    │      │ schema-lite IR │
-           └─────┬─────────┘      └──────┬─────────┘
-                 │                       │
-                 └──────────┬────────────┘
-                            │
-                      ┌─────▼───────┐
-                      │ viva-genicam│  ← public Rust API
-                      └─────┬───────┘
-                            │
-                      ┌─────▼───────┐
-                      │ viva-camctl   │  ← CLI on top of `viva-genicam`
-                      └─────────────┘
+   ┌───────────────┐        ┌────────────────┐
+   │  viva-gencp   │        │  viva-genapi   │
+   │ GenCP encode  │        │ NodeMap,       │
+   │ / decode      │        │ SwissKnife,    │
+   └───────┬───────┘        │ selectors      │
+           │                └───────┬────────┘
+           │                        │
+   ┌───────▼───────┐        ┌───────▼────────┐
+   │  viva-gige /  │        │viva-genapi-xml │
+   │  viva-u3v     │        │ XML loading &  │
+   │ transports    │        │ parsing        │
+   └───────┬───────┘        └───────┬────────┘
+           │                        │
+           └───────────┬────────────┘
+                       │
+               ┌───────▼───────┐
+               │ viva-genicam  │  ← public Rust API
+               └───────┬───────┘
+                       │
+               ┌───────▼───────┐
+               │ viva-camctl   │  ← CLI on top of viva-genicam
+               └───────────────┘
 ```
 
 Roughly:
@@ -80,9 +80,9 @@ features.
 * `viva-genapi` turns that XML into a NodeMap you can read/write, including
 SwissKnife expressions and selector-dependent features.
 * `viva-genicam` stitches all of the above into a reasonably ergonomic API.
-* `viva-camctl` exposes common workflows from genicam as `cargo run -p viva-camctl -- …`.
+* `viva-camctl` exposes common workflows from `viva-genicam` on the command line.
 
-⸻
+---
 
 ## When to use which crate
 
@@ -98,7 +98,7 @@ Typical tasks:
 
 Start with the examples under `crates/viva-genicam/examples/` and the [Tutorials](../tutorials/README.md).
 
-⸻
+---
 
 ### I want a command-line tool for daily work
 
@@ -111,23 +111,23 @@ Typical tasks:
 * Enabling/disabling chunk data, configuring events
 
 This is also a good reference for how to structure a “real” application on top
-of genicam.
+of `viva-genicam`.
 
-⸻
+---
 
 ### I need to touch GigE Vision packets / low-level transport
 
 Use `viva-gige` (and `viva-gencp` as needed).
 
 Example reasons:
-* You want to experiment with MTU, packet delay, resend logic, or custom stats
+* You want to experiment with MTU, packet delay, or custom stats
 * You’re debugging interoperability with a weird device and need raw GVCP/GVSP
 * You want to build a non-GenApi tool that only tweaks vendor-specific registers
 
 The [`viva-gige` chapter](./viva-gige.md) goes into more detail on discovery,
 streaming, events, actions, and tuning.
 
-⸻
+---
 
 ### I want to work on GenApi / XML internals
 
@@ -142,11 +142,11 @@ The following chapter is relevant:
 * [GenApi core & NodeMap: viva-genapi](./viva-genapi.md)
 
 If you’re not sure where a GenApi bug lives, the rule of thumb is:
-* “XML can’t be parsed” → genapi-xml
+* “XML can’t be parsed” → viva-genapi-xml
 * “Feature exists but behaves wrong” → viva-genapi
 * “Device returns odd data / status codes” → viva-gige or viva-gencp
 
-⸻
+---
 
 ### I need a single high-level entry point
 
@@ -155,17 +155,16 @@ Use `viva-genicam`.
 This crate aims to expose just enough control/streaming surface for most applications without making you think about transports, XML, or NodeMap internals.
 
 The [tutorials](../tutorials/README.md) show:
-* How to go from “no camera” to “frames in memory” in ~20 lines
-* How to query and set features safely (with proper types)
-* How to plug in your own logging, error handling, and runtime
+* How to go from discovery to frames in memory
+* How to query and set features by name, and why a write can be refused
 
-⸻
+---
 
 ## Crate deep dives
 
 The rest of this section of the book contains crate-specific chapters:
-* [GenCP: viva-gencp](./viva-gencp.md)￼– control protocol building blocks.
-* [GigE Vision transport: `viva-gige`](./viva-gige.md)￼– discovery, streaming, events, actions.
+* [GenCP: `viva-gencp`](./viva-gencp.md) – control protocol building blocks.
+* [GigE Vision transport: `viva-gige`](./viva-gige.md) – discovery, streaming, events, actions.
 * [GenApi core & NodeMap: `viva-genapi`](./viva-genapi.md) – evaluating features, including SwissKnife.
 
 If you’re reading this for the first time, a good path is:

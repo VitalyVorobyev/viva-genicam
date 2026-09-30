@@ -51,3 +51,12 @@ docs/whereweare.md
 # directory. Landed in a staged commit twice while testing streaming changes.
 frame_*.pgm
 frame_*.ppm
+
+# EVT blocks written by `viva-camctl stream --save`, same accident as the
+# frames above.
+block_*.evt
+block_*.evt3
+block_*.evt21
+
+# `viva-camctl report` default output
+viva-report.txt

@@ -137,6 +137,11 @@ pub enum Cmd {
         packet_size: Option<u32>,
         #[arg(long, default_value_t = 1)]
         save: usize,
+        /// Append every completed EVT block's raw payload to this file,
+        /// in arrival order (replay capture). Image frames are unaffected;
+        /// use --save for frame_NNNN files.
+        #[arg(long)]
+        raw_out: Option<PathBuf>,
         #[arg(long)]
         rgb: bool,
         #[arg(long, default_value_t = 0)]
@@ -333,6 +338,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             save,
             rgb,
             duration_s,
+            raw_out,
         } => {
             let args = StreamArgs {
                 ip,
@@ -346,6 +352,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 save,
                 rgb,
                 duration_s,
+                raw_out,
             };
             cmd_stream::run(args).await?
         }

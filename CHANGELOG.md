@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TriggerSoftware` command whose register is `RW`, so a read of it is served
   and only the log can show it happened.
 
+- **`viva-camctl stream --raw-out <file>` appends every completed EVT block's
+  raw payload to one file** (from
+  [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)). `--save`
+  writes EVT blocks as numbered `block_NNNN.evt3`/`.evt21` files, which is
+  awkward for replay tooling that wants a capture as one concatenated
+  payload stream; `--raw-out` appends each block's payload to a single file,
+  created if missing, in arrival order. Image frames are unaffected and keep
+  their `frame_NNNN` naming, and `--rgb` still warns that it does not apply
+  to EVT data.
+
 ### Changed
 
 - **`viva-service` publishes event-vision blocks on their own topic,

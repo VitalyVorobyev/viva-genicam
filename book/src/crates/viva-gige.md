@@ -26,7 +26,7 @@ bytes. Applications normally reach it through `viva-genicam`.
 ## Selecting the local interface
 
 On a multi-NIC host, bind to the NIC that reaches the camera. `Iface` offers
-four ways to get one, and the difference between them has caused real bugs:
+four ways to get one, and they are easy to confuse:
 
 ```rust,ignore
 use viva_gige::nic::Iface;
@@ -40,16 +40,15 @@ Iface::list()?;                               // everything the library can see
 `from_ipv4` takes an address **on this host**. `from_remote_ipv4` takes the
 camera's address and probes the routing table for the interface that reaches
 it — which is what you want when all you have is the camera's IP. Passing a
-camera address to `from_ipv4` is the defect that made acquisition fail on real
-hardware in [#70](https://github.com/VitalyVorobyev/viva-genicam/issues/70): it
-only ever worked against the loopback fake, where the two addresses coincide.
+camera address to `from_ipv4` is an easy mistake to miss, because it works
+against the loopback fake camera, where the two addresses coincide, and fails
+against real hardware.
 
 `Iface::list()` is also a diagnostic. It reports interfaces *as the library sees
-them*, which is not always the set the OS shows — on Windows, link-local
-`169.254.x.x` addresses were invisible until the `link-local` feature of
-`if-addrs` was enabled, and an interface missing from this list is invisible to
-discovery no matter what `ipconfig` says
-([#57](https://github.com/VitalyVorobyev/viva-genicam/issues/57)).
+them*, which is not always the set the OS shows, and an interface missing from
+this list is invisible to discovery no matter what `ipconfig` or `ip addr`
+says. `IfaceSelector` parses either spelling a user might type — an IPv4
+address or an OS interface name — and `resolve()` turns it into an `Iface`.
 
 ---
 
@@ -63,16 +62,11 @@ user-defined name.
 {{#include ../../../crates/viva-genicam/examples/list_cameras.rs:discover}}
 ```
 
-| Function | Scans |
-|---|---|
-| `discover(timeout)` | Every routable interface |
-| `discover_on_interface(timeout, name)` | One named interface |
-| `discover_all(timeout)` | Every interface **including loopback** |
-
-Use `discover_all` only for the [fake camera](../tutorials/fake-camera.md).
-One unusable interface no longer aborts the whole call, and a stray non-GVCP
-packet on the port no longer discards the replies already collected — both were
-real failure modes.
+`discover`, `discover_on_interface` and `discover_all` differ in which
+interfaces they scan; the table in
+[Discovery → Discover from Rust](../tutorials/discovery.md#step-2--discover-from-rust)
+lists them. An interface that cannot be bound or broadcast on is skipped with a
+warning rather than failing the whole call.
 
 From the CLI:
 
@@ -154,19 +148,28 @@ directly:
 ```
 
 `StreamBuilder` (in `viva_genicam::stream`) exposes `iface`, `dest`,
-`target_mtu`, `packet_size`, `packet_delay`,
+`target_mtu`, `auto_packet_size`, `packet_size`, `probe`, `packet_delay`,
 `destination_port`, `multicast`, `rcvbuf_bytes` and `channel`. `FrameStream`
 wraps the result and yields whole frames.
 
 ### Packet size and MTU
 
 `GevSCPSPacketSize` is the size of the transmitted **IP packet**, so it must fit
-the path MTU end to end. The probed MTU is used unless `packet_size` overrides
-it. Two caveats
-worth knowing:
+the path MTU end to end. `StreamBuilder` chooses it in one of three modes:
 
-- Cameras **clamp** a size they cannot honour, and the write succeeds when they
-  do. `StreamBuilder::build` reads the register back through
+- **Preserve** (the default) — start from the camera's current value and never
+  raise it.
+- **Auto** — `auto_packet_size()` starts from a size derived from the host
+  interface's MTU (`target_mtu` can cap that MTU).
+- **Explicit** — `packet_size(n)` starts from `n`, treated as a ceiling.
+
+In every mode a GVSP test-packet probe can then lower the size when the path
+drops it; `probe(false)` disables it.
+[Streaming → Packet size and MTU](../tutorials/streaming.md#41-packet-size-and-mtu)
+explains the modes, the probe and camera-side clamping in full. Two details
+belong to this layer:
+
+- `StreamBuilder::build` reads the register back through
   `GigeDevice::get_stream_packet_size` and puts the *effective* size in
   `StreamParams`, so reassembly follows the camera rather than the request. A
   device that will not answer the read-back keeps the requested value and logs
@@ -180,12 +183,10 @@ worth knowing:
 
 ### Resend
 
-GVSP defines packet resend, and the pieces exist here — `ResendPlanner`,
-`coalesce_missing`, `GigeDevice::request_resend`. **They are not wired into the
-receive path** (backlog SR-04). Nothing in a live stream requests a resend, and
-nothing increments the `resends` counter, so a summary reading `resends=0` means
-"not implemented" rather than "none were needed". `drops` is the number to
-watch. This section changes when resend lands.
+The resend building blocks live here — `ResendPlanner`, `coalesce_missing`,
+`GigeDevice::request_resend` — but they are **not wired into the receive
+path**, so `resends` stays at zero; see
+[Streaming → What the statistics do and do not tell you](../tutorials/streaming.md#43-what-the-statistics-do-and-do-not-tell-you).
 
 ### Chunk data
 
@@ -198,7 +199,7 @@ what it does not recognise; `viva_genicam::ChunkMap` maps the known ones
 
 `StreamStats` carries `frames`, `bytes`, `drops`, `packets`, `avg_fps`,
 `avg_mbps`, `avg_latency_ms` and the elapsed window. The resend and
-backpressure counters are inert for the reason above.
+backpressure counters stay at zero for the reason above.
 
 ---
 
@@ -215,26 +216,25 @@ rather than as data.
 ## Logging
 
 ```bash
-RUST_LOG=info,viva_gige=debug cargo run -p viva-camctl -- stream --ip 192.168.0.10
+RUST_LOG=info,viva_gige=debug,viva_genicam=debug cargo run -p viva-camctl -- stream --ip 192.168.0.10
 ```
 
 `viva-camctl` maps `-v` to `debug` and `-vv` to `trace` if you would rather not
 set the variable. Useful targets: `viva_gige::gvcp` (binds, discovery, register
-ops), `viva_gige::gvsp` (packets, reassembly, frame stats), `viva_gige::nic`
-(interface enumeration and socket binding).
+ops), `viva_gige::nic` (interface enumeration and socket binding),
+`viva_gige::gvsp` (packet parsing), and `viva_genicam::stream` (stream setup,
+packet-size negotiation and frame reassembly).
 
 ---
 
 ## Platform notes
 
-**Windows.** Allow inbound UDP for discovery and the stream port, for both the
-Private and Public firewall profiles. Enable jumbo frames in the NIC's advanced
-settings if the whole path supports them, and keep the power plan on high
-performance — receive buffers default low on many desktop NICs.
+**Windows.** Firewall profiles, jumbo frames and NIC power settings are
+covered in [Networking → Windows](../networking.md#22-windows).
 
 **Linux.** With firewalld, GVCP replies arrive from source port 3956 and the
 GVSP port needs its own rule — see
-[Link-local (APIPA) cameras](../networking.md#3-link-local-apipa-cameras).
+[Letting the reply back in](../networking.md#33-letting-the-reply-back-in-firewalld).
 `net.core.rmem_max` caps how far `rcvbuf_bytes` can go.
 
 **Link-local.** GigE Vision cameras fall back to `169.254.0.0/16` when no DHCP

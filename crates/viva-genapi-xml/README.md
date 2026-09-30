@@ -2,7 +2,7 @@
 
 GenICam XML parser: loads device description files into a strongly-typed intermediate representation.
 
-Parses GenICam XML node maps into `XmlModel` with typed declarations for all standard node types (Integer, Float, Enum, Boolean, Command, Category, SwissKnife, Converter, IntConverter, String).
+Parses GenICam XML node maps into `XmlModel` with typed declarations for all standard node types (Integer, Float, Enumeration, Boolean, Command, Category, SwissKnife, Converter, IntConverter, String, Register). A node the parser cannot handle is recorded in `XmlModel::skipped` instead of failing the whole document.
 
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
@@ -11,16 +11,15 @@ Parses GenICam XML node maps into `XmlModel` with typed declarations for all sta
 ## Features
 
 - **Full XML parsing** -- parse GenICam XML into `XmlModel` with typed `NodeDecl` variants
-- **Minimal parsing** -- `parse_into_minimal_nodes()` for quick feature enumeration
+- **Minimal parsing** -- `parse_into_minimal_nodes()` for a cheap scan of the schema version and top-level names
 - **XML fetch** -- download and decompress GenICam XML from a device (behind the `fetch` feature flag)
 - **Serde support** -- all public types derive `Serialize`/`Deserialize`
 - **WASM compatible** -- compiles for `wasm32-unknown-unknown`
 
 ## Usage
 
-```toml
-[dependencies]
-viva-genapi-xml = "0.1"
+```bash
+cargo add viva-genapi-xml
 ```
 
 ```rust

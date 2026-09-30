@@ -26,8 +26,10 @@ class of bug has something watching for it.
 
 ## What to send
 
-Two commands. Both deliberately stop **before** building the nodemap, so they
-work on a camera we cannot open — which is the only camera anyone reports.
+Two commands. Neither needs the camera to open: `xml` never parses the
+document, and `report` records a parse or nodemap failure in the bundle instead
+of stopping. So both work on a camera we cannot open — which is the only camera
+anyone reports.
 
 ```bash
 # Everything: environment, interfaces, discovery, bootstrap registers, XML
@@ -70,10 +72,9 @@ Sections, in order:
 | GenApi | XML size, schema version, node and feature counts, and any node that was dropped |
 | GenApi XML | The document itself |
 
-The interface list is there because of
-[#57](https://github.com/VitalyVorobyev/viva-genicam/issues/57): an interface
-missing from that list is invisible to discovery no matter what the OS reports
-elsewhere, and that is not obvious from any other output.
+The interface list is there because an interface missing from it is invisible
+to discovery no matter what the OS reports elsewhere, and that is not obvious
+from any other output.
 
 A section that fails says so and the report continues — a camera that refuses
 the control channel still produces everything up to that point.
@@ -100,9 +101,9 @@ Useful alongside the bundle:
 - Whether a vendor tool works on the same camera and host — that separates a
   library bug from a network or camera configuration problem.
 - A packet capture, if you can take one. `tcpdump -i <iface> -w capture.pcap
-  udp port 3956` covers control traffic. A capture settled
-  [TC-09](https://github.com/VitalyVorobyev/viva-genicam/issues/57#issuecomment-5128039881),
-  a wire question we had been unable to answer from documentation alone.
+  udp port 3956` covers control traffic. A capture shows exactly what the
+  camera sent, which can answer wire-level questions that documentation alone
+  cannot.
 
 ## What happens to it
 

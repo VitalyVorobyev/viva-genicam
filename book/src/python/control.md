@@ -52,7 +52,7 @@ except vg.TransportError as e:
 | `GenApiError` | Nodemap evaluation: unknown feature, value out of range, predicate failed |
 | `TransportError` | GVCP/USB register read or write failed |
 | `ParseError` | User-supplied value couldn't be parsed per the node's type |
-| `MissingChunkFeatureError` | Chunk selector not present in the camera's XML |
+| `MissingChunkFeatureError` | Chunk selector not present in the camera's XML. Chunk configuration is not exposed to Python yet, so the bindings do not raise this today |
 | `UnsupportedPixelFormatError` | No RGB conversion path for the reported pixel format |
 
 All five inherit from `GenicamError`, so `except vg.GenicamError:` catches every
@@ -72,7 +72,7 @@ at the top of the worker as well.
 ### List features
 
 ```python
-cam.nodes()            # ['AcquisitionStart', 'ExposureTime', ... 53 entries]
+cam.nodes()            # ['AcquisitionStart', 'ExposureTime', ...]
 ```
 
 ### Node metadata
@@ -85,17 +85,24 @@ print(info.visibility)   # "Beginner"
 print(info.description)  # "Exposure time of the sensor in microseconds."
 print(info.writable)     # True
 print(info.readable)     # True
+print(info.effective_access)  # "RW" — or "RO" while the feature is locked
 ```
 
 `NodeInfo` fields:
 
 - `name` — feature name
-- `kind` — `"Integer"`, `"Float"`, `"Enumeration"`, `"Boolean"`, `"Command"`, `"Category"`, `"SwissKnife"`, `"Converter"`, `"IntConverter"`, `"StringReg"`
-- `access` — `"RO"`, `"RW"`, `"WO"`, or `None` (for categories)
+- `kind` — `"Integer"`, `"Float"`, `"Enumeration"`, `"Boolean"`, `"Command"`, `"Category"`, `"SwissKnife"`, `"Converter"`, `"IntConverter"`, `"StringReg"`, `"Register"`
+- `access` — the access mode the XML declares: `"RO"`, `"RW"`, `"WO"`, or `None` (for categories)
 - `visibility` — `"Beginner"`, `"Expert"`, `"Guru"`, `"Invisible"`
 - `display_name`, `description`, `tooltip`
+- `effective_access` — the access mode the camera permits *right now*: a
+  `"RW"` feature reads as `"RO"` while a `pIsLocked` lock is engaged or while
+  the feature is unavailable. Only `node_info()` fills it in, and leaves it
+  `None` if the predicates cannot be evaluated; `all_node_info()` always
+  leaves it `None`, because resolving it costs register reads per node.
 
-Plus two convenience properties: `readable` (`access in {"RO","RW"}`) and `writable` (`access in {"RW","WO"}`).
+Plus two convenience properties, both computed from the declared `access`:
+`readable` (`access in {"RO","RW"}`) and `writable` (`access in {"RW","WO"}`).
 
 ### Enum entries
 
@@ -120,13 +127,12 @@ Command raises, and there is nothing to read back.
 
 Three things worth knowing:
 
-- `cam.set("UserSetLoad", "1")` does the same thing and always has — `set`
-  dispatches Command nodes and discards the value. It was never documented,
-  which is what [issue #121](https://github.com/VitalyVorobyev/viva-genicam/issues/121)
-  reported. Prefer `execute`; it says what it does.
+- `cam.set("UserSetLoad", "1")` does the same thing — `set` dispatches
+  Command nodes and discards the value. Prefer `execute`; it says what it
+  does.
 - **A read after the command returns the new value when the camera's XML says
   it should.** A register may declare `<pInvalidator>` nodes: "when this one
-  changes, my cached value is stale". The FLIR Blackfly S BFS-PGE-31S4C names
+  changes, my cached value is stale". The FLIR Blackfly S BFS-PGE-31S4C-C names
   `UserSetLoad`'s register as an invalidator of 171 of its registers, and the
   features built on them — `ExposureTime` and `Gain` among them — go stale
   with them, so a `cam.get("ExposureTime")` after `cam.execute("UserSetLoad")`

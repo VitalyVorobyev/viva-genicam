@@ -14,7 +14,7 @@ Client applications connect to the service for camera discovery, feature control
 - **GenICam XML** -- serves the device description XML via Zenoh queryable
 - **Node read/write** -- live node value updates and feature control
 - **Acquisition** -- start/stop image acquisition from client applications
-- **Frame streaming** -- raw image data with 16-byte binary header over Zenoh pub/sub
+- **Frame streaming** -- raw image data with a 16-byte binary header over Zenoh pub/sub; event-vision blocks on a topic of their own
 - **Device lifecycle** -- connection/disconnection tracking with status announcements
 
 ## Usage
@@ -33,14 +33,19 @@ Cameras are exposed under `genicam/devices/{id}/`:
 
 | Endpoint | Description |
 |----------|-------------|
-| `announce` | Periodic device discovery announcements |
+| `announce` | Periodic device announcements |
+| `status` | Connection status of the device |
 | `xml` | Queryable returning the GenICam XML |
-| `nodes/{name}/value` | Live node value updates |
+| `nodes/{name}/value` | Node value updates |
+| `nodes/{name}/state` | Queryable and updates carrying the full live `FeatureState` of one node |
 | `nodes/{name}/set` | Queryable for writing node values |
 | `nodes/{name}/execute` | Queryable for executing commands |
 | `nodes/bulk/read` | Queryable for batch reads |
+| `nodes/bulk/state` | Queryable returning the `FeatureState` of many nodes at once |
 | `acquisition/control` | Start/stop acquisition |
-| `image` | Raw frame data with binary header |
+| `acquisition/status` | Whether acquisition is running, with frame rate and drop count |
+| `image` | Raw frame data with a 16-byte binary header |
+| `image/meta` | Image geometry and pixel format |
 | `evs` | Event-vision blocks (EVT 3.0 / 2.1) with a 24-byte binary header; never sent on `image` |
 
 Wire types are defined in [`viva-zenoh-api`](https://crates.io/crates/viva-zenoh-api).

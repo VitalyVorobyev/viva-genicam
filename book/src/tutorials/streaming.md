@@ -77,7 +77,28 @@ cargo run -p viva-camctl -- stream \
   --ip 192.168.0.10 --iface 192.168.0.5 --duration-s 5 --save 3
 ```
 
-### 2.3. Multicast
+`--save` defaults to **1**, so a plain `stream` run leaves one file behind;
+pass `--save 0` to write nothing.
+
+### 2.3. Event-vision cameras
+
+Event-based (EVS) cameras send blocks of encoded events rather than images.
+`viva-camctl stream` recognises the Prophesee EVT 3.0 and EVT 2.1 formats, and
+handles those blocks differently from image frames:
+
+- `--save N` writes the first N blocks as raw payloads, `block_0001.evt3` or
+  `block_0001.evt21`, in the current directory. `--rgb` does not apply.
+- `--raw-out <FILE>` appends **every** block's payload to one file, in arrival
+  order — a continuous recording you can replay with event-vision tooling. The
+  file is opened for appending, not truncated, so delete it between runs if you
+  want a fresh capture. Image frames are never written there.
+
+```bash
+cargo run -p viva-camctl -- stream \
+  --ip 192.168.0.10 --iface 192.168.0.5 --duration-s 10 --save 0 --raw-out capture.evt3
+```
+
+### 2.4. Multicast
 
 ```bash
 cargo run -p viva-camctl -- stream \
@@ -90,8 +111,14 @@ cargo run -p viva-camctl -- stream \
 ## 3. Streaming from Rust
 
 ```bash
-cargo run -p viva-genicam --example grab_gige -- --ip 192.168.0.10 --iface eth0
+cargo run -p viva-genicam --example grab_gige -- --iface eth0 --save 5
 ```
+
+The example streams from the first camera discovery finds, on the host
+interface you name with `--iface` (an IPv4 address or an OS name; required).
+It saves `--save N` frames (default 1) and stops. Unless you pass
+`--packet-size`, it opts into automatic packet sizing — see
+[§4.1](#41-packet-size-and-mtu).
 
 Setup — connect, build the stream, start acquisition:
 
@@ -139,23 +166,24 @@ frames will accept a write of 16114 at both ends and still deliver nothing
 (Vieworks FS-3200T through an ipTIME PoE4002; the same camera direct to the NIC
 streams up to **16114**).
 
-**What the library does (ADR-0021 / SR-14).** Default **preserves** the camera’s
-current `GevSCPSPacketSize`: it is read, never raised. Pass `--auto` /
-`StreamBuilder::auto_packet_size()` to set it from the host NIC MTU instead, or
-`--packet-size N` / `StreamBuilder::packet_size(n)` for an explicit ceiling
-(mutually exclusive with `--auto`). A clamping camera is followed on write
-(SR-02).
+**What the library does.** There are three packet-size policies:
 
-That overwrite-on-every-Start behaviour from 0.4.x is gone: a camera already
-set for a narrower switch keeps that value unless you opt into auto or an
-explicit size.
+| Policy | CLI | Rust | Python | Starting size |
+|---|---|---|---|---|
+| Preserve (default) | — | — | — | The camera's current `GevSCPSPacketSize`, never raised |
+| Auto | `--auto` | `StreamBuilder::auto_packet_size()` | `auto_packet_size=True` | Derived from the host NIC's MTU |
+| Explicit | `--packet-size N` | `StreamBuilder::packet_size(n)` | `packet_size=N` | `N`, used as a ceiling |
 
-**All three then probe the path** (SR-13): the library asks the camera for a GVSP
-test packet and bisects downward when the size does not arrive. The probe only
+Auto and explicit are mutually exclusive. The default leaves a camera that is
+already configured for a narrower path alone; the reasoning is in
+[ADR-0021](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0021-gvsp-packet-size-policy.md).
+
+**All three then probe the path**: the library asks the camera for a GVSP test
+packet and bisects downward when the size does not arrive. The probe only
 ever *lowers*, so it cannot override a size you chose — it can only refuse to
 stream at one the path drops, which is undetectable from either endpoint's
 registers. A device that answers no test packet keeps its size unchanged, so
-cameras that never implemented the mechanism are not walked down to 1500.
+cameras that do not implement the mechanism are not walked down to 1500.
 `StreamBuilder::probe(false)` turns it off and makes preserve literal.
 
 Cameras **clamp** a packet size they cannot honour, and the write succeeds when
@@ -191,14 +219,12 @@ the one to watch.
 
 **`resends` is not.** GVSP defines packet resend, and this library contains the
 pieces — a resend planner, and the GVCP command to request one — but they are
-not wired into the receive path (backlog
-[SR-04](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/backlog.md)).
-Nothing in a real stream increments that counter, so `resends=0` means "not
-implemented", not "none were needed". Do not read it as evidence that your
-network is healthy; read `drops` instead.
+not wired into the receive path. Nothing in a real stream increments that
+counter, so `resends=0` means "not implemented", not "none were needed". Do not
+read it as evidence that your network is healthy; read `drops` instead.
 
 The same applies to `backpressure_drops` and the resend-range counters exposed
-on `StreamStats`. When resend lands, this section changes.
+on `StreamStats`.
 
 ---
 
@@ -218,8 +244,8 @@ On Linux with firewalld, this is a separate rule from the GVCP one — see
 as `Mono8` looks like a plausible grey image with a fine crosshatch.
 
 **Intermittent hiccups under load.** Look at CPU usage and other traffic on the
-same NIC. On Windows, check the power profile and NIC driver version — receive
-buffers default low on many desktop NICs.
+same NIC. On Windows, check the power profile and NIC driver settings — see
+[Networking → Windows](../networking.md#22-windows).
 
 When in doubt, save a few frames, re-run with `-vv`, and compare against the
 vendor's viewer on the same cabling. If it still makes no sense,
@@ -231,7 +257,7 @@ vendor's viewer on the same cabling. If it still makes no sense,
 
 You should now be able to:
 
-- Start a stream from the CLI and from Rust, and save frames.
+- Start a stream from the CLI and from Rust, and save frames or event blocks.
 - Read `drops` as the meaningful reliability signal, and know that `resends` is
   not one yet.
 - Know which knob to reach for first: packet size and MTU, then packet delay.

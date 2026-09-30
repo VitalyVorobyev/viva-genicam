@@ -87,9 +87,14 @@ re-resolves the addressing and invalidates the cached values that depended on
 it, so a read after a selector write returns the new channel's value rather than
 a stale one.
 
+`viva-camctl get` reads the selector's current value only. To see which
+entries it accepts, call `Camera::enum_entries("GainSelector")` in Rust or
+`cam.enum_entries("GainSelector")` in [Python](../python/control.md#enum-entries),
+or look the node up in the XML that `viva-camctl xml` dumps.
+
 ```bash
-# What can the selector be set to?
-cargo run -p viva-camctl -- --json get --ip 192.168.0.10 --name GainSelector
+# Which channel is selected now?
+cargo run -p viva-camctl -- get --ip 192.168.0.10 --name GainSelector
 
 # Different gain per channel
 cargo run -p viva-camctl -- set --ip 192.168.0.10 --name GainSelector --value Red

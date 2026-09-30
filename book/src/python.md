@@ -18,14 +18,19 @@ print(cam.get("DeviceModelName"))
 
 with cam.stream() as frames:
     for frame in frames:
-        arr = frame.to_numpy()           # NumPy (H, W) or (H, W, 3) uint8
+        arr = frame.to_numpy()           # shape and dtype follow the pixel format
         break
 ```
+
+`to_numpy()` returns `(H, W)` `uint8` for `Mono8`, `(H, W)` `uint16` for
+`Mono16`, `(H, W, 3)` `uint8` for RGB, BGR and Bayer formats, and the raw bytes
+as a flat `uint8` array for anything else — see
+[Streaming → to_numpy()](python/streaming.md#to_numpy--natural-shape).
 
 ## Tutorials
 
 1. [Install & hello-camera](python/install.md) — install the wheel, run the self-contained fake-camera demo.
-2. [Discovery](python/discovery.md) — enumerate GigE and U3V cameras, restrict to one NIC, auto-detect interfaces.
+2. [Discovery](python/discovery.md) — enumerate GigE and U3V cameras, restrict to one NIC.
 3. [Control & introspection](python/control.md) — read and write features, walk the NodeMap, discover which features apply.
 4. [Streaming](python/streaming.md) — context-manager streams, NumPy frames, pixel formats, timestamps.
 
@@ -36,10 +41,9 @@ with cam.stream() as frames:
 
 ## Supported
 
-- Python 3.9+, abi3 wheels (one wheel covers every minor version).
-- GigE Vision: discovery, control, streaming.
-- USB3 Vision: discovery, control, streaming.
-- Platforms with pre-built wheels: Linux x86_64 (manylinux_2_28), macOS arm64, Windows x86_64.
+GigE Vision and USB3 Vision discovery, control and streaming. Supported Python
+versions and the platforms with pre-built wheels are listed in
+[Install & hello-camera](python/install.md#install-from-pypi).
 
 ### Not exposed to Python yet
 
@@ -57,11 +61,9 @@ no Python equivalent today:
   thing and **are** exposed, via `cam.execute(name)`; see
   [Control](python/control.md#executing-commands).)
 - **Skipped nodes.** `NodeMap::skipped()` — the list of features we could not
-  build from this camera's XML — is reachable from `viva-camctl` but not from
-  Python (backlog DX-05). A missing feature is therefore indistinguishable from
-  one the camera does not have.
+  build from this camera's XML — is reachable from `viva-camctl report` but not
+  from Python. A missing feature is therefore indistinguishable from one the
+  camera does not have.
 
 If you need one of these, `viva-camctl` covers most of them from the command
 line, and the [Rust crates](crates/README.md) cover all of them.
-
-Need another platform? The sdist on PyPI builds from source — you'll need a Rust toolchain (`rustup`) and a C compiler. libusb is always statically vendored; no system package needed.

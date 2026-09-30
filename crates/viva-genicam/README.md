@@ -11,19 +11,17 @@ This is the main entry point for the [viva-genicam](https://github.com/VitalyVor
 ## Project status — pre-1.0, and working
 
 Users have connected, controlled and streamed from real GigE Vision cameras
-with this crate — FLIR, Hikrobot and JAI models, across Linux, Windows and
-macOS. The protocols are implemented against the EMVA specifications and
-covered by ~370 automated tests, in-process fake cameras, and a corpus of 35
-real vendor GenApi XML descriptions.
+from several vendors with this crate, across Linux, Windows and macOS. The protocols are implemented against the EMVA specifications and
+covered by automated tests against in-process fake cameras, and by a corpus of
+dozens of real vendor GenApi XML descriptions.
 
 Two honest caveats, neither of which should stop you trying it:
 
 - **The API changes between releases.** It is pre-1.0 and it moves.
-- **There is no camera in CI.** The maintainer owns no hardware, so every
-  hardware confirmation this project has came from a user with a device. Fake
-  cameras only reproduce the behaviour we already thought of, and every
-  camera-specific bug found so far was found by someone running it on a real
-  device.
+- **There is no camera in CI.** Hardware confirmations come from users with
+  their own devices. Fake cameras only reproduce the behaviour we already
+  thought of; camera-specific bugs are found by people running the crate on a
+  real device.
 
 That second point is why a camera nobody has tried yet may still hit something.
 Cameras deviate from the standard and contradict their own documentation;
@@ -31,8 +29,7 @@ working with the hardware that exists is the goal, not a compromise. **If your
 camera does not work, please
 [open an issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose)**
 — and attach the camera's GenApi XML if you can, since that becomes a permanent
-regression fixture for your model. That loop is how this crate has improved,
-and it has worked every time it has been used.
+regression fixture for your model. That loop is how this crate has improved.
 
 Current gaps are tracked in
 [docs/backlog.md](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/backlog.md).
@@ -41,8 +38,8 @@ Current gaps are tracked in
 
 - **Discovery** -- find GigE Vision cameras on any network interface
 - **Connect & control** -- `connect_gige()` one-liner for camera connection with automatic XML fetch
-- **Feature access** -- typed get/set for Integer, Float, Enum, Boolean, Command, String features
-- **Streaming** -- `FrameStream` async iterator with reassembly and backpressure (packet resend is implemented at the protocol layer but not yet wired into the receive path)
+- **Feature access** -- `get`/`set` by feature name, parsed and encoded per node type (Integer, Float, Enumeration, Boolean, String, Command), plus typed accessors on the underlying `NodeMap`
+- **Streaming** -- `FrameStream` async iterator with reassembly and backpressure (packet resend is not wired into the receive path yet)
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition
 - **Chunks & timestamps** -- parse chunk data; map device timestamps to host time
 - **USB3 Vision** -- optional `u3v` feature for USB3 Vision cameras
@@ -54,13 +51,13 @@ cargo add viva-genicam
 ```
 
 ```rust
-use viva_genicam::{gige, Camera};
 use std::time::Duration;
+use viva_genicam::gige;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let devices = gige::discover(Duration::from_secs(1)).await?;
-    let (mut camera, _xml) = viva_genicam::connect_gige(&devices[0]).await?;
+    let mut camera = viva_genicam::connect_gige(&devices[0]).await?;
     camera.set("ExposureTime", "5000")?;
     let val = camera.get("ExposureTime")?;
     println!("ExposureTime = {val}");

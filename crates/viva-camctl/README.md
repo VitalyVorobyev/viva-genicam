@@ -8,24 +8,35 @@ CLI tool for GenICam camera discovery, feature control, and streaming.
 
 ## Install
 
-This binary is not published to crates.io. Build from source:
-
 ```bash
-cargo install --path crates/viva-camctl
+cargo install viva-camctl
 ```
+
+It also ships with the Python package: `pip install viva-genicam` installs a
+`viva-camctl` command, linked into the extension module, so no Rust toolchain
+is needed. From a checkout, `cargo run -p viva-camctl -- <command>` works too.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `list` | Discover GigE Vision cameras on the network |
-| `list-usb` | Discover USB3 Vision cameras |
 | `get` | Read a GenApi feature value |
 | `set` | Write a GenApi feature value |
-| `stream` | Start a GVSP stream and save frames |
+| `execute` | Execute a GenApi Command feature (e.g. `UserSetLoad`) |
+| `xml` | Dump the camera's GenApi XML without parsing it |
+| `report` | Collect a diagnostic bundle to attach to a bug report |
+| `stream` | Start a GVSP stream; save frames, or raw event-vision blocks |
 | `events` | Configure and read GVCP events |
-| `chunks` | Toggle chunk data features |
-| `bench` | Sustained streaming benchmark with JSON report |
+| `chunks` | Toggle chunk mode and chunk selectors |
+| `bench` | Sustained streaming benchmark with optional JSON report |
+| `set-ip` | Assign a camera's IP address by MAC (FORCEIP with `--force`, persistent otherwise) |
+| `list-usb` | Discover USB3 Vision cameras |
+| `get-usb` | Read a feature from a USB3 Vision camera |
+| `set-usb` | Write a feature to a USB3 Vision camera |
+| `stream-usb` | Stream frames from a USB3 Vision camera |
+
+`viva-camctl <command> --help` lists each command's flags.
 
 ## Examples
 
@@ -33,25 +44,42 @@ cargo install --path crates/viva-camctl
 # Discover cameras
 viva-camctl list
 
-# Read a feature
+# Read and write a feature
 viva-camctl get --ip 192.168.0.10 --name ExposureTime
-
-# Write a feature
 viva-camctl set --ip 192.168.0.10 --name ExposureTime --value 5000
 
-# Stream and save 2 frames. Default preserves GevSCPSPacketSize (ADR-0021).
-# --auto negotiates from the NIC MTU; --packet-size N sets an explicit ceiling:
+# Everything a bug report needs; works on a camera the library cannot open
+viva-camctl report --ip 192.168.0.10 --out viva-report.txt
+viva-camctl xml --ip 192.168.0.10 --out camera.xml
+
+# Stream and save 2 frames. By default the camera's GevSCPSPacketSize is kept;
+# --auto sizes packets from the NIC MTU, --packet-size N sets an explicit ceiling.
+viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --save 2
 viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --packet-size 9000 --save 2
+
+# Event-vision camera: append every EVT block to one file
+viva-camctl stream --ip 192.168.0.10 --save 0 --raw-out capture.evt3 --duration-s 10
 
 # Run a 60-second streaming benchmark
 viva-camctl bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
 ```
 
-## Options
+## Global options
 
-- `-v` / `-vv` -- increase log verbosity
-- `--json` -- output in JSON format
-- `--iface <IPv4>` -- preferred network interface
+These go **before** the command name:
+
+- `-v` / `-vv` -- log at `debug` / `trace` (`RUST_LOG` overrides)
+- `--json` -- machine-readable output where the command supports it
+- `--iface <IFACE>` -- the host interface to use, named by one of its IPv4
+  addresses (`192.168.0.5`) or its OS name (`eth0`, or a GUID on Windows)
+
+```bash
+viva-camctl --json --iface 192.168.0.5 get --ip 192.168.0.10 --name Width
+```
+
+`list`, `xml`, `report`, `stream`, `events` and `bench` also accept `--iface`
+after the command name; the other commands take it only in the global
+position.
 
 Part of the [viva-genicam](https://github.com/VitalyVorobyev/viva-genicam) workspace.

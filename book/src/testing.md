@@ -1,58 +1,65 @@
-# Testing
+# Running the tests
 
-## Unit Tests
+Everything below runs without hardware or external tools: the integration
+tests start in-process fake cameras (`viva-fake-gige`, `viva-fake-u3v`) on
+loopback. What the fakes can do, and how to use them in your own code or
+interactively, is in [Testing without hardware](tutorials/fake-camera.md).
+
+## The whole suite
 
 ```bash
 cargo test --workspace
 ```
 
-Unit tests are embedded in source modules (`mod tests { }`).
+Unit tests live next to the code in `mod tests { }` blocks; the integration
+suites below run as part of this command too.
 
-## Integration Tests
-
-The workspace includes `viva-fake-gige`, an in-process GigE Vision camera
-simulator. All integration tests run automatically with `cargo test` -- no
-external tools or hardware required.
+## Individual suites
 
 ```bash
-# Run all tests (unit + integration)
-cargo test --workspace
-
-# Run integration tests specifically
+# GigE integration: discovery, features, streaming against the fake camera
 cargo test -p viva-genicam --test fake_camera
 
-# Run viva-service end-to-end tests (Zenoh bridge)
+# GenApi access predicates (pIsLocked, pIsAvailable, ...) end to end
+cargo test -p viva-genicam --test predicates
+
+# Control-channel keepalive
+cargo test -p viva-genicam --test heartbeat
+
+# Which GVCP command leaves the host for a register access
+cargo test -p viva-genicam --test register_access
+
+# USB3 Vision, against viva-fake-u3v
+cargo test -p viva-genicam --test fake_u3v_camera --features u3v
+
+# viva-service end to end over Zenoh
 cargo test -p viva-service --test fake_camera_e2e
+
+# Every code include in this book resolves to a real example anchor
+cargo test -p viva-genicam --test book_includes
 ```
 
-The fake camera supports:
-- GVCP discovery on UDP (loopback)
-- GenCP register read/write with an embedded GenApi XML
-- GVSP streaming with synthetic image frames and real timestamps
-- Chunk data (timestamp, exposure time) when ChunkModeActive is enabled
-- Timestamp features (GevTimestampTickFrequency, GevTimestampValue, TimestampLatch)
+Every fake-camera suite binds UDP port 3956, so two test processes running at
+the same time (for example in two checkouts) interfere with each other and fail
+spuriously. Run them one at a time.
 
-## Demo
+## Vendor XML corpus
 
-Run the self-contained demo to see the full workflow without hardware:
+Two further tests parse and evaluate real vendor GenApi documents. The
+documents are fetched rather than committed, and the tests do nothing when the
+corpus directory is absent:
 
 ```bash
-cargo run -p viva-genicam --example demo_fake_camera
+scripts/fetch-xml-corpus.sh
+cargo test -p viva-genapi-xml --test vendor_corpus -- --nocapture   # parses
+cargo test -p viva-genapi     --test vendor_corpus -- --nocapture   # + evaluates
 ```
 
-This starts a fake camera, discovers it, reads/writes features, and streams
-frames -- all on localhost with zero setup.
+To run them against XML from your own camera, see
+[Reporting a camera we can't open → What happens to it](reporting.md#what-happens-to-it).
 
-## Manual / Interactive Testing
-
-For interactive testing or E2E testing with genicam-studio, start the fake
-camera as a standalone server:
+## Logging
 
 ```bash
-# Stays alive until Ctrl+C
-cargo run -p viva-fake-gige
-cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15
+RUST_LOG=debug cargo test --workspace -- --nocapture
 ```
-
-Then use `viva-camctl` or `viva-service` to interact with it. See the
-[Testing without hardware](tutorials/fake-camera.md) tutorial for details.

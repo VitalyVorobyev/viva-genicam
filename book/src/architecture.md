@@ -6,8 +6,8 @@ This section maps the runtime flow, crate boundaries, and key traits so both app
 
 ```
 +---------------------------+   End‑user API & examples
-|   genicam (façade)        |   - device discovery, feature get/set
-|   crates/viva-genicam/examples |   - streaming helpers, CLI wiring
+|   viva-genicam (façade)   |   - device discovery, feature get/set
+|   (+ examples/)           |   - StreamBuilder / FrameStream, events
 +-------------+-------------+
 |
 v
@@ -28,8 +28,8 @@ v
 +---------------------------+   Transports
 |   viva-gige               |   - GVCP (control): discovery, read/write, events,
 |                           |     action commands
-|                           |   - GVSP (data): receive, reassembly, resend,
-|                           |     MTU/packet size negotiation, delay, stats
+|                           |   - GVSP (data): packet parsing, reassembly,
+|                           |     MTU/packet size, delay, stats
 +-------------+-------------+
 |
 v
@@ -49,19 +49,18 @@ v
 6. **Streaming** (`viva-gige`): configure packet size/delay → receive GVSP → reassemble → expose frames + **chunks** and **timestamps**.
 
 ## Async, threading, and I/O
-- Transport uses async UDP sockets (Tokio) and bounded channels for back‑pressure.
-- Frame reassembly runs on dedicated tasks; statistics are aggregated periodically.
-- Node evaluation is sync from the caller’s perspective; I/O hops are awaited within accessors.
+- Discovery, stream setup and GVSP reception use async UDP sockets (Tokio). `FrameStream::next_frame` is an `async fn`; statistics accumulate as frames complete.
+- Node evaluation is **synchronous**: the `RegisterIo` trait `NodeMap` reads and writes through is a plain blocking interface, and `Camera::get`/`set` block until the register transaction completes. `GigeRegisterIo` bridges that onto the async GVCP client itself, so calling them inside `#[tokio::main]` is fine. The reasoning is in [ADR-0014](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0014-sync-registerio-async-adapters.md).
 
 ## Error handling & tracing
-- Errors are categorized by layer (transport/protocol/genapi/eval). Use `anyhow`/custom error types at boundaries.
-- Enable logs with `RUST_LOG=info` (or `debug`,`trace`) and consider JSON output for tooling.
+- Each layer has its own error type (`GigeError`, `GenCpError`, `XmlError`, `GenApiError`, and `GenicamError` at the façade); see [Error Handling & Logging](errors-logging.md).
+- Enable logs with `RUST_LOG=info` (or `debug`, `trace`).
 
 ## Platform considerations
-- **Windows/Linux/macOS** supported. On Windows, run discovery once as admin to authorize firewall; consider jumbo frames per NIC for high FPS.
+- **Windows/Linux/macOS** supported. Windows firewall and NIC settings are covered in [Networking → Windows](networking.md#22-windows).
 - Multi‑NIC hosts should explicitly select the interface for discovery/streaming.
 
 ## Extending the system
-- Add nodes in `viva-genapi` by implementing the evaluation trait and wiring dependencies.
+- Add node kinds in `viva-genapi` as a new `Node` enum variant with its evaluation and dependency wiring, and make anything unsupported land in `NodeMap::skipped()` rather than failing the document.
 - Add transports as new `viva-*` crates behind a trait the facade can select at runtime.
 - Keep `viva-genicam` thin: compose transport + NodeMap + utilities; keep heavy logic in lower crates.

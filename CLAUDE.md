@@ -107,8 +107,9 @@ another directory to check XML dumped from your own hardware.
 
 **When a user reports a camera we cannot open, ask for their XML and add it to
 the corpus** — that is how this class of bug stops recurring. Point them at the
-command, not a code snippet; both commands stop before the nodemap, so they work
-on a camera we cannot open:
+command, not a code snippet. Both work on a camera we cannot open: `xml` never
+parses the document, and `report` records a failed nodemap build in the bundle
+instead of stopping:
 
 ```bash
 viva-camctl report --ip <CAMERA-IP> --out viva-report.txt   # everything

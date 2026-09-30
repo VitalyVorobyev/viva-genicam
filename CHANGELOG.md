@@ -80,12 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VendorLucidEvsEvt30`/`VendorLucidEvsEvt21`** (follow-up to
   [#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)). Both codes
   are vendor-defined — bit 31 is how PFNC marks a format outside its own
-  table — so a name without a vendor prefix reads as if the library standard
-  tables carried an EVT format, and a second vendor's event-word format would
-  collide with the bare spelling. The prefix names the only vendor that has
-  shipped these codes so far. The codes, PFNC wire names (`EVT3_0`/`EVT2_1`)
-  and `bytes_per_pixel` answers (`Some(2)`/`Some(8)`, the depth the codes'
-  own bits 23-16 declare) are unchanged.
+  table — so a name without a vendor prefix reads as if the PFNC tables
+  carried an EVT format, and a second vendor's event-word format would collide
+  with the bare spelling. The prefix names the vendor whose camera the codes
+  were captured from (a Lucid Triton2 EVS). The codes, PFNC wire names
+  (`EVT3_0`/`EVT2_1`) and `bytes_per_pixel` answers (`Some(2)`/`Some(8)`, the
+  depth the codes' own bits 23-16 declare) are unchanged.
 
 ### Fixed
 

@@ -9,7 +9,7 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{TAG_P_ADDRESS, TAG_P_INDEX, index_offset};
+use super::{TAG_P_ADDRESS, TAG_P_INDEX, handle_invalidator_start, index_offset};
 use crate::util::{
     attribute_value, attribute_value_required, parse_u64, read_text_start, skip_element,
 };
@@ -32,6 +32,7 @@ pub fn parse_struct_reg(
     let mut access = AccessMode::RW;
     let mut byte_order = ByteOrder::Little;
     let mut sign = Sign::default();
+    let mut invalidators = Vec::new();
     let mut entries = Vec::new();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -85,7 +86,11 @@ pub fn parse_struct_reg(
                     let entry = parse_struct_entry(reader, e.clone(), byte_order)?;
                     entries.push(entry);
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !handle_invalidator_start(reader, e, &mut invalidators)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 TAG_P_ADDRESS => {
@@ -154,6 +159,9 @@ pub fn parse_struct_reg(
                 p_min: None,
                 value: None,
                 predicates: PredicateRefs::default(),
+                // Declared once on the `<StructReg>`, so every entry — each a
+                // view of the same register — goes stale together.
+                invalidators: invalidators.clone(),
             }
         })
         .collect();

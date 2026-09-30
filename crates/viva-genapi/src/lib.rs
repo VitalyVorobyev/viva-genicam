@@ -2561,4 +2561,91 @@ mod tests {
             9
         );
     }
+
+    /// GA-24: a write to a register's `<pInvalidator>` must drop its cache.
+    ///
+    /// The register is changed behind the nodemap's back first, and the stale
+    /// read that follows is the negative control: without it, a test that
+    /// simply never cached would pass for the wrong reason.
+    #[test]
+    fn writing_an_invalidator_refreshes_the_register_it_names() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <IntReg Name="Value">
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RO</AccessMode>
+                    <pInvalidator>Trigger</pInvalidator>
+                </IntReg>
+                <IntReg Name="Trigger">
+                    <Address>0x200</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let mut nodemap = NodeMap::try_from_xml(model).expect("build");
+        let io = MockIo::with_registers(&[
+            (0x100, 7u32.to_be_bytes().to_vec()),
+            (0x200, 0u32.to_be_bytes().to_vec()),
+        ]);
+        assert_eq!(nodemap.dependents("Trigger"), ["Value"]);
+
+        assert_eq!(nodemap.get_integer("Value", &io).expect("first read"), 7);
+        assert_eq!(io.read_count(0x100), 1);
+
+        io.write(0x100, &9u32.to_be_bytes())
+            .expect("device-side change");
+        assert_eq!(
+            nodemap.get_integer("Value", &io).expect("cached read"),
+            7,
+            "nothing invalidated Value yet, so it must answer from its cache"
+        );
+        assert_eq!(io.read_count(0x100), 1);
+
+        nodemap
+            .set_integer("Trigger", 1, &io)
+            .expect("write trigger");
+        assert_eq!(nodemap.get_integer("Value", &io).expect("fresh read"), 9);
+        assert_eq!(io.read_count(0x100), 2);
+    }
+
+    /// The FLIR shape: the register behind a feature names the *command's*
+    /// pValue register as its invalidator, so executing the command reaches
+    /// the feature through two edges — the invalidator, then the pValue.
+    #[test]
+    fn executing_a_command_refreshes_a_register_that_names_its_pvalue() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Command Name="Load">
+                    <pValue>LoadReg</pValue>
+                    <CommandValue>1</CommandValue>
+                </Command>
+                <IntReg Name="LoadReg">
+                    <Address>0x200</Address><Length>4</Length><AccessMode>WO</AccessMode>
+                </IntReg>
+                <Float Name="Exp">
+                    <pValue>ExpReg</pValue>
+                </Float>
+                <FloatReg Name="ExpReg">
+                    <Address>0x300</Address><Length>8</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                    <pInvalidator>LoadReg</pInvalidator>
+                </FloatReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let mut nodemap = NodeMap::try_from_xml(model).expect("build");
+        let io = MockIo::with_registers(&[(0x300, 20000.0f64.to_be_bytes().to_vec())]);
+
+        assert_eq!(nodemap.get_float("Exp", &io).expect("first read"), 20000.0);
+        io.write(0x300, &5000.0f64.to_be_bytes())
+            .expect("device-side reset");
+        assert_eq!(
+            nodemap.get_float("Exp", &io).expect("cached read"),
+            20000.0,
+            "negative control: the cache must still hold the old value"
+        );
+
+        nodemap.exec_command("Load", &io).expect("execute");
+        assert_eq!(io.regs.borrow()[&0x200], 1u32.to_be_bytes());
+        assert_eq!(nodemap.get_float("Exp", &io).expect("fresh read"), 5000.0);
+    }
 }

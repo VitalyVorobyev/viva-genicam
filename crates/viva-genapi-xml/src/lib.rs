@@ -571,6 +571,10 @@ pub struct StringDecl {
     /// Predicate refs gating implementation / availability / lock state.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
     pub predicates: PredicateRefs,
+    /// GenICam `<pInvalidator>` references, in declaration order: each names a
+    /// node whose change makes this node's cached value stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalidators: Vec<String>,
 }
 
 /// Declaration of a `<Register>` node — raw byte-array register access.
@@ -600,6 +604,10 @@ pub struct RegisterDecl {
     /// Predicate refs gating implementation / availability / lock state.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
     pub predicates: PredicateRefs,
+    /// GenICam `<pInvalidator>` references, in declaration order: each names a
+    /// node whose change makes this node's cached value stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalidators: Vec<String>,
 }
 
 /// Declaration of a node extracted from the GenICam XML description.
@@ -651,6 +659,10 @@ pub enum NodeDecl {
         /// Predicate refs gating implementation / availability / lock state.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
         predicates: PredicateRefs,
+        /// GenICam `<pInvalidator>` references, in declaration order: each names a
+        /// node whose change makes this node's cached value stale.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        invalidators: Vec<String>,
     },
     /// Floating point feature backed by an integer register with scaling,
     /// a native IEEE 754 register, or delegated via pValue.
@@ -683,6 +695,10 @@ pub enum NodeDecl {
         /// Predicate refs gating implementation / availability / lock state.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
         predicates: PredicateRefs,
+        /// GenICam `<pInvalidator>` references, in declaration order: each names a
+        /// node whose change makes this node's cached value stale.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        invalidators: Vec<String>,
     },
     /// Enumeration feature exposing a list of named integer values.
     Enum {
@@ -2335,5 +2351,100 @@ mod tests {
     fn clean_document_skips_nothing() {
         let model = parse(FIXTURE).expect("parse fixture");
         assert!(model.skipped.is_empty());
+    }
+
+    /// The `<pInvalidator>` list of any node kind that can carry one.
+    fn invalidators_of(decl: &NodeDecl) -> &[String] {
+        match decl {
+            NodeDecl::Integer { invalidators, .. } | NodeDecl::Float { invalidators, .. } => {
+                invalidators
+            }
+            NodeDecl::String(decl) => &decl.invalidators,
+            NodeDecl::Register(decl) => &decl.invalidators,
+            other => panic!("{} carries no invalidators", other.kind()),
+        }
+    }
+
+    /// GA-24: a register may name any number of invalidators — FLIR declares
+    /// up to nineteen on one node — and each must survive, in order.
+    #[test]
+    fn int_reg_keeps_every_invalidator_in_order() {
+        let model = parse_fragment(
+            r#"<IntReg Name="ExposureTime_Val">
+                 <Address>0x100</Address>
+                 <Length>4</Length>
+                 <pInvalidator>ExposureAuto_Val</pInvalidator>
+                 <pInvalidator> UserSetLoad_Val </pInvalidator>
+               </IntReg>"#,
+        );
+        assert_eq!(
+            invalidators_of(&model.nodes[0]),
+            ["ExposureAuto_Val", "UserSetLoad_Val"]
+        );
+    }
+
+    #[test]
+    fn masked_int_float_string_and_register_nodes_carry_invalidators() {
+        let model = parse_fragment(
+            r#"<MaskedIntReg Name="Bits">
+                 <Address>0x100</Address><Length>4</Length><Bit>0</Bit>
+                 <pInvalidator>A</pInvalidator>
+               </MaskedIntReg>
+               <FloatReg Name="Exposure">
+                 <Address>0x200</Address><Length>8</Length>
+                 <pInvalidator>B</pInvalidator>
+               </FloatReg>
+               <StringReg Name="Model">
+                 <Address>0x300</Address><Length>16</Length>
+                 <pInvalidator>C</pInvalidator>
+               </StringReg>
+               <Register Name="Raw">
+                 <Address>0x400</Address><Length>16</Length>
+                 <pInvalidator>D</pInvalidator>
+               </Register>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        let lists: Vec<&[String]> = model.nodes.iter().map(invalidators_of).collect();
+        assert_eq!(lists, [["A"], ["B"], ["C"], ["D"]]);
+    }
+
+    /// Declared once on the `<StructReg>`, the invalidator applies to every
+    /// entry: each is a view of the same register.
+    #[test]
+    fn struct_reg_invalidator_lands_on_every_entry() {
+        let model = parse_fragment(
+            r#"<StructReg Comment="Inquiry">
+                 <Address>0x100</Address>
+                 <Length>4</Length>
+                 <pInvalidator>UserSetLoad_Val</pInvalidator>
+                 <StructEntry Name="First"><Bit>0</Bit></StructEntry>
+                 <StructEntry Name="Second"><Bit>1</Bit></StructEntry>
+               </StructReg>"#,
+        );
+        assert_eq!(model.nodes.len(), 2);
+        for node in &model.nodes {
+            assert_eq!(
+                invalidators_of(node),
+                ["UserSetLoad_Val"],
+                "{}",
+                node.name()
+            );
+        }
+    }
+
+    /// An empty reference must not become an edge from a node named "".
+    #[test]
+    fn empty_invalidator_is_ignored() {
+        let model = parse_fragment(
+            r#"<IntReg Name="Reg">
+                 <Address>0x100</Address>
+                 <Length>4</Length>
+                 <pInvalidator></pInvalidator>
+                 <pInvalidator>   </pInvalidator>
+                 <pInvalidator/>
+               </IntReg>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        assert!(invalidators_of(&model.nodes[0]).is_empty());
     }
 }

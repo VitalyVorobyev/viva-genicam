@@ -6,8 +6,9 @@ use quick_xml::events::{BytesStart, Event};
 use super::{
     NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
     TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX,
-    TAG_VALUE, handle_addressing_empty, handle_addressing_start, handle_p_selected_empty,
-    handle_p_selected_start, handle_predicate_start, handle_selected_empty, handle_selected_start,
+    TAG_VALUE, handle_addressing_empty, handle_addressing_start, handle_invalidator_start,
+    handle_p_selected_empty, handle_p_selected_start, handle_predicate_start,
+    handle_selected_empty, handle_selected_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
 use crate::util::{
@@ -44,6 +45,7 @@ pub fn parse_integer(
     let mut p_min = None;
     let mut static_value: Option<i64> = None;
     let mut predicates = PredicateRefs::default();
+    let mut invalidators = Vec::new();
     let mut selector_state = SelectorState::default();
     let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_string();
@@ -182,7 +184,9 @@ pub fn parse_integer(
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {
-                    if handle_predicate_start(reader, e, &mut predicates)? {
+                    if handle_predicate_start(reader, e, &mut predicates)?
+                        || handle_invalidator_start(reader, e, &mut invalidators)?
+                    {
                         // handled
                     } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
@@ -296,6 +300,7 @@ pub fn parse_integer(
         p_min,
         value: static_value,
         predicates,
+        invalidators,
     })
 }
 
@@ -333,6 +338,7 @@ pub fn parse_float(
     let mut pvalue = None;
     let mut byte_order: Option<ByteOrder> = None;
     let mut predicates = PredicateRefs::default();
+    let mut invalidators = Vec::new();
     let mut selector_state = SelectorState::default();
     let mut meta_builder = NodeMetaBuilder::default();
     let mut buf = Vec::new();
@@ -402,7 +408,9 @@ pub fn parse_float(
                     handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
                 }
                 _ => {
-                    if handle_predicate_start(reader, e, &mut predicates)? {
+                    if handle_predicate_start(reader, e, &mut predicates)?
+                        || handle_invalidator_start(reader, e, &mut invalidators)?
+                    {
                         // handled
                     } else if !meta_builder.handle_start(reader, e)? {
                         skip_element(reader, e.name().as_ref())?;
@@ -470,6 +478,7 @@ pub fn parse_float(
         encoding,
         byte_order,
         predicates,
+        invalidators,
     })
 }
 

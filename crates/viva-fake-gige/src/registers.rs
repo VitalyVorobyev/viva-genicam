@@ -689,16 +689,24 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Float Name="ExposureTime" NameSpace="Standard">
     <ToolTip>Exposure time in microseconds — locked to RO when ExposureAuto is not Off</ToolTip>
-    <Address>0x20030</Address>
-    <Length>8</Length>
-    <AccessMode>RW</AccessMode>
+    <pValue>ExposureTimeReg</pValue>
     <Min>10.0</Min>
     <Max>1000000.0</Max>
-    <Endianess>BigEndian</Endianess>
     <pIsImplemented>ExposureTime_Imp</pIsImplemented>
     <pIsAvailable>ExposureTime_Avl</pIsAvailable>
     <pIsLocked>ExposureAutoActive</pIsLocked>
   </Float>
+  <!-- The FLIR shape: the register, not the feature, carries <pInvalidator>,
+       and it names the command's pValue register rather than the command. So
+       executing UserSetLoad writes UserSetLoadReg, which marks this register
+       stale, which marks ExposureTime stale through its <pValue> (GA-24). -->
+  <FloatReg Name="ExposureTimeReg">
+    <Address>0x20030</Address>
+    <Length>8</Length>
+    <AccessMode>RW</AccessMode>
+    <Endianess>BigEndian</Endianess>
+    <pInvalidator>UserSetLoadReg</pInvalidator>
+  </FloatReg>
 
   <!-- Feature-status bits in one big-endian word, the shape FLIR ships and the
        shape that exposed issue #120. GenICam counts <Bit> from the MSB here, so

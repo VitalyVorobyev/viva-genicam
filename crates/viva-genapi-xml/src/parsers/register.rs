@@ -4,7 +4,8 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    NodeMetaBuilder, handle_addressing_empty, handle_addressing_start, handle_predicate_start,
+    NodeMetaBuilder, handle_addressing_empty, handle_addressing_start, handle_invalidator_start,
+    handle_predicate_start,
 };
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value_required, read_text_start, skip_element};
@@ -38,6 +39,7 @@ pub fn parse_register(
     let mut addressing = AddressingBuilder::new(&name);
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
+    let mut invalidators = Vec::new();
     let mut port: Option<String> = None;
     let mut p_length: Option<String> = None;
     let node_name = start.name().as_ref().to_string();
@@ -65,6 +67,7 @@ pub fn parse_register(
                 _ => {
                     let handled = handle_addressing_start(reader, e, &name, &mut addressing)?
                         || handle_predicate_start(reader, e, &mut predicates)?
+                        || handle_invalidator_start(reader, e, &mut invalidators)?
                         || meta_builder.handle_start(reader, e)?;
                     if !handled {
                         skip_element(reader, e.name().as_ref())?;
@@ -100,6 +103,7 @@ pub fn parse_register(
         access,
         port,
         predicates,
+        invalidators,
     }))
 }
 

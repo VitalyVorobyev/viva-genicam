@@ -124,16 +124,19 @@ Three things worth knowing:
   dispatches Command nodes and discards the value. It was never documented,
   which is what [issue #121](https://github.com/VitalyVorobyev/viva-genicam/issues/121)
   reported. Prefer `execute`; it says what it does.
-- **A read after the command will be stale, and waiting will not fix it.** We do
-  not parse `<pInvalidator>`, so nothing tells the cached nodemap that
-  `UserSetLoad` just changed `ExposureTime`, `Gain` and the rest. The camera *is*
-  updated; the stale value is ours. Until that is implemented, **reconnect** if
-  you need to read the new settings back:
+- **A read after the command returns the new value when the camera's XML says
+  it should.** A register may declare `<pInvalidator>` nodes: "when this one
+  changes, my cached value is stale". The FLIR Blackfly S BFS-PGE-31S4C names
+  `UserSetLoad`'s register as an invalidator of 171 of its registers, and the
+  features built on them — `ExposureTime` and `Gain` among them — go stale
+  with them, so a `cam.get("ExposureTime")` after `cam.execute("UserSetLoad")`
+  reads the camera again. A feature with no such link, direct or indirect,
+  keeps its cached value; reconnect if you need one of those read back.
 
-  ```python
-  cam.execute("UserSetLoad")
-  cam = vg.connect_gige(info)     # fresh nodemap; a sleep will not do it
-  ```
+  Values the camera changes *on its own* — `ExposureTime` under auto exposure,
+  say — are a different matter. GenICam governs those with `<Cachable>` and
+  `<PollingTime>`, which are not honoured yet, so such a read can still be
+  stale.
 
 - **Separately**, GenICam's `pIsDone` polling is **not implemented**. `execute`
   returns when the register write is acknowledged, not when the camera has

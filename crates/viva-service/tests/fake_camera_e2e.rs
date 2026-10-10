@@ -95,7 +95,7 @@ async fn send_acq_command(
     command: AcquisitionCommand,
 ) -> NodeOpResponse {
     let key = keys::acquisition_control(device_id);
-    let req = AcquisitionControlRequest { command };
+    let req = AcquisitionControlRequest::new(command);
     let payload = serde_json::to_vec(&req).unwrap();
 
     let replies = session

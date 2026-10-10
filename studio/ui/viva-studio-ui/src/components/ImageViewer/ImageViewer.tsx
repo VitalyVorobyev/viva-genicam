@@ -20,6 +20,7 @@ interface ImageViewerProps {
   isConnected: boolean;
   isAcquiring: boolean;
   externalModel: ParseXmlResponse | null;
+  deviceId: string | null;
   deviceName?: string;
   cameraModel?: string;
   imageMeta: ImageMeta | null;
@@ -30,6 +31,7 @@ export function ImageViewer({
   isConnected,
   isAcquiring,
   externalModel,
+  deviceId,
   deviceName,
   cameraModel,
   imageMeta,
@@ -173,6 +175,7 @@ export function ImageViewer({
           frameCount={frameCount}
           externalModel={externalModel}
           cameraModel={cameraModel ?? null}
+          deviceId={deviceId}
         />
       </div>
     );
@@ -245,6 +248,7 @@ export function ImageViewer({
         frameCount={frameCount}
         externalModel={externalModel}
         cameraModel={cameraModel ?? null}
+        deviceId={deviceId}
       />
     </div>
   );

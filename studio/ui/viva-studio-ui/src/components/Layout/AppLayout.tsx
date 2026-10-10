@@ -4,6 +4,7 @@ import { useDevice } from "../../device/useDevice";
 import { useBackendStatus } from "../../device/useBackendStatus";
 import { formatBackendChip } from "../../device/backendStatus";
 import { FeatureStoreProvider } from "../../device/FeatureStoreContext";
+import { loadPacketSize } from "../../device/packetSize";
 import { useAcquisition } from "../../device/useAcquisition";
 import { useImageMeta } from "../../device/useImageMeta";
 import { AppLogProvider, useAppLog } from "../../context/AppLogContext";
@@ -140,14 +141,16 @@ function AppLayoutInner() {
     log("info", "Starting acquisition\u2026");
     try {
       setActiveTab("image");
-      await startAcq();
+      await startAcq(
+        connectionState.kind === "connected" ? loadPacketSize(connectionState.device_id) : null,
+      );
       log("success", "Acquisition started");
       addToast("success", "Acquisition started");
     } catch (e) {
       log("error", `Acquisition start failed: ${String(e)}`);
       addToast("error", `Acquisition start failed: ${String(e)}`);
     }
-  }, [startAcq, log, addToast]);
+  }, [startAcq, connectionState, log, addToast]);
 
   const handleStopAcquisition = useCallback(async () => {
     log("info", "Stopping acquisition\u2026");
@@ -271,6 +274,7 @@ function AppLayoutInner() {
                 isConnected={isConnected}
                 isAcquiring={acqStatus.active}
                 externalModel={externalModel}
+                deviceId={connectionState.kind === "connected" ? connectionState.device_id : null}
                 deviceName={connectedDeviceName ?? undefined}
                 cameraModel={connectedModel ?? undefined}
                 imageMeta={imageMeta}

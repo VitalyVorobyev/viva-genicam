@@ -38,6 +38,14 @@ pub struct ConnectResult {
     pub model: String,
 }
 
+/// How to start an acquisition.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StartOptions {
+    /// The GVSP packet size to use, as a ceiling the path probe stays under;
+    /// `None` negotiates one from the NIC's MTU (backlog ST-22, issue #112).
+    pub packet_size: Option<u32>,
+}
+
 /// Network configuration of a GigE Vision camera.
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -89,7 +97,7 @@ pub trait DeviceBackend: Send + Sync + 'static {
     async fn exec_command(&self, name: &str) -> Result<Vec<String>, String>;
 
     /// Start image acquisition and return the WebSocket URL for the stream.
-    async fn start_acquisition(&self) -> Result<StreamerInfo, String>;
+    async fn start_acquisition(&self, options: StartOptions) -> Result<StreamerInfo, String>;
 
     /// Stop image acquisition.
     async fn stop_acquisition(&self) -> Result<(), String>;

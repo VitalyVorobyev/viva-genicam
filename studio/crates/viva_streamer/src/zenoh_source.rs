@@ -2,25 +2,13 @@
 //!
 //! Two subscribers run concurrently inside a single `select!` loop:
 //!
-//! - **meta subscriber** — listens on `image/meta`; updates the shared `Arc<RwLock<ImageMeta>>`
-//!   and rebuilds both BMP encoders when dimensions change. Retained for the Tauri app's
-//!   `image-meta-changed` event path.
-//! - **frame subscriber** — receives framed payloads (`16-byte FrameHeader + raw pixels`),
-//!   decodes the inline header, converts the pixel data to BMP using the appropriate
-//!   format-specific encoder, and pushes into the watch channel.
-//!
-//! ## Supported pixel formats
-//!
-//! | Format(s)          | Encoding path                                   | BMP output |
-//! |--------------------|--------------------------------------------------|------------|
-//! | Mono8              | Direct                                           | 8bpp gray  |
-//! | Mono10/12/16       | Right-shift to 8-bit gray                        | 8bpp gray  |
-//! | BayerRG/GR/BG/GB 8 | Bilinear debayer → RGB8                          | 24bpp RGB  |
-//! | BayerRG/GR/BG/GB 10/12/16 | Downscale to 8-bit, then debayer → RGB8  | 24bpp RGB  |
-//! | RGB8               | Direct                                           | 24bpp RGB  |
-//! | BGR8               | Swap B↔R                                         | 24bpp RGB  |
-//! | RGBa8              | Drop alpha                                        | 24bpp RGB  |
-//! | Other              | Dropped with a warning                           | —          |
+//! - **meta subscriber** — listens on `image/meta`, updates the shared
+//!   `Arc<RwLock<ImageMeta>>` and the stream info the viewer reads.
+//! - **frame subscriber** — receives framed payloads (`16-byte FrameHeader + raw
+//!   pixels`), decodes the inline header, and draws the pixels with
+//!   [`FrameEncoder`] — the same encoder embedded mode uses, which lists the
+//!   formats it can draw ([`PixelLayout::of_wire`]). A frame is not encoded
+//!   while no viewer is connected, nor above `fps_limit`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,8 +18,8 @@ use tokio::sync::{RwLock, watch};
 use tracing::{info, warn};
 use viva_zenoh_api::{FrameHeader, ImageMeta, PixelFormat};
 
-use crate::bmp::{BayerPattern, BmpEncoder, debayer_nn, mono_u16le_to_gray8};
 use crate::error::StreamerError;
+use crate::frame::{FrameEncoder, PixelLayout};
 
 #[derive(Clone, Debug)]
 pub struct ZenohSourceConfig {
@@ -79,14 +67,9 @@ async fn run_inner(
 
     let frame_sub = session.declare_subscriber(&source.key_expr).await?;
     let meta_sub = session.declare_subscriber(&source.meta_key).await?;
-
-    // Initialise both BMP encoders from the current (default) dimensions.
-    let (init_width, init_height) = {
-        let m = shared_meta.read().await;
-        (m.width, m.height)
-    };
-    let mut encoder_gray = BmpEncoder::new(init_width, init_height);
-    let mut encoder_rgb = BmpEncoder::new_rgb24(init_width, init_height);
+    let mut encoder = FrameEncoder::new();
+    // Warned about once, not on every frame.
+    let mut unsupported: Option<PixelFormat> = None;
 
     info!(
         "Subscribed to '{}' (meta: '{}')",
@@ -137,22 +120,6 @@ async fn run_inner(
                     logged_first_meta = true;
                 }
 
-                // Rebuild encoders only when dimensions change.
-                // Safety: the select! loop is single-threaded — no concurrent writers.
-                let needs_rebuild = {
-                    let old = shared_meta.read().await;
-                    old.width != meta.width || old.height != meta.height
-                };
-
-                if needs_rebuild {
-                    info!(
-                        "Dimensions changed to {}x{}; rebuilding BMP encoders",
-                        meta.width, meta.height
-                    );
-                    encoder_gray = BmpEncoder::new(meta.width, meta.height);
-                    encoder_rgb = BmpEncoder::new_rgb24(meta.width, meta.height);
-                }
-
                 let stream_info = crate::ws::StreamInfo::from_image_meta(&meta);
                 *shared_meta.write().await = meta;
 
@@ -176,6 +143,10 @@ async fn run_inner(
                         && last.elapsed() < interval {
                             continue;
                         }
+                // Nobody is watching: decoding and encoding would be wasted.
+                if frame_tx.receiver_count() == 0 {
+                    continue;
+                }
 
                 let raw = sample.payload().to_bytes();
 
@@ -221,30 +192,18 @@ async fn run_inner(
                 // Truncate trailing bytes (e.g. GVSP row padding) if payload is oversized.
                 let pixel_data = &pixel_data[..expected_bytes];
 
-                // Rebuild encoders when frame-header dimensions differ from cache.
-                {
-                    let old = shared_meta.read().await;
-                    if old.width != header.width || old.height != header.height {
-                        info!(
-                            "Frame header dimensions changed to {}x{}; rebuilding BMP encoders",
-                            header.width, header.height
+                let Some(layout) = PixelLayout::of_wire(&header.pixel_format) else {
+                    if unsupported.as_ref() != Some(&header.pixel_format) {
+                        warn!(
+                            "Pixel format {:?} cannot be drawn; dropping its frames",
+                            header.pixel_format
                         );
-                        encoder_gray = BmpEncoder::new(header.width, header.height);
-                        encoder_rgb = BmpEncoder::new_rgb24(header.width, header.height);
+                        unsupported = Some(header.pixel_format.clone());
                     }
-                }
-
-                // Encode to BMP based on pixel format.
-                let maybe_frame = encode_frame(
-                    pixel_data,
-                    &header,
-                    &encoder_gray,
-                    &encoder_rgb,
-                );
-
-                let frame = match maybe_frame {
-                    Ok(Some(f)) => f,
-                    Ok(None) => continue, // unsupported format — warning already logged
+                    continue;
+                };
+                let frame = match encoder.encode(layout, header.width, header.height, pixel_data) {
+                    Ok(frame) => frame,
                     Err(err) => {
                         warn!("BMP encode error for seq={}: {err}", header.seq);
                         continue;
@@ -269,136 +228,4 @@ async fn run_inner(
 
     info!("Zenoh source loop exited");
     Ok(())
-}
-
-/// Convert `pixel_data` to a BMP `Bytes` buffer according to `header.pixel_format`.
-///
-/// Returns `Ok(None)` if the format is not supported (a warning is logged inside).
-/// Returns `Err` only on BMP encoding failures (e.g. size mismatch).
-fn encode_frame(
-    pixel_data: &[u8],
-    header: &FrameHeader,
-    encoder_gray: &BmpEncoder,
-    encoder_rgb: &BmpEncoder,
-) -> Result<Option<Bytes>, crate::bmp::BmpError> {
-    match &header.pixel_format {
-        // ── 8-bit grayscale ───────────────────────────────────────────────
-        PixelFormat::Mono8 => Ok(Some(encoder_gray.encode_gray8(pixel_data)?)),
-
-        // ── Downscaled 16-bit grayscale ───────────────────────────────────
-        PixelFormat::Mono10 => {
-            let gray = mono_u16le_to_gray8(pixel_data, 10);
-            Ok(Some(encoder_gray.encode_gray8(&gray)?))
-        }
-        PixelFormat::Mono12 => {
-            let gray = mono_u16le_to_gray8(pixel_data, 12);
-            Ok(Some(encoder_gray.encode_gray8(&gray)?))
-        }
-        PixelFormat::Mono16 => {
-            let gray = mono_u16le_to_gray8(pixel_data, 16);
-            Ok(Some(encoder_gray.encode_gray8(&gray)?))
-        }
-
-        // ── Bayer 8-bit: debayer → 24bpp RGB ─────────────────────────────
-        pf @ (PixelFormat::BayerRG8
-        | PixelFormat::BayerGR8
-        | PixelFormat::BayerBG8
-        | PixelFormat::BayerGB8) => {
-            let pattern = bayer_pattern(pf);
-            let rgb = debayer_nn(pixel_data, header.width, header.height, pattern);
-            Ok(Some(encoder_rgb.encode_rgb24(&rgb)?))
-        }
-
-        // ── Bayer 10-bit: downscale + debayer → 24bpp RGB ─────────────────
-        pf @ (PixelFormat::BayerRG10
-        | PixelFormat::BayerGR10
-        | PixelFormat::BayerBG10
-        | PixelFormat::BayerGB10) => {
-            let gray = mono_u16le_to_gray8(pixel_data, 10);
-            let pattern = bayer_pattern(pf);
-            let rgb = debayer_nn(&gray, header.width, header.height, pattern);
-            Ok(Some(encoder_rgb.encode_rgb24(&rgb)?))
-        }
-
-        // ── Bayer 12-bit: downscale + debayer → 24bpp RGB ─────────────────
-        pf @ (PixelFormat::BayerRG12
-        | PixelFormat::BayerGR12
-        | PixelFormat::BayerBG12
-        | PixelFormat::BayerGB12) => {
-            let gray = mono_u16le_to_gray8(pixel_data, 12);
-            let pattern = bayer_pattern(pf);
-            let rgb = debayer_nn(&gray, header.width, header.height, pattern);
-            Ok(Some(encoder_rgb.encode_rgb24(&rgb)?))
-        }
-
-        // ── Bayer 16-bit: downscale + debayer → 24bpp RGB ─────────────────
-        pf @ (PixelFormat::BayerRG16
-        | PixelFormat::BayerGR16
-        | PixelFormat::BayerBG16
-        | PixelFormat::BayerGB16) => {
-            let gray = mono_u16le_to_gray8(pixel_data, 16);
-            let pattern = bayer_pattern(pf);
-            let rgb = debayer_nn(&gray, header.width, header.height, pattern);
-            Ok(Some(encoder_rgb.encode_rgb24(&rgb)?))
-        }
-
-        // ── Packed colour ─────────────────────────────────────────────────
-        PixelFormat::RGB8 => Ok(Some(encoder_rgb.encode_rgb24(pixel_data)?)),
-
-        PixelFormat::BGR8 => {
-            // Swap B↔R channels.
-            let rgb: Vec<u8> = pixel_data
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .flat_map(|c| [c[2], c[1], c[0]])
-                .collect();
-            Ok(Some(encoder_rgb.encode_rgb24(&rgb)?))
-        }
-
-        PixelFormat::RGBa8 => {
-            // Strip alpha (4th byte).
-            let rgb: Vec<u8> = pixel_data
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|c| [c[0], c[1], c[2]])
-                .collect();
-            Ok(Some(encoder_rgb.encode_rgb24(&rgb)?))
-        }
-
-        // ── Unsupported ───────────────────────────────────────────────────
-        pf => {
-            warn!(
-                "Unsupported pixel format {:?} for frame seq={}; dropping",
-                pf, header.seq
-            );
-            Ok(None)
-        }
-    }
-}
-
-/// Map a Bayer `PixelFormat` to its `BayerPattern`.
-///
-/// Callers are responsible for only passing Bayer variants.
-fn bayer_pattern(pf: &PixelFormat) -> BayerPattern {
-    match pf {
-        PixelFormat::BayerRG8
-        | PixelFormat::BayerRG10
-        | PixelFormat::BayerRG12
-        | PixelFormat::BayerRG16 => BayerPattern::Rggb,
-        PixelFormat::BayerGR8
-        | PixelFormat::BayerGR10
-        | PixelFormat::BayerGR12
-        | PixelFormat::BayerGR16 => BayerPattern::Grbg,
-        PixelFormat::BayerBG8
-        | PixelFormat::BayerBG10
-        | PixelFormat::BayerBG12
-        | PixelFormat::BayerBG16 => BayerPattern::Bggr,
-        PixelFormat::BayerGB8
-        | PixelFormat::BayerGB10
-        | PixelFormat::BayerGB12
-        | PixelFormat::BayerGB16 => BayerPattern::Gbrg,
-        _ => BayerPattern::Rggb, // unreachable for valid callers
-    }
 }

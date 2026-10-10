@@ -41,9 +41,10 @@ export function useAcquisition() {
     };
   }, []);
 
-  const start = useCallback(async (): Promise<StreamerInfo> => {
+  /** Start streaming; `packetSize` is the user's, or `null` to negotiate. */
+  const start = useCallback(async (packetSize: number | null = null): Promise<StreamerInfo> => {
     const { invoke } = await import("@tauri-apps/api/core");
-    const info = await invoke<StreamerInfo>("start_acquisition");
+    const info = await invoke<StreamerInfo>("start_acquisition", { packetSize });
     setStreamerInfo(info);
     return info;
   }, []);

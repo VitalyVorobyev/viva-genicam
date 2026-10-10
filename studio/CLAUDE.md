@@ -48,7 +48,9 @@ skips loopback — so the fake camera never appears. See `#132`.
 - Unknown XML nodes are never dropped: preserved as `UiNodeKind::Unknown`.
   `RawNode` is meant to carry their XML but is empty today (backlog ST-34).
 - In the Tauri backend use `tauri::async_runtime::spawn`, never bare
-  `tokio::spawn`.
+  `tokio::spawn`. Reach the embedded camera only through
+  `EmbeddedBackend::with_camera`, which runs the operation on the blocking
+  pool: the camera's register I/O blocks its thread (ST-31).
 - The UI's IPC types — payloads, the UiGraph contract and the `StudioEvents`
   map — are generated from the Rust types into
   `ui/viva-studio-ui/src/generated/ipc.ts`; never edit that file. After

@@ -444,6 +444,22 @@ pub struct BulkReadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcquisitionControlRequest {
     pub command: AcquisitionCommand,
+    /// For `Start`: the GVSP packet size to use, as a ceiling the service's
+    /// path probe stays under. Absent, the service negotiates one from the
+    /// NIC's MTU. A size the user measured for their link is how they get
+    /// past a link the negotiation misjudges (issue #112).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_size: Option<u32>,
+}
+
+impl AcquisitionControlRequest {
+    /// `command` with the service's own choice of packet size.
+    pub fn new(command: AcquisitionCommand) -> Self {
+        Self {
+            command,
+            packet_size: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

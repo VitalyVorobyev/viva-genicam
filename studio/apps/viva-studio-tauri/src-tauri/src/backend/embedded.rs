@@ -6,35 +6,35 @@
 //!
 //! ## Thread safety
 //!
-//! `Camera<GigeRegisterIo>` is `!Sync` because the underlying `NodeMap` uses
-//! `RefCell` for caching. All camera operations are dispatched to a dedicated
-//! blocking thread via `spawn_blocking` and a `std::sync::Mutex` protects
-//! concurrent access.
+//! `Camera<GigeRegisterIo>` is `!Sync`: its `NodeMap` caches in `RefCell`s, and
+//! its register I/O blocks the calling thread on the runtime. So the camera
+//! lives behind an async mutex, and every operation on it runs on the blocking
+//! pool ([`EmbeddedBackend::with_camera`]): a command waiting for the camera
+//! waits asynchronously, and camera I/O never occupies a runtime worker
+//! (backlog ST-31).
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{debug, info, warn};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
+use viva_streamer::bmp::BayerPattern;
+use viva_streamer::frame::{FrameEncoder, PixelLayout};
 use viva_zenoh_api::{DeviceAnnounce, FeatureState};
 
 use crate::state::device_state::{DeviceInfo, StreamerInfo};
 use crate::state::events::Events;
 
-use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig};
+use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig, StartOptions};
 
 // ── Internal types ──────────────────────────────────────────────────────────
 
 /// A connected GigE Vision camera and its associated state.
-///
-/// Wrapped in a `std::sync::Mutex` because `Camera<GigeRegisterIo>` is `!Sync`
-/// (the `NodeMap` uses `RefCell` for caching). All access goes through
-/// `spawn_blocking`.
 ///
 /// `Send` is derived, not asserted: every field is `Send` already. The
 /// `unsafe impl Send` this type used to carry was redundant, and a redundant
@@ -61,13 +61,6 @@ impl ConnectedCamera {
 struct AcquisitionState {
     shutdown_tx: watch::Sender<bool>,
     task_handles: Vec<tauri::async_runtime::JoinHandle<()>>,
-    /// Kept for diagnostics and status reporting.
-    #[allow(dead_code)]
-    ws_url: String,
-    #[allow(dead_code)]
-    width: u32,
-    #[allow(dead_code)]
-    height: u32,
 }
 
 // ── EmbeddedBackend ─────────────────────────────────────────────────────────
@@ -76,10 +69,14 @@ struct AcquisitionState {
 /// Short, because the camera may already be gone and app exit waits on it.
 const RELEASE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// The most frames a second the viewer is sent. A camera can deliver far
+/// more, and encoding each as a BMP costs CPU the user cannot see.
+const DISPLAY_FPS: u32 = 30;
+
 /// Backend that communicates directly with cameras via GigE Vision / USB3 Vision.
 pub struct EmbeddedBackend {
-    /// Connected camera behind a std::sync::Mutex for spawn_blocking access.
-    camera: Arc<std::sync::Mutex<Option<ConnectedCamera>>>,
+    /// The connected camera; see the module docs.
+    camera: Arc<AsyncMutex<Option<ConnectedCamera>>>,
     /// Cache of discovered devices, updated periodically.
     discovered: RwLock<Vec<DeviceInfo>>,
     /// Active acquisition state, if streaming.
@@ -91,7 +88,7 @@ impl EmbeddedBackend {
     /// Create a new embedded backend with no connected camera.
     pub fn new(events: Arc<Events>) -> Self {
         Self {
-            camera: Arc::new(std::sync::Mutex::new(None)),
+            camera: Arc::new(AsyncMutex::new(None)),
             discovered: RwLock::new(Vec::new()),
             acquisition: AsyncMutex::new(None),
             events,
@@ -114,6 +111,28 @@ impl EmbeddedBackend {
         });
     }
 
+    /// Run `op` on the connected camera, on the blocking pool.
+    ///
+    /// The camera's register I/O blocks its thread, so it must not run on a
+    /// runtime worker; and waiting for another operation to finish with the
+    /// camera must not hold one either. This replaced `block_in_place` under
+    /// a `std::sync::Mutex`, which did both (backlog ST-31).
+    async fn with_camera<R, F>(&self, op: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut ConnectedCamera) -> Result<R, String> + Send + 'static,
+        R: Send + 'static,
+    {
+        let mut slot = self.camera.clone().lock_owned().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let connected = slot
+                .as_mut()
+                .ok_or_else(|| "No camera connected".to_string())?;
+            op(connected)
+        })
+        .await
+        .map_err(|e| format!("Camera task failed: {e}"))?
+    }
+
     /// Stop streamer tasks and clean up acquisition state.
     async fn stop_acquisition_inner(&self) {
         let mut acq = self.acquisition.lock().await;
@@ -133,18 +152,14 @@ impl EmbeddedBackend {
     ///
     /// Every step is best-effort: an unplugged camera cannot answer, and the
     /// caller is disconnecting or exiting either way. Dropping the camera joins
-    /// its keepalive (`GigeRegisterIo`'s `Drop`), which needs the runtime this
-    /// runs on.
+    /// its keepalive (`GigeRegisterIo`'s `Drop`), which needs the runtime the
+    /// blocking pool belongs to.
     async fn release_camera(&self) {
         self.stop_acquisition_inner().await;
-        let connected = match self.camera.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        let Some(mut connected) = connected else {
+        let Some(mut connected) = self.camera.lock().await.take() else {
             return;
         };
-        tokio::task::block_in_place(move || {
+        let released = tauri::async_runtime::spawn_blocking(move || {
             if let Ok(mut device) = connected.camera.transport().lock_device() {
                 device.set_control_timeout(RELEASE_ACK_TIMEOUT);
             }
@@ -161,7 +176,11 @@ impl EmbeddedBackend {
                 Err(error) => debug!(%error, "releasing control privilege"),
             }
             drop(connected);
-        });
+        })
+        .await;
+        if let Err(error) = released {
+            warn!(%error, "releasing the camera failed");
+        }
         info!("Camera released (embedded mode)");
     }
 }
@@ -222,24 +241,16 @@ impl DeviceBackend for EmbeddedBackend {
             "Camera connected, XML fetched"
         );
 
-        let result = ConnectResult {
+        *self.camera.lock().await = Some(ConnectedCamera {
+            camera,
+            device_id: device_id.to_string(),
+        });
+
+        Ok(ConnectResult {
             xml,
             device_name: name,
             model,
-        };
-
-        {
-            let mut guard = self
-                .camera
-                .lock()
-                .map_err(|_| "Camera mutex poisoned".to_string())?;
-            *guard = Some(ConnectedCamera {
-                camera,
-                device_id: device_id.to_string(),
-            });
-        }
-
-        Ok(result)
+        })
     }
 
     async fn disconnect(&self) -> Result<(), String> {
@@ -249,15 +260,8 @@ impl DeviceBackend for EmbeddedBackend {
 
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         let name = name.to_string();
-        let mut guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        let connected = guard.as_mut().ok_or("No camera connected".to_string())?;
-        // Camera::get() calls RegisterIo::read() which uses block_on() internally.
-        // block_in_place converts the current async thread to a blocking thread,
-        // allowing nested block_on to work without panic.
-        tokio::task::block_in_place(|| connected.feature_state(&name))
+        self.with_camera(move |connected| connected.feature_state(&name))
+            .await
     }
 
     async fn set_feature(
@@ -265,76 +269,59 @@ impl DeviceBackend for EmbeddedBackend {
         name: &str,
         value: &serde_json::Value,
     ) -> Result<Vec<String>, String> {
-        let value_str = json_value_to_string(value);
-        let mut guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        let connected = guard.as_mut().ok_or("No camera connected".to_string())?;
-        tokio::task::block_in_place(|| connected.camera.set(name, &value_str))
-            .map_err(|e| format!("Failed to write feature '{name}': {e}"))?;
-        Ok(connected.camera.nodemap().invalidated_by(name))
+        let value = json_value_to_string(value);
+        let name = name.to_string();
+        self.with_camera(move |connected| {
+            connected
+                .camera
+                .set(&name, &value)
+                .map_err(|e| format!("Failed to write feature '{name}': {e}"))?;
+            Ok(connected.camera.nodemap().invalidated_by(&name))
+        })
+        .await
     }
 
     async fn exec_command(&self, name: &str) -> Result<Vec<String>, String> {
-        let mut guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        let connected = guard.as_mut().ok_or("No camera connected".to_string())?;
-        tokio::task::block_in_place(|| connected.camera.set(name, ""))
-            .map_err(|e| format!("Failed to execute command '{name}': {e}"))?;
-        Ok(connected.camera.nodemap().invalidated_by(name))
+        let name = name.to_string();
+        self.with_camera(move |connected| {
+            connected
+                .camera
+                .set(&name, "")
+                .map_err(|e| format!("Failed to execute command '{name}': {e}"))?;
+            Ok(connected.camera.nodemap().invalidated_by(&name))
+        })
+        .await
     }
 
     async fn bulk_feature_state(
         &self,
         names: &[String],
     ) -> Result<HashMap<String, FeatureState>, String> {
-        let mut guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        let connected = guard.as_mut().ok_or("No camera connected".to_string())?;
-        let result = tokio::task::block_in_place(|| {
+        let names = names.to_vec();
+        self.with_camera(move |connected| {
             let mut result = HashMap::with_capacity(names.len());
             for name in names {
-                match connected.feature_state(name) {
+                match connected.feature_state(&name) {
                     Ok(state) => {
-                        result.insert(name.clone(), state);
+                        result.insert(name, state);
                     }
                     Err(e) => {
-                        tracing::warn!(name, error = %e, "Failed to read feature in bulk_feature_state");
+                        warn!(name, error = %e, "Failed to read feature in bulk_feature_state");
                     }
                 }
             }
-            result
-        });
-        Ok(result)
+            Ok(result)
+        })
+        .await
     }
 
-    async fn start_acquisition(&self) -> Result<StreamerInfo, String> {
+    async fn start_acquisition(&self, options: StartOptions) -> Result<StreamerInfo, String> {
         // Stop any previous acquisition.
         self.stop_acquisition_inner().await;
 
-        // Build the stream and start acquisition on a blocking thread
-        // (GigeRegisterIo uses block_on() internally, must not run in async context).
-        let (width, height, pixel_format, frame_stream) = {
-            let mut guard = self
-                .camera
-                .lock()
-                .map_err(|_| "Camera mutex poisoned".to_string())?;
-            let connected = guard
-                .as_mut()
-                .ok_or_else(|| "No camera connected".to_string())?;
-
-            // `block_in_place` puts no `Send` bound on its closure, so the
-            // borrow can be handed over directly — the raw-pointer reborrow
-            // that used to stand here bought nothing and cost the aliasing
-            // guarantee.
-            let cam = &mut connected.camera;
-
-            tokio::task::block_in_place(move || {
+        let (width, height, pixel_format, frame_stream) = self
+            .with_camera(move |connected| {
+                let cam = &mut connected.camera;
                 let width = cam
                     .get("Width")
                     .ok()
@@ -350,7 +337,6 @@ impl DeviceBackend for EmbeddedBackend {
                     "Unknown".to_string()
                 });
 
-                // Get device handle for stream building.
                 let mut device_guard = cam
                     .transport()
                     .lock_device()
@@ -369,32 +355,34 @@ impl DeviceBackend for EmbeddedBackend {
 
                 // camera_ipv4 belongs to the remote camera, not the host. Probe
                 // the OS route to find the local NIC and source address that
-                // Windows selected to reach that camera.
+                // the OS selected to reach that camera.
                 let iface = viva_genicam::gige::nic::Iface::from_remote_ipv4(camera_ipv4)
                     .map_err(|e| format!("Failed to detect network interface: {e}"))?;
 
+                let builder = viva_genicam::StreamBuilder::new(&mut device_guard)
+                    .iface(iface)
+                    .rcvbuf_bytes(64 << 20); // 64 MiB to absorb bursty GVSP traffic
+                // A size the user measured for their link is a ceiling the
+                // path probe stays under; otherwise negotiate from the NIC MTU
+                // (backlog ST-22, issue #112).
+                let builder = match options.packet_size {
+                    Some(size) => builder.packet_size(size),
+                    None => builder.auto_packet_size(),
+                };
                 let stream = handle
-                    .block_on(
-                        viva_genicam::StreamBuilder::new(&mut device_guard)
-                            .iface(iface)
-                            .rcvbuf_bytes(64 << 20) // 64 MiB to absorb bursty GVSP traffic
-                            // No packet-size UI yet; negotiate from NIC MTU + path probe.
-                            .auto_packet_size()
-                            .build(),
-                    )
+                    .block_on(builder.build())
                     .map_err(|e| format!("Failed to build stream: {e}"))?;
 
                 drop(device_guard);
 
                 let frame_stream = FrameStream::new(stream, None);
 
-                // Start acquisition on the camera.
                 cam.acquisition_start()
                     .map_err(|e| format!("Failed to start acquisition: {e}"))?;
 
                 Ok((width, height, pixel_format, frame_stream))
-            })?
-        };
+            })
+            .await?;
 
         // Create WS broadcast channels.
         let (frame_tx, _) = watch::channel(Bytes::new());
@@ -413,100 +401,17 @@ impl DeviceBackend for EmbeddedBackend {
 
         info!(ws_url, width, height, "Embedded streamer starting");
 
-        // Spawn frame reader task.
-        let frame_reader_handle = {
-            let frame_tx = frame_tx.clone();
-            let info_tx = info_tx.clone();
-            let mut shutdown_rx = shutdown_rx.clone();
-            let mut frame_stream = frame_stream;
-            tauri::async_runtime::spawn(async move {
-                let mut encoder_gray = viva_streamer::bmp::BmpEncoder::new(width, height);
-                let mut encoder_rgb = viva_streamer::bmp::BmpEncoder::new_rgb24(width, height);
-                let mut stream_width = width;
-                let mut stream_height = height;
-                let mut stream_pixel_format = pixel_format;
-                let mut logged_first = false;
-
-                loop {
-                    tokio::select! {
-                        _ = shutdown_rx.changed() => {
-                            if *shutdown_rx.borrow() {
-                                break;
-                            }
-                        }
-                        result = frame_stream.next_frame() => {
-                            match result {
-                                Ok(Some(frame)) => {
-                                    if !logged_first {
-                                        info!(
-                                            width = frame.width,
-                                            height = frame.height,
-                                            pixel_format = ?frame.pixel_format,
-                                            "First frame received (embedded)"
-                                        );
-                                        logged_first = true;
-                                    }
-
-                                    if frame.width != stream_width || frame.height != stream_height {
-                                        encoder_gray = viva_streamer::bmp::BmpEncoder::new(
-                                            frame.width,
-                                            frame.height,
-                                        );
-                                        encoder_rgb = viva_streamer::bmp::BmpEncoder::new_rgb24(
-                                            frame.width,
-                                            frame.height,
-                                        );
-                                    }
-
-                                    let frame_pixel_format = frame.pixel_format.to_string();
-                                    if frame.width != stream_width
-                                        || frame.height != stream_height
-                                        || frame_pixel_format != stream_pixel_format
-                                    {
-                                        stream_width = frame.width;
-                                        stream_height = frame.height;
-                                        stream_pixel_format = frame_pixel_format;
-                                        let _ = info_tx.send(camera_stream_info(
-                                            stream_width,
-                                            stream_height,
-                                            stream_pixel_format.clone(),
-                                        ));
-                                    }
-
-                                    let bmp = encode_camera_frame(
-                                        &frame,
-                                        &encoder_gray,
-                                        &encoder_rgb,
-                                    );
-                                    match bmp {
-                                        Ok(Some(data)) => {
-                                            let _ = frame_tx.send(data);
-                                        }
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            warn!("BMP encode error: {e}");
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    info!("Frame stream ended");
-                                    break;
-                                }
-                                Err(e) => {
-                                    warn!("Frame stream error: {e}");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-        };
+        let frame_reader_handle = tauri::async_runtime::spawn(run_frame_reader(
+            frame_stream,
+            frame_tx.clone(),
+            info_tx.clone(),
+            shutdown_rx.clone(),
+            StreamInfoTracker::new(width, height, pixel_format),
+        ));
 
         // Spawn WS server task.
         let ws_handle = {
             let state = viva_streamer::ws::AppState { frame_tx, info_tx };
-            let shutdown_rx = shutdown_rx.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = viva_streamer::ws::run_server_with_listener(
                     listener,
@@ -530,9 +435,6 @@ impl DeviceBackend for EmbeddedBackend {
         *self.acquisition.lock().await = Some(AcquisitionState {
             shutdown_tx,
             task_handles: vec![frame_reader_handle, ws_handle],
-            ws_url: ws_url.clone(),
-            width,
-            height,
         });
 
         Ok(StreamerInfo {
@@ -544,18 +446,19 @@ impl DeviceBackend for EmbeddedBackend {
 
     async fn stop_acquisition(&self) -> Result<(), String> {
         self.stop_acquisition_inner().await;
-
-        // Stop acquisition on the camera.
-        let mut guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        if let Some(connected) = guard.as_mut() {
-            tokio::task::block_in_place(|| connected.camera.acquisition_stop())
-                .map_err(|e| format!("Failed to stop acquisition: {e}"))?;
+        // Stop acquisition on the camera, if one is still connected.
+        match self
+            .with_camera(|connected| {
+                connected
+                    .camera
+                    .acquisition_stop()
+                    .map_err(|e| format!("Failed to stop acquisition: {e}"))
+            })
+            .await
+        {
+            Err(e) if e == "No camera connected" => Ok(()),
+            other => other,
         }
-
-        Ok(())
     }
 
     async fn shutdown(&self) {
@@ -577,41 +480,28 @@ impl DeviceBackend for EmbeddedBackend {
     }
 
     async fn get_network_config(&self) -> Result<NetworkConfig, String> {
-        let (current_ip, persistent_ip, persistent_subnet, persistent_gateway, device_id) = {
-            let guard = self
-                .camera
-                .lock()
-                .map_err(|_| "Camera mutex poisoned".to_string())?;
-            let connected = guard
-                .as_ref()
-                .ok_or_else(|| "No camera connected".to_string())?;
-            let device_id = connected.device_id.clone();
-
-            tokio::task::block_in_place(|| {
+        let (current_ip, persistent_ip, persistent_subnet, persistent_gateway, device_id) = self
+            .with_camera(|connected| {
                 let mut device_guard = connected
                     .camera
                     .transport()
                     .lock_device()
                     .map_err(|e| format!("Failed to access device: {e}"))?;
-
                 let current_ip = device_guard.remote_addr().ip().to_string();
-
                 let handle = tokio::runtime::Handle::current();
                 let (pip, psub, pgw) = handle
                     .block_on(device_guard.read_persistent_ip())
                     .map_err(|e| format!("Failed to read persistent IP: {e}"))?;
-
-                Ok::<_, String>((
+                Ok((
                     current_ip,
                     pip.to_string(),
                     psub.to_string(),
                     pgw.to_string(),
-                    device_id,
+                    connected.device_id.clone(),
                 ))
-            })?
-        };
+            })
+            .await?;
 
-        // Read discovery cache after dropping the camera mutex.
         let mac = {
             let discovered = self.discovered.read().await;
             discovered
@@ -636,36 +526,161 @@ impl DeviceBackend for EmbeddedBackend {
         subnet: Ipv4Addr,
         gateway: Ipv4Addr,
     ) -> Result<(), String> {
-        let guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        let connected = guard
-            .as_ref()
-            .ok_or_else(|| "No camera connected".to_string())?;
-
-        tokio::task::block_in_place(|| {
+        self.with_camera(move |connected| {
             let mut device_guard = connected
                 .camera
                 .transport()
                 .lock_device()
                 .map_err(|e| format!("Failed to access device: {e}"))?;
-
             let handle = tokio::runtime::Handle::current();
             handle
                 .block_on(device_guard.write_persistent_ip(ip, subnet, gateway))
                 .map_err(|e| format!("Failed to write persistent IP: {e}"))?;
-
             handle
                 .block_on(device_guard.enable_persistent_ip())
                 .map_err(|e| format!("Failed to enable persistent IP: {e}"))?;
-
-            Ok::<_, String>(())
-        })?;
+            Ok(())
+        })
+        .await?;
 
         info!(%ip, %subnet, %gateway, "Persistent IP configured and enabled");
         Ok(())
     }
+}
+
+// ── Streaming ───────────────────────────────────────────────────────────────
+
+/// Read frames until shutdown, sending the viewer a BMP of each — at most
+/// [`DISPLAY_FPS`] a second, and none while no viewer is connected.
+async fn run_frame_reader(
+    mut frame_stream: FrameStream,
+    frame_tx: watch::Sender<Bytes>,
+    info_tx: watch::Sender<viva_streamer::ws::StreamInfo>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    mut info: StreamInfoTracker,
+) {
+    let min_interval = Duration::from_secs(1) / DISPLAY_FPS;
+    let mut encoder = FrameEncoder::new();
+    let mut last_sent: Option<Instant> = None;
+    let mut unsupported = None;
+    let mut logged_first = false;
+
+    loop {
+        let frame = tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            result = frame_stream.next_frame() => match result {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    info!("Frame stream ended");
+                    break;
+                }
+                Err(e) => {
+                    warn!("Frame stream error: {e}");
+                    break;
+                }
+            },
+        };
+        if !logged_first {
+            info!(
+                width = frame.width,
+                height = frame.height,
+                pixel_format = ?frame.pixel_format,
+                "First frame received (embedded)"
+            );
+            logged_first = true;
+        }
+        if let Some(changed) =
+            info.observe(frame.width, frame.height, &frame.pixel_format.to_string())
+        {
+            let _ = info_tx.send(changed);
+        }
+        // Nobody is watching, or the viewer has a frame younger than it can
+        // show: encoding this one would be wasted.
+        if frame_tx.receiver_count() == 0
+            || last_sent.is_some_and(|sent| sent.elapsed() < min_interval)
+        {
+            continue;
+        }
+        let Some(layout) = camera_pixel_layout(frame.pixel_format) else {
+            if unsupported != Some(frame.pixel_format) {
+                warn!(pixel_format = ?frame.pixel_format, "Pixel format cannot be drawn; dropping its frames");
+                unsupported = Some(frame.pixel_format);
+            }
+            continue;
+        };
+        match encoder.encode(layout, frame.width, frame.height, frame.payload.as_ref()) {
+            Ok(bmp) => {
+                let _ = frame_tx.send(bmp);
+                last_sent = Some(Instant::now());
+            }
+            Err(e) => warn!("BMP encode error: {e}"),
+        }
+    }
+}
+
+/// The stream description the viewer last got, re-sent when a frame
+/// disagrees with it: Studio seeds it from `PixelFormat` before the first
+/// frame, and the camera may change format or size mid-stream (ST-17).
+struct StreamInfoTracker {
+    width: u32,
+    height: u32,
+    pixel_format: String,
+}
+
+impl StreamInfoTracker {
+    fn new(width: u32, height: u32, pixel_format: String) -> Self {
+        Self {
+            width,
+            height,
+            pixel_format,
+        }
+    }
+
+    /// The description to send for a frame, if it differs from the last.
+    fn observe(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixel_format: &str,
+    ) -> Option<viva_streamer::ws::StreamInfo> {
+        if (width, height) == (self.width, self.height) && pixel_format == self.pixel_format {
+            return None;
+        }
+        self.width = width;
+        self.height = height;
+        self.pixel_format = pixel_format.to_string();
+        Some(camera_stream_info(width, height, pixel_format))
+    }
+}
+
+/// How a camera's PFNC format is drawn, or `None` if it cannot be.
+fn camera_pixel_layout(format: viva_genicam::pfnc::PixelFormat) -> Option<PixelLayout> {
+    use BayerPattern::{Bggr, Gbrg, Grbg, Rggb};
+    use viva_genicam::pfnc::PixelFormat as P;
+    let bayer = |pattern, bits| PixelLayout::Bayer { pattern, bits };
+    Some(match format {
+        P::Mono8 => PixelLayout::Mono { bits: 8 },
+        P::Mono10 => PixelLayout::Mono { bits: 10 },
+        P::Mono12 => PixelLayout::Mono { bits: 12 },
+        P::Mono14 => PixelLayout::Mono { bits: 14 },
+        P::Mono16 => PixelLayout::Mono { bits: 16 },
+        P::BayerRG8 => bayer(Rggb, 8),
+        P::BayerGR8 => bayer(Grbg, 8),
+        P::BayerBG8 => bayer(Bggr, 8),
+        P::BayerGB8 => bayer(Gbrg, 8),
+        P::BayerRG16 => bayer(Rggb, 16),
+        P::BayerGR16 => bayer(Grbg, 16),
+        P::BayerBG16 => bayer(Bggr, 16),
+        P::BayerGB16 => bayer(Gbrg, 16),
+        P::RGB8Packed => PixelLayout::Rgb8,
+        P::BGR8Packed => PixelLayout::Bgr8,
+        _ => return None,
+    })
 }
 
 // ── Discovery helpers ───────────────────────────────────────────────────────
@@ -712,8 +727,6 @@ fn json_value_to_string(value: &serde_json::Value) -> String {
     }
 }
 
-// ── Frame encoding ──────────────────────────────────────────────────────────
-
 fn camera_stream_info(
     width: u32,
     height: u32,
@@ -725,84 +738,6 @@ fn camera_stream_info(
         pixel_format: pixel_format.into(),
         encoding: "BMP",
         frame_type: "info",
-    }
-}
-
-/// Convert a `viva_genicam::Frame` to BMP bytes for WebSocket delivery.
-fn encode_camera_frame(
-    frame: &viva_genicam::Frame,
-    encoder_gray: &viva_streamer::bmp::BmpEncoder,
-    encoder_rgb: &viva_streamer::bmp::BmpEncoder,
-) -> Result<Option<Bytes>, String> {
-    use viva_genicam::pfnc::PixelFormat;
-
-    let pixel_data = frame.payload.as_ref();
-
-    match frame.pixel_format {
-        PixelFormat::Mono8 => encoder_gray
-            .encode_gray8(pixel_data)
-            .map(Some)
-            .map_err(|e| e.to_string()),
-
-        PixelFormat::Mono16 => {
-            let gray = viva_streamer::bmp::mono_u16le_to_gray8(pixel_data, 16);
-            encoder_gray
-                .encode_gray8(&gray)
-                .map(Some)
-                .map_err(|e| e.to_string())
-        }
-
-        PixelFormat::RGB8Packed => encoder_rgb
-            .encode_rgb24(pixel_data)
-            .map(Some)
-            .map_err(|e| e.to_string()),
-
-        PixelFormat::BGR8Packed => {
-            let rgb: Vec<u8> = pixel_data
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .flat_map(|c| [c[2], c[1], c[0]])
-                .collect();
-            encoder_rgb
-                .encode_rgb24(&rgb)
-                .map(Some)
-                .map_err(|e| e.to_string())
-        }
-
-        PixelFormat::BayerRG8
-        | PixelFormat::BayerGR8
-        | PixelFormat::BayerBG8
-        | PixelFormat::BayerGB8 => {
-            let pattern = camera_bayer_pattern(frame.pixel_format);
-            let rgb =
-                viva_streamer::bmp::debayer_nn(pixel_data, frame.width, frame.height, pattern);
-            encoder_rgb
-                .encode_rgb24(&rgb)
-                .map(Some)
-                .map_err(|e| e.to_string())
-        }
-
-        _ => {
-            warn!(
-                pixel_format = ?frame.pixel_format,
-                "Unsupported pixel format in embedded streaming"
-            );
-            Ok(None)
-        }
-    }
-}
-
-fn camera_bayer_pattern(pf: viva_genicam::pfnc::PixelFormat) -> viva_streamer::bmp::BayerPattern {
-    use viva_genicam::pfnc::PixelFormat;
-    use viva_streamer::bmp::BayerPattern;
-
-    match pf {
-        PixelFormat::BayerRG8 => BayerPattern::Rggb,
-        PixelFormat::BayerGR8 => BayerPattern::Grbg,
-        PixelFormat::BayerBG8 => BayerPattern::Bggr,
-        PixelFormat::BayerGB8 => BayerPattern::Gbrg,
-        _ => BayerPattern::Rggb,
     }
 }
 
@@ -855,7 +790,7 @@ pub(crate) mod fake_camera {
         let backend = EmbeddedBackend::new(Default::default());
         backend.connect("127.0.0.1").await.expect("connect");
         backend
-            .start_acquisition()
+            .start_acquisition(Default::default())
             .await
             .expect("start acquisition");
         assert_ne!(
@@ -988,7 +923,10 @@ mod tests {
             let _fake = fake_camera::start().await;
             let backend = super::EmbeddedBackend::new(Default::default());
             backend.connect("127.0.0.1").await.expect("connect");
-            let streamer = backend.start_acquisition().await.expect("start");
+            let streamer = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
             assert_eq!((streamer.width, streamer.height), (64, 48));
 
             fake_camera::first_frame(&streamer.ws_url).await;
@@ -996,6 +934,53 @@ mod tests {
             backend.stop_acquisition().await.expect("stop");
             backend.disconnect().await.expect("disconnect");
         });
+    }
+
+    /// The camera's `GevSCPSPacketSize`, low 16 bits.
+    async fn packet_size_on(fake: &viva_fake_gige::FakeCamera) -> u32 {
+        use viva_fake_gige::registers::{SCP_PACKET_SIZE, STREAM_CHANNEL_BASE};
+        let bytes = fake.peek(STREAM_CHANNEL_BASE + SCP_PACKET_SIZE, 4).await;
+        u32::from_be_bytes(bytes.try_into().unwrap()) & 0xFFFF
+    }
+
+    /// A packet size the user measured for their link is what the camera is
+    /// told, rather than one negotiated from the NIC (ST-22, #112).
+    #[test]
+    fn a_measured_packet_size_is_used_instead_of_negotiating() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+
+            let options = super::StartOptions {
+                packet_size: Some(1000),
+            };
+            backend.start_acquisition(options).await.expect("start");
+            assert_eq!(packet_size_on(&fake).await, 1000);
+            backend.stop_acquisition().await.expect("stop");
+
+            // Negative control: left to negotiate, loopback's MTU gives more.
+            backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+            assert_ne!(packet_size_on(&fake).await, 1000);
+            backend.disconnect().await.expect("disconnect");
+        });
+    }
+
+    /// The viewer is told when a frame's format or size differs from what it
+    /// was last told, and only then (ST-17).
+    #[test]
+    fn stream_info_is_resent_when_a_frame_disagrees() {
+        let mut info = super::StreamInfoTracker::new(64, 48, "Mono8".to_string());
+        assert!(info.observe(64, 48, "Mono8").is_none());
+        let changed = info.observe(64, 48, "RGB8Packed").expect("format changed");
+        assert_eq!(changed.pixel_format, "RGB8Packed");
+        assert!(info.observe(64, 48, "RGB8Packed").is_none());
+        let resized = info.observe(32, 24, "RGB8Packed").expect("size changed");
+        assert_eq!((resized.width, resized.height), (32, 24));
     }
 
     #[test]

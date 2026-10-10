@@ -298,7 +298,10 @@ mod tests {
         async fn exec_command(&self, _: &str) -> Result<Vec<String>, String> {
             Err("stuck".into())
         }
-        async fn start_acquisition(&self) -> Result<state::device_state::StreamerInfo, String> {
+        async fn start_acquisition(
+            &self,
+            _: backend::StartOptions,
+        ) -> Result<state::device_state::StreamerInfo, String> {
             Err("stuck".into())
         }
         async fn stop_acquisition(&self) -> Result<(), String> {

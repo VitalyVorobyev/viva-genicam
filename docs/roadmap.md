@@ -20,7 +20,7 @@ client parser. Fake and client have repeatedly shared the same wrong assumption,
 and only spec-derived fixtures stop them agreeing on an error
 ([design.md](design.md#testing-strategy)).
 
-**Open**: TC-05, TC-06, TC-10, TC-11, TC-12, TC-16, TC-18, TC-21.
+**Open**: TC-05, TC-06, TC-10, TC-11, TC-12, TC-16, TC-21, TC-24, TC-25, TC-26.
 
 ## Phase 2 — Diagnostics loop
 

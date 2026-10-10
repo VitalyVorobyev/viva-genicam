@@ -1028,73 +1028,50 @@ impl GigeDevice {
                     + consts::GENCP_MAX_BLOCK
                     + consts::GENCP_WRITE_OVERHEAD
             ];
-            let mut mismatched_acks = 0usize;
-            loop {
-                match self.recv_absorbing_pending(&mut buf, request_id).await {
-                    AckRecv::Received(len) => {
-                        trace!(request_id, bytes = len, attempt, "received GenCP ack");
-                        let ack = decode_ack(&buf[..len])?;
-                        if ack.header.request_id != request_id {
-                            debug!(
-                                request_id,
-                                got = ack.header.request_id,
-                                attempt,
-                                "acknowledgement id mismatch"
-                            );
-                            // A delayed acknowledgement from an earlier command is
-                            // normal on devices that process file operations
-                            // asynchronously. Keep waiting for this request, but
-                            // bound the number of unrelated datagrams before
-                            // restarting the same transaction.
-                            mismatched_acks += 1;
-                            if mismatched_acks < consts::MAX_RETRIES {
-                                continue;
-                            }
-                            if attempt >= consts::MAX_RETRIES {
-                                return Err(GigeError::Protocol(
-                                    "acknowledgement id mismatch".into(),
-                                ));
-                            }
+            // Only this request's datagram comes back: `recv_for_request` drains
+            // replies to other request IDs — a delayed ACK for an earlier
+            // command, an in-flight heartbeat's reply — against this attempt's
+            // deadline, so they can neither be mistaken for it nor extend it.
+            match self.recv_absorbing_pending(&mut buf, request_id).await {
+                AckRecv::Received(len) => {
+                    trace!(request_id, bytes = len, attempt, "received GenCP ack");
+                    let ack = decode_ack(&buf[..len])?;
+                    if ack.header.opcode != opcode {
+                        return Err(GigeError::Protocol(
+                            "unexpected opcode in acknowledgement".into(),
+                        ));
+                    }
+                    match ack.header.status {
+                        StatusCode::Success => return Ok(ack),
+                        // Only `BUSY` (0x8007) is congestion. This used to
+                        // match `DeviceBusy`, which was mapped to 0x8004 —
+                        // `WRITE_PROTECT` — so the retry loop burned its
+                        // budget on a read-only register that could never
+                        // accept the write, and gave up immediately on the
+                        // one status retrying is for.
+                        status if status.is_retryable() && attempt < consts::MAX_RETRIES => {
+                            warn!(request_id, attempt, %status, "device busy, retrying");
                             self.backoff(attempt).await;
                             continue 'retry;
                         }
-                        if ack.header.opcode != opcode {
-                            return Err(GigeError::Protocol(
-                                "unexpected opcode in acknowledgement".into(),
-                            ));
-                        }
-                        match ack.header.status {
-                            StatusCode::Success => return Ok(ack),
-                            // Only `BUSY` (0x8007) is congestion. This used to
-                            // match `DeviceBusy`, which was mapped to 0x8004 —
-                            // `WRITE_PROTECT` — so the retry loop burned its
-                            // budget on a read-only register that could never
-                            // accept the write, and gave up immediately on the
-                            // one status retrying is for.
-                            status if status.is_retryable() && attempt < consts::MAX_RETRIES => {
-                                warn!(request_id, attempt, %status, "device busy, retrying");
-                                self.backoff(attempt).await;
-                                continue 'retry;
-                            }
-                            other => return Err(GigeError::Status(other)),
-                        }
+                        other => return Err(GigeError::Status(other)),
                     }
-                    AckRecv::Io(err) => {
-                        if attempt >= consts::MAX_RETRIES {
-                            return Err(err.into());
-                        }
-                        warn!(request_id, ?opcode, attempt, "receive error, retrying");
-                        self.backoff(attempt).await;
-                        continue 'retry;
+                }
+                AckRecv::Io(err) => {
+                    if attempt >= consts::MAX_RETRIES {
+                        return Err(err.into());
                     }
-                    AckRecv::TimedOut => {
-                        if attempt >= consts::MAX_RETRIES {
-                            return Err(GigeError::Timeout);
-                        }
-                        warn!(request_id, ?opcode, attempt, "command timeout, retrying");
-                        self.backoff(attempt).await;
-                        continue 'retry;
+                    warn!(request_id, ?opcode, attempt, "receive error, retrying");
+                    self.backoff(attempt).await;
+                    continue 'retry;
+                }
+                AckRecv::TimedOut => {
+                    if attempt >= consts::MAX_RETRIES {
+                        return Err(GigeError::Timeout);
                     }
+                    warn!(request_id, ?opcode, attempt, "command timeout, retrying");
+                    self.backoff(attempt).await;
+                    continue 'retry;
                 }
             }
         }
@@ -1197,17 +1174,11 @@ impl GigeDevice {
                 .await
             {
                 AckRecv::Received(len) => {
-                    let Some((pending_id, requested)) = parse_pending_ack(&buf[..len]) else {
+                    // `recv_for_request` has already drained PENDING_ACKs for
+                    // other request IDs, so this one is ours.
+                    let Some((_, requested)) = parse_pending_ack(&buf[..len]) else {
                         return AckRecv::Received(len);
                     };
-                    if pending_id != request_id {
-                        debug!(
-                            request_id,
-                            got = pending_id,
-                            "ignoring PENDING_ACK for another request"
-                        );
-                        continue;
-                    }
                     pending_seen += 1;
                     if pending_seen > consts::MAX_PENDING_ACKS {
                         warn!(

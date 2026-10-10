@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet resend waits also filter unrelated ACKs.
 - Cancel and drain control-channel keepalive I/O when `GigeRegisterIo` is
   dropped, preventing timer registration from racing runtime shutdown.
+- Stale acknowledgements can no longer stretch a GVCP attempt (TC-18). Each
+  one used to restart the 500 ms receive timeout, so a trickle of them could
+  hold one attempt for up to 4 × 500 ms; they are now drained against the
+  attempt's fixed deadline. The count-based mismatch handling this replaces is
+  removed.
 
 ## [0.7.0] - 2026-09-30
 

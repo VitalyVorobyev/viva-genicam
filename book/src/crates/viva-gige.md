@@ -108,6 +108,17 @@ You do not have to manage this. `GigeRegisterIo` in `viva-genicam` owns a
 keepalive: it reads the device's own `GevHeartbeatTimeout` and pings at a
 quarter of it, so holding a `Camera` is enough. `heartbeat_timeout_ms()` and
 `ping_control_channel()` are here for anyone driving `GigeDevice` directly.
+Dropping the transport stops the keepalive and waits for any request it has in
+flight, so keep the Tokio runtime alive until the `Camera` is gone.
+
+A request whose acknowledgement is slow — a file operation the device answers
+with `PENDING_ACK` — holds the device for the whole wait, and the keepalive
+cannot get in. `GigeDevice` therefore sends its own CCP reads while it waits,
+with separate request IDs, and drains their replies
+([ADR-0023](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0023-inflight-gvcp-heartbeats.md)).
+`GigeRegisterIo` sets the probe period from the heartbeat window; a raw
+`GigeDevice` opts in with `set_inflight_keepalive_period`. Each wait lasts
+`set_control_timeout` (500 ms by default) unless the device asks for more.
 
 ### IP configuration
 

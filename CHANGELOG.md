@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `viva-service` answers `genicam/devices/{id}/report` (`keys::report`,
   `DeviceReportRequest`, `DeviceReportResponse`) with that report on its
   camera, written on the host the camera is attached to (backlog ST-41).
+- `gige::DeviceInfo::interface` names the host interface a Discovery ACK
+  arrived on. A broadcast meant for one camera, such as `force_ip`, has to
+  leave through it: sent from an unbound socket it leaves through one
+  interface the OS picks, usually the default route's, which on a direct
+  camera link is the wrong one.
 - Python: `Camera.skipped()` lists the declarations in the camera's XML that
   could not become features, as `SkippedNode`s with the element, name and
   reason, so a missing feature can be told apart from one the camera lacks
@@ -219,6 +224,10 @@ section changes the library.
   shows the connected camera's vendor, model, serial, firmware, user ID, MAC
   and IP address — what a report asks for — and sets the persistent IP
   address the camera takes from its next restart.
+- **"Set IP…" for a camera on another subnet** (ST-37). Discovery finds such
+  a camera but nothing can open it; the device list now offers FORCEIP, which
+  gives it an address until it restarts, sent out of the interface the camera
+  answered on. Only `viva-camctl set-ip --force` could do this before.
 - **User sets** (ST-38). The Image tab's sidebar has a User Sets group:
   `UserSetSelector`, `UserSetLoad`, `UserSetSave`, and the default set under
   either SFNC name (`UserSetDefault` or `UserSetDefaultSelector`). Studio's own

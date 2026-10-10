@@ -143,6 +143,15 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] Focus a splitter (Tab) and use the arrow keys -> the pane resizes
 - [ ] Select a category two levels deep -> the breadcrumb shows both levels
 
+### 6e. A camera on another subnet (real hardware)
+- [ ] Put a GigE camera on a static IP outside the host's subnet (or connect
+      it to a link-local NIC) -> it appears in the device list but fails to
+      connect
+- [ ] "Set IP…", enter a free address in the host's subnet, Send -> a toast
+      confirms; at the next scan the camera shows the new address and connects
+- [ ] With two network cards, the camera on the non-default one -> the same
+      works (ForceIP leaves through the interface the camera answered on)
+
 ### 6b. Report
 - [ ] Diagnostics tab -> Save report… -> the file holds
       "# viva-genicam diagnostic report" and a "## Camera" section on the

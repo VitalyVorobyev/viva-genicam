@@ -82,6 +82,8 @@ pub struct EmbeddedBackend {
     camera: Arc<AsyncMutex<Option<ConnectedCamera>>>,
     /// Cache of discovered devices, updated periodically.
     discovered: RwLock<Vec<DeviceInfo>>,
+    /// The host interface each discovered camera answered on, by MAC.
+    interfaces: RwLock<HashMap<[u8; 6], String>>,
     /// Active acquisition state, if streaming.
     acquisition: AsyncMutex<Option<AcquisitionState>>,
     events: Arc<Events>,
@@ -93,6 +95,7 @@ impl EmbeddedBackend {
         Self {
             camera: Arc::new(AsyncMutex::new(None)),
             discovered: RwLock::new(Vec::new()),
+            interfaces: RwLock::new(HashMap::new()),
             acquisition: AsyncMutex::new(None),
             events,
         }
@@ -105,8 +108,9 @@ impl EmbeddedBackend {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                let devices = discover_gige_devices().await;
+                let (devices, interfaces) = discover_gige_devices().await;
                 *backend.discovered.write().await = devices.clone();
+                *backend.interfaces.write().await = interfaces;
                 for d in &devices {
                     backend.events.send(d);
                 }
@@ -507,7 +511,18 @@ impl DeviceBackend for EmbeddedBackend {
         subnet: Ipv4Addr,
         gateway: Ipv4Addr,
     ) -> Result<(), String> {
-        viva_genicam::gige::force_ip(mac, ip, subnet, gateway, None)
+        // Out of the interface the camera answered discovery on. Without one
+        // the OS picks the interface, usually the default route's, which on a
+        // direct camera link is a different network card.
+        let name = self.interfaces.read().await.get(&mac).cloned();
+        let iface = match name {
+            Some(name) => Some(
+                viva_genicam::gige::nic::Iface::from_system(&name)
+                    .map_err(|e| format!("ForceIP: interface {name}: {e}"))?,
+            ),
+            None => None,
+        };
+        viva_genicam::gige::force_ip(mac, ip, subnet, gateway, iface.as_ref())
             .await
             .map_err(|e| format!("ForceIP failed: {e}"))?;
         info!(%ip, %subnet, %gateway, "ForceIP command sent");
@@ -730,36 +745,50 @@ fn camera_pixel_layout(format: viva_genicam::pfnc::PixelFormat) -> Option<PixelL
 
 // ── Discovery helpers ───────────────────────────────────────────────────────
 
-async fn discover_gige_devices() -> Vec<DeviceInfo> {
+async fn discover_gige_devices() -> (Vec<DeviceInfo>, HashMap<[u8; 6], String>) {
     let timeout = Duration::from_secs(1);
     // `discover` rather than `discover_all`: the latter probes loopback, which
     // on Windows can raise WSAECONNRESET and used to abort the whole scan,
     // leaving the UI on "No device" with a real camera on the wire (#57).
     // `discover_all` remains for the fake-camera tests that need loopback.
     match viva_genicam::gige::discover(timeout).await {
-        // The same announce the service would publish for this camera, so the
-        // id is the MAC-derived one and not the IP (ST-25): the IP changes under
-        // DHCP, FORCEIP and a persistent-IP write from this very app, and the
-        // bridge has always keyed by MAC. `connect` resolves the IP back.
-        Ok(devices) => devices
-            .into_iter()
-            .map(|d| {
-                let announce = DeviceAnnounce::for_gige(
-                    &d.mac,
-                    d.ip,
-                    d.model.as_deref(),
-                    d.serial.as_deref(),
-                    d.user_name.as_deref(),
-                    d.manufacturer.as_deref(),
-                );
-                DeviceInfo::from_announce(announce, "gige")
-            })
-            .collect(),
+        Ok(devices) => discovered_gige(devices),
         Err(e) => {
             warn!("GigE discovery failed: {e}");
-            Vec::new()
+            (Vec::new(), HashMap::new())
         }
     }
+}
+
+/// The device list for what discovery found, and the interface each camera
+/// answered on, which FORCEIP must leave through (ST-37).
+///
+/// Each device is the announce the service would publish for it, so the id
+/// is the MAC-derived one and not the IP (ST-25): the IP changes under DHCP,
+/// FORCEIP and a persistent-IP write from this very app, and the bridge has
+/// always keyed by MAC. `connect` resolves the IP back.
+fn discovered_gige(
+    devices: Vec<viva_genicam::gige::DeviceInfo>,
+) -> (Vec<DeviceInfo>, HashMap<[u8; 6], String>) {
+    let interfaces = devices
+        .iter()
+        .filter_map(|d| Some((d.mac, d.interface.clone()?)))
+        .collect();
+    let infos = devices
+        .into_iter()
+        .map(|d| {
+            let announce = DeviceAnnounce::for_gige(
+                &d.mac,
+                d.ip,
+                d.model.as_deref(),
+                d.serial.as_deref(),
+                d.user_name.as_deref(),
+                d.manufacturer.as_deref(),
+            );
+            DeviceInfo::from_announce(announce, "gige")
+        })
+        .collect();
+    (infos, interfaces)
 }
 
 /// Convert a JSON value to a string suitable for the camera `set()` API.
@@ -1099,6 +1128,26 @@ mod tests {
 
             backend.disconnect().await.expect("disconnect");
         });
+    }
+
+    /// FORCEIP leaves through the interface a camera answered discovery on,
+    /// so the backend keeps it per camera; a record discovery did not make
+    /// has none (ST-37).
+    #[test]
+    fn discovery_keeps_the_interface_each_camera_answered_on() {
+        let mac = [0x00, 0x0C, 0xDF, 0x01, 0x02, 0x03];
+        let found = viva_genicam::gige::DeviceInfo {
+            mac,
+            interface: Some("en7".to_string()),
+            ..viva_genicam::gige::DeviceInfo::from_ip("169.254.1.20".parse().unwrap())
+        };
+        let typed = viva_genicam::gige::DeviceInfo::from_ip("10.0.0.2".parse().unwrap());
+
+        let (devices, interfaces) = super::discovered_gige(vec![found, typed]);
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[&mac], "en7");
     }
 
     /// The camera's `GevSCPSPacketSize`, low 16 bits.

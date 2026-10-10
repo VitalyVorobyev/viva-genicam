@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deviceDetail, deviceLabel } from "../../device/deviceLabel";
 import type { ConnectionState, DeviceInfo, DisconnectReason } from "../../device/types";
+import { ForceIpForm } from "./ForceIpForm";
 
 interface DeviceDropdownProps {
   devices: DeviceInfo[];
@@ -19,6 +20,8 @@ export function DeviceDropdown({
   onDisconnect,
 }: DeviceDropdownProps) {
   const [open, setOpen] = useState(false);
+  /** The camera whose temporary-IP form is open. */
+  const [forcing, setForcing] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Close on outside click
@@ -139,26 +142,42 @@ export function DeviceDropdown({
           )}
           {!isConnected &&
             devices.map((d) => (
-              <button
-                key={d.id}
-                type="button"
-                className="device-dd__option"
-                disabled={isBusy}
-                onClick={() => handleConnect(d.id)}
-              >
-                <span className="device-dd__dot device-dd__dot--idle" />
-                <span className="device-dd__option-text">
-                  <span className="device-dd__option-name">{deviceLabel(d)}</span>
-                  {deviceDetail(d) && (
-                    <span className="device-dd__option-detail">{deviceDetail(d)}</span>
-                  )}
-                </span>
-                {d.transport && (
-                  <span className={`device-dd__transport device-dd__transport--${d.transport}`}>
-                    {d.transport === "gige" ? "GigE" : d.transport === "usb3" ? "USB3" : d.transport}
+              <div key={d.id} className="device-dd__row">
+                <button
+                  type="button"
+                  className="device-dd__option"
+                  disabled={isBusy}
+                  onClick={() => handleConnect(d.id)}
+                >
+                  <span className="device-dd__dot device-dd__dot--idle" />
+                  <span className="device-dd__option-text">
+                    <span className="device-dd__option-name">{deviceLabel(d)}</span>
+                    {deviceDetail(d) && (
+                      <span className="device-dd__option-detail">{deviceDetail(d)}</span>
+                    )}
                   </span>
+                  {d.transport && (
+                    <span className={`device-dd__transport device-dd__transport--${d.transport}`}>
+                      {d.transport === "gige" ? "GigE" : d.transport === "usb3" ? "USB3" : d.transport}
+                    </span>
+                  )}
+                </button>
+                {d.transport === "gige" && d.mac && (
+                  <button
+                    type="button"
+                    className="btn--ghost device-dd__set-ip"
+                    disabled={isBusy}
+                    aria-expanded={forcing === d.id}
+                    title="Give this camera a temporary IP address (FORCEIP)"
+                    onClick={() => setForcing(forcing === d.id ? null : d.id)}
+                  >
+                    Set IP…
+                  </button>
                 )}
-              </button>
+                {forcing === d.id && d.mac && (
+                  <ForceIpForm mac={d.mac} onDone={() => setForcing(null)} />
+                )}
+              </div>
             ))}
         </div>
       )}

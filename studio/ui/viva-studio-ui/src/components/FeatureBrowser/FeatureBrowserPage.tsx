@@ -63,6 +63,11 @@ interface FeatureBrowserPageProps {
   onMergeState?: (name: string, state: FeatureState) => void;
   isConnected?: boolean;
   onRefreshAll?: () => Promise<void>;
+  /**
+   * Whether the Feature Browser is the visible tab. The page stays mounted
+   * while hidden, so it must not act on keyboard shortcuts then.
+   */
+  isActive?: boolean;
 }
 
 export function FeatureBrowserPage({

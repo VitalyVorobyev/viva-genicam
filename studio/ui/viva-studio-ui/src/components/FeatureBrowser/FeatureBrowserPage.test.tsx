@@ -60,3 +60,42 @@ describe("FeatureBrowserPage, connected", () => {
     expect(screen.queryByText("Value must be a valid enumeration entry.")).toBeNull();
   });
 });
+
+describe("FeatureBrowserPage, keyboard shortcuts", () => {
+  // AppLayout keeps the page mounted with display:none while another tab is
+  // shown, so a shortcut typed on the Image tab must not reach it.
+  it("ignores Ctrl+Enter and Ctrl+F while its tab is hidden", async () => {
+    const writes: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "get_current_model") return null;
+      if (cmd === "write_node") {
+        writes.push(args);
+        return { value: 800, access_mode: "RW", kind: "Integer", is_implemented: true, is_available: true };
+      }
+      return undefined;
+    });
+    const page = (isActive: boolean) => (
+      <ToastProvider>
+        <FeatureBrowserPage
+          externalModel={model}
+          liveValues={liveValues}
+          isConnected={true}
+          isActive={isActive}
+        />
+      </ToastProvider>
+    );
+    const { rerender } = render(page(true));
+    await userEvent.click(await screen.findByRole("option", { name: /Width/ }));
+    const input = screen.getByRole("spinbutton");
+    await userEvent.clear(input);
+    await userEvent.type(input, "800");
+    input.blur();
+
+    rerender(page(false));
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await userEvent.keyboard("{Control>}f{/Control}");
+
+    expect(writes).toEqual([]);
+    expect(document.activeElement).not.toBe(screen.getByRole("searchbox"));
+  });
+});

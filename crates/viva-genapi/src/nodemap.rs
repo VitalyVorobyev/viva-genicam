@@ -371,7 +371,7 @@ impl NodeMap {
             };
         }
         let node = self.get_integer_node(name)?;
-        ensure_readable(&node.access, name)?;
+        self.ensure_readable_now(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
         // Return static value if present.
         if let Some(v) = node.value {
@@ -500,7 +500,7 @@ impl NodeMap {
             };
         }
         let node = self.get_float_node(name)?;
-        ensure_readable(&node.access, name)?;
+        self.ensure_readable_now(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
@@ -591,7 +591,7 @@ impl NodeMap {
     /// Read an enumeration feature returning the symbolic entry name.
     pub fn get_enum(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_enum_node(name)?;
-        ensure_readable(&node.access, name)?;
+        self.ensure_readable_now(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
         // When pValue is set, read the integer from the delegate node.
         if let Some(ref pv) = node.pvalue {
@@ -760,6 +760,22 @@ impl NodeMap {
     /// path in the library for a check the subsequent read reports anyway; a
     /// refused write, by contrast, is worth one predicate evaluation to turn a
     /// wire error into a named local one. See backlog GA-06.
+    /// The `<ImposedAccessMode>` `name` declares, a ceiling on its own
+    /// `<AccessMode>` (backlog GA-23).
+    fn imposed_access(&self, name: &str) -> Option<AccessMode> {
+        self.nodes.get(name).and_then(|n| n.meta().imposed_access)
+    }
+
+    /// Refuse a read of `name` that its `access`, or the access imposed on
+    /// it, forbids.
+    fn ensure_readable_now(&self, access: &AccessMode, name: &str) -> Result<(), GenApiError> {
+        ensure_readable(access, name)?;
+        if self.imposed_access(name) == Some(AccessMode::WO) {
+            return Err(GenApiError::Access(name.to_string()));
+        }
+        Ok(())
+    }
+
     fn ensure_writable_now(
         &self,
         name: &str,
@@ -767,6 +783,9 @@ impl NodeMap {
         io: &dyn RegisterIo,
     ) -> Result<(), GenApiError> {
         ensure_writable(access, name)?;
+        if self.imposed_access(name) == Some(AccessMode::RO) {
+            return Err(GenApiError::Access(name.to_string()));
+        }
         if !self.is_available(name, io)? {
             return Err(GenApiError::Unavailable(name.to_string()));
         }
@@ -792,6 +811,10 @@ impl NodeMap {
     /// mode of the linked feature instead of the node's own; combining keeps
     /// that and also honours a restriction the node declares itself.
     ///
+    /// An `<ImposedAccessMode>` anywhere on the chain is a ceiling of the
+    /// same kind: `RO` removes writing, `WO` reading, `RW` nothing (backlog
+    /// GA-23).
+    ///
     /// A `<Converter>` or `<IntConverter>` declares no mode of its own, so it
     /// contributes nothing to the combination. A converter whose chain reaches
     /// no node that declares a mode (a dangling `<pValue>`, or converters
@@ -808,9 +831,15 @@ impl NodeMap {
         }
         let (mut readable, mut writable, mut declared) = (true, true, false);
         for link in self.value_chain(name) {
-            let Some(mode) = self
-                .nodes
-                .get(link)
+            let Some(node) = self.nodes.get(link) else {
+                continue;
+            };
+            match node.meta().imposed_access {
+                Some(AccessMode::RO) => writable = false,
+                Some(AccessMode::WO) => readable = false,
+                Some(AccessMode::RW) | None => {}
+            }
+            let Some(mode) = Some(node)
                 .filter(|n| !is_converter(n))
                 .and_then(Node::access_mode)
             else {
@@ -970,7 +999,7 @@ impl NodeMap {
     /// Read a boolean feature.
     pub fn get_bool(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
         let node = self.get_bool_node(name)?;
-        ensure_readable(&node.access, name)?;
+        self.ensure_readable_now(&node.access, name)?;
         self.ensure_selectors(name, &node.selected_if, io)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
@@ -1782,7 +1811,7 @@ impl NodeMap {
     /// Read a String feature value using the provided transport.
     pub fn get_string(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_string_node(name)?;
-        ensure_readable(&node.access, name)?;
+        self.ensure_readable_now(&node.access, name)?;
         if let Some((ref value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
@@ -1830,7 +1859,7 @@ impl NodeMap {
     /// transport directly when a partial read is what you want.
     pub fn get_register(&self, name: &str, io: &dyn RegisterIo) -> Result<Vec<u8>, GenApiError> {
         let node = self.get_register_node(name)?;
-        ensure_readable(&node.access, name)?;
+        self.ensure_readable_now(&node.access, name)?;
         ensure_device_port(name, node.port.as_deref())?;
         if let Some((ref value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()

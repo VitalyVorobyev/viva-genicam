@@ -2701,6 +2701,58 @@ mod tests {
         assert_eq!(nodemap.get_float("Exp", &io).expect("fresh read"), 5000.0);
     }
 
+    /// `<ImposedAccessMode>` caps a node's access whatever its chain allows:
+    /// FLIR's `SensorWidth` is an `RW` register imposed `RO`, which we
+    /// exposed `RW` (backlog GA-23). It caps; it never grants.
+    #[test]
+    fn an_imposed_access_mode_caps_the_declared_one() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="SensorWidth">
+                    <ImposedAccessMode>RO</ImposedAccessMode>
+                    <pValue>SensorWidthReg</pValue>
+                </Integer>
+                <IntReg Name="SensorWidthReg">
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Integer Name="Key">
+                    <ImposedAccessMode>WO</ImposedAccessMode>
+                    <pValue>KeyReg</pValue>
+                </Integer>
+                <IntReg Name="KeyReg">
+                    <Address>0x104</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Integer Name="Serial">
+                    <ImposedAccessMode>RW</ImposedAccessMode>
+                    <pValue>SerialReg</pValue>
+                </Integer>
+                <IntReg Name="SerialReg">
+                    <Address>0x108</Address><Length>4</Length><AccessMode>RO</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let mut nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+
+        assert_eq!(
+            nodemap.declared_access_mode("SensorWidth"),
+            Some(AccessMode::RO)
+        );
+        assert_eq!(nodemap.declared_access_mode("Key"), Some(AccessMode::WO));
+        // An imposed RW grants nothing the register refuses.
+        assert_eq!(nodemap.declared_access_mode("Serial"), Some(AccessMode::RO));
+
+        let io = MockIo::with_registers(&[(0x100, 2048u32.to_be_bytes().to_vec())]);
+        assert!(
+            nodemap.set_integer("SensorWidth", 1024, &io).is_err(),
+            "a write to an imposed-RO feature went through"
+        );
+        assert_eq!(io.regs.borrow()[&0x100], 2048u32.to_be_bytes());
+    }
+
     /// A converter's access comes from the whole `<pValue>` chain, not from
     /// the first node on it. The AVT `AcquisitionFrameRateLimit` shape: a
     /// converter over a `<Float>` that declares no access of its own and

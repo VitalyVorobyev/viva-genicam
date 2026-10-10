@@ -36,6 +36,7 @@ pub const TAG_P_VALUE: &str = "pValue";
 pub const TAG_DISPLAY_NAME: &str = "DisplayName";
 /// XML element for node visibility level.
 pub const TAG_VISIBILITY: &str = "Visibility";
+pub const TAG_IMPOSED_ACCESS_MODE: &str = "ImposedAccessMode";
 /// XML element for the long-form description.
 pub const TAG_DESCRIPTION: &str = "Description";
 /// XML element for short tooltip text.
@@ -342,6 +343,7 @@ pub struct NodeMetaBuilder {
     pub tooltip: Option<String>,
     pub display_name: Option<String>,
     pub representation: Option<Representation>,
+    pub imposed_access: Option<crate::AccessMode>,
 }
 
 impl NodeMetaBuilder {
@@ -388,6 +390,11 @@ impl NodeMetaBuilder {
                 self.representation = Representation::parse(&text);
                 Ok(true)
             }
+            TAG_IMPOSED_ACCESS_MODE => {
+                let text = read_text_start(reader, event)?;
+                self.imposed_access = Some(crate::AccessMode::parse(&text)?);
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -400,6 +407,7 @@ impl NodeMetaBuilder {
             tooltip: self.tooltip,
             display_name: self.display_name,
             representation: self.representation,
+            imposed_access: self.imposed_access,
         }
     }
 }

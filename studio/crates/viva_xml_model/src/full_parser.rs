@@ -208,7 +208,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             p_max,
             ..
         } => UiNode {
-            access_mode: Some(access_mode_str(*access)),
+            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
             unit: unit.clone(),
             constraints: integer_constraints(*min, *max, *inc),
             dependencies: [pvalue, p_min, p_max]
@@ -230,7 +230,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             ..
         } => UiNode {
-            access_mode: Some(access_mode_str(*access)),
+            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
             unit: unit.clone(),
             constraints: float_constraints(*min, *max),
             dependencies: pvalue.iter().cloned().collect(),
@@ -243,7 +243,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             ..
         } => UiNode {
-            access_mode: Some(access_mode_str(*access)),
+            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
             enum_entries: entries
                 .iter()
                 .map(|e| EnumEntry {
@@ -264,7 +264,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             ..
         } => UiNode {
-            access_mode: Some(access_mode_str(*access)),
+            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
             dependencies: pvalue.iter().cloned().collect(),
             ..described(&name, UiNodeKind::Boolean, meta)
         },
@@ -310,11 +310,17 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             ..described(&name, UiNodeKind::Integer, &cv.meta)
         },
         NodeDecl::String(s) => UiNode {
-            access_mode: Some(access_mode_str(s.access)),
+            access_mode: s
+                .access
+                .capped_by(s.meta.imposed_access)
+                .map(access_mode_str),
             ..described(&name, UiNodeKind::String, &s.meta)
         },
         NodeDecl::Register(r) => UiNode {
-            access_mode: Some(access_mode_str(r.access)),
+            access_mode: r
+                .access
+                .capped_by(r.meta.imposed_access)
+                .map(access_mode_str),
             ..described(&name, UiNodeKind::Register, &r.meta)
         },
         // `NodeDecl` is `#[non_exhaustive]`, so a node type added upstream no
@@ -525,6 +531,26 @@ mod tests {
     /// an `Unknown` node, which the category list skips: in the vendor corpus
     /// 55 SwissKnives listed under a category never showed — `WidthMax`,
     /// `HeightMax` and `UserSetCurrent` among them (backlog ST-34).
+    /// A feature imposed `RO` shows read-only, whatever its own
+    /// `<AccessMode>` says (backlog GA-23).
+    #[test]
+    fn an_imposed_access_mode_caps_a_features_access() {
+        let xml = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <IntReg Name="SensorWidth">
+                    <ImposedAccessMode>RO</ImposedAccessMode>
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let graph = parse_genicam_xml(xml).expect("parse");
+        assert_eq!(
+            graph.nodes_by_name["SensorWidth"].access_mode.as_deref(),
+            Some("RO")
+        );
+    }
+
     #[test]
     fn test_swissknife_is_a_read_only_value_of_its_output_type() {
         let xml = r#"

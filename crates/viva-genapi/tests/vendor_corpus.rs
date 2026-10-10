@@ -331,3 +331,25 @@ fn vendor_xml_corpus_builds_nodemaps() {
         failures.join("\n  ")
     );
 }
+
+/// `FLIR_BFS_PGE_31S4C_C` imposes `RO` on `SensorWidth`, an `RW` register:
+/// a camera's own word that the sensor's width cannot be written, which the
+/// GenApi layer ignored until it parsed `<ImposedAccessMode>` (backlog GA-23).
+#[test]
+fn an_imposed_read_only_feature_is_read_only() {
+    let path = corpus_dir().join("FLIR_BFS_PGE_31S4C_C.xml");
+    let Ok(bytes) = std::fs::read(&path) else {
+        println!(
+            "{} not present; run scripts/fetch-xml-corpus.sh",
+            path.display()
+        );
+        return;
+    };
+    let xml = String::from_utf8_lossy(&bytes);
+    let model = viva_genapi_xml::parse(&xml).expect("parse");
+    let nodemap = NodeMap::try_from_xml(model).expect("build");
+    assert_eq!(
+        nodemap.declared_access_mode("SensorWidth"),
+        Some(viva_genapi_xml::AccessMode::RO)
+    );
+}

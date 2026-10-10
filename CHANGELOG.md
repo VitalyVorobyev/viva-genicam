@@ -149,6 +149,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hold the contract, which `viva-service-u3v` (5 s until now) and Studio share.
 - `viva-service --help` and its logs say `viva-service`, not
   `genicam-service` (backlog SVC-05), and it has a `--version`.
+- `<ImposedAccessMode>` is honoured (backlog GA-23). The parser skipped it, so
+  a feature a camera declares read-only over a writable register was
+  reported, and written, as `RW` — FLIR's `SensorWidth` among them. It caps
+  the access along the `<pValue>` chain as the declared modes do: `RO` removes
+  writing, `WO` reading, `RW` nothing; reads and writes the ceiling forbids are
+  refused. The corpus has 1 421 `RO` and 199 `WO` ceilings in 31 of its 38
+  documents. `NodeMeta` gains `imposed_access`.
+- An `<AccessMode>` value the parser does not recognise reads as `RO`, not
+  `RW` (backlog GA-26): a register whose access we cannot read is not written.
 - `viva-service-u3v` streams as the library does (backlog SVC-03, SVC-06). It
   built its own `U3vStream`, which skipped the SIRM — the streaming registers
   — and sized a packed format's frames at one byte a pixel, and read in a

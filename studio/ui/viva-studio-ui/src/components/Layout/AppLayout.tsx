@@ -303,6 +303,7 @@ function AppLayoutInner() {
                 onMergeState={mergeState}
                 isConnected={isConnected}
                 onRefreshAll={handleRefreshAll}
+                isActive={activeTab === "features"}
               />
             </div>
             {activeTab === "image" && (

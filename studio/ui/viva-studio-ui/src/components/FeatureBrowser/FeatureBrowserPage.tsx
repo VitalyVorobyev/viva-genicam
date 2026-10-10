@@ -77,8 +77,10 @@ export function FeatureBrowserPage({
   onMergeState,
   isConnected = false,
   onRefreshAll,
+  isActive = true,
 }: FeatureBrowserPageProps = {}) {
   const toast = useToast();
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const presetInputRef = useRef<HTMLInputElement | null>(null);
   // T7.2 — search input ref for Ctrl+F focus
@@ -192,8 +194,9 @@ export function FeatureBrowserPage({
     }
   }, [externalModel, applyResponse]);
 
-  // T7.6 — keyboard shortcuts
+  // T7.6 — keyboard shortcuts, only while this tab is the one shown
   useEffect(() => {
+    if (!isActive) return;
     function onKeyDown(e: globalThis.KeyboardEvent) {
       const ctrl = e.ctrlKey || e.metaKey;
 
@@ -219,7 +222,7 @@ export function FeatureBrowserPage({
 
       // Ctrl+Enter — apply if enabled
       if (ctrl && e.key === "Enter") {
-        const applyBtn = document.querySelector<HTMLButtonElement>(
+        const applyBtn = rootRef.current?.querySelector<HTMLButtonElement>(
           ".editor-actions button:last-child:not(:disabled)"
         );
         applyBtn?.click();
@@ -229,7 +232,7 @@ export function FeatureBrowserPage({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [searchInput]);
+  }, [isActive, searchInput]);
 
   const onLoadXml = useCallback(() => { fileInputRef.current?.click(); }, []);
 
@@ -527,7 +530,7 @@ export function FeatureBrowserPage({
   );
 
   return (
-    <div className="feature-browser">
+    <div className="feature-browser" ref={rootRef}>
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" accept=".xml,text/xml" onChange={onFileSelected} hidden />
       <input ref={presetInputRef} type="file" accept=".json,application/json" onChange={onPresetFileSelected} hidden />

@@ -4,9 +4,21 @@ on:
   push:
     tags:
       - 'v*'
+  # A change to the packaging builds every artifact before a tag depends on
+  # it. Nothing is published: the release job runs for tags only.
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'studio/apps/viva-studio-tauri/src-tauri/tauri.conf.json'
+      - 'studio/apps/viva-studio-tauri/src-tauri/icons/**'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -78,10 +90,92 @@ jobs:
           path: ${{ env.ARCHIVE_FILE }}
           if-no-files-found: error
 
+  # Viva Studio as unsigned desktop bundles, versioned with the library
+  # (ADR-0024, backlog ST-06). Signing needs paid certificates; the first-launch
+  # prompts this causes are documented in studio/README.md.
+  studio:
+    name: Viva Studio ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # The oldest Ubuntu runner: the AppImage and the deb need at least
+          # the glibc they were built against.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Tauri's Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: studio/apps/viva-studio-tauri/src-tauri
+          key: release-studio-${{ matrix.target }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      # Vite runs under Node, and needs a newer one than some runners carry.
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install UI dependencies
+        working-directory: studio/ui/viva-studio-ui
+        run: bun install --frozen-lockfile
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '^2' --locked
+
+      # Builds the UI first (`beforeBuildCommand` in tauri.conf.json).
+      - name: Build bundles
+        working-directory: studio/apps/viva-studio-tauri
+        run: cargo tauri build --ci
+
+      - name: Collect bundles
+        shell: bash
+        env:
+          VERSION_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          BUNDLE=studio/apps/viva-studio-tauri/src-tauri/target/release/bundle
+          mkdir -p out
+          for f in "$BUNDLE"/dmg/*.dmg "$BUNDLE"/appimage/*.AppImage "$BUNDLE"/deb/*.deb "$BUNDLE"/msi/*.msi; do
+            cp "$f" "out/viva-studio-${VERSION_TAG}-${TARGET}.${f##*.}"
+          done
+          ls -la out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: studio-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
-    needs: build
+    if: github.ref_type == 'tag'
+    needs: [build, studio]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -99,7 +193,13 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          body: |
+            The `viva-studio-*` files are Viva Studio for macOS (Apple Silicon), Linux and Windows. They are not signed, so the first launch asks for confirmation: see [Install a release build](https://github.com/VitalyVorobyev/viva-genicam/blob/main/studio/README.md#install-a-release-build).
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.msi
             dist/SHA256SUMS.txt

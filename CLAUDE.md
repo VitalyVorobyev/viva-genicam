@@ -291,8 +291,8 @@ A codegraph MCP index of the workspace lives in `.codegraph/` (gitignored, regen
 
 ## Version Bumps
 
-All workspace crates and the Python package share one release version, bumped
-at six touchpoints together — the **release** skill
+All workspace crates, the Python package and Viva Studio share one release version, bumped
+at eight touchpoints together — the **release** skill
 (`.claude/skills/release/SKILL.md`) lists them.
 
 **Do not add a version-pinned install snippet to any README**; both say

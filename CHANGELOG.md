@@ -188,6 +188,26 @@ section changes the library.
   (Codex review of #173). Embedded mode warns once about a format it cannot
   draw rather than on every frame.
   When a frame's size or format changes mid-stream the viewer is told (ST-17).
+- **Studio ships with each release** (ST-06). The release workflow builds
+  unsigned bundles — a DMG for Apple Silicon, an AppImage and a deb for
+  x86_64 Linux, an MSI for Windows — and attaches them to the GitHub release
+  of every `v*` tag; until now every user built Studio from source. Studio
+  takes the library's version (it said 0.1.0), and a test fails while its
+  manifests disagree with the workspace. libusb is linked statically, so the
+  bundles do not depend on one being installed. `studio/README.md` covers the
+  first-launch prompts an unsigned app gets.
+- **Every Studio command is permitted** (Codex review of #174). Tauri
+  refuses an app command that no permission in `capabilities/main.json`
+  allows, and five were in none: `generate_report`, so "Generate report"
+  always failed; `backend_status`, so the header's mode chip and the warning
+  for a `ZENOH_CONFIG` that fails to load (#132) could not appear; and the
+  three IP configuration commands. Backlog ST-44 had this backwards, taking
+  the permission sets for decoration. A test now checks every registered
+  command against the sets, and another sends calls through Tauri's own ACL.
+- **A report gets two minutes in remote mode** (Codex review of #174). The
+  report query shared the 5-second timeout of a feature read, though the
+  service reads the camera's whole XML to write it, and the cameras worth
+  reporting on are the slow ones.
 - **"Generate report" in the Diagnostics tab** (ST-41). Studio writes the
   report `viva-camctl report` writes — the same library code — and saves it
   to a file or copies it, with or without the camera's GenApi XML. In remote

@@ -2013,6 +2013,18 @@
           "markdownDescription": "Allows device discovery and connection commands."
         },
         {
+          "description": "Allows reading the backend mode and generating the diagnostic report.",
+          "type": "string",
+          "const": "diagnostics",
+          "markdownDescription": "Allows reading the backend mode and generating the diagnostic report."
+        },
+        {
+          "description": "Allows reading and setting a GigE camera's IP configuration.",
+          "type": "string",
+          "const": "ip-config",
+          "markdownDescription": "Allows reading and setting a GigE camera's IP configuration."
+        },
+        {
           "description": "Allows feature state, write and execute commands.",
           "type": "string",
           "const": "nodes",

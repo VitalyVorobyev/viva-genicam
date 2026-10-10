@@ -69,9 +69,10 @@ The desktop app for GenICam cameras lives in `studio/` as a separate Cargo
 workspace in this repository, so the published library crates stay decoupled
 from GUI and Node toolchain concerns. It is a React 19 + Tauri v2 application
 that drives a camera in-process through `viva-genicam` (embedded mode) or talks
-to `viva-service` / `viva-service-u3v` over Zenoh (remote mode). There are no
-prebuilt binaries yet; build it from source as
-[`studio/README.md`](studio/README.md) describes. `docs/studio/` holds the
+to `viva-service` / `viva-service-u3v` over Zenoh (remote mode). Releases after
+0.7.0 attach unsigned builds for macOS (Apple Silicon), Linux and Windows —
+[`studio/README.md`](studio/README.md#install-a-release-build) covers the
+first-launch prompts and building from source. `docs/studio/` holds the
 Zenoh API contract and the testing cookbook.
 
 ## Quick start

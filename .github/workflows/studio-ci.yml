@@ -58,8 +58,8 @@ jobs:
         run: cargo test --workspace
 
   # The Tauri app is `exclude`d from the studio workspace (it builds via
-  # `cargo tauri`), so the `rust` job above never reaches it, and `tauri-build`
-  # is `workflow_dispatch`-only. That left the entire Tauri backend — every
+  # `cargo tauri`), so the `rust` job above never reaches it, and the bundles
+  # are built only by `release.yml`. That left the entire Tauri backend — every
   # command handler and the whole camera-session lifecycle — with no PR-time
   # gate: #81 deleted the code behind a `use` there and the dead import sat on
   # `main` unnoticed. Linting it needs no frontend build, so it is cheap.
@@ -151,37 +151,3 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: studio/ui/viva-studio-ui
         run: bun run build
-
-  # Expensive full desktop-app build; run on demand only.
-  tauri-build:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: studio/apps/viva-studio-tauri/src-tauri
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install UI dependencies
-        working-directory: studio/ui/viva-studio-ui
-        run: bun install --frozen-lockfile
-
-      - name: Build UI
-        working-directory: studio/ui/viva-studio-ui
-        run: bun run build
-
-      - name: Install tauri-cli
-        run: cargo install tauri-cli --version '^2' --locked
-
-      - name: Tauri build
-        working-directory: studio/apps/viva-studio-tauri
-        run: cargo tauri build

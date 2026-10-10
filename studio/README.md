@@ -30,18 +30,19 @@ wire contract is in [`../docs/studio/zenoh-api.md`](../docs/studio/zenoh-api.md)
   access-mode handling — a read-only or locked feature is presented as such.
 - **Offline XML browsing.** Open a GenApi XML file with no camera attached and
   explore the same tree.
-- **Unknown-node visibility.** Unrecognised XML tags become `Unknown` nodes with
-  their `RawNode` debug data preserved, rather than disappearing.
+- **Unknown-node visibility.** Unrecognised XML tags become `Unknown` nodes
+  rather than disappearing, and declarations the library could not turn into
+  features are listed in the Diagnostics tab and counted in the toolbar.
+- **A diagnostic report.** The Diagnostics tab saves the report
+  `viva-camctl report` writes, for attaching to an issue.
 
 ## What is not there yet
 
 - **USB3 Vision discovery in the embedded backend** — it reads only the GigE
   cache, though `u3v-usb` is compiled in (backlog ST-14). The Zenoh path via
   `viva-service-u3v` does work.
-- **Skipped-node reporting.** When the library cannot build a feature from the
-  camera's XML it records that, and Studio has no way to show it — so a missing
-  feature looks the same as one the camera does not have (backlog DX-05).
-- **Packaging.** No DMG / AppImage / MSI yet (ST-06); run it from source.
+- **Signed builds.** The release bundles are unsigned; see
+  [Install a release build](#install-a-release-build).
 - **Recording and playback**, **frame annotation**, **auto-update** — planned,
   see `../docs/backlog.md`.
 
@@ -92,7 +93,36 @@ step with `crates/viva_xml_model/src/model.rs`.
 
 ---
 
-## Quickstart
+## Install a release build
+
+Releases after 0.7.0 attach Viva Studio to the
+[GitHub release](https://github.com/VitalyVorobyev/viva-genicam/releases),
+versioned with the library, as `viva-studio-<tag>-<target>.<ext>`:
+
+| OS | File | Install |
+|---|---|---|
+| macOS, Apple Silicon | `.dmg` | Open it and drag Viva Studio to Applications |
+| Linux x86_64 | `.deb` or `.AppImage` | `sudo apt install ./viva-studio-….deb`, or `chmod +x` the AppImage and run it |
+| Windows x86_64 | `.msi` | Run the installer |
+
+The Linux builds are made on Ubuntu 22.04 and need its glibc or newer, and
+WebKitGTK 4.1 (the `.deb` pulls it in). Running an AppImage needs FUSE 2
+(`libfuse2t64` on Ubuntu 24.04). `SHA256SUMS.txt` on the release lists every
+file's checksum.
+
+**The bundles are not signed** — that needs paid certificates from Apple and
+Microsoft — so the first launch asks for confirmation:
+
+- **macOS** refuses to open the app the first time. Open System Settings →
+  Privacy & Security and choose *Open Anyway* for Viva Studio, or clear the
+  download's quarantine flag:
+  `xattr -dr com.apple.quarantine "/Applications/Viva Studio.app"`.
+- **Windows** SmartScreen shows "Windows protected your PC": choose
+  *More info*, then *Run anyway*. If Windows Firewall then asks whether Viva
+  Studio may use the network, allow the network your camera is on: discovery
+  and streaming arrive as inbound UDP.
+
+## Quickstart (from source)
 
 ### Prerequisites
 
@@ -156,9 +186,15 @@ rather than silently ignored.
 ## Building
 
 ```sh
-cd studio/ui/viva-studio-ui && bun install && bun run build
+cd studio/ui/viva-studio-ui && bun install
 cd ../../apps/viva-studio-tauri && cargo tauri build
 ```
+
+`cargo tauri build` builds the UI first, then this platform's bundles into
+`apps/viva-studio-tauri/src-tauri/target/release/bundle/`. The release
+workflow (`.github/workflows/release.yml`) does the same on macOS, Ubuntu and
+Windows for every `v*` tag, and on any pull request that changes the
+packaging.
 
 ---
 

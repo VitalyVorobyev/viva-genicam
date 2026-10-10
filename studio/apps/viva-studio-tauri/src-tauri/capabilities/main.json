@@ -13,6 +13,8 @@
     "nodes",
     "acquisition",
     "sfnc-groups",
+    "diagnostics",
+    "ip-config",
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-write-file",

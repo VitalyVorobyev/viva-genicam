@@ -37,6 +37,12 @@ use super::{BackendMode, ConnectResult, DeviceBackend, StartOptions};
 /// How long a query to the service may take.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the service may take to write a report. It reads the bootstrap
+/// registers and the whole XML from the camera, in 512-byte reads, and the
+/// cameras worth reporting on are the slow and troubled ones (Codex review
+/// of #174).
+const REPORT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// A device not announced for this long is dropped from the list.
 const ANNOUNCE_EXPIRY_SECS: u64 = 6;
 
@@ -676,8 +682,9 @@ impl DeviceBackend for RemoteBackend {
                 let session = self.session()?;
                 let payload = serde_json::to_vec(&DeviceReportRequest { include_xml })
                     .map_err(|e| e.to_string())?;
+                let key = keys::report(&device_id);
                 let response: DeviceReportResponse =
-                    query(&session, &keys::report(&device_id), Some(payload)).await?;
+                    query_within(&session, &key, Some(payload), REPORT_TIMEOUT).await?;
                 Ok(header + &response.report)
             }
             Err(_) => {
@@ -714,7 +721,17 @@ async fn query<T: DeserializeOwned>(
     key: &str,
     payload: Option<Vec<u8>>,
 ) -> Result<T, String> {
-    let mut get = session.get(key).timeout(QUERY_TIMEOUT);
+    query_within(session, key, payload, QUERY_TIMEOUT).await
+}
+
+/// [`query`], waiting up to `timeout` for the reply.
+async fn query_within<T: DeserializeOwned>(
+    session: &Session,
+    key: &str,
+    payload: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<T, String> {
+    let mut get = session.get(key).timeout(timeout);
     if let Some(payload) = payload {
         get = get.payload(payload);
     }
@@ -864,13 +881,39 @@ mod tests {
             assert!(report.contains("tool:        viva-service"), "{report}");
             assert!(report.contains("selected: 127.0.0.1"), "{report}");
 
-            backend.disconnect().await.expect("disconnect");
-            assert!(backend.get_feature_state("Width").await.is_err());
-
+            // The service stops; the backend is still connected.
             let _ = shutdown_tx.send(true);
             for task in service {
                 let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
             }
+
+            // A report takes as long as the camera needs — discovery, the
+            // bootstrap registers, the whole XML in 512-byte reads — and a
+            // slow camera needs more than the 5 s other queries get: the
+            // backend gave up while the service was still writing (Codex
+            // review of #174). A stand-in service answers after 6 s.
+            let slow = session
+                .declare_queryable(viva_zenoh_api::keys::report(&device_id))
+                .await
+                .unwrap();
+            let stand_in = tauri::async_runtime::spawn(async move {
+                let query = slow.recv_async().await.unwrap();
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                let response = viva_zenoh_api::DeviceReportResponse {
+                    report: "written slowly".to_string(),
+                };
+                let payload = serde_json::to_vec(&response).unwrap();
+                query
+                    .reply(query.key_expr().clone(), payload)
+                    .await
+                    .unwrap();
+            });
+            let report = backend.report(false).await.expect("a slow report");
+            assert!(report.contains("written slowly"), "{report}");
+            stand_in.await.unwrap();
+
+            backend.disconnect().await.expect("disconnect");
+            assert!(backend.get_feature_state("Width").await.is_err());
         });
     }
 }

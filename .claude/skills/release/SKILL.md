@@ -5,11 +5,12 @@ description: Cut a release: version bump across all touchpoints, changelog, PR, 
 
 # Release
 
-One version is shared by all workspace crates plus the Python package; this
-skill is the canonical list of where it lives. `studio/` crates are unpublished
-and not versioned by this process.
+One version is shared by all workspace crates, the Python package and Viva
+Studio; this skill is the canonical list of where it lives. Studio's crates are
+unpublished, but its desktop bundles are attached to the GitHub release under
+the same version (ADR-0024).
 
-## 1. Bump — all six touchpoints together
+## 1. Bump — all eight touchpoints together
 
 1. `Cargo.toml` — `[workspace.package] version` (every crate with
    `version.workspace = true` picks it up)
@@ -26,6 +27,12 @@ and not versioned by this process.
    These are caret ranges, so a minor bump makes them unsatisfiable once
    published; they only keep building locally because `path` wins. Bump
    them whenever the minor version changes.
+7. `studio/Cargo.toml` — `[workspace.package] version` (Studio's crates
+   inherit it)
+8. `studio/apps/viva-studio-tauri/src-tauri/Cargo.toml` — `[package] version`.
+   The Tauri app is a workspace of its own, and `tauri.conf.json` names no
+   version, so the bundles take this one. The crate's `tests/version.rs`
+   fails while 7 or 8 disagrees with 1.
 
 A missed file breaks the wheel build or publishes wrong metadata.
 
@@ -74,6 +81,7 @@ Watch the three workflows: **Publish Rust crates**, **Release**,
   `curl -A viva-release-check https://index.crates.io/vi/va/viva-genicam | tail -1`
 - PyPI JSON shows the version and license `MIT AND LGPL-2.1-or-later`:
   `curl -s https://pypi.org/pypi/viva-genicam/json | jq '.info.version, .info.license'`
-- GitHub release `vX.Y.Z` exists and has the binary assets attached.
+- GitHub release `vX.Y.Z` exists and has the binary assets attached: the CLI
+  archives, and the Viva Studio `.dmg`, `.AppImage`, `.deb` and `.msi`.
 
 Report a checklist of what was verified and anything still pending.

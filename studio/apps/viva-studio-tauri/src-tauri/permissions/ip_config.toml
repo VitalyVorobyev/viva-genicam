@@ -1,0 +1,8 @@
+[[permission]]
+identifier = "ip-config"
+description = "Allows reading and setting a GigE camera's IP configuration."
+commands.allow = [
+  "force_ip",
+  "get_network_config",
+  "set_persistent_ip"
+]

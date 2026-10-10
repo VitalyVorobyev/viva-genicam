@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "viva_streamer"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "bytes",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "viva_xml_model"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",

@@ -1,0 +1,7 @@
+[[permission]]
+identifier = "diagnostics"
+description = "Allows reading the backend mode and generating the diagnostic report."
+commands.allow = [
+  "backend_status",
+  "generate_report"
+]

@@ -142,6 +142,14 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] Restart service in Terminal 2
 - [ ] Studio reconnects automatically
 
+### 9. A release bundle (after a tag)
+- [ ] macOS: the `.dmg` from the GitHub release installs, and opens after
+      *Open Anyway* in Privacy & Security; the About box and the report say
+      the library's version
+- [ ] Windows: the `.msi` installs past SmartScreen's *Run anyway*, and a GigE
+      camera is discovered once the firewall prompt is allowed
+- [ ] Linux: the `.deb` installs with `apt` and the AppImage runs
+
 ## Fake camera features
 
 | Feature | Supported |

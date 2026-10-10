@@ -8,6 +8,26 @@ export default defineConfig({
     strictPort: true,
   },
   test: {
-    environment: "node",
+    // Pure functions (`*.test.ts`) run in node; components and hooks
+    // (`*.test.tsx`) get a DOM and the Tauri IPC mock reset in setup-dom.ts.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "dom",
+          include: ["src/**/*.test.tsx"],
+          environment: "jsdom",
+          setupFiles: ["./src/test/setup-dom.ts"],
+        },
+      },
+    ],
   },
 });

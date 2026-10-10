@@ -76,7 +76,6 @@ export function bresenhamLine(
   const sy = y < ey ? 1 : -1;
   let err = dx - dy;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     pixels.push({ x, y });
     if (x === ex && y === ey) break;

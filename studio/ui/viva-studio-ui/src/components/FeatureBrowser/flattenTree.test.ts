@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { flattenVisibleTree, type FlatRow } from "./flattenTree";
 import type { UiGraph, UiCategory, UiNode } from "../../xml_model/uigraph";
+import type { NodeValueEntry } from "../../device/types";
 
 function makeGraph(categories: Record<string, UiCategory>, nodes: Record<string, Partial<UiNode>>): UiGraph {
   const fullNodes: Record<string, UiNode> = {};
@@ -87,7 +88,7 @@ describe("flattenVisibleTree", () => {
       { Root: { name: "Root", display_name: "Root", features: ["Width", "Mystery"] } },
       {
         Width: { kind: "Integer" },
-        Mystery: { kind: { Unknown: { tag: "Foo" } } as any },
+        Mystery: { kind: { Unknown: { tag: "Foo" } } },
       }
     );
     const rows = flatten({ graph, hideUnknown: true });
@@ -126,8 +127,8 @@ describe("flattenVisibleTree", () => {
   });
 
   it("includes live text when liveValues provided", () => {
-    const liveValues = new Map([
-      ["Width", { value: 640, access_mode: "RW", min: undefined, max: undefined, inc: undefined } as any],
+    const liveValues = new Map<string, NodeValueEntry>([
+      ["Width", { value: 640, access_mode: "RW" }],
     ]);
     const rows = flatten({ liveValues });
     const widthRow = rows.find((r) => r.name === "Width" && r.type === "leaf");
@@ -135,8 +136,8 @@ describe("flattenVisibleTree", () => {
   });
 
   it("sets accessMode from live values", () => {
-    const liveValues = new Map([
-      ["Width", { value: 640, access_mode: "RO" } as any],
+    const liveValues = new Map<string, NodeValueEntry>([
+      ["Width", { value: 640, access_mode: "RO" }],
     ]);
     const rows = flatten({ liveValues });
     const widthRow = rows.find((r) => r.name === "Width" && r.type === "leaf");

@@ -11,9 +11,9 @@ import { AnalysisPanel } from "./AnalysisPanel";
 import { useViewerLayout } from "./useViewerLayout";
 import { snapshotImageData, encodeImageDataToPng, suggestFilename } from "./snapshotUtils";
 import { saveSnapshot } from "./snapshotSave";
-import { isTauri } from "../../tauri";
 import type { ImageRect } from "./roiUtils";
 import type { LineSegment } from "./lineProfileUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface ImageViewerProps {
   streamerInfo: StreamerInfo | null;
@@ -32,16 +32,6 @@ interface ImageViewerProps {
   recordingElapsed?: number;
 }
 
-async function writeNode(nodeName: string, value: number): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function ImageViewer({
   streamerInfo,
   isConnected,
@@ -58,6 +48,7 @@ export function ImageViewer({
   recordingFrameCount,
   recordingElapsed,
 }: ImageViewerProps) {
+  const writeNode = useNodeWriter();
   const [fps, setFps] = useState<number>(0);
   const [frameCount, setFrameCount] = useState<number>(0);
   const [zoomLabel, setZoomLabel] = useState<string>("Fit");
@@ -167,15 +158,21 @@ export function ImageViewer({
 
   const handleApplyRoi = useCallback(async () => {
     if (!roiRect) return;
-    // Write Width and Height before Offsets to avoid transient invalid states
-    await writeNode("Width", roiRect.w);
-    await writeNode("Height", roiRect.h);
-    await writeNode("OffsetX", roiRect.x);
-    await writeNode("OffsetY", roiRect.y);
-    // Clear selection after applying
+    // Write Width and Height before Offsets to avoid transient invalid states.
+    // Stop at the first refusal (the writer has said why) and keep the
+    // selection, so the user can adjust it and try again.
+    const writes: Array<[string, number]> = [
+      ["Width", roiRect.w],
+      ["Height", roiRect.h],
+      ["OffsetX", roiRect.x],
+      ["OffsetY", roiRect.y],
+    ];
+    for (const [name, value] of writes) {
+      if (!(await writeNode(name, value))) return;
+    }
     setRoiRect(null);
     setShowRoiTool(false);
-  }, [roiRect]);
+  }, [roiRect, writeNode]);
 
   const acquisitionModeEntries: EnumEntry[] =
     externalModel?.graph.nodes_by_name["AcquisitionMode"]?.enum_entries ?? [];

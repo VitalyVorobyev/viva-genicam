@@ -10,6 +10,7 @@ import type { Diag, ParseXmlResponse, UiGraph, UiNode } from "../../xml_model/ui
 import type { NodeValue } from "../../xml_model/values";
 import type { FeatureState, NodeValueEntry } from "../../device/types";
 import { useToast } from "../../context/ToastContext";
+import { formatErrorMessage } from "../../device/errorMessage";
 import { entryToFeatureState } from "../../device/useNodeValues";
 import { TauriProvider, type XmlModelProvider } from "../../xml_model/provider";
 import { isUnknownKind, nodeDisplayName, nodeKindCssKey, nodeKindIcon } from "../../xml_model/helpers";
@@ -863,19 +864,4 @@ function highlightMatch(text: string, query: string): React.ReactNode {
       {text.slice(idx + query.length)}
     </>
   );
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatErrorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object") {
-    const message = (error as { message?: string }).message;
-    const details = (error as { details?: string }).details;
-    if (message && details) return `${message} (${details})`;
-    if (message) return message;
-    if (details) return details;
-  }
-  return String(error);
 }

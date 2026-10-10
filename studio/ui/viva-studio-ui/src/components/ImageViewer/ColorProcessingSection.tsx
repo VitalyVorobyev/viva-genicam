@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
 import { getLiveNumber } from "./liveValueUtils";
 import {
   extractNumericConstraints,
@@ -10,6 +9,7 @@ import {
   formatGammaLabel,
   resolveLiveEnumValue,
 } from "./colorProcessingUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface ColorProcessingSectionProps {
   isConnected: boolean;
@@ -20,21 +20,12 @@ interface ColorProcessingSectionProps {
 const BALANCE_RATIO_DEFAULTS = { min: 0.0, max: 4.0, inc: 0 };
 const GAMMA_DEFAULTS = { min: 0.1, max: 4.0, inc: 0 };
 
-async function writeNode(nodeName: string, value: number | string | boolean): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function ColorProcessingSection({
   isConnected,
   externalModel,
   liveValues,
 }: ColorProcessingSectionProps) {
+  const writeNode = useNodeWriter();
   const graph = externalModel?.graph;
   const nodes = graph?.nodes_by_name;
 
@@ -54,27 +45,31 @@ export function ColorProcessingSection({
   const [gammaText, setGammaText] = useState<string>(String(gammaConstraints.min));
 
   const balanceRatioDragging = useRef(false);
+  const balanceRatioEditing = useRef(false);
   const gammaDragging = useRef(false);
+  const gammaEditing = useRef(false);
 
+  const liveBalanceRatio = getLiveNumber(liveValues, "BalanceRatio");
   useEffect(() => {
-    if (balanceRatioDragging.current) return;
-    const v = getLiveNumber(liveValues, "BalanceRatio");
+    if (balanceRatioDragging.current || balanceRatioEditing.current) return;
+    const v = liveBalanceRatio;
     if (v !== null) {
       const clamped = clampValue(v, balanceRatioConstraints.min, balanceRatioConstraints.max);
       setBalanceRatioDraft(clamped);
       setBalanceRatioText(String(clamped));
     }
-  }, [liveValues, balanceRatioConstraints.min, balanceRatioConstraints.max]);
+  }, [liveBalanceRatio, balanceRatioConstraints.min, balanceRatioConstraints.max]);
 
+  const liveGamma = getLiveNumber(liveValues, "Gamma");
   useEffect(() => {
-    if (gammaDragging.current) return;
-    const v = getLiveNumber(liveValues, "Gamma");
+    if (gammaDragging.current || gammaEditing.current) return;
+    const v = liveGamma;
     if (v !== null) {
       const clamped = clampValue(v, gammaConstraints.min, gammaConstraints.max);
       setGammaDraft(clamped);
       setGammaText(String(clamped));
     }
-  }, [liveValues, gammaConstraints.min, gammaConstraints.max]);
+  }, [liveGamma, gammaConstraints.min, gammaConstraints.max]);
 
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
@@ -131,6 +126,7 @@ export function ColorProcessingSection({
   };
 
   const handleBalanceRatioTextBlur = () => {
+    balanceRatioEditing.current = false;
     const parsed = parseFloat(balanceRatioText);
     const clamped = isNaN(parsed)
       ? balanceRatioDraft
@@ -164,6 +160,7 @@ export function ColorProcessingSection({
   };
 
   const handleGammaTextBlur = () => {
+    gammaEditing.current = false;
     const parsed = parseFloat(gammaText);
     const clamped = isNaN(parsed)
       ? gammaDraft
@@ -224,6 +221,9 @@ export function ColorProcessingSection({
             className="iv-text-input"
             value={balanceRatioText}
             onChange={handleBalanceRatioTextChange}
+            onFocus={() => {
+              balanceRatioEditing.current = true;
+            }}
             onBlur={handleBalanceRatioTextBlur}
           />
         </div>
@@ -251,6 +251,9 @@ export function ColorProcessingSection({
             className="iv-text-input"
             value={gammaText}
             onChange={handleGammaTextChange}
+            onFocus={() => {
+              gammaEditing.current = true;
+            }}
             onBlur={handleGammaTextBlur}
           />
         </div>

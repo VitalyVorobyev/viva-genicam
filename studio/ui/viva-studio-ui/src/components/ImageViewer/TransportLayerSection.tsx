@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
 import { getLiveNumber } from "./liveValueUtils";
 import {
   extractNumericConstraints,
@@ -10,6 +9,7 @@ import {
   formatPacketSizeLabel,
   formatInterPacketDelayLabel,
 } from "./transportLayerUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface TransportLayerSectionProps {
   isConnected: boolean;
@@ -20,21 +20,12 @@ interface TransportLayerSectionProps {
 const PACKET_SIZE_DEFAULTS = { min: 220, max: 9000, inc: 4 };
 const INTER_PACKET_DELAY_DEFAULTS = { min: 0, max: 10000, inc: 1 };
 
-async function writeNode(nodeName: string, value: number | string): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function TransportLayerSection({
   isConnected,
   externalModel,
   liveValues,
 }: TransportLayerSectionProps) {
+  const writeNode = useNodeWriter();
   const nodes = externalModel?.graph.nodes_by_name;
 
   const packetSizeC = extractNumericConstraints(
@@ -59,27 +50,31 @@ export function TransportLayerSection({
   );
 
   const packetSizeDragging = useRef(false);
+  const packetSizeEditing = useRef(false);
   const interPacketDelayDragging = useRef(false);
+  const interPacketDelayEditing = useRef(false);
 
+  const livePacketSize = getLiveNumber(liveValues, "GevSCPSPacketSize");
   useEffect(() => {
-    if (packetSizeDragging.current) return;
-    const v = getLiveNumber(liveValues, "GevSCPSPacketSize");
+    if (packetSizeDragging.current || packetSizeEditing.current) return;
+    const v = livePacketSize;
     if (v !== null) {
       const clamped = clampValue(v, packetSizeC.min, packetSizeC.max);
       setPacketSizeDraft(clamped);
       setPacketSizeText(String(clamped));
     }
-  }, [liveValues, packetSizeC.min, packetSizeC.max]);
+  }, [livePacketSize, packetSizeC.min, packetSizeC.max]);
 
+  const liveInterPacketDelay = getLiveNumber(liveValues, "GevSCPD");
   useEffect(() => {
-    if (interPacketDelayDragging.current) return;
-    const v = getLiveNumber(liveValues, "GevSCPD");
+    if (interPacketDelayDragging.current || interPacketDelayEditing.current) return;
+    const v = liveInterPacketDelay;
     if (v !== null) {
       const clamped = clampValue(v, interPacketDelayC.min, interPacketDelayC.max);
       setInterPacketDelayDraft(clamped);
       setInterPacketDelayText(String(clamped));
     }
-  }, [liveValues, interPacketDelayC.min, interPacketDelayC.max]);
+  }, [liveInterPacketDelay, interPacketDelayC.min, interPacketDelayC.max]);
 
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
@@ -128,10 +123,14 @@ export function TransportLayerSection({
             type="number"
             className="iv-text-input"
             value={packetSizeText}
+            onFocus={() => {
+              packetSizeEditing.current = true;
+            }}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
               setPacketSizeText(e.target.value);
             }}
             onBlur={() => {
+              packetSizeEditing.current = false;
               const parsed = parseInt(packetSizeText, 10);
               const clamped = isNaN(parsed)
                 ? packetSizeDraft
@@ -180,10 +179,14 @@ export function TransportLayerSection({
             type="number"
             className="iv-text-input"
             value={interPacketDelayText}
+            onFocus={() => {
+              interPacketDelayEditing.current = true;
+            }}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
               setInterPacketDelayText(e.target.value);
             }}
             onBlur={() => {
+              interPacketDelayEditing.current = false;
               const parsed = parseInt(interPacketDelayText, 10);
               const clamped = isNaN(parsed)
                 ? interPacketDelayDraft

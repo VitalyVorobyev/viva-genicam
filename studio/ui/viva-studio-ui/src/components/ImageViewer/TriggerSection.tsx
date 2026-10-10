@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
 import { getLiveNumber } from "./liveValueUtils";
 import {
   extractNumericConstraints,
@@ -9,6 +8,7 @@ import {
   formatTriggerDelayLabel,
   resolveLiveEnumValue,
 } from "./triggerUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface TriggerSectionProps {
   isConnected: boolean;
@@ -18,21 +18,12 @@ interface TriggerSectionProps {
 
 const TRIGGER_DELAY_DEFAULTS = { min: 0, max: 1000000, inc: 0 };
 
-async function writeNode(nodeName: string, value: number | string): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function TriggerSection({
   isConnected,
   externalModel,
   liveValues,
 }: TriggerSectionProps) {
+  const writeNode = useNodeWriter();
   const nodes = externalModel?.graph.nodes_by_name;
 
   const delayConstraints = extractNumericConstraints(
@@ -43,6 +34,7 @@ export function TriggerSection({
   const [delayDraft, setDelayDraft] = useState<number>(delayConstraints.min);
   const [delayText, setDelayText] = useState<string>(String(delayConstraints.min));
   const delayDragging = useRef(false);
+  const delayEditing = useRef(false);
 
   const triggerModeEntries = nodes?.["TriggerMode"]?.enum_entries ?? [];
   const triggerSourceEntries = nodes?.["TriggerSource"]?.enum_entries ?? [];
@@ -53,15 +45,16 @@ export function TriggerSection({
   const triggerActivationValue = resolveLiveEnumValue(liveValues, "TriggerActivation");
 
   // Sync delay draft from liveValues when not dragging
+  const liveDelay = getLiveNumber(liveValues, "TriggerDelay");
   useEffect(() => {
-    if (delayDragging.current) return;
-    const v = getLiveNumber(liveValues, "TriggerDelay");
+    if (delayDragging.current || delayEditing.current) return;
+    const v = liveDelay;
     if (v !== null) {
       const clamped = clampValue(v, delayConstraints.min, delayConstraints.max);
       setDelayDraft(clamped);
       setDelayText(String(clamped));
     }
-  }, [liveValues, delayConstraints.min, delayConstraints.max]);
+  }, [liveDelay, delayConstraints.min, delayConstraints.max]);
 
   // After every hook, so a connect or disconnect does not change how many
   // hooks this component calls.
@@ -93,6 +86,7 @@ export function TriggerSection({
   };
 
   const handleDelayTextBlur = () => {
+    delayEditing.current = false;
     const parsed = parseFloat(delayText);
     const clamped = isNaN(parsed)
       ? delayDraft
@@ -189,6 +183,9 @@ export function TriggerSection({
             className="iv-text-input"
             value={delayText}
             onChange={handleDelayTextChange}
+            onFocus={() => {
+              delayEditing.current = true;
+            }}
             onBlur={handleDelayTextBlur}
           />
         </div>

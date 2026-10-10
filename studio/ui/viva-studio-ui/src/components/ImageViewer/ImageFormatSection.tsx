@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
 import {
   extractNumericConstraints,
   clampValue,
@@ -10,6 +9,7 @@ import {
   deriveOffsetMax,
 } from "./imageFormatUtils";
 import { getLiveNumber } from "./liveValueUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface ImageFormatSectionProps {
   isConnected: boolean;
@@ -22,21 +22,12 @@ const HEIGHT_DEFAULTS = { min: 1, max: 3072, inc: 1 };
 const OFFSET_X_DEFAULTS = { min: 0, max: 4095, inc: 1 };
 const OFFSET_Y_DEFAULTS = { min: 0, max: 3071, inc: 1 };
 
-async function writeNode(nodeName: string, value: number | string): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function ImageFormatSection({
   isConnected,
   externalModel,
   liveValues,
 }: ImageFormatSectionProps) {
+  const writeNode = useNodeWriter();
   const graph = externalModel?.graph;
   const nodes = graph?.nodes_by_name;
 
@@ -76,9 +67,13 @@ export function ImageFormatSection({
   );
 
   const widthDragging = useRef(false);
+  const widthEditing = useRef(false);
   const heightDragging = useRef(false);
+  const heightEditing = useRef(false);
   const offsetXDragging = useRef(false);
+  const offsetXEditing = useRef(false);
   const offsetYDragging = useRef(false);
+  const offsetYEditing = useRef(false);
 
   const pixelFormatEntries = nodes?.["PixelFormat"]?.enum_entries ?? [];
   const livePixelFormat = liveValues.get("PixelFormat");
@@ -124,44 +119,46 @@ export function ImageFormatSection({
 
   // Sync drafts from liveValues when not dragging
   useEffect(() => {
-    if (widthDragging.current) return;
-    const v = getLiveNumber(liveValues, "Width");
+    if (widthDragging.current || widthEditing.current) return;
+    const v = liveWidth;
     if (v !== null) {
       const clamped = clampValue(v, widthC.min, widthC.max);
       setWidthDraft(clamped);
       setWidthText(String(clamped));
     }
-  }, [liveValues, widthC.min, widthC.max]);
+  }, [liveWidth, widthC.min, widthC.max]);
 
   useEffect(() => {
-    if (heightDragging.current) return;
-    const v = getLiveNumber(liveValues, "Height");
+    if (heightDragging.current || heightEditing.current) return;
+    const v = liveHeight;
     if (v !== null) {
       const clamped = clampValue(v, heightC.min, heightC.max);
       setHeightDraft(clamped);
       setHeightText(String(clamped));
     }
-  }, [liveValues, heightC.min, heightC.max]);
+  }, [liveHeight, heightC.min, heightC.max]);
 
+  const liveOffsetX = getLiveNumber(liveValues, "OffsetX");
   useEffect(() => {
-    if (offsetXDragging.current) return;
-    const v = getLiveNumber(liveValues, "OffsetX");
+    if (offsetXDragging.current || offsetXEditing.current) return;
+    const v = liveOffsetX;
     if (v !== null) {
       const clamped = clampValue(v, offsetXC.min, effectiveOffsetXMax);
       setOffsetXDraft(clamped);
       setOffsetXText(String(clamped));
     }
-  }, [liveValues, offsetXC.min, effectiveOffsetXMax]);
+  }, [liveOffsetX, offsetXC.min, effectiveOffsetXMax]);
 
+  const liveOffsetY = getLiveNumber(liveValues, "OffsetY");
   useEffect(() => {
-    if (offsetYDragging.current) return;
-    const v = getLiveNumber(liveValues, "OffsetY");
+    if (offsetYDragging.current || offsetYEditing.current) return;
+    const v = liveOffsetY;
     if (v !== null) {
       const clamped = clampValue(v, offsetYC.min, effectiveOffsetYMax);
       setOffsetYDraft(clamped);
       setOffsetYText(String(clamped));
     }
-  }, [liveValues, offsetYC.min, effectiveOffsetYMax]);
+  }, [liveOffsetY, offsetYC.min, effectiveOffsetYMax]);
 
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
@@ -193,6 +190,7 @@ export function ImageFormatSection({
     setWidthText(e.target.value);
   };
   const handleWidthTextBlur = () => {
+    widthEditing.current = false;
     const parsed = parseInt(widthText, 10);
     const clamped = isNaN(parsed) ? widthDraft : clampValue(parsed, widthC.min, widthC.max);
     setWidthDraft(clamped);
@@ -220,6 +218,7 @@ export function ImageFormatSection({
     setHeightText(e.target.value);
   };
   const handleHeightTextBlur = () => {
+    heightEditing.current = false;
     const parsed = parseInt(heightText, 10);
     const clamped = isNaN(parsed) ? heightDraft : clampValue(parsed, heightC.min, heightC.max);
     setHeightDraft(clamped);
@@ -247,6 +246,7 @@ export function ImageFormatSection({
     setOffsetXText(e.target.value);
   };
   const handleOffsetXTextBlur = () => {
+    offsetXEditing.current = false;
     const parsed = parseInt(offsetXText, 10);
     const clamped = isNaN(parsed) ? offsetXDraft : clampValue(parsed, offsetXC.min, effectiveOffsetXMax);
     setOffsetXDraft(clamped);
@@ -274,6 +274,7 @@ export function ImageFormatSection({
     setOffsetYText(e.target.value);
   };
   const handleOffsetYTextBlur = () => {
+    offsetYEditing.current = false;
     const parsed = parseInt(offsetYText, 10);
     const clamped = isNaN(parsed) ? offsetYDraft : clampValue(parsed, offsetYC.min, effectiveOffsetYMax);
     setOffsetYDraft(clamped);
@@ -338,6 +339,9 @@ export function ImageFormatSection({
             className="iv-text-input"
             value={widthText}
             onChange={handleWidthTextChange}
+            onFocus={() => {
+              widthEditing.current = true;
+            }}
             onBlur={handleWidthTextBlur}
           />
         </div>
@@ -366,6 +370,9 @@ export function ImageFormatSection({
             className="iv-text-input"
             value={heightText}
             onChange={handleHeightTextChange}
+            onFocus={() => {
+              heightEditing.current = true;
+            }}
             onBlur={handleHeightTextBlur}
           />
         </div>
@@ -394,6 +401,9 @@ export function ImageFormatSection({
             className="iv-text-input"
             value={offsetXText}
             onChange={handleOffsetXTextChange}
+            onFocus={() => {
+              offsetXEditing.current = true;
+            }}
             onBlur={handleOffsetXTextBlur}
           />
         </div>
@@ -422,6 +432,9 @@ export function ImageFormatSection({
             className="iv-text-input"
             value={offsetYText}
             onChange={handleOffsetYTextChange}
+            onFocus={() => {
+              offsetYEditing.current = true;
+            }}
             onBlur={handleOffsetYTextBlur}
           />
         </div>

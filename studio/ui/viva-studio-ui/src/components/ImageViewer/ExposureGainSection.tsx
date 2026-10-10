@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
 import {
   extractNumericConstraints,
   clampValue,
@@ -11,6 +10,7 @@ import {
   isAutoContinuous,
 } from "./exposureGainUtils";
 import { getLiveNumber } from "./liveValueUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface ExposureGainSectionProps {
   isConnected: boolean;
@@ -21,21 +21,12 @@ interface ExposureGainSectionProps {
 const EXP_DEFAULTS = { min: 100, max: 100_000 };
 const GAIN_DEFAULTS = { min: 0.0, max: 24.0 };
 
-async function writeNode(nodeName: string, value: number | string): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function ExposureGainSection({
   isConnected,
   externalModel,
   liveValues,
 }: ExposureGainSectionProps) {
+  const writeNode = useNodeWriter();
   const graph = externalModel?.graph;
   const nodes = graph?.nodes_by_name;
 
@@ -48,7 +39,9 @@ export function ExposureGainSection({
   const [gainText, setGainText] = useState<string>(String(gainConstraints.min));
 
   const expDragging = useRef(false);
+  const expEditing = useRef(false);
   const gainDragging = useRef(false);
+  const gainEditing = useRef(false);
 
   const expAutoState = resolveAutoState(liveValues, "ExposureAuto");
   const gainAutoState = resolveAutoState(liveValues, "GainAuto");
@@ -59,25 +52,27 @@ export function ExposureGainSection({
   const gainAutoEntries = nodes?.["GainAuto"]?.enum_entries ?? [];
 
   // Sync draft from liveValues when not dragging
+  const liveExp = getLiveNumber(liveValues, "ExposureTime");
   useEffect(() => {
-    if (expDragging.current) return;
-    const v = getLiveNumber(liveValues, "ExposureTime");
+    if (expDragging.current || expEditing.current) return;
+    const v = liveExp;
     if (v !== null) {
       const clamped = clampValue(v, expConstraints.min, expConstraints.max);
       setExpDraft(clamped);
       setExpText(String(clamped));
     }
-  }, [liveValues, expConstraints.min, expConstraints.max]);
+  }, [liveExp, expConstraints.min, expConstraints.max]);
 
+  const liveGain = getLiveNumber(liveValues, "Gain");
   useEffect(() => {
-    if (gainDragging.current) return;
-    const v = getLiveNumber(liveValues, "Gain");
+    if (gainDragging.current || gainEditing.current) return;
+    const v = liveGain;
     if (v !== null) {
       const clamped = clampValue(v, gainConstraints.min, gainConstraints.max);
       setGainDraft(clamped);
       setGainText(String(clamped));
     }
-  }, [liveValues, gainConstraints.min, gainConstraints.max]);
+  }, [liveGain, gainConstraints.min, gainConstraints.max]);
 
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
@@ -107,6 +102,7 @@ export function ExposureGainSection({
   };
 
   const handleExpTextBlur = () => {
+    expEditing.current = false;
     const parsed = parseFloat(expText);
     const clamped = isNaN(parsed)
       ? expDraft
@@ -140,6 +136,7 @@ export function ExposureGainSection({
   };
 
   const handleGainTextBlur = () => {
+    gainEditing.current = false;
     const parsed = parseFloat(gainText);
     const clamped = isNaN(parsed)
       ? gainDraft
@@ -186,6 +183,9 @@ export function ExposureGainSection({
             value={expText}
             disabled={expAutoContinuous}
             onChange={handleExpTextChange}
+            onFocus={() => {
+              expEditing.current = true;
+            }}
             onBlur={handleExpTextBlur}
           />
         </div>
@@ -232,6 +232,9 @@ export function ExposureGainSection({
             value={gainText}
             disabled={gainAutoContinuous}
             onChange={handleGainTextChange}
+            onFocus={() => {
+              gainEditing.current = true;
+            }}
             onBlur={handleGainTextBlur}
           />
         </div>

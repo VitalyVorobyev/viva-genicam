@@ -108,6 +108,24 @@ pub async fn announce_loop(
     }
 }
 
+/// The served cameras a discovery pass has lost: those it did not find, if it
+/// succeeded. `None` is a failed pass, which says nothing about which cameras
+/// are gone; a successful pass that found nothing has lost them all. The two
+/// were one case once, so an unplugged only camera stayed served and
+/// announced (Codex review of #185).
+pub fn lost_cameras<'a>(
+    discovered: Option<&std::collections::HashSet<String>>,
+    served: impl Iterator<Item = &'a String>,
+) -> Vec<String> {
+    let Some(discovered) = discovered else {
+        return Vec::new();
+    };
+    served
+        .filter(|id| !discovered.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Publish one announce on `keys::announce`.
 pub async fn put_announce(session: &zenoh::Session, announce: &DeviceAnnounce) {
     let key = viva_zenoh_api::keys::announce(&announce.id);
@@ -203,6 +221,19 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         let _ = task.await;
+    }
+
+    /// A successful discovery pass that finds nothing has lost every camera;
+    /// a failed one has lost none (Codex review of #185: an unplugged only
+    /// camera was announced forever).
+    #[test]
+    fn a_successful_empty_discovery_loses_every_camera() {
+        let active = ["a".to_string(), "b".to_string()];
+        let none = std::collections::HashSet::new();
+        assert_eq!(lost_cameras(Some(&none), active.iter()), vec!["a", "b"]);
+        assert!(lost_cameras(None, active.iter()).is_empty());
+        let some: std::collections::HashSet<String> = ["b".to_string()].into();
+        assert_eq!(lost_cameras(Some(&some), active.iter()), vec!["a"]);
     }
 
     /// Three announces fit in the expiry a client applies.

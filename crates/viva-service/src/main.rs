@@ -11,7 +11,8 @@ use viva_genicam::gige::nic::IfaceSelector;
 use viva_service::config::Cli;
 use viva_service::device::DeviceHandle;
 use viva_service::serve::{
-    Announces, announce_loop, derive_device_id, device_announce, publish_announce, serve_device,
+    Announces, announce_loop, derive_device_id, device_announce, lost_cameras, publish_announce,
+    serve_device,
 };
 use viva_service::status;
 
@@ -123,6 +124,7 @@ async fn run_discovery_loop(
         };
 
         let mut discovered_ids = std::collections::HashSet::new();
+        let discovery_succeeded = devices.is_ok();
 
         match devices {
             Ok(found) => {
@@ -171,14 +173,13 @@ async fn run_discovery_loop(
             }
         }
 
-        // Detect lost devices (discovered_ids is empty on discovery failure — skip cleanup).
-        if !discovered_ids.is_empty() {
+        // Lost devices: those a successful pass did not find.
+        {
             let mut active = active_devices.lock().await;
-            let lost: Vec<String> = active
-                .keys()
-                .filter(|id| !discovered_ids.contains(id.as_str()))
-                .cloned()
-                .collect();
+            let lost = lost_cameras(
+                discovery_succeeded.then_some(&discovered_ids),
+                active.keys(),
+            );
             for device_id in lost {
                 warn!(device_id, "device lost, cleaning up");
                 announces.lock().await.remove(&device_id);

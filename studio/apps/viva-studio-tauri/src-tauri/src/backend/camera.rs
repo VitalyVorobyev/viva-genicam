@@ -223,13 +223,13 @@ impl Frames {
         }
     }
 
-    /// Frames lost since the stream started, where the transport counts them:
-    /// GVSP's are abandoned incomplete or discarded under backpressure; a USB
-    /// bulk stream reports none.
+    /// Frames lost since the stream started: GVSP's abandoned incomplete or
+    /// discarded under backpressure, USB3 Vision's dropped because their
+    /// trailer reported an error.
     pub(crate) fn dropped(&self) -> u64 {
         match self {
             Frames::Gige(stream) => stream.stats().drops,
-            Frames::U3v(_) => 0,
+            Frames::U3v(stream) => stream.dropped(),
         }
     }
 }

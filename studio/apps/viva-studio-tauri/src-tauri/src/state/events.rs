@@ -23,14 +23,11 @@ pub trait StudioEvent: Serialize {
     const NAME: &'static str;
 }
 
-/// A feature's new state, in the one shape both modes send: the legacy flat
-/// `value` and `access_mode`, plus the whole `state`.
+/// A feature's new state, the same in both modes.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct NodeStateChanged {
-    pub node_name: String,
-    pub value: serde_json::Value,
-    pub access_mode: String,
+pub struct FeatureStateChanged {
+    pub name: String,
     pub state: FeatureState,
 }
 
@@ -98,7 +95,7 @@ studio_events! {
     DeviceReconnected => "device-reconnected",
     ZenohSessionLost => "zenoh-session-lost",
     ZenohSessionRestored => "zenoh-session-restored",
-    NodeStateChanged => "node-value-changed",
+    FeatureStateChanged => "feature-state-changed",
     FeaturesInvalidated => "features-invalidated",
     AcquisitionStatus => "acquisition-status",
     ImageMeta => "image-meta-changed",
@@ -140,10 +137,8 @@ impl Events {
 
     /// A feature's new state.
     pub fn node_state(&self, node_name: &str, state: &FeatureState) {
-        self.send(&NodeStateChanged {
-            node_name: node_name.to_string(),
-            value: state.value.clone(),
-            access_mode: state.access_mode.clone(),
+        self.send(&FeatureStateChanged {
+            name: node_name.to_string(),
             state: state.clone(),
         });
     }

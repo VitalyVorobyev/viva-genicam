@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { buildLiveValuePreset, presetValueToDraft } from "./presetUtils";
 import type { UiNode } from "../../xml_model/uigraph";
-import type { NodeValueEntry } from "../../device/types";
+import type { JsonValue } from "../../device/types";
 
-function entry(value: number | string | boolean): NodeValueEntry {
-  return { value, access_mode: "RW" };
+function entry(value: JsonValue) {
+  return { value };
 }
 
 describe("buildLiveValuePreset", () => {
@@ -14,9 +14,9 @@ describe("buildLiveValuePreset", () => {
 
   // A register's state is a summary of its size, not a value to restore.
   it("leaves out a register's size summary", () => {
-    const map = new Map<string, NodeValueEntry>([
+    const map = new Map([
       ["Width", entry(640)],
-      ["FileAccessBuffer", { value: { kind: "register", length: 100000 }, access_mode: "RW" }],
+      ["FileAccessBuffer", entry({ kind: "register", length: 100000 })],
     ]);
     expect(buildLiveValuePreset(map)).toEqual({ Width: 640 });
   });
@@ -80,10 +80,10 @@ describe("buildLiveValuePreset", () => {
 
   it("test_buildLiveValuePreset_skips_features_without_a_value", () => {
     // Commands and write-only nodes carry `null`: nothing to restore.
-    const map = new Map<string, NodeValueEntry>([
+    const map = new Map([
       ["Width", entry(640)],
-      ["AcquisitionStart", { value: null, access_mode: "WO" }],
-      ["UserSetLoadReg", { value: null, access_mode: "WO" }],
+      ["AcquisitionStart", entry(null)],
+      ["UserSetLoadReg", entry(null)],
     ]);
     expect(buildLiveValuePreset(map)).toEqual({ Width: 640 });
   });

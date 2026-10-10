@@ -1,4 +1,4 @@
-import { useReducer, useRef, useCallback, useEffect } from "react";
+import { useReducer, useRef, useCallback, useEffect, useLayoutEffect } from "react";
 import { fitContain } from "./viewerUtils";
 import type { FitContainResult } from "./viewerUtils";
 import {
@@ -63,10 +63,13 @@ export function useZoomPan(
   const panXRef = useRef(internal.panX);
   const panYRef = useRef(internal.panY);
   const fitScaleRef = useRef(fitScale);
-  scaleRef.current = internal.scale;
-  panXRef.current = internal.panX;
-  panYRef.current = internal.panY;
-  fitScaleRef.current = fitScale;
+  // Updated after each render, before the browser can deliver an event.
+  useLayoutEffect(() => {
+    scaleRef.current = internal.scale;
+    panXRef.current = internal.panX;
+    panYRef.current = internal.panY;
+    fitScaleRef.current = fitScale;
+  });
 
   // Reset when image dimensions change
   const prevImgSizeRef = useRef({ w: imgW, h: imgH });

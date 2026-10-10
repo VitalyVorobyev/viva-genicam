@@ -1,9 +1,9 @@
-import type { NodeValueEntry } from "../../device/types";
+import type { FeatureState } from "../../device/types";
 import type { UiNode } from "../../xml_model/uigraph";
 import type { NodeValue } from "../../xml_model/values";
 
 /**
- * Convert a live-values map to a flat preset record.
+ * Convert live feature states to a flat preset record.
  *
  * The result is in the same format as the draft-preset export so it can be
  * re-imported with "Import Preset" and applied with "Apply All" to restore
@@ -13,16 +13,16 @@ import type { NodeValue } from "../../xml_model/values";
  * have none, and a register reports only its size. There is no state to
  * restore.
  *
- * @param liveValues  Current live node values from the Tauri backend.
+ * @param states  Live feature states, as the store loaded them.
  * @returns           A plain object mapping node names to their scalar values.
  */
 export function buildLiveValuePreset(
-  liveValues: Map<string, NodeValueEntry>,
+  states: Map<string, Pick<FeatureState, "value">>,
 ): Record<string, number | string | boolean> {
   const result: Record<string, number | string | boolean> = {};
-  for (const [name, entry] of liveValues) {
-    if (entry.value === null || typeof entry.value === "object") continue;
-    result[name] = entry.value;
+  for (const [name, state] of states) {
+    if (state.value === null || typeof state.value === "object") continue;
+    result[name] = state.value;
   }
   return result;
 }

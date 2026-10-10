@@ -130,20 +130,6 @@ export type ConnectionState = { "kind": "disconnected" } | { "kind": "connecting
 
 export type StreamerInfo = { ws_url: string, width: number, height: number, };
 
-export type NodeValueEntry = { value: JsonValue, access_mode: string,
-/**
- * Runtime minimum constraint forwarded from the camera service, if available.
- */
-min?: number,
-/**
- * Runtime maximum constraint forwarded from the camera service, if available.
- */
-max?: number,
-/**
- * Runtime increment (step) forwarded from the camera service, if available.
- */
-inc?: number, };
-
 export type BackendStatus = {
 /**
  * The mode the app actually started in.
@@ -174,7 +160,7 @@ device_version: number | null,
  */
 app_version: number, };
 
-export type NodeStateChanged = { node_name: string, value: JsonValue, access_mode: string, state: FeatureState, };
+export type FeatureStateChanged = { name: string, state: FeatureState, };
 
 export type FeaturesInvalidated = {
 /**
@@ -200,7 +186,7 @@ export type StudioEvents = {
   "device-reconnected": DeviceReconnected;
   "zenoh-session-lost": ZenohSessionLost;
   "zenoh-session-restored": ZenohSessionRestored;
-  "node-value-changed": NodeStateChanged;
+  "feature-state-changed": FeatureStateChanged;
   "features-invalidated": FeaturesInvalidated;
   "acquisition-status": AcquisitionStatus;
   "image-meta-changed": ImageMeta;

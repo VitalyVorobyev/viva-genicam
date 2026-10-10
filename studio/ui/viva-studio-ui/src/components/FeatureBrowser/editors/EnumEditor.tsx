@@ -20,23 +20,18 @@ interface EnumEditorProps {
 
 // Enumeration editor writes enum names into the shared draft store.
 export function EnumEditor({ node, value, errors, onChange, liveState }: EnumEditorProps) {
-  const options = useMemo(() => {
-    // Prefer the live-from-device enum entries over the static XML list so
-    // the dropdown reflects what the device actually supports right now.
-    if (liveState?.enum_available && liveState.enum_available.length > 0) {
-      return liveState.enum_available.map((name) => {
-        const match = node.enum_entries?.find((e) => e.name === name);
-        return {
-          value: name,
-          label: match?.display_name ?? name,
-        };
-      });
-    }
-    return (node.enum_entries ?? []).map((entry) => ({
-      value: entry.name,
-      label: entry.display_name ?? entry.name,
-    }));
-  }, [liveState?.enum_available, node.enum_entries]);
+  // Prefer the live-from-device enum entries over the static XML list so
+  // the dropdown reflects what the device actually supports right now.
+  const options =
+    liveState?.enum_available && liveState.enum_available.length > 0
+      ? liveState.enum_available.map((name) => {
+          const match = node.enum_entries?.find((e) => e.name === name);
+          return { value: name, label: match?.display_name ?? name };
+        })
+      : (node.enum_entries ?? []).map((entry) => ({
+          value: entry.name,
+          label: entry.display_name ?? entry.name,
+        }));
 
   // Fall back to the live value when the draft is unset, so the form does
   // not render "(unset)" immediately after a successful Apply.

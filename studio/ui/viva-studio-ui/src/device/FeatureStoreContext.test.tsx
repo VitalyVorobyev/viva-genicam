@@ -1,0 +1,75 @@
+import { emit } from "@tauri-apps/api/event";
+import { mockIPC } from "@tauri-apps/api/mocks";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { ToastProvider } from "../context/ToastContext";
+import { FeatureStoreProvider, useFeature } from "./FeatureStoreContext";
+import type { FeatureState, FeaturesInvalidated, FeatureStateChanged } from "./types";
+
+function state(value: number): FeatureState {
+  return { value, access_mode: "RW", kind: "Float", is_implemented: true, is_available: true };
+}
+
+/** The camera; `values` can change behind the UI's back, as a selector write would. */
+function camera(values: Record<string, number>) {
+  const reads: string[][] = [];
+  mockIPC(
+    (cmd, args) => {
+      if (cmd === "query_feature_states_bulk") {
+        const names = (args as { names: string[] }).names;
+        reads.push([...names].sort());
+        return Object.fromEntries(names.map((n) => [n, state(values[n] ?? 0)]));
+      }
+      return undefined;
+    },
+    { shouldMockEvents: true },
+  );
+  return reads;
+}
+
+function Value({ name }: { name: string }) {
+  const s = useFeature(name);
+  return <span data-testid={name}>{s ? String(s.value) : "…"}</span>;
+}
+
+function app(...names: string[]) {
+  return (
+    <ToastProvider>
+      <FeatureStoreProvider connected={true}>
+        {names.map((n) => (
+          <Value key={n} name={n} />
+        ))}
+      </FeatureStoreProvider>
+    </ToastProvider>
+  );
+}
+
+describe("FeatureStoreProvider", () => {
+  // ST-30: writing BalanceRatioSelector changes what BalanceRatio reads.
+  it("re-reads the invalidated features on screen, and only those", async () => {
+    const values = { BalanceRatio: 1.0, Gamma: 2.2 };
+    const reads = camera(values);
+    render(app("BalanceRatio"));
+    await waitFor(() => expect(screen.getByTestId("BalanceRatio").textContent).toBe("1"));
+    reads.length = 0;
+
+    values.BalanceRatio = 1.5;
+    const invalidated: FeaturesInvalidated = {
+      cause: "BalanceRatioSelector",
+      names: ["BalanceRatio", "Gamma"],
+    };
+    await act(() => emit("features-invalidated", invalidated));
+
+    await waitFor(() => expect(screen.getByTestId("BalanceRatio").textContent).toBe("1.5"));
+    expect(reads).toEqual([["BalanceRatio"]]);
+  });
+
+  it("takes a state the backend announces", async () => {
+    camera({ Gain: 0 });
+    render(app("Gain"));
+    await waitFor(() => expect(screen.getByTestId("Gain").textContent).toBe("0"));
+    const changed: FeatureStateChanged = { name: "Gain", state: state(6) };
+    await act(() => emit("feature-state-changed", changed));
+    await waitFor(() => expect(screen.getByTestId("Gain").textContent).toBe("6"));
+  });
+});

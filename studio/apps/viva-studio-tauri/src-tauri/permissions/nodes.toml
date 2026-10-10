@@ -2,9 +2,7 @@
 identifier = "nodes"
 description = "Allows feature state, write and execute commands."
 commands.allow = [
-  "query_feature_state",
   "query_feature_states_bulk",
-  "read_nodes_bulk",
   "write_node",
   "execute_command"
 ]

@@ -153,4 +153,31 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].features[0].widget, "custom_widget");
     }
+
+    /// The UI draws only the widgets `FeatureControl.tsx` lists in `WIDGETS`;
+    /// a feature named with any other falls back to its kind's widget.
+    #[test]
+    fn bundled_groups_name_only_widgets_the_ui_draws() {
+        const DRAWN: &[&str] = &[
+            "float_slider",
+            "int_slider",
+            "int_select",
+            "enum_select",
+            "bool_toggle",
+            "command_button",
+            "text",
+        ];
+        let bytes = include_bytes!("../../resources/sfnc-groups.json");
+        for group in parse_sfnc_groups(bytes).expect("bundled groups parse") {
+            for feature in &group.features {
+                assert!(
+                    DRAWN.contains(&feature.widget.as_str()),
+                    "{}: {} names widget {:?}",
+                    group.id,
+                    feature.node,
+                    feature.widget
+                );
+            }
+        }
+    }
 }

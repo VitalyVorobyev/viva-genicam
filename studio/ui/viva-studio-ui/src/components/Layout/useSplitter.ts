@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useLayoutEffect } from "react";
 import type React from "react";
 
 /**
@@ -78,7 +78,9 @@ export function useSplitter({
 
   // Keep a ref so closures inside onPointerDown always see the latest size.
   const sizeRef = useRef(size);
-  sizeRef.current = size;
+  useLayoutEffect(() => {
+    sizeRef.current = size;
+  }, [size]);
 
   const dragRef = useRef({ active: false, startPos: 0, startSize: 0 });
 

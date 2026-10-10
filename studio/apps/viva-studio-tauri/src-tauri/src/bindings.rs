@@ -54,7 +54,6 @@ fn render() -> String {
         crate::state::device_state::DeviceInfo,
         crate::state::device_state::ConnectionState,
         crate::state::device_state::StreamerInfo,
-        crate::state::device_state::NodeValueEntry,
         crate::commands::backend::BackendStatus,
         crate::backend::BackendMode,
         crate::backend::NetworkConfig,
@@ -63,7 +62,7 @@ fn render() -> String {
         // Event payloads.
         crate::state::device_state::DisconnectReason,
         crate::state::device_state::ApiVersionMismatch,
-        crate::state::events::NodeStateChanged,
+        crate::state::events::FeatureStateChanged,
         crate::state::events::FeaturesInvalidated,
         crate::state::events::DeviceLost,
         crate::state::events::DeviceReconnected,

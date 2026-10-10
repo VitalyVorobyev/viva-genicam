@@ -1,9 +1,10 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ToastProvider } from "../../context/ToastContext";
-import type { NodeValueEntry } from "../../device/types";
+import { FeatureStoreProvider } from "../../device/FeatureStoreContext";
+import type { FeatureState } from "../../device/types";
 import { makeModel } from "../../test/model";
 import { FeatureBrowserPage } from "./FeatureBrowserPage";
 
@@ -26,22 +27,41 @@ const model = makeModel(
   },
 );
 
-// What the connect-time bulk read leaves behind: values, not FeatureStates.
-const liveValues = new Map<string, NodeValueEntry>([
-  ["Width", { value: 640, access_mode: "RW" }],
-  ["PixelFormat", { value: "Mono8", access_mode: "RW" }],
-]);
+function live(value: number | string, kind: string): FeatureState {
+  return { value, access_mode: "RW", kind, is_implemented: true, is_available: true };
+}
 
-function renderPage() {
-  return render(
+// The camera, as the backend's IPC answers for it.
+const states: Record<string, FeatureState> = {
+  Width: { ...live(640, "Integer"), numeric: { min: 16, max: 4096 } },
+  PixelFormat: { ...live("Mono8", "Enumeration"), enum_available: ["Mono8", "Mono16"] },
+};
+
+function answer(cmd: string, args: unknown) {
+  if (cmd === "get_current_model") return null;
+  if (cmd === "query_feature_states_bulk") {
+    const names = (args as { names: string[] }).names;
+    return Object.fromEntries(names.filter((n) => n in states).map((n) => [n, states[n]]));
+  }
+  return undefined;
+}
+
+function page(isActive = true) {
+  return (
     <ToastProvider>
-      <FeatureBrowserPage externalModel={model} liveValues={liveValues} isConnected={true} />
-    </ToastProvider>,
+      <FeatureStoreProvider connected={true}>
+        <FeatureBrowserPage externalModel={model} isConnected={true} isActive={isActive} />
+      </FeatureStoreProvider>
+    </ToastProvider>
   );
 }
 
+function renderPage() {
+  return render(page());
+}
+
 beforeEach(() => {
-  mockIPC((cmd) => (cmd === "get_current_model" ? null : undefined));
+  mockIPC(answer);
 });
 
 describe("FeatureBrowserPage, connected", () => {
@@ -56,7 +76,9 @@ describe("FeatureBrowserPage, connected", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("option", { name: /Pixel Format/ }));
 
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("Mono8");
+    await waitFor(() =>
+      expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("Mono8"),
+    );
     expect(screen.queryByText("Value must be a valid enumeration entry.")).toBeNull();
   });
 });
@@ -67,23 +89,12 @@ describe("FeatureBrowserPage, keyboard shortcuts", () => {
   it("ignores Ctrl+Enter and Ctrl+F while its tab is hidden", async () => {
     const writes: unknown[] = [];
     mockIPC((cmd, args) => {
-      if (cmd === "get_current_model") return null;
       if (cmd === "write_node") {
         writes.push(args);
-        return { value: 800, access_mode: "RW", kind: "Integer", is_implemented: true, is_available: true };
+        return live(800, "Integer");
       }
-      return undefined;
+      return answer(cmd, args);
     });
-    const page = (isActive: boolean) => (
-      <ToastProvider>
-        <FeatureBrowserPage
-          externalModel={model}
-          liveValues={liveValues}
-          isConnected={true}
-          isActive={isActive}
-        />
-      </ToastProvider>
-    );
     const { rerender } = render(page(true));
     await userEvent.click(await screen.findByRole("option", { name: /Width/ }));
     const input = screen.getByRole("spinbutton");

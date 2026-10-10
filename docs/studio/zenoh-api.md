@@ -433,9 +433,7 @@ remote (`DeviceBackend`, ADR-0024).
 | `connect_device(device_id)` | → `ParseXmlResponse` | Connect and fetch XML |
 | `disconnect_device()` | → `()` | Let go of the device and its subscriptions |
 | `get_connection_state()` | → `ConnectionState` | Current state enum |
-| `query_feature_state(node_name)` | → `FeatureState` | One feature's live state |
-| `query_feature_states_bulk(names)` | → `Map<string, FeatureState>` | Many features' live state |
-| `read_nodes_bulk(names)` | → `Map<string, NodeValueEntry>` | Legacy projection of the bulk state (ST-29) |
+| `query_feature_states_bulk(names)` | → `Map<string, FeatureState>` | Live state of the features the UI shows |
 | `write_node(node_name, value)` | → `FeatureState` | Write, then read back |
 | `execute_command(node_name)` | → `CommandResult` | Execute a Command node |
 | `start_acquisition()` | → `StreamerInfo` | Start acquisition and the viewer's WebSocket |
@@ -448,7 +446,7 @@ remote (`DeviceBackend`, ADR-0024).
 | `device-discovered` | `DeviceInfo` | New device seen on Zenoh |
 | `device-lost` | `{ device_id: string }` | Device announce timed out |
 | `api-version-mismatch` | `{ device_id: string, device_version: number \| null, app_version: number }` | Emitted once per device on first discovery when `api_version` is absent or differs from `API_VERSION`; device is still discovered |
-| `node-value-changed` | `{ node_name, value, access_mode, state: FeatureState }` | Live feature update, the same shape in both modes; remote mode forwards the service's `nodes/{name}/state` publications |
+| `feature-state-changed` | `{ name, state: FeatureState }` | Live feature update, the same in both modes; remote mode forwards the service's `nodes/{name}/state` publications |
 | `features-invalidated` | `{ cause: string, names: string[] }` | After a write or command: the features it may have changed (`NodeMap::invalidated_by`, or the service's `NodeOpResponse.invalidated`), for the UI to re-read the ones it shows |
 | `acquisition-status` | `AcquisitionStatus` | Acquisition state change |
 | `connection-state-changed` | `ConnectionState` | Connect/disconnect/error |

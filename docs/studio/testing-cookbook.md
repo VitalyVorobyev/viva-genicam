@@ -135,6 +135,12 @@ mockIPC((cmd, args) => {
 });
 ```
 
+A component that reads live state needs a `FeatureStoreProvider connected`
+around it, and answers `query_feature_states_bulk` from the mock; pass
+`{ shouldMockEvents: true }` to `mockIPC` and `emit` from
+`@tauri-apps/api/event` to deliver `feature-state-changed` or
+`features-invalidated` (`FeatureStoreContext.test.tsx`).
+
 `src/test/setup-dom.ts` clears the mock after every test. `src/test/model.ts`
 builds a `ParseXmlResponse` from a few partial nodes, and `src/test/bmp.ts`
 builds frames shaped like the streamer's. A component that calls `useToast`

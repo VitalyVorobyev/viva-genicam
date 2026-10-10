@@ -21,12 +21,6 @@ export interface XmlModelProvider {
    * surface `error` to the user and cache `affected_states` as live state.
    */
   executeCommand?(nodeName: string): Promise<CommandResult>;
-  /**
-   * Read the authoritative live state of a single node. Used on selection to
-   * seed the editor with real values / ranges / enum entries rather than
-   * falling back to static XML.
-   */
-  queryFeatureState?(nodeName: string): Promise<FeatureState>;
 }
 
 // Tauri provider bridges the UI to native Rust parsing. It also exposes fixtures
@@ -57,10 +51,6 @@ export class TauriProvider implements XmlModelProvider {
 
   async executeCommand(nodeName: string): Promise<CommandResult> {
     return await invokeNative<CommandResult>("execute_command", { nodeName });
-  }
-
-  async queryFeatureState(nodeName: string): Promise<FeatureState> {
-    return await invokeNative<FeatureState>("query_feature_state", { nodeName });
   }
 }
 

@@ -11,7 +11,8 @@
 // - `numeric` is present only for Integer/Float nodes with a resolvable range.
 //   When absent, render "range unknown" — never invent `i64::MIN` / `i64::MAX`.
 // - `enum_available` replaces the static XML entries as the dropdown options.
-// - `NodeValueEntry` is the legacy projection of `FeatureState` (ST-29).
+// - Read live state through `FeatureStoreContext` (`useFeature`), which keeps
+//   the one cache the UI has (ST-29).
 
 export type {
   AcquisitionStatus,
@@ -20,11 +21,10 @@ export type {
   DeviceInfo,
   DisconnectReason,
   FeatureState,
+  FeatureStateChanged,
   FeaturesInvalidated,
   ImageMeta,
   JsonValue,
-  NodeStateChanged,
-  NodeValueEntry,
   NumericRange,
   SfncFeature,
   SfncGroup,

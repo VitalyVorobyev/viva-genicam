@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildLiveValuePreset } from "./presetUtils";
+import { buildLiveValuePreset, presetValueToDraft } from "./presetUtils";
+import type { UiNode } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
 
 function entry(value: number | string | boolean): NodeValueEntry {
@@ -76,5 +77,47 @@ describe("buildLiveValuePreset", () => {
       ["UserSetLoadReg", { value: null, access_mode: "WO" }],
     ]);
     expect(buildLiveValuePreset(map)).toEqual({ Width: 640 });
+  });
+});
+
+function node(kind: UiNode["kind"], access_mode = "RW"): UiNode {
+  return {
+    name: "N",
+    kind,
+    access_mode,
+    raw: { tag: String(kind), attributes: {}, children_text: {} },
+  };
+}
+
+// "Export State" writes the camera's live values, where an enumeration is its
+// entry name; "Export Preset" writes drafts, where it is `{ enumName }`. Both
+// must import as drafts the editors and the validator accept.
+describe("presetValueToDraft", () => {
+  it("turns an exported enum entry name into an enum draft", () => {
+    expect(presetValueToDraft(node("Enumeration"), "Mono8")).toEqual({ enumName: "Mono8" });
+  });
+
+  it("keeps an enum draft exported as a draft", () => {
+    expect(presetValueToDraft(node("Enumeration"), { enumName: "Mono8" })).toEqual({
+      enumName: "Mono8",
+    });
+  });
+
+  it("keeps a value of the node's own type", () => {
+    expect(presetValueToDraft(node("Integer"), 640)).toBe(640);
+    expect(presetValueToDraft(node("Float"), 1.5)).toBe(1.5);
+    expect(presetValueToDraft(node("Boolean"), true)).toBe(true);
+    expect(presetValueToDraft(node("String"), "cam-1")).toBe("cam-1");
+  });
+
+  it("leaves out a value of the wrong type", () => {
+    expect(presetValueToDraft(node("Integer"), "640")).toBeUndefined();
+    expect(presetValueToDraft(node("Boolean"), 1)).toBeUndefined();
+  });
+
+  it("leaves out what cannot be written", () => {
+    expect(presetValueToDraft(node("Integer", "RO"), 640)).toBeUndefined();
+    expect(presetValueToDraft(node("Integer", "NA"), 640)).toBeUndefined();
+    expect(presetValueToDraft(node("Command", "WO"), true)).toBeUndefined();
   });
 });

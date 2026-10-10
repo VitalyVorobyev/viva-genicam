@@ -1,4 +1,6 @@
 import type { NodeValueEntry } from "../../device/types";
+import type { UiNode } from "../../xml_model/uigraph";
+import type { NodeValue } from "../../xml_model/values";
 
 /**
  * Convert a live-values map to a flat preset record.
@@ -22,4 +24,12 @@ export function buildLiveValuePreset(
     result[name] = entry.value;
   }
   return result;
+}
+
+/**
+ * The draft an imported preset entry becomes for `node`, or `undefined` to
+ * leave the node out.
+ */
+export function presetValueToDraft(_node: UiNode, raw: unknown): NodeValue | undefined {
+  return raw === undefined ? undefined : (raw as NodeValue);
 }

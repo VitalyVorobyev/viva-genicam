@@ -18,7 +18,7 @@ import { CategoryList } from "./CategoryList";
 import { FeatureList } from "./FeatureList";
 import { formatLiveValue } from "./treeUtils";
 import { countApplicableDrafts, formatBatchProgress } from "./batchApplyUtils";
-import { buildLiveValuePreset } from "./presetUtils";
+import { buildLiveValuePreset, presetValueToDraft } from "./presetUtils";
 import { FeaturePanel } from "./FeaturePanel";
 
 // T7.1 — visibility levels; rank determines filtering inclusivity
@@ -289,12 +289,12 @@ export function FeatureBrowserPage({
       if (!file || !graph) return;
       try {
         const text = await file.text();
-        const imported = JSON.parse(text) as Record<string, NodeValue>;
-        Object.entries(imported).forEach(([name, value]) => {
+        const imported = JSON.parse(text) as Record<string, unknown>;
+        Object.entries(imported).forEach(([name, raw]) => {
           const node = graph.nodes_by_name[name];
-          if (node && value !== undefined) {
-            setDraft(node, value);
-          }
+          if (!node) return;
+          const value = presetValueToDraft(node, raw);
+          if (value !== undefined) setDraft(node, value);
         });
       } catch {
         // Silently ignore malformed preset files

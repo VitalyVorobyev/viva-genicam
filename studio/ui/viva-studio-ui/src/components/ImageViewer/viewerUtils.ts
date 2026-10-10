@@ -30,6 +30,48 @@ export function fitContain(
 }
 
 /**
+ * How the viewer canvas is sized. Its backing store holds every camera pixel
+ * and CSS shows it at the fit size, so zooming in enlarges the camera's own
+ * pixels; a backing store at the fit size made "1:1" an enlarged, downscaled
+ * copy (backlog ST-39).
+ */
+export function canvasLayout(
+  imgW: number,
+  imgH: number,
+  boxW: number,
+  boxH: number,
+): { backing: { width: number; height: number }; css: { width: number; height: number } } {
+  const fit = fitContain(imgW, imgH, boxW, boxH);
+  return {
+    backing: { width: imgW, height: imgH },
+    css: { width: fit.width, height: fit.height },
+  };
+}
+
+/**
+ * The viewer box after a measurement. A hidden viewer measures 0×0, which is
+ * not a resize: taking it as one would reset the zoom whenever the user
+ * switches tabs (backlog ST-39).
+ */
+export function observedBoxSize(
+  previous: { w: number; h: number },
+  width: number,
+  height: number,
+): { w: number; h: number } {
+  if (width <= 0 || height <= 0) return previous;
+  return { w: Math.round(width), h: Math.round(height) };
+}
+
+/**
+ * CSS `image-rendering` at a zoom `scale` (CSS pixels per camera pixel):
+ * enlarged pixels are drawn as squares, so each stays distinct; a reduced
+ * image is smoothed.
+ */
+export function imageRendering(scale: number): "pixelated" | "auto" {
+  return scale > 1 ? "pixelated" : "auto";
+}
+
+/**
  * Format a frames-per-second value to two decimal places.
  * Example: 30 → "30.00 fps"
  */

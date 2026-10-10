@@ -55,11 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `viva-service` answers `genicam/devices/{id}/report` (`keys::report`,
   `DeviceReportRequest`, `DeviceReportResponse`) with that report on its
   camera, written on the host the camera is attached to (backlog ST-41).
-- `gige::DeviceInfo::interface` names the host interface a Discovery ACK
-  arrived on. A broadcast meant for one camera, such as `force_ip`, has to
-  leave through it: sent from an unbound socket it leaves through one
+- `gige::DeviceInfo::local_ip` is the host address a Discovery ACK arrived
+  at. A broadcast meant for one camera, such as `force_ip`, has to leave from
+  it (`Iface::from_ipv4`): sent from an unbound socket it leaves through an
   interface the OS picks, usually the default route's, which on a direct
-  camera link is the wrong one.
+  camera link is the wrong one. An address rather than an interface name, as
+  first merged, because a NIC can carry several (Codex review of #177).
 - Python: `Camera.skipped()` lists the declarations in the camera's XML that
   could not become features, as `SkippedNode`s with the element, name and
   reason, so a missing feature can be told apart from one the camera lacks
@@ -224,10 +225,18 @@ section changes the library.
   shows the connected camera's vendor, model, serial, firmware, user ID, MAC
   and IP address — what a report asks for — and sets the persistent IP
   address the camera takes from its next restart.
+- **The viewer shows the camera's pixels** (ST-39). The canvas held a copy
+  downscaled to the window, so "1:1" and every zoom above fit enlarged that
+  copy; it now holds every camera pixel and draws enlarged pixels as squares.
+  The histogram shows its axis ends and the image's minimum, maximum, mean and
+  share of samples at 255. Switching tabs no longer reconnects the stream or
+  resets the zoom: the viewer stays mounted and skips drawing while hidden.
 - **"Set IP…" for a camera on another subnet** (ST-37). Discovery finds such
   a camera but nothing can open it; the device list now offers FORCEIP, which
-  gives it an address until it restarts, sent out of the interface the camera
-  answered on. Only `viva-camctl set-ip --force` could do this before.
+  gives it an address until it restarts, sent from the host address the camera
+  answered at. Only `viva-camctl set-ip --force` could do this before. A
+  camera one discovery scan misses keeps that address, rather than falling
+  back to an interface the OS picks (Codex review of #177).
 - **User sets** (ST-38). The Image tab's sidebar has a User Sets group:
   `UserSetSelector`, `UserSetLoad`, `UserSetSave`, and the default set under
   either SFNC name (`UserSetDefault` or `UserSetDefaultSelector`). Studio's own

@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  canvasLayout,
+  observedBoxSize,
   fitContain,
+  imageRendering,
   formatFps,
   formatResolution,
   formatFrameCount,
@@ -230,5 +233,45 @@ describe("mouseToImageCoordsClamped", () => {
     // Invalid fitScale → null (same guard as mouseToImageCoords).
     const result = mouseToImageCoordsClamped({ ...base, fitScale: 0, mouseX: 320, mouseY: 240 });
     expect(result).toBeNull();
+  });
+});
+
+// "1:1" drew a copy downscaled to the fit size and enlarged it, so it never
+// showed the camera's pixels (backlog ST-39).
+describe("canvasLayout", () => {
+  it("keeps every camera pixel and shows the canvas at the fit size", () => {
+    expect(canvasLayout(2448, 2048, 800, 600)).toEqual({
+      backing: { width: 2448, height: 2048 },
+      css: { width: 717, height: 600 },
+    });
+  });
+
+  it("shows a small image at its own size", () => {
+    expect(canvasLayout(320, 240, 800, 600)).toEqual({
+      backing: { width: 320, height: 240 },
+      css: { width: 320, height: 240 },
+    });
+  });
+});
+
+describe("imageRendering", () => {
+  it("draws enlarged pixels as squares and smooths a reduced image", () => {
+    expect(imageRendering(2)).toBe("pixelated");
+    expect(imageRendering(1)).toBe("auto");
+    expect(imageRendering(0.4)).toBe("auto");
+  });
+});
+
+// Switching tabs unmounted the viewer, which reconnected its WebSocket and
+// reset the zoom. Kept mounted but hidden, it measures 0×0, which must not
+// count as a resize, or the zoom resets anyway (backlog ST-39).
+describe("observedBoxSize", () => {
+  it("follows a resize", () => {
+    expect(observedBoxSize({ w: 800, h: 600 }, 1024.4, 700.6)).toEqual({ w: 1024, h: 701 });
+  });
+
+  it("keeps the last size while the viewer is hidden", () => {
+    const shown = { w: 800, h: 600 };
+    expect(observedBoxSize(shown, 0, 0)).toBe(shown);
   });
 });

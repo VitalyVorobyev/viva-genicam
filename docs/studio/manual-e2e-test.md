@@ -92,6 +92,12 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
       the one frame is shown (the fake streams continuously whatever the mode)
 
 ### 5. Stream tools
+- [ ] Click "1:1", then zoom further -> single camera pixels show as sharp
+      squares, not a blur
+- [ ] Open the histogram -> 0 and 255 under the plot, and min/max/mean below;
+      overexpose -> "% at 255" appears
+- [ ] Zoom in, switch to the Feature Browser and back -> the zoom and the
+      stream are as they were
 - [ ] Zoom/pan with scroll wheel and drag
 - [ ] Histogram toggle works (if available)
 - [ ] Pixel inspector shows coordinates on hover

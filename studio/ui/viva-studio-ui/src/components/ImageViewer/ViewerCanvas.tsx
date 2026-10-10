@@ -1,5 +1,11 @@
 import React, { useEffect, useEffectEvent, useRef, useState } from "react";
-import { fitContain, mouseToImageCoords, mouseToImageCoordsClamped } from "./viewerUtils";
+import {
+  canvasLayout,
+  imageRendering,
+  observedBoxSize,
+  mouseToImageCoords,
+  mouseToImageCoordsClamped,
+} from "./viewerUtils";
 import { useZoomPan } from "./useZoomPan";
 import type { ZoomPanState } from "./useZoomPan";
 import { buildTransform } from "./zoomPanUtils";
@@ -40,6 +46,8 @@ interface ViewerCanvasProps {
   onRoiSelect?: (roi: ImageRect | null) => void;
   lineMode?: boolean;
   onLineSelect?: (seg: LineSegment | null) => void;
+  /** False while another tab is shown: frames are kept but not drawn. */
+  active?: boolean;
 }
 
 export function ViewerCanvas({
@@ -58,6 +66,7 @@ export function ViewerCanvas({
   onRoiSelect,
   lineMode,
   onLineSelect,
+  active = true,
 }: ViewerCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -66,6 +75,7 @@ export function ViewerCanvas({
   // stream ends.
   const [hasRenderedFrame, setHasRenderedFrame] = useState(false);
 
+  const isActive = useEffectEvent(() => active);
   const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
   const [wrapMouse, setWrapMouse] = useState<{ x: number; y: number } | null>(
@@ -104,12 +114,12 @@ export function ViewerCanvas({
       const entry = entries[0];
       if (!entry) return;
       const { width, height } = entry.contentRect;
-      setBoxSize({ w: Math.round(width), h: Math.round(height) });
+      setBoxSize((previous) => observedBoxSize(previous, width, height));
     });
     observer.observe(wrap);
 
     // Seed initial size immediately
-    setBoxSize({ w: Math.round(wrap.clientWidth), h: Math.round(wrap.clientHeight) });
+    setBoxSize((previous) => observedBoxSize(previous, wrap.clientWidth, wrap.clientHeight));
 
     return () => observer.disconnect();
   }, []);
@@ -127,12 +137,22 @@ export function ViewerCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgSize.w, imgSize.h, boxSize.w, boxSize.h]);
 
+  // Keep the canvas at the fit size when the viewer resizes between frames.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || imgSize.w === 0) return;
+    const { css } = canvasLayout(imgSize.w, imgSize.h, boxSize.w, boxSize.h);
+    canvas.style.width = `${css.width}px`;
+    canvas.style.height = `${css.height}px`;
+  }, [imgSize.w, imgSize.h, boxSize.w, boxSize.h]);
+
   // Apply CSS transform whenever zoom/pan state changes
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const { scale, panX, panY, fitScale } = zoomPan.state;
     canvas.style.transform = buildTransform(panX, panY, scale, fitScale);
+    canvas.style.imageRendering = imageRendering(scale);
   }, [zoomPan.state]);
 
   // Emit zoom/pan state to parent
@@ -235,6 +255,10 @@ export function ViewerCanvas({
         firstBinaryLogged = true;
       }
 
+      // Hidden behind another tab: keep the frame for the analysis tools, but
+      // decoding and drawing it would be wasted.
+      if (!isActive()) return;
+
       const blob = new Blob([event.data]);
       createImageBitmap(blob)
         .then((bitmap) => {
@@ -248,13 +272,13 @@ export function ViewerCanvas({
           const newImgW = bitmap.width;
           const newImgH = bitmap.height;
 
-          // Update canvas intrinsic size to fitContain dimensions
-          const boxW = wrap.clientWidth;
-          const boxH = wrap.clientHeight;
-          const fit = fitContain(newImgW, newImgH, boxW, boxH);
-
-          canvas.width = fit.width;
-          canvas.height = fit.height;
+          // Every camera pixel in the backing store, shown at the fit size.
+          // Resizing the backing store clears it, so only on a change.
+          const layout = canvasLayout(newImgW, newImgH, wrap.clientWidth, wrap.clientHeight);
+          if (canvas.width !== layout.backing.width) canvas.width = layout.backing.width;
+          if (canvas.height !== layout.backing.height) canvas.height = layout.backing.height;
+          canvas.style.width = `${layout.css.width}px`;
+          canvas.style.height = `${layout.css.height}px`;
 
           // Centre the canvas using CSS; transform is managed by zoom/pan effect
           canvas.style.left = "50%";
@@ -263,7 +287,7 @@ export function ViewerCanvas({
 
           const ctx = canvas.getContext("2d");
           if (ctx) {
-            ctx.drawImage(bitmap, 0, 0, fit.width, fit.height);
+            ctx.drawImage(bitmap, 0, 0);
           }
           bitmap.close();
           setHasRenderedFrame(true);

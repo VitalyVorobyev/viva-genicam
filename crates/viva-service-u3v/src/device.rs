@@ -2,9 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use viva_genicam::{Camera, GenicamError, U3vRegisterIo};
+use viva_genicam::{Camera, GenicamError, U3vFrameStream, U3vRegisterIo, U3vStreamBuilder};
 use viva_service::device::{DeviceOps, camera_feature_state, camera_invalidated_by};
-use viva_u3v::stream::U3vStream;
 use viva_u3v::usb::UsbTransfer;
 use viva_zenoh_api::FeatureState;
 
@@ -13,39 +12,32 @@ pub struct U3vDeviceHandle<T: UsbTransfer + 'static> {
     camera: Arc<Mutex<Camera<U3vRegisterIo<T>>>>,
     raw_xml: String,
     device_id: String,
-    /// Shared transport for streaming (same Arc used by the control channel).
-    transport: Arc<T>,
-    stream_ep: Option<u8>,
 }
 
-impl<T: UsbTransfer + 'static> U3vDeviceHandle<T> {
+impl<T: UsbTransfer + Send + 'static> U3vDeviceHandle<T> {
     /// Create a handle from a pre-built Camera + XML.
-    pub fn new(
-        camera: Camera<U3vRegisterIo<T>>,
-        xml: String,
-        device_id: String,
-        transport: Arc<T>,
-        stream_ep: Option<u8>,
-    ) -> Self {
+    pub fn new(camera: Camera<U3vRegisterIo<T>>, xml: String, device_id: String) -> Self {
         Self {
             camera: Arc::new(Mutex::new(camera)),
             raw_xml: xml,
             device_id,
-            transport,
-            stream_ep,
         }
     }
 
-    /// Open a U3V stream for frame reception.
-    pub fn open_stream(&self, payload_size: usize) -> Option<U3vStream<T>> {
-        let ep = self.stream_ep?;
-        Some(U3vStream::new(
-            self.transport.clone(),
-            ep,
-            256, // max_leader_size
-            256, // max_trailer_size
-            payload_size,
-        ))
+    /// Open the camera's frame stream as the library does: sized by its
+    /// `PayloadSize`, with the SIRM configured and streaming enabled. The
+    /// service built a `U3vStream` itself, which skipped the SIRM and sized a
+    /// packed format's frames at one byte a pixel (backlog SVC-03).
+    pub async fn open_frame_stream(&self) -> Result<U3vFrameStream, GenicamError> {
+        let camera = self.camera.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut camera = camera
+                .lock()
+                .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
+            U3vStreamBuilder::new(&mut camera).build()
+        })
+        .await
+        .map_err(|e| GenicamError::Transport(e.to_string()))?
     }
 }
 
@@ -118,13 +110,7 @@ mod tests {
         let device =
             U3vDevice::open(transport.clone(), 0x81, 0x01, Some(0x82), None).expect("open");
         let (camera, xml) = open_u3v_device(device).expect("camera");
-        let handle = U3vDeviceHandle::new(
-            camera,
-            xml,
-            "cam-fake-u3v".to_string(),
-            transport.clone(),
-            Some(0x82),
-        );
+        let handle = U3vDeviceHandle::new(camera, xml, "cam-fake-u3v".to_string());
         (handle, transport)
     }
 

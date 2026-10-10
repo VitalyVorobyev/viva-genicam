@@ -56,7 +56,10 @@ struct ConnectedCamera {
 /// State for an active image acquisition session.
 struct AcquisitionState {
     shutdown_tx: watch::Sender<bool>,
-    task_handles: Vec<tauri::async_runtime::JoinHandle<()>>,
+    /// Reads frames; shuts its stream down on the way out.
+    reader: tauri::async_runtime::JoinHandle<()>,
+    /// Serves the viewer's WebSocket.
+    server: tauri::async_runtime::JoinHandle<()>,
 }
 
 // ── EmbeddedBackend ─────────────────────────────────────────────────────────
@@ -69,7 +72,7 @@ const RELEASE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// more, and encoding each as a BMP costs CPU the user cannot see.
 const DISPLAY_FPS: u32 = 30;
 
-/// How long stopping waits for a streaming task to finish on its own.
+/// How long stopping waits for the WebSocket server to finish on its own.
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often a stream reports its frame rate and dropped frames.
@@ -83,9 +86,11 @@ pub struct EmbeddedBackend {
     discovered: RwLock<Vec<DeviceInfo>>,
     /// The USB3 Vision cameras the last scan found, by device id.
     usb: RwLock<HashMap<String, U3vDeviceInfo>>,
-    /// The id each USB position was last given: a camera keeps its
-    /// serial-based id when a later scan cannot read the serial.
-    u3v_ids: RwLock<HashMap<(u8, u8), String>>,
+    /// The id each camera present at a USB position was given, keyed by the
+    /// position and its vendor and product: a camera keeps its serial-based id
+    /// when a later scan cannot read the serial. Positions a scan no longer
+    /// finds are forgotten.
+    u3v_ids: RwLock<HashMap<UsbPosition, String>>,
     /// The host address each camera's discovery reply arrived at, by MAC.
     /// Kept across scans: one scan can miss a camera the list still shows.
     local_ips: RwLock<HashMap<[u8; 6], Ipv4Addr>>,
@@ -132,8 +137,12 @@ impl EmbeddedBackend {
         let (mut devices, local_ips) = discovered_gige(found);
         let mut by_id = HashMap::new();
         let mut known = self.u3v_ids.write().await;
+        // A camera that is gone takes its id with it, so a device that later
+        // takes its place does not inherit it (Codex review of #180).
+        let present: Vec<UsbPosition> = usb.iter().map(UsbPosition::of).collect();
+        known.retain(|position, _| present.contains(position));
         for info in usb {
-            let position = (info.bus, info.address);
+            let position = UsbPosition::of(&info);
             // A serial that cannot be read now — the camera may be busy, open
             // in this app — keeps the id it had (Codex review of #179).
             let id = match (&info.serial, known.get(&position)) {
@@ -248,17 +257,19 @@ impl EmbeddedBackend {
         let mut acq = self.acquisition.lock().await;
         if let Some(state) = acq.take() {
             let _ = state.shutdown_tx.send(true);
-            for mut handle in state.task_handles {
-                // Let each task finish: the frame reader shuts its stream down
-                // on the way out, so no reader outlives it (Codex review of
-                // #179). One that does not finish in time is cancelled.
-                if tokio::time::timeout(TASK_STOP_TIMEOUT, &mut handle)
-                    .await
-                    .is_err()
-                {
-                    handle.abort();
-                    let _ = handle.await;
-                }
+            // The reader is waited for, however long: it shuts its stream
+            // down on the way out, and a USB read it is inside ends within
+            // the transfer timeout. Abandoning it would leave it on the
+            // endpoint for the next stream (Codex review of #180).
+            let _ = state.reader.await;
+            // The WebSocket server holds nothing of the camera's.
+            let mut server = state.server;
+            if tokio::time::timeout(TASK_STOP_TIMEOUT, &mut server)
+                .await
+                .is_err()
+            {
+                server.abort();
+                let _ = server.await;
             }
         }
     }
@@ -470,7 +481,8 @@ impl DeviceBackend for EmbeddedBackend {
 
         *self.acquisition.lock().await = Some(AcquisitionState {
             shutdown_tx,
-            task_handles: vec![frame_reader_handle, ws_handle],
+            reader: frame_reader_handle,
+            server: ws_handle,
         });
 
         Ok(StreamerInfo {
@@ -834,6 +846,27 @@ fn u3v_identity(info: &U3vDeviceInfo) -> Vec<(String, String)> {
         ("model".to_string(), opt(&info.model)),
         ("serial".to_string(), opt(&info.serial)),
     ]
+}
+
+/// Where a USB3 Vision camera is plugged in, and what it is: the key under
+/// which its id is remembered between scans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UsbPosition {
+    bus: u8,
+    address: u8,
+    vendor_id: u16,
+    product_id: u16,
+}
+
+impl UsbPosition {
+    fn of(info: &U3vDeviceInfo) -> Self {
+        Self {
+            bus: info.bus,
+            address: info.address,
+            vendor_id: info.vendor_id,
+            product_id: info.product_id,
+        }
+    }
 }
 
 /// A USB3 Vision camera's id. USB has no MAC or IP, so it is the vendor and
@@ -1394,6 +1427,42 @@ mod tests {
         });
     }
 
+    /// A remembered id belongs to one camera: a different device at the same
+    /// USB position, or the same position after the camera was unplugged,
+    /// does not inherit it (Codex review of #180).
+    #[test]
+    fn a_usb3_vision_id_is_not_inherited() {
+        tauri::async_runtime::block_on(async {
+            let backend = super::EmbeddedBackend::new(Default::default());
+            let ids = || async {
+                backend
+                    .discover()
+                    .await
+                    .into_iter()
+                    .map(|d| d.id)
+                    .collect::<Vec<_>>()
+            };
+
+            // Another model at the camera's position, its serial unread.
+            backend
+                .record_scan(vec![], vec![u3v_info(Some("A123"))])
+                .await;
+            let mut other = u3v_info(None);
+            other.product_id = 0x0001;
+            backend.record_scan(vec![], vec![other]).await;
+            assert_eq!(ids().await, ["u3v-26760001-2.7"]);
+
+            // The camera unplugged, then a camera of the same model there,
+            // its serial unread: nothing says it is the same one.
+            backend
+                .record_scan(vec![], vec![u3v_info(Some("A123"))])
+                .await;
+            backend.record_scan(vec![], vec![]).await;
+            backend.record_scan(vec![], vec![u3v_info(None)]).await;
+            assert_eq!(ids().await, ["u3v-2676ba02-2.7"]);
+        });
+    }
+
     fn u3v_info(serial: Option<&str>) -> viva_genicam::u3v::discovery::U3vDeviceInfo {
         viva_genicam::u3v::discovery::U3vDeviceInfo {
             bus: 2,
@@ -1413,6 +1482,80 @@ mod tests {
                 event_ep_in: None,
             },
         }
+    }
+
+    /// Stopping waits for a USB read that stalls mid-frame. It gave up after
+    /// two seconds and abandoned the reader inside a five-second bulk read,
+    /// so a restart could put a second reader on the endpoint (Codex review
+    /// of #180).
+    #[test]
+    fn stopping_waits_for_a_stalled_usb_read() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::time::Duration;
+        use viva_genicam::u3v::U3vError;
+        use viva_genicam::u3v::usb::UsbTransfer;
+
+        /// The fake camera, with stream reads that can be made to hang.
+        struct Stalling {
+            inner: viva_fake_u3v::FakeU3vTransport,
+            stall: AtomicBool,
+            reading: AtomicBool,
+        }
+        impl UsbTransfer for Stalling {
+            fn bulk_write(&self, ep: u8, data: &[u8], t: Duration) -> Result<usize, U3vError> {
+                self.inner.bulk_write(ep, data, t)
+            }
+            fn bulk_read(&self, ep: u8, buf: &mut [u8], t: Duration) -> Result<usize, U3vError> {
+                if ep == 0x82 && self.stall.load(SeqCst) {
+                    self.reading.store(true, SeqCst);
+                    std::thread::sleep(Duration::from_secs(3));
+                    self.reading.store(false, SeqCst);
+                }
+                self.inner.bulk_read(ep, buf, t)
+            }
+        }
+
+        tauri::async_runtime::block_on(async {
+            let transport = Arc::new(Stalling {
+                inner: viva_fake_u3v::FakeU3vTransport::new(64, 48, 0x0108_0001),
+                stall: AtomicBool::new(false),
+                reading: AtomicBool::new(false),
+            });
+            let device = viva_genicam::u3v::device::U3vDevice::open(
+                transport.clone(),
+                0x81,
+                0x01,
+                Some(0x82),
+                None,
+            )
+            .expect("open");
+            let (camera, _xml) = viva_genicam::open_u3v_device(device).expect("camera");
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.attach(Box::new(camera), "u3v-stall", None).await;
+            let streamer = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+            fake_camera::first_frame(&streamer.ws_url).await;
+
+            transport.stall.store(true, SeqCst);
+            let stalled = async {
+                while !transport.reading.load(SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(2), stalled)
+                .await
+                .expect("the reader never reached a stream read");
+
+            backend.stop_acquisition().await.expect("stop");
+            assert!(
+                !transport.reading.load(SeqCst),
+                "stop returned while the USB reader was still inside a read"
+            );
+            backend.disconnect().await.expect("disconnect");
+        });
     }
 
     /// The camera's `GevSCPSPacketSize`, low 16 bits.

@@ -12,11 +12,10 @@ use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpRespon
 use zenoh::Session;
 
 use crate::device::U3vDeviceHandle;
-use viva_pfnc::PixelFormat;
 use viva_u3v::usb::UsbTransfer;
 
 /// Run the acquisition control queryable for a U3V device.
-pub async fn run<T: UsbTransfer + 'static>(
+pub async fn run<T: UsbTransfer + Send + 'static>(
     session: Arc<Session>,
     device: Arc<U3vDeviceHandle<T>>,
     mut shutdown: watch::Receiver<bool>,
@@ -87,110 +86,54 @@ pub async fn run<T: UsbTransfer + 'static>(
     }
 }
 
-async fn handle_start<T: UsbTransfer + 'static>(
+async fn handle_start<T: UsbTransfer + Send + 'static>(
     session: &Arc<Session>,
     device: &Arc<U3vDeviceHandle<T>>,
     device_id: &str,
     stop_tx: &watch::Sender<bool>,
     frame_task: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> NodeOpResponse {
-    // Resolve payload size from camera features.
-    let width: u32 = device
-        .get_feature("Width")
-        .await
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(640);
-    let height: u32 = device
-        .get_feature("Height")
-        .await
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(480);
-    let pf_str = device
-        .get_feature("PixelFormat")
-        .await
-        .unwrap_or_else(|_| "Mono8".to_string());
-    let bpp: usize = PixelFormat::from_name(&pf_str)
-        .bytes_per_pixel()
-        .unwrap_or(1);
-    let payload_size = (width as usize) * (height as usize) * bpp;
-
-    // Open U3V stream.
-    let mut stream = match device.open_stream(payload_size) {
-        Some(s) => s,
-        None => {
-            return NodeOpResponse::err("device has no streaming endpoint");
-        }
+    let mut frames = match device.open_frame_stream().await {
+        Ok(frames) => frames,
+        Err(e) => return NodeOpResponse::err(format!("opening the stream failed: {e}")),
     };
 
     // Publish image metadata.
     publish_image_meta(session, device.as_ref(), device_id).await;
 
     let _ = stop_tx.send(false);
-    let stop_rx = stop_tx.subscribe();
-
-    let session_clone = session.clone();
+    let mut stop_rx = stop_tx.subscribe();
+    let publisher = session.clone();
     let device_id_owned = device_id.to_string();
 
-    // Spawn the frame loop. U3V streaming is synchronous (USB bulk reads),
-    // so the inner loop runs in spawn_blocking and sends frames through a
-    // channel to the async Zenoh publisher.
+    // Publish every frame as it arrives. Reading is the library's: a reader
+    // thread that waits out idle periods (trigger mode) and is joined on
+    // stop. The service used to read itself and sleep to hold ~30 fps, which
+    // a faster camera overruns (backlog SVC-06); a viewer paces itself.
     let handle = tokio::spawn(async move {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<FrameData>(4);
-
-        // Reader thread: blocking U3V bulk reads.
-        // With a real USB camera, bulk_read blocks until a transfer completes,
-        // naturally rate-limiting to the camera's frame rate. The fake transport
-        // returns instantly, so we throttle to ~30 fps to avoid spinning.
-        let reader = tokio::task::spawn_blocking(move || {
-            let frame_interval = std::time::Duration::from_millis(33); // ~30 fps
-            loop {
-                // Check stop flag (non-blocking).
-                if *stop_rx.borrow() {
-                    break;
-                }
-                let t0 = std::time::Instant::now();
-                // No frame within the poll is a stream waiting, as in trigger
-                // mode; a timeout used to end the stream (Codex review of #179).
-                match stream.next_frame_within(std::time::Duration::from_millis(250)) {
-                    Ok(None) => continue,
-                    Ok(Some(frame)) => {
-                        if tx
-                            .blocking_send(FrameData {
-                                width: frame.leader.width,
-                                height: frame.leader.height,
-                                pixel_format: frame.leader.pixel_format,
-                                payload: frame.payload.to_vec(),
-                            })
-                            .is_err()
-                        {
-                            break; // receiver dropped
-                        }
-                        // Throttle: sleep for remainder of frame interval.
-                        let elapsed = t0.elapsed();
-                        if elapsed < frame_interval {
-                            std::thread::sleep(frame_interval - elapsed);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "U3V stream error");
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Publisher loop: encode and publish frames to Zenoh.
         let image_key = keys::image(&device_id_owned);
         let mut seq: u32 = 0;
         let mut logged_first = false;
-
-        while let Some(frame) = rx.recv().await {
-            let zenoh_pf = pfnc_to_zenoh(viva_genicam::pfnc::PixelFormat::from_code(
-                frame.pixel_format,
-            ));
-
+        loop {
+            let frame = tokio::select! {
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                result = frames.next_frame() => match result {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        info!(device_id = device_id_owned, "U3V stream ended");
+                        break;
+                    }
+                    Err(e) => {
+                        error!(device_id = device_id_owned, error = %e, "U3V stream error");
+                        break;
+                    }
+                },
+            };
             if !logged_first {
                 info!(
                     device_id = device_id_owned,
@@ -201,9 +144,8 @@ async fn handle_start<T: UsbTransfer + 'static>(
                 );
                 logged_first = true;
             }
-
             let header = FrameHeader {
-                pixel_format: zenoh_pf,
+                pixel_format: pfnc_to_zenoh(frame.pixel_format),
                 width: frame.width,
                 height: frame.height,
                 seq,
@@ -212,21 +154,19 @@ async fn handle_start<T: UsbTransfer + 'static>(
             let mut payload = Vec::with_capacity(encoded_header.len() + frame.payload.len());
             payload.extend_from_slice(&encoded_header);
             payload.extend_from_slice(&frame.payload);
-
-            if let Err(e) = session_clone.put(&image_key, payload).await {
+            if let Err(e) = publisher.put(&image_key, payload).await {
                 warn!(error = %e, "failed to publish frame");
             }
-
             seq = seq.wrapping_add(1);
         }
-
-        let _ = reader.await;
+        // The reader thread lets go of the endpoint before this task ends.
+        frames.shutdown().await;
         info!(device_id = device_id_owned, seq, "U3V frame loop exited");
     });
 
     // Execute AcquisitionStart on the camera.
     if let Err(e) = device.exec_command("AcquisitionStart").await {
-        handle.abort();
+        let _ = stop_tx.send(true);
         let _ = handle.await;
         return NodeOpResponse::err(format!("AcquisitionStart failed: {e}"));
     }
@@ -238,7 +178,7 @@ async fn handle_start<T: UsbTransfer + 'static>(
     NodeOpResponse::ok()
 }
 
-async fn handle_stop<T: UsbTransfer + 'static>(
+async fn handle_stop<T: UsbTransfer + Send + 'static>(
     session: &Arc<Session>,
     device: &Arc<U3vDeviceHandle<T>>,
     device_id: &str,
@@ -261,10 +201,69 @@ async fn handle_stop<T: UsbTransfer + 'static>(
     NodeOpResponse::ok()
 }
 
-/// Intermediate frame data passed from the blocking reader to the async publisher.
-struct FrameData {
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    payload: Vec<u8>,
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use viva_fake_u3v::FakeU3vCamera;
+    use viva_genicam::open_u3v_device;
+
+    use super::*;
+
+    /// The service streams what the camera sends, packed formats included.
+    /// It sized frames as width × height × one byte for a format without a
+    /// whole-byte pixel, and opened the stream without configuring the SIRM
+    /// (backlog SVC-03); it now opens it as the library does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_packed_format_streams_at_its_payload_size() {
+        let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+        let device = FakeU3vCamera::new(64, 48).open_device().unwrap();
+        let (mut camera, xml) = open_u3v_device(device).unwrap();
+        camera.set("PixelFormat", "Mono12Packed").unwrap();
+        let device_id = format!("u3v-acquisition-test-{}", std::process::id());
+        let handle = Arc::new(U3vDeviceHandle::new(camera, xml, device_id.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let service = tokio::spawn(run(session.clone(), handle, shutdown_rx));
+        let images = session
+            .declare_subscriber(keys::image(&device_id))
+            .await
+            .unwrap();
+
+        let start =
+            serde_json::to_vec(&AcquisitionControlRequest::new(AcquisitionCommand::Start)).unwrap();
+        let started = async {
+            loop {
+                let replies = session
+                    .get(keys::acquisition_control(&device_id))
+                    .payload(start.clone())
+                    .timeout(Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                if let Ok(reply) = replies.recv_async().await
+                    && let Ok(sample) = reply.result()
+                {
+                    let response: NodeOpResponse =
+                        serde_json::from_slice(&sample.payload().to_bytes()).unwrap();
+                    assert!(response.ok, "{response:?}");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .expect("no answer to Start");
+
+        let sample = tokio::time::timeout(Duration::from_secs(5), images.recv_async())
+            .await
+            .expect("no frame within 5 s")
+            .unwrap();
+        let bytes = sample.payload().to_bytes();
+        let (header, pixels) = FrameHeader::decode(&bytes).unwrap();
+        assert_eq!((header.width, header.height), (64, 48));
+        assert_eq!(pixels.len(), 64 * 48 * 3 / 2, "64 × 48 × 1.5 bytes");
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(10), service).await;
+    }
 }

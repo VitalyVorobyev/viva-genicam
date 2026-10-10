@@ -86,6 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `viva-service-u3v` streams as the library does (backlog SVC-03, SVC-06). It
+  built its own `U3vStream`, which skipped the SIRM — the streaming registers
+  — and sized a packed format's frames at one byte a pixel, and read in a
+  loop that slept to hold ~30 frames a second. It now opens a
+  `U3vFrameStream` through `U3vStreamBuilder` and publishes every frame.
+  `U3vDeviceHandle::new` takes the camera, its XML and its id only.
+- `U3vStreamBuilder` returns a `PayloadSize` read that fails for any reason
+  but a missing feature, rather than falling back to a computed size that
+  misses the camera's padding or chunk data (Codex review of #180).
 - A USB3 Vision stream of a packed format is sized right. `U3vStreamBuilder`
   sized frames as width × height × one byte when the format has no
   whole-byte pixel (`Mono12Packed`), and the reader then took the rest of the
@@ -245,10 +254,12 @@ section changes the library.
   shows the connected camera's vendor, model, serial, firmware, user ID, MAC
   and IP address — what a report asks for — and sets the persistent IP
   address the camera takes from its next restart.
-- **USB3 Vision streams stop cleanly and keep their names** (Codex review of
-  #179). Stopping waits for the USB reader, so a restart or reconnect finds
-  the endpoint free, and a camera keeps its serial-based id in the device list
-  when a later scan cannot read its serial.
+- **USB3 Vision streams stop cleanly and keep their names** (Codex reviews of
+  #179 and #180). Stopping waits for the USB reader, however long a read it is
+  inside takes, so a restart or reconnect finds the endpoint free; it gave up
+  after two seconds at first. A camera keeps its serial-based id in the device
+  list when a later scan cannot read its serial, but only while it stays at
+  the same USB position with the same vendor and product.
 - **USB3 Vision cameras in embedded mode** (ST-14). Embedded mode discovered,
   opened and streamed only GigE Vision cameras, so a USB3 Vision camera
   needed `viva-service-u3v` and remote mode. The device list now includes

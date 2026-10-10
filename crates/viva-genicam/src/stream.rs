@@ -1862,6 +1862,16 @@ impl U3vFrameStream {
 /// let frames = U3vStreamBuilder::new(&mut camera)
 ///     .build()?;
 /// ```
+/// Whether reading `PayloadSize` failed because the camera has no such
+/// feature, the one failure a computed size may stand in for.
+#[cfg(feature = "u3v")]
+fn payload_size_is_absent(error: &GenicamError) -> bool {
+    matches!(
+        error,
+        GenicamError::GenApi(viva_genapi::GenApiError::NodeNotFound(_))
+    )
+}
+
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub struct U3vStreamBuilder<'a, T: crate::u3v::usb::UsbTransfer + 'static> {
@@ -1894,14 +1904,18 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
     /// has none, and guessing one byte made the reader take the rest of the
     /// image for the trailer and fail (Codex review of #179).
     fn frame_size(&self) -> Result<u64, GenicamError> {
-        if let Some(size) = self
-            .camera
-            .get("PayloadSize")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&size| size > 0)
-        {
-            return Ok(size);
+        match self.camera.get("PayloadSize") {
+            Ok(text) => {
+                if let Some(size) = text.parse::<u64>().ok().filter(|&size| size > 0) {
+                    return Ok(size);
+                }
+            }
+            // Only a camera without the feature falls back. One that has it
+            // but cannot answer — I/O, access, availability — must not get a
+            // computed size that misses its padding or chunk data (Codex
+            // review of #180).
+            Err(error) if payload_size_is_absent(&error) => {}
+            Err(error) => return Err(error),
         }
         let dimension = |name: &str| -> Result<u64, GenicamError> {
             self.camera
@@ -1941,6 +1955,20 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a missing `PayloadSize` may be replaced by a computed size (Codex
+    /// review of #180).
+    #[cfg(feature = "u3v")]
+    #[test]
+    fn only_a_missing_payload_size_falls_back() {
+        use viva_genapi::GenApiError;
+        let missing = GenicamError::GenApi(GenApiError::NodeNotFound("PayloadSize".into()));
+        let refused = GenicamError::GenApi(GenApiError::Access("PayloadSize".into()));
+        let failed = GenicamError::Transport("bulk read".into());
+        assert!(payload_size_is_absent(&missing));
+        assert!(!payload_size_is_absent(&refused));
+        assert!(!payload_size_is_absent(&failed));
+    }
 
     #[test]
     fn frame_assembly_state_ingest_tracks_packets() {

@@ -13,7 +13,7 @@ The UI needs to render camera feature trees. The `UiGraph` type bridges Rust par
 
 ### Contract location
 - Rust: `crates/genicam_xml_model/src/model.rs`
-- TypeScript: `ui/genicam-studio-ui/src/xml_model/uigraph.ts`
+- TypeScript: `studio/ui/viva-studio-ui/src/xml_model/uigraph.ts`
 
 ### Stability rules
 - Fields can be added (with `Option` / `?` and `skip_serializing_if`).

@@ -31,6 +31,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt's fixed deadline. The count-based mismatch handling this replaces is
   removed.
 
+### Viva Studio and documentation — not part of any published crate
+
+Viva Studio lives in the `studio/` workspace, which is published nowhere: no
+crate on crates.io and no desktop binary carries these changes. Nothing in this
+section changes the library.
+
+- **Studio has a role and a plan**
+  ([ADR-0024](docs/adrs/adr0024-studio-reference-viewer.md)). It is the
+  library's reference viewer: a single-camera tool to configure, view and
+  diagnose a camera and to file a report, embedded mode first, with remote mode
+  kept behind one backend trait. The backlog's ST section is rewritten from a
+  review of the code and the eight reports Studio users have filed, and ordered
+  by the ADR's phases. ST-01 is deleted, because #142 did it.
+- **The Studio docs describe Studio as it is.** `docs/design.md`, `README.md`
+  and `studio/CLAUDE.md` now name embedded mode, the primary path, rather than
+  saying Studio only talks to the services over Zenoh.
+  `docs/studio/testing-cookbook.md` drops the aravis prerequisites for the
+  in-repo `viva-fake-gige`, lists the `FeatureState` topics, and says which
+  Studio test suites run in CI and which do not. `studio/CLAUDE.md` no longer
+  claims `RawNode` is populated (ST-34).
+
 ## [0.7.0] - 2026-09-30
 
 Three changes need a read before upgrading. **`viva_zenoh_api::API_VERSION` is

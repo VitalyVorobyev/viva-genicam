@@ -54,7 +54,9 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
   test vehicle (see Testing strategy below).
 
 The `studio/` GUI workspace (Viva Studio, a Tauri desktop app) lives in this
-repository as a second Cargo workspace (ADR-0017); it consumes
+repository as a second Cargo workspace (ADR-0017). It is the library's
+reference viewer (ADR-0024): in embedded mode, the primary path, it drives the
+camera in-process through `viva-genicam`; in remote mode it consumes
 `viva-zenoh-api` and talks to the services via Zenoh.
 
 Layering rules: a crate depends only on layers below it. `viva-genapi-xml` and

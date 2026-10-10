@@ -1,7 +1,9 @@
 # CLAUDE.md — Viva Studio
 
-Viva Studio is a Tauri v2 + React 19 GUI for GenICam cameras. It consumes
-viva-service / viva-service-u3v over Zenoh and is the **second Cargo
+Viva Studio is a Tauri v2 + React 19 GUI for GenICam cameras, and the
+library's reference viewer (ADR-0024). It drives a camera in-process through
+viva-genicam (embedded mode, the primary path) or consumes viva-service /
+viva-service-u3v over Zenoh (remote mode). It is the **second Cargo
 workspace** of this monorepo (kept separate from the published library
 workspace at the repo root — see ADR-0017).
 
@@ -43,8 +45,8 @@ skips loopback — so the fake camera never appears. See `#132`.
   `viva-genapi-xml`). The UI consumes UiGraph JSON and never parses XML.
 - UiGraph contract fields `nodes_by_name` / `categories` / `root_category`
   are frozen.
-- Unknown XML nodes are never dropped: preserved as `UiNodeKind::Unknown`
-  with `RawNode` populated.
+- Unknown XML nodes are never dropped: preserved as `UiNodeKind::Unknown`.
+  `RawNode` is meant to carry their XML but is empty today (backlog ST-34).
 - In the Tauri backend use `tauri::async_runtime::spawn`, never bare
   `tokio::spawn`.
 - Package manager is bun, never npm (`bun.lock` is authoritative).

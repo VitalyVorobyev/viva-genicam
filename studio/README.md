@@ -12,9 +12,9 @@ concerns.
 
 > **Experimental.** Studio works — it discovers cameras, reads and writes
 > features, and streams live frames. But it is the least-exercised part of this
-> repository: it has no hardware in CI, and the only hardware reports it has are
-> from a single camera model. Treat what it displays as unconfirmed until you
-> have seen it agree with your camera. Bug reports are very welcome.
+> repository: it has no hardware in CI, and its hardware reports come from a few
+> users and camera models. Treat what it displays as unconfirmed
+> until you have seen it agree with your camera. Bug reports are very welcome.
 
 The working agreement for contributors is in [`CLAUDE.md`](CLAUDE.md); the Zenoh
 wire contract is in [`../docs/studio/zenoh-api.md`](../docs/studio/zenoh-api.md).

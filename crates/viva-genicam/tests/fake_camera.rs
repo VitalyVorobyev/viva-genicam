@@ -152,6 +152,20 @@ async fn test_discovery_reports_a_configured_identity() {
     assert_eq!([high[2], high[3], low[0], low[1], low[2], low[3]], mac);
 }
 
+/// Discovery names the host interface each camera answered on. A broadcast
+/// meant for one camera — FORCEIP to a camera on another subnet — has to leave
+/// through that interface: sent to 255.255.255.255 from an unbound socket, it
+/// leaves through one the OS picks, usually the default route's, which on a
+/// direct camera link is the wrong one (backlog ST-37).
+#[tokio::test]
+async fn test_discovery_names_the_interface_a_camera_answered_on() {
+    let _cam = common::TestCamera::start().await;
+
+    let fake = discover_fake().await;
+    let loopback = gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback");
+    assert_eq!(fake.interface.as_deref(), Some(loopback.name()));
+}
+
 /// Check the fake's Discovery ACK **bytes** against the specification's field
 /// table, without going through `parse_discovery_payload`.
 ///

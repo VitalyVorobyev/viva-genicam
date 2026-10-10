@@ -2247,6 +2247,19 @@ input[type="checkbox"] {
   0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
   40%           { opacity: 1;   transform: scale(1.2); }
 }
+/* A device row: the option, its "Set IP…" button, and the FORCEIP form. */
+.device-dd__row { display: flex; flex-wrap: wrap; align-items: center; }
+.device-dd__row .device-dd__option { flex: 1 1 0; min-width: 0; }
+.device-dd__set-ip { font-size: var(--text-xs); margin-right: var(--sp-3); }
+.device-dd__force-ip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: 0 var(--sp-4) var(--sp-3);
+}
+.device-dd__force-ip .iv-text-input { width: 120px; }
+
 .device-dd__option {
   display: flex;
   align-items: center;

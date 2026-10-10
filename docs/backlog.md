@@ -134,7 +134,6 @@ A laser profile scanner (Micro-Epsilon scanCONTROL 850050, [#93](https://github.
 | CI-08 | `cargo doc` in ci.yml lacks `--all-features` + `RUSTDOCFLAGS` | P2 | S | planned | |
 | CI-09 | Fuzz the packet and XML parsers | P2 | L | planned | Both consume untrusted network input |
 | CI-10 | cargo-semver-checks on release tags | P2 | M | planned | |
-| CI-17 | Nothing checks links in `docs/` | P2 | S | planned | Links to moved files under `docs/` went stale for weeks unnoticed. `crates/viva-genicam/tests/book_includes.rs` covers mdBook `{{#include}}` anchors only and `ci.yml` greps `mdbook build` for `[ERROR]`; nothing checks ordinary Markdown links, inside or outside `book/` |
 | CI-18 | Studio's Linux bundle builds on a retiring runner | P2 | S | planned | `release.yml`'s `studio` job builds the AppImage and deb on `ubuntu-22.04` for its low glibc floor. GitHub retires that image on 2027-04-17, with brownouts that fail jobs on 2027-03-23, 03-30, 04-06 and 04-13 ([runner-images#14254](https://github.com/actions/runner-images/issues/14254)), so a tag pushed then gets no Linux bundle. Move to `ubuntu-24.04` (glibc 2.39), or build inside an older container to keep the floor |
 
 ## DOC — Documentation
@@ -144,7 +143,7 @@ which is why they are not all P2.
 
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
-| DOC-06 | Book: fill the three crate pages; add the missing ones; write the stubs | P2 | L | planned | No page exists for viva-u3v, viva-genapi-xml, viva-pfnc, viva-sfnc, viva-zenoh-api, the services, viva-camctl or the fakes. USB3 Vision has no tutorial anywhere. `book/src/errors-logging.md` and `book/src/contributing.md` are 24-line stubs |
+| DOC-06 | Book: fill the three crate pages; add the missing ones; write the stubs | P2 | L | planned | No page exists for viva-u3v, viva-genapi-xml, viva-pfnc, viva-sfnc, viva-zenoh-api, the services, viva-camctl or the fakes. USB3 Vision has no tutorial anywhere. `book/src/errors-logging.md` is a 24-line stub |
 
 ## ST — Studio
 

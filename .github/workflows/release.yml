@@ -94,7 +94,7 @@ jobs:
 
   # Viva Studio as unsigned desktop bundles, versioned with the library
   # (ADR-0024, backlog ST-06). Signing needs paid certificates; the first-launch
-  # prompts this causes are documented in studio/README.md.
+  # prompts this causes are documented in the user guide (book/src/studio.md).
   studio:
     name: Viva Studio ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -196,7 +196,7 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            The `viva-studio-*` files are Viva Studio for macOS (Apple Silicon), Linux and Windows. They are not signed, so the first launch asks for confirmation: see [Install a release build](https://github.com/VitalyVorobyev/viva-genicam/blob/main/studio/README.md#install-a-release-build).
+            The `viva-studio-*` files are Viva Studio for macOS (Apple Silicon), Linux and Windows. They are not signed, so the first launch asks for confirmation: see [Viva Studio → First launch](https://vitalyvorobyev.github.io/viva-genicam/studio.html#first-launch) in the user guide.
           files: |
             dist/*.tar.gz
             dist/*.zip

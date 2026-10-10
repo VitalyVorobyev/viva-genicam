@@ -254,9 +254,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Viva Studio and documentation — not part of any published crate
 
-Viva Studio lives in the `studio/` workspace, which is published nowhere: no
-crate on crates.io and no desktop binary carries these changes. Nothing in this
-section changes the library.
+Viva Studio lives in the `studio/` workspace. Its crates are not published to
+crates.io; from this release its desktop bundles are attached to the GitHub
+release. Nothing in this section changes the library.
+
+- **The documentation is split by reader.** The book is the user guide, now in
+  parts — getting started, using the library, Python, Viva Studio, help,
+  reference — with a new **Viva Studio** chapter: installing a release bundle,
+  first launch on each OS, connecting, features, images, reports and remote
+  mode. Developer documentation lives in the repository: a new
+  `CONTRIBUTING.md` (building, checks, test suites, the vendor corpus, pull
+  requests), and `docs/` with an index. The book's "Running the tests" and
+  "Contributing" pages moved there; its architecture page is rewritten for
+  users, with USB3 Vision, the services and Python in the picture.
+  `studio/README.md` keeps only what developers need, and the README is a
+  user's landing page. A new test, `doc_links`, fails on any relative Markdown
+  link that points at nothing (backlog CI-17).
+- `docs/standards.md` and the book's `viva-gencp` page described GenCP as the
+  protocol both GigE Vision and USB3 Vision speak, with register commands; GVCP
+  is its own protocol, and GenCP has memory commands only.
 
 - Studio builds on Tauri 2.12, React 19.3, Vite 8.3, Vitest 5 and
   TypeScript 7, and lints with Oxlint instead of ESLint: typescript-eslint

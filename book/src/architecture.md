@@ -1,66 +1,78 @@
-# Architecture Overview
+# How the library fits together
 
-This section maps the runtime flow, crate boundaries, and key traits so both app developers and contributors can reason about the system.
+viva-genicam is a stack of crates, each one a layer of the GenICam standards.
+Most applications use only the top one, `viva-genicam`; the layers below are
+there when you need to reach past it.
 
-## Layered view
+## The layers
 
 ```
-+---------------------------+   End‑user API & examples
-|   viva-genicam (façade)   |   - device discovery, feature get/set
-|   (+ examples/)           |   - StreamBuilder / FrameStream, events
-+-------------+-------------+
-|
-v
-+---------------------------+   GenApi core
-|   viva-genapi             |   - Node types (Integer/Float/Enum/Bool/Command,
-|                           |     Register, String, **SwissKnife**)
-|                           |   - NodeMap build & evaluation
-|                           |   - Selector routing & dependency graph
-+-------------+-------------+
-|
-v
-+---------------------------+   GenApi XML
-|   viva-genapi-xml         |   - Fetch XML via control path
-|                           |   - Parse schema‑lite → IR used by viva-genapi
-+-------------+-------------+
-|
-v
-+---------------------------+   Transports
-|   viva-gige               |   - GVCP (control): discovery, read/write, events,
-|                           |     action commands
-|                           |   - GVSP (data): packet parsing, reassembly,
-|                           |     MTU/packet size, delay, stats
-+-------------+-------------+
-|
-v
-+---------------------------+   Protocol helpers
-|   viva-gencp              |   - GenCP encode/decode, status codes, helpers
-+---------------------------+
+  your application          viva-camctl (CLI)      Python (viva-genicam on PyPI)
+          \                        |                      /
+           +---------------- viva-genicam ---------------+     discovery, Camera, streams, events
+                          /                  \
+                 viva-genapi                  transports
+           NodeMap: features by name          viva-gige (GigE Vision: GVCP control, GVSP streaming)
+                       |                      viva-u3v  (USB3 Vision: GenCP over USB bulk endpoints)
+               viva-genapi-xml                         \
+           the camera's GenApi XML                    viva-gencp (GenCP / GVCP message primitives)
 ```
 
-## Data flow
-1. **Discovery** (`viva-gige`): bind to NIC → broadcast GVCP discovery → parse replies.
-2. **Connect**: establish control channel (UDP) and prepare stream endpoints if needed.
-3. **GenApi XML** (`viva-genapi-xml`): read address from device registers → fetch XML → parse to IR.
-4. **NodeMap** (`viva-genapi`): build nodes, resolve links (Includes, Pointers, Selectors), set defaults.
-5. **Evaluation** (`viva-genapi`):
-   - **Direct** nodes read/write underlying registers via `viva-gige` + `viva-gencp`.
-   - **Computed** nodes (e.g., **SwissKnife**) evaluate expressions that reference other nodes.
-6. **Streaming** (`viva-gige`): configure packet size/delay → receive GVSP → reassemble → expose frames + **chunks** and **timestamps**.
+- **`viva-genicam`** — start here. It discovers cameras, opens them, fetches
+  their XML, and gives you a `Camera` whose features you read and write by
+  name, plus frame streams, events, chunks and time mapping.
+- **`viva-genapi`** — the GenApi engine: it turns a feature name such as
+  `ExposureTime` into register reads and writes, evaluating formulas,
+  selectors and access rules on the way.
+- **`viva-genapi-xml`** — parses a camera's GenApi XML, from the camera or from
+  a file.
+- **`viva-gige`** and **`viva-u3v`** — the two transports.
+- **`viva-gencp`** — the control-protocol message formats both build on.
 
-## Async, threading, and I/O
-- Discovery, stream setup and GVSP reception use async UDP sockets (Tokio). `FrameStream::next_frame` is an `async fn`; statistics accumulate as frames complete.
-- Node evaluation is **synchronous**: the `RegisterIo` trait `NodeMap` reads and writes through is a plain blocking interface, and `Camera::get`/`set` block until the register transaction completes. `GigeRegisterIo` bridges that onto the async GVCP client itself, so calling them inside `#[tokio::main]` is fine. The reasoning is in [ADR-0014](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0014-sync-registerio-async-adapters.md).
+Around the stack: `viva-pfnc` and `viva-sfnc` name pixel formats and standard
+features; `viva-service` and `viva-service-u3v` serve cameras over
+[Zenoh](https://zenoh.io) for [Viva Studio](studio.md) and other clients;
+`viva-fake-gige` and `viva-fake-u3v` are cameras that run in your process
+([Testing without hardware](tutorials/fake-camera.md)). The
+[Crates](crates/README.md) page says which of them you are likely to need.
 
-## Error handling & tracing
-- Each layer has its own error type (`GigeError`, `GenCpError`, `XmlError`, `GenApiError`, and `GenicamError` at the façade); see [Error Handling & Logging](errors-logging.md).
-- Enable logs with `RUST_LOG=info` (or `debug`, `trace`).
+## What happens when you open a camera
 
-## Platform considerations
-- **Windows/Linux/macOS** supported. Windows firewall and NIC settings are covered in [Networking → Windows](networking.md#22-windows).
-- Multi‑NIC hosts should explicitly select the interface for discovery/streaming.
+1. **Discovery** finds cameras: a GVCP broadcast on each network interface, or
+   USB enumeration.
+2. **Connecting** opens the control channel. For GigE Vision this also takes
+   control privilege and starts a heartbeat that keeps it.
+3. **The GenApi XML** is read from the camera — its address is in the
+   camera's bootstrap registers — and parsed.
+4. **The NodeMap** is built from it. A declaration the library cannot build is
+   listed in `NodeMap::skipped()` instead of failing the camera.
+5. **Feature access** goes through the NodeMap: a direct feature reads and
+   writes its registers, a computed one evaluates its formula over others.
+6. **Streaming** configures the camera's stream channel and receives frames —
+   GVSP packets reassembled over UDP, or USB3 Vision blocks over a bulk
+   endpoint — with their timestamps and chunk data.
 
-## Extending the system
-- Add node kinds in `viva-genapi` as a new `Node` enum variant with its evaluation and dependency wiring, and make anything unsupported land in `NodeMap::skipped()` rather than failing the document.
-- Add transports as new `viva-*` crates behind a trait the facade can select at runtime.
-- Keep `viva-genicam` thin: compose transport + NodeMap + utilities; keep heavy logic in lower crates.
+## Blocking and async
+
+Discovery, stream setup and frame reception are async (Tokio):
+`FrameStream::next_frame` is an `async fn`.
+
+Feature access is **synchronous**: `Camera::get` and `Camera::set` block until
+the camera answers. That keeps the GenApi engine independent of any runtime,
+and it is safe to call them inside `#[tokio::main]` — the GigE transport
+bridges onto its async client itself. In a GUI or a server, call them where a
+short block is acceptable, such as a blocking-pool task. The reasoning is in
+[ADR-0014](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0014-sync-registerio-async-adapters.md).
+
+## Errors and logs
+
+Each layer has its own error type — `GigeError`, `GenCpError`, `XmlError`,
+`GenApiError` — and `GenicamError` wraps them at the top
+([Error Handling & Logging](errors-logging.md)). Everything logs through
+`tracing`; `RUST_LOG=debug` shows the protocol traffic.
+
+## Platforms
+
+Linux, macOS and Windows. Network setup — firewalls, interface selection,
+jumbo frames — is in [Networking](networking.md). On a host with several
+network interfaces, name the one your camera is on.

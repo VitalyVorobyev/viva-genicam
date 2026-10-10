@@ -53,9 +53,6 @@ no Python equivalent today:
 - **Chunk data.** `frame.chunks` is not surfaced; `ChunkConfig` and
   `configure_chunks` are Rust-only.
 - **Events.** There is no binding for the message channel or `EventStream`.
-- **Time sync.** `time_calibrate` is not exposed, which also means
-  `frame.ts_host` has no device mapping to work from — see
-  [Streaming](python/streaming.md).
 - **Action commands** and **FORCEIP / persistent IP** configuration. (GenApi
   *`<Command>` features* — `UserSetLoad`, `TriggerSoftware` — are a different
   thing and **are** exposed, via `cam.execute(name)`; see

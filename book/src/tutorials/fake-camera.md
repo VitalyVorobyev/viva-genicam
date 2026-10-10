@@ -55,7 +55,8 @@ Demo complete. All operations succeeded without hardware.
 
 The workspace's integration tests use the fake cameras automatically, so
 `cargo test --workspace` needs no hardware. The individual suites are listed in
-[Running the tests](../testing.md).
+the repository's
+[CONTRIBUTING.md](https://github.com/VitalyVorobyev/viva-genicam/blob/main/CONTRIBUTING.md#tests).
 
 ## Using the fake camera in your own code
 

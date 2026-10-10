@@ -24,6 +24,9 @@ RUST_LOG=debug cargo test --workspace -- --nocapture
 cargo test -p viva-genicam --test fake_camera        # 38: GigE discovery, features, streaming
 cargo test -p viva-genicam --test predicates         # 6: pIsLocked, pIsAvailable, ... on the fake camera
 cargo test -p viva-genicam --test heartbeat          # 2: idle keepalive survival + a negative control
+cargo test -p viva-genicam --test inflight_keepalive # 1: probes continue while register I/O holds the mutex
+cargo test -p viva-genicam --test keepalive_shutdown # 6: dropping the transport cancels and joins keepalive I/O
+cargo test -p viva-gige --test inflight_keepalive    # 5: heartbeats during long ACK waits (ADR-0023)
 cargo test -p viva-genicam --test register_access    # 6: READREG/WRITEREG dispatch and fallback
 cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # 5: U3V open, features, streaming, pixel formats
 cargo test -p viva-service --test fake_camera_e2e    # 6: acquisition, double start, sustained streaming,

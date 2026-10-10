@@ -351,11 +351,21 @@ function renderEditor(
       );
     case "Boolean":
       return (
-        <BoolEditor value={draftValue} errors={draftErrors} onChange={onDraftChange} />
+        <BoolEditor
+          value={draftValue}
+          errors={draftErrors}
+          onChange={onDraftChange}
+          liveState={liveState}
+        />
       );
     case "String":
       return (
-        <StringEditor value={draftValue} errors={draftErrors} onChange={onDraftChange} />
+        <StringEditor
+          value={draftValue}
+          errors={draftErrors}
+          onChange={onDraftChange}
+          liveState={liveState}
+        />
       );
     case "Command":
       return (

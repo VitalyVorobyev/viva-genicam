@@ -136,7 +136,8 @@ jobs:
         working-directory: studio/ui/viva-studio-ui
         run: bunx tsc --noEmit
 
-      # typescript-eslint plus react-hooks' rules-of-hooks and exhaustive-deps.
+      # Oxlint (`.oxlintrc.json`): ESLint's and typescript-eslint's recommended
+      # rules, and the React hooks and React Compiler rules.
       - name: Lint
         if: ${{ !cancelled() }}
         working-directory: studio/ui/viva-studio-ui

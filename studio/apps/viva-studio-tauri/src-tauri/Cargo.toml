@@ -39,7 +39,7 @@ viva_xml_model = { path = "../../../crates/viva_xml_model", features = ["ts"] }
 # Reads `permissions/*.toml` in the ACL test, and sends IPC calls through
 # Tauri's ACL on its mock runtime.
 tauri = { version = "2", features = ["test"] }
-toml = "0.9"
+toml = "1"
 # The image WebSocket's client side, for the frame-delivery tests.
 tokio-tungstenite = "0.30"
 viva-fake-gige = { path = "../../../../crates/viva-fake-gige" }

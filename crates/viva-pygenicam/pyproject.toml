@@ -14,7 +14,7 @@ license-files = ["THIRD-PARTY-NOTICES.md", "LICENSES/*"]
 authors = [
     { name = "Vitaly Vorobyev" },
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = ["genicam", "gige", "usb3-vision", "camera", "vision"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -22,11 +22,11 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
     "Topic :: Multimedia :: Graphics :: Capture",
     "Topic :: Scientific/Engineering :: Image Processing",

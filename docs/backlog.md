@@ -132,13 +132,14 @@ A laser profile scanner (Micro-Epsilon scanCONTROL 850050, [#93](https://github.
 |----|------|----------|------|--------|-------|
 | CI-01 | Per-crate feature matrix (`cargo hack --each-feature`) | P1 | M | planned | `viva-camctl`/`viva-pygenicam`/`viva-service-u3v` all enable `u3v-usb`, so feature unification builds U3V. The gap: `viva-genicam` with its *own* default features (`[]`) is never verified |
 | CI-03 | MSRV job | P2 | S | planned | `rust-version = "1.88"` is declared and never checked |
-| CI-04 | Windows wheel is built and published but never tested | P2 | M | planned | `python.yml` test matrix is ubuntu + macos-14 only. #57 is a Windows issue |
+| CI-04 | Windows wheel is built and published but never tested | P2 | M | planned | `python.yml` test matrix is ubuntu + macos-15 only. #57 is a Windows issue |
 | CI-05 | Scope release.yml / publish-docs.yml permissions to the jobs that need write | P2 | S | planned | |
 | CI-07 | python.yml path filter misses viva-gencp and root Cargo.toml/Cargo.lock | P2 | S | planned | |
 | CI-08 | `cargo doc` in ci.yml lacks `--all-features` + `RUSTDOCFLAGS` | P2 | S | planned | |
 | CI-09 | Fuzz the packet and XML parsers | P2 | L | planned | Both consume untrusted network input |
 | CI-10 | cargo-semver-checks on release tags | P2 | M | planned | |
 | CI-17 | Nothing checks links in `docs/` | P2 | S | planned | Links to moved files under `docs/` went stale for weeks unnoticed. `crates/viva-genicam/tests/book_includes.rs` covers mdBook `{{#include}}` anchors only and `ci.yml` greps `mdbook build` for `[ERROR]`; nothing checks ordinary Markdown links, inside or outside `book/` |
+| CI-18 | Studio's Linux bundle builds on a retiring runner | P2 | S | planned | `release.yml`'s `studio` job builds the AppImage and deb on `ubuntu-22.04` for its low glibc floor. GitHub retires that image on 2027-04-17, with brownouts that fail jobs on 2027-03-23, 03-30, 04-06 and 04-13 ([runner-images#14254](https://github.com/actions/runner-images/issues/14254)), so a tag pushed then gets no Linux bundle. Move to `ubuntu-24.04` (glibc 2.39), or build inside an older container to keep the floor |
 
 ## DOC — Documentation
 

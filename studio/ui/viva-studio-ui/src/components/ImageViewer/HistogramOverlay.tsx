@@ -1,5 +1,11 @@
-import { useEffect, useRef } from "react";
-import { computeHistogram, renderHistogram } from "./histogramUtils";
+import { useEffect, useRef, useState } from "react";
+import {
+  computeHistogram,
+  formatHistogramStats,
+  histogramStats,
+  renderHistogram,
+  type HistogramStats,
+} from "./histogramUtils";
 
 const REFRESH_MS = 200; // ~5 fps refresh for histogram
 
@@ -11,6 +17,7 @@ interface HistogramOverlayProps {
 export function HistogramOverlay({ frameRef, visible }: HistogramOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [stats, setStats] = useState<HistogramStats | null>(null);
 
   // Track container size and resize canvas accordingly
   useEffect(() => {
@@ -42,6 +49,7 @@ export function HistogramOverlay({ frameRef, visible }: HistogramOverlayProps) {
       if (!bytes) return;
       const data = computeHistogram(bytes);
       if (!data) return;
+      setStats(histogramStats(data));
       const canvas = canvasRef.current;
       if (!canvas || canvas.width === 0 || canvas.height === 0) return;
       const ctx = canvas.getContext("2d");
@@ -57,8 +65,15 @@ export function HistogramOverlay({ frameRef, visible }: HistogramOverlayProps) {
   if (!visible) return null;
 
   return (
-    <div ref={wrapRef} className="iv-histogram" aria-label="Histogram">
-      <canvas ref={canvasRef} className="iv-histogram__canvas" />
+    <div className="iv-histogram-panel">
+      <div ref={wrapRef} className="iv-histogram" aria-label="Histogram">
+        <canvas ref={canvasRef} className="iv-histogram__canvas" />
+      </div>
+      <div className="iv-histogram__axis" aria-hidden="true">
+        <span>0</span>
+        <span>255</span>
+      </div>
+      {stats && <div className="iv-histogram__stats">{formatHistogramStats(stats)}</div>}
     </div>
   );
 }

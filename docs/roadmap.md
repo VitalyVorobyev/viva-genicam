@@ -86,7 +86,7 @@ fastest way for someone with a camera to exercise the library and report what
 they saw.
 
 - **Services**: SVC-01, SVC-03, SVC-04, SVC-05.
-- **Studio foundations**: ST-45. Done: one
+- **Studio foundations**: ST-45, ST-46. Done: one
   feature-state implementation (ST-26), one backend trait with a real remote
   implementation (ST-27), generated IPC types (ST-28), one UI data layer and
   `<FeatureControl>` (ST-29), re-reading what a write invalidates (ST-30),

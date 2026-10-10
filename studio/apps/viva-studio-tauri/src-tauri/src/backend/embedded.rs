@@ -82,8 +82,9 @@ pub struct EmbeddedBackend {
     camera: Arc<AsyncMutex<Option<ConnectedCamera>>>,
     /// Cache of discovered devices, updated periodically.
     discovered: RwLock<Vec<DeviceInfo>>,
-    /// The host interface each discovered camera answered on, by MAC.
-    interfaces: RwLock<HashMap<[u8; 6], String>>,
+    /// The host address each camera's discovery reply arrived at, by MAC.
+    /// Kept across scans: one scan can miss a camera the list still shows.
+    local_ips: RwLock<HashMap<[u8; 6], Ipv4Addr>>,
     /// Active acquisition state, if streaming.
     acquisition: AsyncMutex<Option<AcquisitionState>>,
     events: Arc<Events>,
@@ -95,7 +96,7 @@ impl EmbeddedBackend {
         Self {
             camera: Arc::new(AsyncMutex::new(None)),
             discovered: RwLock::new(Vec::new()),
-            interfaces: RwLock::new(HashMap::new()),
+            local_ips: RwLock::new(HashMap::new()),
             acquisition: AsyncMutex::new(None),
             events,
         }
@@ -108,14 +109,39 @@ impl EmbeddedBackend {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                let (devices, interfaces) = discover_gige_devices().await;
-                *backend.discovered.write().await = devices.clone();
-                *backend.interfaces.write().await = interfaces;
-                for d in &devices {
-                    backend.events.send(d);
-                }
+                let found = discover_gige_devices().await;
+                backend.record_scan(found).await;
             }
         });
+    }
+
+    /// Take in what one discovery scan found, and announce it.
+    async fn record_scan(&self, found: Vec<viva_genicam::gige::DeviceInfo>) {
+        let (devices, local_ips) = discovered_gige(found);
+        *self.discovered.write().await = devices.clone();
+        // Updated, never cleared: a camera one scan misses keeps its address
+        // (Codex review of #177).
+        self.local_ips.write().await.extend(local_ips);
+        for d in &devices {
+            self.events.send(d);
+        }
+    }
+
+    /// The interface FORCEIP to `mac` leaves through: the one the camera
+    /// answered discovery on, with the address that discovery used — a NIC
+    /// can carry several (Codex review of #177) — or `None` to let the OS
+    /// pick.
+    async fn forceip_interface(
+        &self,
+        mac: &[u8; 6],
+    ) -> Result<Option<viva_genicam::gige::nic::Iface>, String> {
+        let local_ip = self.local_ips.read().await.get(mac).copied();
+        local_ip
+            .map(|ip| {
+                viva_genicam::gige::nic::Iface::from_ipv4(ip)
+                    .map_err(|e| format!("ForceIP: the interface with {ip}: {e}"))
+            })
+            .transpose()
     }
 
     /// Run `op` on the connected camera, on the blocking pool.
@@ -514,14 +540,7 @@ impl DeviceBackend for EmbeddedBackend {
         // Out of the interface the camera answered discovery on. Without one
         // the OS picks the interface, usually the default route's, which on a
         // direct camera link is a different network card.
-        let name = self.interfaces.read().await.get(&mac).cloned();
-        let iface = match name {
-            Some(name) => Some(
-                viva_genicam::gige::nic::Iface::from_system(&name)
-                    .map_err(|e| format!("ForceIP: interface {name}: {e}"))?,
-            ),
-            None => None,
-        };
+        let iface = self.forceip_interface(&mac).await?;
         viva_genicam::gige::force_ip(mac, ip, subnet, gateway, iface.as_ref())
             .await
             .map_err(|e| format!("ForceIP failed: {e}"))?;
@@ -745,23 +764,22 @@ fn camera_pixel_layout(format: viva_genicam::pfnc::PixelFormat) -> Option<PixelL
 
 // ── Discovery helpers ───────────────────────────────────────────────────────
 
-async fn discover_gige_devices() -> (Vec<DeviceInfo>, HashMap<[u8; 6], String>) {
+async fn discover_gige_devices() -> Vec<viva_genicam::gige::DeviceInfo> {
     let timeout = Duration::from_secs(1);
     // `discover` rather than `discover_all`: the latter probes loopback, which
     // on Windows can raise WSAECONNRESET and used to abort the whole scan,
     // leaving the UI on "No device" with a real camera on the wire (#57).
     // `discover_all` remains for the fake-camera tests that need loopback.
-    match viva_genicam::gige::discover(timeout).await {
-        Ok(devices) => discovered_gige(devices),
-        Err(e) => {
+    viva_genicam::gige::discover(timeout)
+        .await
+        .unwrap_or_else(|e| {
             warn!("GigE discovery failed: {e}");
-            (Vec::new(), HashMap::new())
-        }
-    }
+            Vec::new()
+        })
 }
 
-/// The device list for what discovery found, and the interface each camera
-/// answered on, which FORCEIP must leave through (ST-37).
+/// The device list for what discovery found, and the host address each
+/// camera's reply arrived at, which FORCEIP must leave from (ST-37).
 ///
 /// Each device is the announce the service would publish for it, so the id
 /// is the MAC-derived one and not the IP (ST-25): the IP changes under DHCP,
@@ -769,10 +787,10 @@ async fn discover_gige_devices() -> (Vec<DeviceInfo>, HashMap<[u8; 6], String>) 
 /// always keyed by MAC. `connect` resolves the IP back.
 fn discovered_gige(
     devices: Vec<viva_genicam::gige::DeviceInfo>,
-) -> (Vec<DeviceInfo>, HashMap<[u8; 6], String>) {
-    let interfaces = devices
+) -> (Vec<DeviceInfo>, HashMap<[u8; 6], Ipv4Addr>) {
+    let local_ips = devices
         .iter()
-        .filter_map(|d| Some((d.mac, d.interface.clone()?)))
+        .filter_map(|d| Some((d.mac, d.local_ip?)))
         .collect();
     let infos = devices
         .into_iter()
@@ -788,7 +806,7 @@ fn discovered_gige(
             DeviceInfo::from_announce(announce, "gige")
         })
         .collect();
-    (infos, interfaces)
+    (infos, local_ips)
 }
 
 /// Convert a JSON value to a string suitable for the camera `set()` API.
@@ -1130,7 +1148,7 @@ mod tests {
         });
     }
 
-    /// FORCEIP leaves through the interface a camera answered discovery on,
+    /// FORCEIP leaves from the host address a camera answered discovery at,
     /// so the backend keeps it per camera; a record discovery did not make
     /// has none (ST-37).
     #[test]
@@ -1138,16 +1156,43 @@ mod tests {
         let mac = [0x00, 0x0C, 0xDF, 0x01, 0x02, 0x03];
         let found = viva_genicam::gige::DeviceInfo {
             mac,
-            interface: Some("en7".to_string()),
+            local_ip: Some("169.254.1.1".parse().unwrap()),
             ..viva_genicam::gige::DeviceInfo::from_ip("169.254.1.20".parse().unwrap())
         };
         let typed = viva_genicam::gige::DeviceInfo::from_ip("10.0.0.2".parse().unwrap());
 
-        let (devices, interfaces) = super::discovered_gige(vec![found, typed]);
+        let (devices, local_ips) = super::discovered_gige(vec![found, typed]);
 
         assert_eq!(devices.len(), 2);
-        assert_eq!(interfaces.len(), 1);
-        assert_eq!(interfaces[&mac], "en7");
+        assert_eq!(local_ips.len(), 1);
+        assert_eq!(
+            local_ips[&mac],
+            "169.254.1.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+    }
+
+    /// One discovery scan can miss a camera that answered the last one, while
+    /// the device list still shows it; FORCEIP to it must still leave through
+    /// its interface, not the one the OS picks (Codex review of #177).
+    #[test]
+    fn a_missed_scan_keeps_the_interface_a_camera_answered_on() {
+        tauri::async_runtime::block_on(async {
+            let mac = [0x00, 0x0C, 0xDF, 0x01, 0x02, 0x03];
+            let found = viva_genicam::gige::DeviceInfo {
+                mac,
+                local_ip: Some(std::net::Ipv4Addr::LOCALHOST),
+                ..viva_genicam::gige::DeviceInfo::from_ip("169.254.1.20".parse().unwrap())
+            };
+            let backend = super::EmbeddedBackend::new(Default::default());
+
+            backend.record_scan(vec![found]).await;
+            backend.record_scan(vec![]).await;
+
+            let iface = backend.forceip_interface(&mac).await.expect("resolve");
+            let iface = iface.expect("the interface was forgotten after one missed scan");
+            // The address discovery used, not the interface's first one.
+            assert_eq!(iface.ipv4(), Some(std::net::Ipv4Addr::LOCALHOST));
+        });
     }
 
     /// The camera's `GevSCPSPacketSize`, low 16 bits.

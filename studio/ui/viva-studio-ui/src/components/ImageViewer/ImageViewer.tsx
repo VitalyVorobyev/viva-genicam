@@ -24,6 +24,8 @@ interface ImageViewerProps {
   deviceName?: string;
   cameraModel?: string;
   imageMeta: ImageMeta | null;
+  /** False while another tab is shown; the viewer stays mounted. */
+  isActive?: boolean;
 }
 
 export function ImageViewer({
@@ -35,6 +37,7 @@ export function ImageViewer({
   deviceName,
   cameraModel,
   imageMeta,
+  isActive = true,
 }: ImageViewerProps) {
   const writeNode = useFeatureWriter();
   const [fps, setFps] = useState<number>(0);
@@ -206,6 +209,7 @@ export function ImageViewer({
           }}
         />
         <ViewerCanvas
+          active={isActive}
           wsUrl={streamerInfo.ws_url}
           onFrameStats={setFps}
           onFrame={handleFrame}

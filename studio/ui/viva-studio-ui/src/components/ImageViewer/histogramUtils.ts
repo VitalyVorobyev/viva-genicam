@@ -101,6 +101,45 @@ export function computeHistogram(bmpBytes: Uint8Array): HistogramData | null {
   return null;
 }
 
+/** Summary of an 8-bit histogram, for the numbers under the plot. */
+export interface HistogramStats {
+  min: number;
+  max: number;
+  mean: number;
+  /** Share of samples at 255, which may have clipped. */
+  saturated: number;
+}
+
+/**
+ * Range, mean and saturated share of a histogram (backlog ST-39). A colour
+ * image pools the samples of its three channels. `null` when it is empty.
+ */
+export function histogramStats(data: HistogramData): HistogramStats | null {
+  const channels = data.kind === "mono" ? [data.values] : [data.r, data.g, data.b];
+  let count = 0;
+  let sum = 0;
+  let min = 256;
+  let max = -1;
+  for (const bins of channels) {
+    bins.forEach((n, level) => {
+      if (n === 0) return;
+      count += n;
+      sum += n * level;
+      min = Math.min(min, level);
+      max = Math.max(max, level);
+    });
+  }
+  if (count === 0) return null;
+  const saturated = channels.reduce((total, bins) => total + bins[255], 0) / count;
+  return { min, max, mean: sum / count, saturated };
+}
+
+/** One line of histogram numbers; the clipped share only when some clipped. */
+export function formatHistogramStats({ min, max, mean, saturated }: HistogramStats): string {
+  const line = `min ${min} · max ${max} · mean ${mean.toFixed(1)}`;
+  return saturated > 0 ? `${line} · ${(saturated * 100).toFixed(1)}% at 255` : line;
+}
+
 /**
  * Render histogram data onto a 2D canvas context.
  *

@@ -279,7 +279,8 @@ function AppLayoutInner() {
                 isActive={activeTab === "features"}
               />
             </div>
-            {activeTab === "image" && (
+            {/* The viewer stays mounted too, keeping its stream and zoom */}
+            <div style={{ display: activeTab === "image" ? "contents" : "none" }}>
               <ImageViewer
                 streamerInfo={streamerInfo}
                 isConnected={isConnected}
@@ -289,8 +290,9 @@ function AppLayoutInner() {
                 deviceName={connectedDeviceName ?? undefined}
                 cameraModel={connectedModel ?? undefined}
                 imageMeta={imageMeta}
+                isActive={activeTab === "image"}
               />
-            )}
+            </div>
             {activeTab === "diagnostics" && <DiagnosticsTab connected={isConnected} />}
           </div>
         </main>

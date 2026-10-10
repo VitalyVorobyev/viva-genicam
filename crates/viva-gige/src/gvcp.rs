@@ -313,10 +313,12 @@ pub struct DeviceInfo {
     pub serial: Option<String>,
     /// User-programmable device name (Discovery ACK offset 232).
     pub user_name: Option<String>,
-    /// The host interface the Discovery ACK arrived on, by name; `None` for a
+    /// The host address the Discovery ACK arrived at: the local IPv4 of the
+    /// discovery socket, which names both the interface and, on a NIC with
+    /// several addresses, which of them reached the device. `None` for a
     /// record discovery did not make. A broadcast meant for this device, such
-    /// as [`force_ip`], has to leave through it.
-    pub interface: Option<String>,
+    /// as [`force_ip`], has to leave from it (`Iface::from_ipv4`).
+    pub local_ip: Option<Ipv4Addr>,
 }
 
 impl DeviceInfo {
@@ -333,7 +335,7 @@ impl DeviceInfo {
             version: None,
             serial: None,
             user_name: None,
-            interface: None,
+            local_ip: None,
         }
     }
 
@@ -565,7 +567,7 @@ async fn discover_impl(
                         trace!(%interface_name, bytes = len, "GVCP response length");
                         if let Some(mut info) = parse_discovery_ack(&buffer[..len], request_id) {
                             trace!(ip = %info.ip, mac = %info.mac_string(), "parsed discovery ack");
-                            info.interface = Some(interface_name.clone());
+                            info.local_ip = Some(v4.ip);
                             responses.push(info);
                         }
                     }
@@ -737,7 +739,7 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
         version,
         serial,
         user_name,
-        interface: None,
+        local_ip: None,
     })
 }
 

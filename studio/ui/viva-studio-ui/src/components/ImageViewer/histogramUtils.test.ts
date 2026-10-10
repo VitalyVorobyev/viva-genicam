@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { computeHistogram, renderHistogram } from "./histogramUtils";
+import {
+  computeHistogram,
+  formatHistogramStats,
+  histogramStats,
+  renderHistogram,
+} from "./histogramUtils";
 import type { HistogramData } from "./histogramUtils";
 import { makeGray8Bmp, makeRgb24Bmp } from "../../test/bmp";
 
@@ -124,5 +129,45 @@ describe("renderHistogram", () => {
     // One clearRect; 3 channels × 256 bins each = 768 fillRect calls.
     expect(ctx.ops.filter((o) => o === "clearRect").length).toBe(1);
     expect(ctx.ops.filter((o) => o === "fillRect").length).toBe(768);
+  });
+});
+
+// The histogram had no axes or numbers, so it could not answer "is anything
+// clipped?" (backlog ST-39).
+describe("histogramStats", () => {
+  function mono(counts: Record<number, number>) {
+    const values = new Uint32Array(256);
+    for (const [level, n] of Object.entries(counts)) values[Number(level)] = n;
+    return { kind: "mono" as const, values };
+  }
+
+  it("reports the range, mean and share of saturated pixels", () => {
+    const stats = histogramStats(mono({ 10: 1, 100: 2, 255: 1 }));
+    expect(stats).toEqual({ min: 10, max: 255, mean: 116.25, saturated: 0.25 });
+  });
+
+  it("pools the samples of every channel of a colour image", () => {
+    const rgb = {
+      kind: "rgb" as const,
+      r: mono({ 50: 2 }).values,
+      g: mono({ 255: 2 }).values,
+      b: mono({ 0: 2 }).values,
+    };
+    expect(histogramStats(rgb)).toEqual({ min: 0, max: 255, mean: 101.66666666666667, saturated: 1 / 3 });
+  });
+
+  it("is null for an empty image", () => {
+    expect(histogramStats(mono({}))).toBeNull();
+  });
+});
+
+describe("formatHistogramStats", () => {
+  it("names the clipped share only when there is one", () => {
+    expect(formatHistogramStats({ min: 10, max: 255, mean: 116.25, saturated: 0.25 })).toBe(
+      "min 10 · max 255 · mean 116.3 · 25.0% at 255",
+    );
+    expect(formatHistogramStats({ min: 3, max: 200, mean: 80, saturated: 0 })).toBe(
+      "min 3 · max 200 · mean 80.0",
+    );
   });
 });

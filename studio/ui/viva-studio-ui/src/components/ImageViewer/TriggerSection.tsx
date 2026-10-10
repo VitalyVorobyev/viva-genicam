@@ -33,10 +33,6 @@ export function TriggerSection({
   externalModel,
   liveValues,
 }: TriggerSectionProps) {
-  if (!isConnected) {
-    return <p className="sidebar-placeholder">No device connected.</p>;
-  }
-
   const nodes = externalModel?.graph.nodes_by_name;
 
   const delayConstraints = extractNumericConstraints(
@@ -66,6 +62,12 @@ export function TriggerSection({
       setDelayText(String(clamped));
     }
   }, [liveValues, delayConstraints.min, delayConstraints.max]);
+
+  // After every hook, so a connect or disconnect does not change how many
+  // hooks this component calls.
+  if (!isConnected) {
+    return <p className="sidebar-placeholder">No device connected.</p>;
+  }
 
   const handleDelaySliderPointerDown = () => {
     delayDragging.current = true;

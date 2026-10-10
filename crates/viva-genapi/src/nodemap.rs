@@ -1487,11 +1487,22 @@ impl NodeMap {
                 .get_bool(provider, io)
                 .map(|flag| SkValue::Int(i64::from(flag))),
             Some(Node::Enum(_)) => self.get_enum_numeric(provider, io).map(SkValue::Int),
-            Some(Node::SwissKnife(node)) => self.evaluate_swissknife(node, io, stack),
-            Some(Node::Converter(node)) => self.evaluate_converter(node, io, stack),
-            Some(Node::IntConverter(node)) => self
-                .evaluate_int_converter(node, io, stack)
-                .map(SkValue::Int),
+            // The primitive getters check a ceiling themselves; a computed
+            // node is evaluated here directly, so check its own (Codex review
+            // of #187).
+            Some(Node::SwissKnife(node)) => {
+                self.ensure_not_imposed(provider, AccessMode::WO)?;
+                self.evaluate_swissknife(node, io, stack)
+            }
+            Some(Node::Converter(node)) => {
+                self.ensure_not_imposed(provider, AccessMode::WO)?;
+                self.evaluate_converter(node, io, stack)
+            }
+            Some(Node::IntConverter(node)) => {
+                self.ensure_not_imposed(provider, AccessMode::WO)?;
+                self.evaluate_int_converter(node, io, stack)
+                    .map(SkValue::Int)
+            }
             Some(_) => Err(GenApiError::Type(provider.to_string())),
             None => Err(GenApiError::NodeNotFound(provider.to_string())),
         }
@@ -1639,15 +1650,21 @@ impl NodeMap {
         })
     }
 
-    /// Forget `name`'s cached value, and those of the nodes that depend on
-    /// it, so the next read asks the device.
+    /// Forget `name`'s cached value — and that of every node it takes its
+    /// value from through `<pValue>`, which is where a register reading is
+    /// held — and those of the nodes that depend on it, so the next read asks
+    /// the device.
     ///
     /// For a value the device changes on its own whose XML does not say so:
     /// `Cachable` and `PollingTime` are not honoured yet (backlog GA-05), so
-    /// a latched timestamp read twice came back the same.
+    /// a latched timestamp read twice came back the same. Every timestamp in
+    /// the vendor corpus is an `Integer` over an `IntReg`, so clearing the
+    /// front node alone changed nothing (Codex review of #187).
     pub fn invalidate(&self, name: &str) {
-        if let Some(node) = self.nodes.get(name) {
-            node.invalidate_cache();
+        for link in self.value_chain(name) {
+            if let Some(node) = self.nodes.get(link) {
+                node.invalidate_cache();
+            }
         }
         self.invalidate_dependents(name);
     }

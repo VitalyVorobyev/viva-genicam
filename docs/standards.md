@@ -48,7 +48,7 @@ opcodes and headers, and the status codes the two share.
 
 ### GVCP / GVSP -- GigE Vision protocols
 
-GigE Vision adds two protocols on top of GenCP:
+GigE Vision defines two protocols of its own:
 
 - **GVCP** (Control Protocol) -- UDP-based device discovery, register access, event delivery, and action commands. Cameras listen on port 3956.
 - **GVSP** (Streaming Protocol) -- UDP-based image transfer with packet reassembly; packet resend is specified but not yet wired into the receive path.

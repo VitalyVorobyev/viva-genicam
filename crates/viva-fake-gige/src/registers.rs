@@ -791,14 +791,20 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
 
+  <!-- An Integer over an IntReg, as every timestamp in the vendor corpus is
+       declared, and with nothing linking it to the latch: the cache holds the
+       reading in the register node. -->
   <Integer Name="GevTimestampValue" NameSpace="Standard">
     <ToolTip>Current device timestamp in ticks (latched)</ToolTip>
+    <pValue>GevTimestampValueReg</pValue>
+  </Integer>
+  <IntReg Name="GevTimestampValueReg">
     <Address>0x20068</Address>
     <Length>8</Length>
     <AccessMode>RO</AccessMode>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
-  </Integer>
+  </IntReg>
 
   <IntReg Name="GevIEEE1588OffsetFromMasterLatched_Val" NameSpace="Custom">
     <ToolTip>PTP offset from master in ns, latched</ToolTip>

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! The message payloads and topic names the viva GenICam camera services
 //! publish, and their clients subscribe to.
 //!
@@ -290,6 +291,62 @@ impl From<&FeatureState> for NodeValueUpdate {
     fn from(s: &FeatureState) -> Self {
         s.to_node_value_update()
     }
+}
+
+/// The wire form of a state read through `viva-genapi`.
+///
+/// Every service that holds a nodemap builds its [`FeatureState`] this way,
+/// so the access-mode spelling, the register summary and the unreadable-value
+/// rules cannot drift between them (backlog ST-26).
+#[cfg(feature = "genapi")]
+#[cfg_attr(docsrs, doc(cfg(feature = "genapi")))]
+impl From<viva_genapi::FeatureState> for FeatureState {
+    fn from(state: viva_genapi::FeatureState) -> Self {
+        use viva_genapi::{AccessMode, FeatureValue};
+
+        let value = match state.value {
+            FeatureValue::None => serde_json::Value::Null,
+            FeatureValue::Integer(v) => serde_json::Value::Number(v.into()),
+            FeatureValue::Float(v) => f64_to_json(v),
+            FeatureValue::Boolean(v) => serde_json::Value::Bool(v),
+            FeatureValue::Enum(v) | FeatureValue::String(v) => serde_json::Value::String(v),
+            FeatureValue::Register { len } => {
+                serde_json::json!({ "kind": "register", "length": len })
+            }
+            // `FeatureValue` is `#[non_exhaustive]`: name what we cannot show
+            // rather than emitting a bare null.
+            _ => serde_json::json!({ "kind": state.kind, "unsupported": true }),
+        };
+        let access_mode = match state.access {
+            Some(AccessMode::RO) => "RO",
+            Some(AccessMode::RW) => "RW",
+            Some(AccessMode::WO) => "WO",
+            None => "NA",
+        };
+        FeatureState {
+            value,
+            access_mode: access_mode.to_string(),
+            kind: state.kind.to_string(),
+            is_implemented: state.is_implemented,
+            is_available: state.is_available,
+            numeric: state.range.map(|r| NumericRange {
+                min: r.min,
+                max: r.max,
+                inc: r.inc,
+            }),
+            enum_available: state.enum_entries,
+            unit: state.unit,
+        }
+    }
+}
+
+/// A JSON number, or the value's text for NaN and infinities, which JSON
+/// cannot carry.
+#[cfg(feature = "genapi")]
+fn f64_to_json(v: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(v)
+        .map(serde_json::Value::Number)
+        .unwrap_or_else(|| serde_json::Value::String(v.to_string()))
 }
 
 // ── CommandResult ────────────────────────────────────────────────────────────

@@ -15,7 +15,14 @@ categories = ["hardware-support", "network-programming"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+# `From<viva_genapi::FeatureState>` for the wire `FeatureState`, for services
+# that read features through `viva-genapi`. Off by default: a client needs only
+# the payload types.
+genapi = ["dep:viva-genapi"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+viva-genapi = { version = "0.7", path = "../viva-genapi", optional = true }

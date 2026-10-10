@@ -86,10 +86,10 @@ fastest way for someone with a camera to exercise the library and report what
 they saw.
 
 - **Services**: SVC-01, SVC-03, SVC-04, SVC-05.
-- **Studio foundations**: one feature-state implementation, one backend trait,
-  generated types, one UI data layer — ST-26, ST-27, ST-28, ST-29, ST-30 and
-  ST-03, then ST-31, ST-32, ST-33, ST-34, ST-43, ST-02.
+- **Studio foundations**: one backend trait, generated types, one UI data
+  layer — ST-27, ST-28, ST-29, ST-30 and ST-03, then ST-31, ST-32, ST-33,
+  ST-34, ST-43, ST-02. One feature-state implementation (ST-26) is done.
 - **Studio viewer parity**: ST-22 (seen on hardware), ST-41, ST-35, ST-36,
-  ST-18, then ST-37, ST-38, ST-39, ST-40, ST-14, ST-17, DX-05.
+  then ST-37, ST-38, ST-39, ST-40, ST-14, ST-17, DX-05.
 - **Studio distribution**, alongside parity: ST-06, then ST-07.
 - **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-42.

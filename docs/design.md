@@ -46,7 +46,10 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 - `viva-zenoh-api` — the message payloads and topic names the services
   publish. This is the contract, not the transport: despite the name it does
   not depend on the `zenoh` crate, so a client can share the message format
-  without linking a broker, and it compiles everywhere including wasm.
+  without linking a broker, and it compiles everywhere including wasm. Its
+  optional `genapi` feature converts `viva-genapi`'s `FeatureState` into the
+  wire form, so every service that reads features builds that payload the same
+  way.
 
 **Test crates (not published):**
 

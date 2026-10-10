@@ -111,7 +111,7 @@ All keys prefixed with `genicam/devices/{device_id}/`:
 | `nodes/{name}/set` | App → Service (query) | Write node value |
 | `nodes/{name}/execute` | App → Service (query) | Execute command node |
 | `nodes/bulk/read` | App → Service (query) | Batch read node values |
-| `nodes/{name}/state` | App → Service (query) | One node's `FeatureState` (ADR-0010) |
+| `nodes/{name}/state` | Service → App; App → Service (query) | One node's `FeatureState` (ADR-0010): published alongside `value` on connect and after writes, and answered on query |
 | `nodes/bulk/state` | App → Service (query) | `FeatureState` for many nodes |
 | `acquisition/control` | App → Service (query) | Start/stop acquisition |
 | `acquisition/status` | Service → App | Acquisition state with FPS |

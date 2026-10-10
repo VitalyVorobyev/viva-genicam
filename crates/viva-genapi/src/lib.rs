@@ -7,6 +7,7 @@ mod error;
 mod io;
 mod nodemap;
 mod nodes;
+mod state;
 pub mod swissknife;
 
 pub use error::GenApiError;
@@ -16,6 +17,7 @@ pub use nodes::{
     BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, FormulaVar, IntegerNode, Node,
     NodeMeta, RegisterNode, Representation, SkNode, Visibility,
 };
+pub use state::{FeatureState, FeatureValue, ValueRange};
 pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
 pub use viva_genapi_xml::{AccessMode, SkOutput, SkippedNode};
 
@@ -1168,7 +1170,7 @@ mod tests {
         let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
         assert!(nodemap.skipped().is_empty(), "{:?}", nodemap.skipped());
 
-        let mut targets: Vec<String> = nodemap.command_targets().into_iter().collect();
+        let mut targets: Vec<&String> = nodemap.command_targets().iter().collect();
         targets.sort();
         assert_eq!(
             targets,
@@ -2697,5 +2699,200 @@ mod tests {
         nodemap.exec_command("Load", &io).expect("execute");
         assert_eq!(io.regs.borrow()[&0x200], 1u32.to_be_bytes());
         assert_eq!(nodemap.get_float("Exp", &io).expect("fresh read"), 5000.0);
+    }
+
+    /// A converter's access comes from the whole `<pValue>` chain, not from
+    /// the first node on it. The AVT `AcquisitionFrameRateLimit` shape: a
+    /// converter over a `<Float>` that declares no access of its own and
+    /// delegates to a read-only register. Stopping at the float reported the
+    /// converter `RW` (Codex review of #168).
+    #[test]
+    fn a_converter_over_a_float_over_a_read_only_register_is_read_only() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Converter Name="FrameRateLimit">
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO</FormulaFrom>
+                    <pValue>FrameRateLimitFloat</pValue>
+                </Converter>
+                <Float Name="FrameRateLimitFloat">
+                    <pValue>FrameRateLimitReg</pValue>
+                </Float>
+                <FloatReg Name="FrameRateLimitReg">
+                    <Address>0x100</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </FloatReg>
+                <Converter Name="FrameRate">
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO</FormulaFrom>
+                    <pValue>FrameRateFloat</pValue>
+                </Converter>
+                <Float Name="FrameRateFloat">
+                    <pValue>FrameRateReg</pValue>
+                </Float>
+                <FloatReg Name="FrameRateReg">
+                    <Address>0x200</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </FloatReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        assert!(nodemap.skipped().is_empty(), "{:?}", nodemap.skipped());
+
+        for name in ["FrameRateLimit", "FrameRateLimitFloat"] {
+            assert_eq!(
+                nodemap.declared_access_mode(name),
+                Some(AccessMode::RO),
+                "{name}"
+            );
+        }
+        // Negative control: the same shape over a writable register.
+        assert_eq!(
+            nodemap.declared_access_mode("FrameRate"),
+            Some(AccessMode::RW)
+        );
+    }
+
+    /// A converter can carry its own `pIsLocked` and `pIsAvailable`, and a
+    /// write must honour them before it reaches the register: checking only
+    /// the register at the end of the chain let a locked converter be written
+    /// (Codex review of #168).
+    #[test]
+    fn a_converter_write_honours_the_converters_own_predicates() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Converter Name="Exposure">
+                    <pIsLocked>ExposureLocked</pIsLocked>
+                    <FormulaTo>FROM * 10</FormulaTo>
+                    <FormulaFrom>TO / 10</FormulaFrom>
+                    <pValue>ExposureRaw</pValue>
+                </Converter>
+                <IntConverter Name="Binning">
+                    <pIsAvailable>BinningAvailable</pIsAvailable>
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO</FormulaFrom>
+                    <pValue>BinningRaw</pValue>
+                </IntConverter>
+                <IntReg Name="ExposureRaw">
+                    <Address>0x100</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <IntReg Name="BinningRaw">
+                    <Address>0x104</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <IntReg Name="ExposureLocked">
+                    <Address>0x200</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <IntReg Name="BinningAvailable">
+                    <Address>0x204</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let build = || {
+            let model = viva_genapi_xml::parse(XML).expect("parse");
+            NodeMap::try_from_xml(model).expect("build nodemap")
+        };
+        let gates = |locked: u32, available: u32| {
+            MockIo::with_registers(&[
+                (0x200, locked.to_be_bytes().to_vec()),
+                (0x204, available.to_be_bytes().to_vec()),
+            ])
+        };
+
+        let io = gates(1, 0);
+        let mut nodemap = build();
+        assert!(matches!(
+            nodemap.set_converter("Exposure", 5.0, &io),
+            Err(GenApiError::Locked { .. })
+        ));
+        assert!(matches!(
+            nodemap.set_int_converter("Binning", 2, &io),
+            Err(GenApiError::Unavailable(_))
+        ));
+        assert!(!io.regs.borrow().contains_key(&0x100), "nothing written");
+        assert!(!io.regs.borrow().contains_key(&0x104), "nothing written");
+
+        // Negative control: with the gates open both writes go through.
+        let io = gates(0, 1);
+        let mut nodemap = build();
+        nodemap
+            .set_converter("Exposure", 5.0, &io)
+            .expect("unlocked");
+        nodemap
+            .set_int_converter("Binning", 2, &io)
+            .expect("available");
+        assert_eq!(io.regs.borrow()[&0x100], 50u32.to_be_bytes());
+        assert_eq!(io.regs.borrow()[&0x104], 2u32.to_be_bytes());
+    }
+
+    /// Writing a selector invalidates the features it selects, and writing a
+    /// feature invalidates whatever reads the register it writes through
+    /// (backlog ST-30).
+    #[test]
+    fn invalidated_by_follows_selectors_and_the_value_chain() {
+        let nodemap = build_nodemap();
+        assert_eq!(nodemap.invalidated_by("GainSelector"), ["Gain"]);
+        assert!(nodemap.invalidated_by("Width").is_empty());
+        assert!(nodemap.invalidated_by("Nope").is_empty());
+
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Float Name="Gain">
+                    <pValue>GainRaw</pValue>
+                </Float>
+                <IntReg Name="GainRaw">
+                    <Address>0x100</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Converter Name="GainDb">
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO / 10</FormulaFrom>
+                    <pValue>GainRaw</pValue>
+                </Converter>
+                <SwissKnife Name="GainDbTimesTwo">
+                    <pVariable Name="G">GainDb</pVariable>
+                    <Formula>G * 2</Formula>
+                </SwissKnife>
+                <Integer Name="Unrelated">
+                    <Address>0x200</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                </Integer>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        assert!(nodemap.skipped().is_empty(), "{:?}", nodemap.skipped());
+        assert_eq!(
+            nodemap.invalidated_by("Gain"),
+            ["GainDb", "GainDbTimesTwo", "GainRaw"]
+        );
+        assert_eq!(
+            nodemap.invalidated_by("GainDb"),
+            ["Gain", "GainDbTimesTwo", "GainRaw"]
+        );
     }
 }

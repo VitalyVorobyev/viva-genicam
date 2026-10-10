@@ -167,7 +167,7 @@ opaque string without `/`).
   { "value": null, "access_mode": "WO", "kind": "Command", "is_implemented": true, "is_available": true }
   ```
 - **Rust type:** `FeatureState` in `viva_zenoh_api`
-- **Semantics:** Authoritative live state of a feature. `min/max/inc` apply to the current selector context; `enum_available` is the set of entries the device reports as currently implemented/available. The legacy `nodes/{name}/value` key continues to be published in parallel for backward compatibility and is populated from the same `FeatureState` via `FeatureState::to_node_value_update`. Clients that speak API v2 should prefer this key.
+- **Semantics:** Authoritative live state of a feature, computed by `viva_genapi::NodeMap::feature_state` and converted with the `genapi` feature of `viva_zenoh_api` — the same computation Viva Studio's embedded mode uses. `access_mode` is what the feature permits now: the declared modes along its `<pValue>` chain combined (an `RW` integer over an `RO` register is `RO`), then `RO` while the feature is locked or unavailable, and `NA` when nothing is permitted. `min/max/inc` apply to the current selector context; `enum_available` is the set of entries the device reports as currently implemented/available. The legacy `nodes/{name}/value` key continues to be published in parallel for backward compatibility and is populated from the same `FeatureState` via `FeatureState::to_node_value_update`. Clients that speak API v2 should prefer this key.
 
 ### `genicam/devices/{device_id}/nodes/bulk/state` *(API v2)*
 

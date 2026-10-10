@@ -58,28 +58,29 @@ fn write_and_readback_feature() {
 fn stream_frames_from_fake_camera() {
     use std::sync::Arc;
     use viva_fake_u3v::FakeU3vTransport;
+    use viva_fake_u3v::registers::REG_ACQ_START;
     use viva_u3v::device::U3vDevice;
-    use viva_u3v::stream::U3vStream;
 
-    let width = 64u32;
-    let height = 64u32;
+    let (width, height) = (64u32, 64u32);
     let pixel_format = 0x0108_0001u32; // Mono8
 
     let transport = Arc::new(FakeU3vTransport::new(width, height, pixel_format));
-    let _device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None).unwrap();
+    let mut device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None).unwrap();
+    let mut stream = device.open_stream(0).expect("SIRM configured");
+    device
+        .write_mem(REG_ACQ_START, &1u32.to_le_bytes())
+        .unwrap();
 
-    // Create stream directly (bypassing SIRM config for simplicity).
-    let payload_size = (width * height) as usize;
-    let mut stream = U3vStream::new(transport, 0x82, 256, 256, payload_size);
-
-    // Receive 3 frames.
+    let mut last_block = 0;
     for _ in 0..3 {
         let frame = stream.next_frame().unwrap();
         assert_eq!(frame.leader.width, width);
         assert_eq!(frame.leader.height, height);
         assert_eq!(frame.leader.pixel_format, pixel_format);
-        assert_eq!(frame.payload.len(), payload_size);
+        assert_eq!(frame.payload.len(), (width * height) as usize);
         assert_eq!(frame.trailer.status, 0);
+        assert!(frame.leader.block_id > last_block);
+        last_block = frame.leader.block_id;
     }
 }
 
@@ -94,10 +95,11 @@ fn different_pixel_formats() {
     assert_eq!(pf, "RGB8Packed");
 }
 
-/// A packed format is 12 bits a pixel, not a whole byte, so the builder must
-/// not size its frames as `width × height × 1`: the reader then takes the
-/// rest of the image for the trailer and fails. The camera's `PayloadSize`
-/// is the authority (Codex review of #179).
+/// A packed format is 12 bits a pixel, not a whole byte, so frames must not
+/// be sized as `width × height × 1`: the reader then takes the rest of the
+/// image for the trailer and fails (Codex review of #179). The device's SIRM
+/// says how big a block is; 4 608 bytes are not a whole number of the fake's
+/// 1 KiB-aligned transfers, so the final transfer carries the rest.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_packed_format_streams_at_its_payload_size() {
     use viva_genicam::U3vStreamBuilder;
@@ -108,14 +110,30 @@ async fn a_packed_format_streams_at_its_payload_size() {
     assert_eq!(camera.get("PayloadSize").unwrap(), "4608", "64 × 48 × 1.5");
 
     let mut frames = U3vStreamBuilder::new(&mut camera).build().expect("stream");
+    camera.acquisition_start().unwrap();
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next_frame())
         .await
         .expect("no frame within 5 s")
         .expect("stream error")
         .expect("stream ended");
-    frames.stop();
+    frames.shutdown().await;
 
     assert_eq!(frame.payload.len(), 64 * 48 * 3 / 2);
+}
+
+/// A fake camera behind a transport the test can inspect.
+fn inspectable_camera() -> (
+    std::sync::Arc<viva_fake_u3v::FakeU3vTransport>,
+    viva_genicam::Camera<viva_genicam::U3vRegisterIo<viva_fake_u3v::FakeU3vTransport>>,
+) {
+    use std::sync::Arc;
+    use viva_fake_u3v::FakeU3vTransport;
+    use viva_u3v::device::U3vDevice;
+
+    let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
+    let device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None).unwrap();
+    let (camera, _xml) = open_u3v_device(device).unwrap();
+    (transport, camera)
 }
 
 /// Stopping a frame stream waits for its reader thread. `stop()` only set a
@@ -125,13 +143,12 @@ async fn a_packed_format_streams_at_its_payload_size() {
 #[tokio::test(flavor = "multi_thread")]
 async fn shutting_down_a_stream_waits_for_its_reader() {
     use std::sync::Arc;
-    use viva_fake_u3v::FakeU3vTransport;
-    use viva_genicam::U3vFrameStream;
-    use viva_u3v::stream::U3vStream;
+    use viva_genicam::U3vStreamBuilder;
 
-    let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
-    let stream = U3vStream::new(Arc::clone(&transport), 0x82, 256, 256, 64 * 64);
-    let mut frames = U3vFrameStream::start(stream);
+    let (transport, mut camera) = inspectable_camera();
+    let held = Arc::strong_count(&transport);
+    let mut frames = U3vStreamBuilder::new(&mut camera).build().expect("stream");
+    camera.acquisition_start().unwrap();
     frames
         .next_frame()
         .await
@@ -142,7 +159,52 @@ async fn shutting_down_a_stream_waits_for_its_reader() {
 
     assert_eq!(
         Arc::strong_count(&transport),
-        1,
+        held,
         "the reader thread still holds the transport"
     );
+}
+
+/// The device stops streaming when the host's stream does: stopping clears
+/// StreamEnable in the SIRM (Codex review of #181), whether the stream is
+/// shut down or dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_stream_clears_stream_enable() {
+    use viva_genicam::U3vStreamBuilder;
+
+    let (transport, mut camera) = inspectable_camera();
+    let frames = U3vStreamBuilder::new(&mut camera).build().expect("stream");
+    assert!(transport.stream_enabled(), "building a stream enables it");
+    frames.shutdown().await;
+    assert!(!transport.stream_enabled(), "shutdown leaves it enabled");
+
+    let frames = U3vStreamBuilder::new(&mut camera).build().expect("stream");
+    assert!(transport.stream_enabled());
+    drop(frames);
+    assert!(!transport.stream_enabled(), "a drop leaves it enabled");
+}
+
+/// A camera sends nothing before AcquisitionStart, however the stream is
+/// configured.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_frame_arrives_before_acquisition_starts() {
+    use std::time::Duration;
+    use viva_genicam::U3vStreamBuilder;
+
+    let (_transport, mut camera) = inspectable_camera();
+    let mut frames = U3vStreamBuilder::new(&mut camera).build().expect("stream");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), frames.next_frame())
+            .await
+            .is_err(),
+        "a frame before AcquisitionStart"
+    );
+
+    camera.acquisition_start().unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(5), frames.next_frame())
+        .await
+        .expect("no frame within 5 s after AcquisitionStart")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.payload.len(), 64 * 64);
+    frames.shutdown().await;
 }

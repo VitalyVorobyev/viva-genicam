@@ -28,8 +28,10 @@ cargo test -p viva-genicam --test inflight_keepalive # 1: probes continue while 
 cargo test -p viva-genicam --test keepalive_shutdown # 6: dropping the transport cancels and joins keepalive I/O
 cargo test -p viva-gige --test inflight_keepalive    # 5: heartbeats during long ACK waits (ADR-0023)
 cargo test -p viva-genicam --test register_access    # 6: READREG/WRITEREG dispatch and fallback
-cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # 7: U3V open, features, streaming,
-                                                     #    pixel formats, packed payloads, reader shutdown
+cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # 9: U3V open, features, streaming,
+                                                     #    packed payloads, reader shutdown, StreamEnable
+                                                     #    cleared on stop, no frame before AcquisitionStart
+cargo test -p viva-u3v --test gencp_conformance      # 9: U3V wire layouts from GenCP 1.2 and vendor XML
 cargo test -p viva-service --test fake_camera_e2e    # 8: acquisition, double start, sustained streaming,
                                                      #    predicates, write-only/command snapshot, EVS topic,
                                                      #    what a write invalidates, the report queryable

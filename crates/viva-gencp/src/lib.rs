@@ -24,6 +24,41 @@ bitflags! {
     }
 }
 
+/// GenCP command ids (GenCP 1.2, Table 7) — what USB3 Vision carries.
+///
+/// These are not [`OpCode`]'s values: those are GVCP's opcodes, which GigE
+/// Vision uses for the same operations and which no GenCP device understands.
+/// A command id has its least significant bit clear; the acknowledge's is the
+/// same id with that bit set.
+pub mod command_id {
+    /// Read a block of the device's register map.
+    pub const READMEM_CMD: u16 = 0x0800;
+    /// Answer to [`READMEM_CMD`], carrying the data read.
+    pub const READMEM_ACK: u16 = 0x0801;
+    /// Write a block of the device's register map.
+    pub const WRITEMEM_CMD: u16 = 0x0802;
+    /// Answer to [`WRITEMEM_CMD`].
+    pub const WRITEMEM_ACK: u16 = 0x0803;
+    /// The device needs more time; see [`PENDING_ACK_COMMAND`](super::PENDING_ACK_COMMAND).
+    pub const PENDING_ACK: u16 = 0x0805;
+    /// An event the device sends unasked.
+    pub const EVENT_CMD: u16 = 0x0C00;
+    /// The host's answer to [`EVENT_CMD`].
+    pub const EVENT_ACK: u16 = 0x0C01;
+}
+
+/// Flag bits of a GenCP command's `flags` field (GenCP 1.2, Table 4).
+///
+/// Not [`CommandFlags`], whose bit values are this crate's GVCP
+/// representation: a GenCP device ignores a command without
+/// [`REQUEST_ACK`](ccd_flags::REQUEST_ACK) set, and answers nothing.
+pub mod ccd_flags {
+    /// The sender wants an acknowledge.
+    pub const REQUEST_ACK: u16 = 1 << 14;
+    /// The command is a retry of one whose acknowledge never arrived.
+    pub const COMMAND_RESEND: u16 = 1 << 15;
+}
+
 /// Command id of the GenCP pending-acknowledge.
 ///
 /// A device that cannot answer within the controller's timeout replies with
@@ -33,13 +68,12 @@ bitflags! {
 /// cannot tell one from a real answer and will hand the timeout bytes back as
 /// payload. GVCP models the same mechanism the same way, as opcode `0x0089`
 /// (`viva_gige::gvcp::consts::PENDING_ACK`).
-///
-/// Corroborated by aravis `ARV_UVCP_COMMAND_PENDING_ACK`
-/// (`src/arvuvcpprivate.h`), which sits in the same command-id table as
-/// `READ_MEMORY_CMD` `0x0800` and `WRITE_MEMORY_CMD` `0x0802`.
-pub const PENDING_ACK_COMMAND: u16 = 0x0805;
+pub const PENDING_ACK_COMMAND: u16 = command_id::PENDING_ACK;
 
-/// GenCP operation codes supported by this crate.
+/// GVCP operation codes for the GenCP-style operations GigE Vision carries.
+///
+/// The values are GVCP's (`READREG_CMD` `0x0080` …). A USB3 Vision device
+/// speaks GenCP proper and knows none of them: its ids are in [`command_id`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCode {
     /// Read a single bootstrap or device register.
@@ -53,7 +87,7 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    /// Raw command value as defined by the GenCP/GVCP specification.
+    /// Raw command value as GVCP defines it.
     pub const fn command_code(self) -> u16 {
         match self {
             OpCode::ReadRegister => 0x0080,

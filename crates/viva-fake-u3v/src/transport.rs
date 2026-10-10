@@ -1,48 +1,79 @@
 //! Fake USB transport implementing [`UsbTransfer`] via an in-memory register map.
 //!
-//! Handles U3V-prefixed GenCP commands (ReadMem, WriteMem) and generates
-//! U3V stream frames on the stream endpoint.
+//! The control endpoint speaks GenCP as GenCP 1.2 defines it — the `U3VC`
+//! prefix both ways, RequestAck at bit 14, READMEM `0x0800` and WRITEMEM
+//! `0x0802`, every field little-endian — and refuses what a device refuses.
+//! The stream endpoint sends a block only while the host has set StreamEnable
+//! and started acquisition, in the transfer sizes the host wrote to the SIRM.
+//! Its constants are its own, not `viva-u3v`'s (ADR-0019, backlog TC-27).
 
 use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
-use viva_gencp::{OpCode, StatusCode};
+use viva_gencp::StatusCode;
 use viva_u3v::U3vError;
 use viva_u3v::usb::UsbTransfer;
 
-use crate::registers::RegisterMap;
+use crate::registers::{
+    LEADER_SIZE, REG_ACQ_START, REG_ACQ_STOP, RegisterMap, SIRM_CONTROL, TRAILER_SIZE,
+};
 
-/// U3V command prefix magic: "U3VC" in little-endian.
-const CMD_PREFIX: u32 = 0x4356_3355;
-/// U3V acknowledge prefix magic: "U3VA" in little-endian.
-const ACK_PREFIX: u32 = 0x4356_3341;
-/// U3V prefix size.
-const PREFIX_SIZE: usize = 12;
+/// "U3VC", little-endian: the prefix of every command and acknowledge.
+const CONTROL_PREFIX: [u8; 4] = *b"U3VC";
+/// Prefix plus common command data.
+const HEADER_SIZE: usize = 12;
+/// GenCP 1.2 Table 4: the RequestAck flag.
+const REQUEST_ACK: u16 = 1 << 14;
+// GenCP 1.2 Table 7.
+const READMEM_CMD: u16 = 0x0800;
+const WRITEMEM_CMD: u16 = 0x0802;
+/// GenCP 1.2 Table 6: `GENCP_INVALID_HEADER`.
+const INVALID_HEADER: u16 = 0x800E;
 
-/// U3V stream leader prefix: "U3VL" in little-endian.
-const LEADER_PREFIX: u32 = 0x4C56_3355;
-/// U3V stream trailer prefix: "U3VT" in little-endian.
-const TRAILER_PREFIX: u32 = 0x5456_3355;
+/// The control endpoints, as [`FakeU3vCamera`](crate::FakeU3vCamera) opens them.
+const STREAM_EP: u8 = 0x82;
+
+/// "U3VL" and "U3VT", little-endian.
+const LEADER_PREFIX: [u8; 4] = *b"U3VL";
+const TRAILER_PREFIX: [u8; 4] = *b"U3VT";
+
+/// Longest a stream read blocks before reporting no data, standing in for
+/// the host's timeout so an idle reader does not spin.
+const IDLE_READ: Duration = Duration::from_millis(20);
 
 /// Fake USB transport backed by an in-memory register map.
 ///
-/// Implements [`UsbTransfer`] by intercepting bulk writes as GenCP commands
-/// and returning pre-computed ack responses. Stream endpoint reads return
-/// synthetic frames.
+/// Implements [`UsbTransfer`] by executing bulk writes as GenCP commands and
+/// queuing their acknowledges. Stream endpoint reads return synthetic blocks.
 pub struct FakeU3vTransport {
     state: Mutex<TransportState>,
 }
 
 struct TransportState {
     registers: RegisterMap,
-    /// Pending ack response (written by bulk_write, read by bulk_read on ep_in).
+    /// The acknowledge for the last command, until the host reads it.
     pending_ack: Option<Vec<u8>>,
-    /// Frame counter for stream.
-    frame_count: u64,
+    /// Whether AcquisitionStart has run without an AcquisitionStop since.
+    acquiring: bool,
+    /// The block being sent, once its leader has gone.
+    block: Option<Block>,
+    next_block_id: u64,
     /// `(address, length)` of every register read the device was asked for,
     /// served or refused, in order.
     reads: Vec<(u64, usize)>,
+    /// `(address, bytes)` of every write the device accepted, in order.
+    writes: Vec<(u64, Vec<u8>)>,
+}
+
+/// One block on its way out: its payload, and the transfers left to send it
+/// in.
+struct Block {
+    id: u64,
+    payload: Vec<u8>,
+    sent: usize,
+    transfers: std::vec::IntoIter<u32>,
+    height: u32,
 }
 
 impl FakeU3vTransport {
@@ -52,14 +83,17 @@ impl FakeU3vTransport {
             state: Mutex::new(TransportState {
                 registers: RegisterMap::new(width, height, pixel_format),
                 pending_ack: None,
-                frame_count: 0,
+                acquiring: false,
+                block: None,
+                next_block_id: 1,
                 reads: Vec::new(),
+                writes: Vec::new(),
             }),
         }
     }
 
-    /// `(address, length)` of every ReadMem/ReadRegister received so far,
-    /// including the ones refused for touching a write-only register.
+    /// `(address, length)` of every READMEM received so far, including the
+    /// ones refused for touching a write-only register.
     ///
     /// The device's own record, so a test can tell a read that never happened
     /// from one whose failure the client swallowed.
@@ -81,6 +115,26 @@ impl FakeU3vTransport {
             .iter()
             .any(|&(a, len)| a < addr + 4 && addr < a.saturating_add(len as u64))
     }
+
+    /// `(address, bytes)` of every write the device accepted, in order.
+    pub fn writes(&self) -> Vec<(u64, Vec<u8>)> {
+        self.state.lock().unwrap().writes.clone()
+    }
+
+    /// The device's register bytes at `[addr, addr + len)`, as it holds them.
+    pub fn peek(&self, addr: u64, len: usize) -> Vec<u8> {
+        self.state.lock().unwrap().registers.read(addr, len)
+    }
+
+    /// Whether the host has StreamEnable set.
+    pub fn stream_enabled(&self) -> bool {
+        self.state.lock().unwrap().registers.stream_enabled()
+    }
+
+    /// Whether acquisition is running.
+    pub fn acquiring(&self) -> bool {
+        self.state.lock().unwrap().acquiring
+    }
 }
 
 impl UsbTransfer for FakeU3vTransport {
@@ -91,51 +145,7 @@ impl UsbTransfer for FakeU3vTransport {
         _timeout: Duration,
     ) -> Result<usize, U3vError> {
         let mut state = self.state.lock().unwrap();
-
-        if data.len() < PREFIX_SIZE {
-            return Err(U3vError::Protocol("command too short".into()));
-        }
-
-        let prefix = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if prefix != CMD_PREFIX {
-            return Err(U3vError::Protocol(format!("bad cmd prefix: {prefix:#x}")));
-        }
-
-        let opcode_raw = u16::from_le_bytes([data[6], data[7]]);
-        let scd_len = u16::from_le_bytes([data[8], data[9]]) as usize;
-        let request_id = u16::from_le_bytes([data[10], data[11]]);
-        let payload = &data[PREFIX_SIZE..PREFIX_SIZE + scd_len];
-
-        let ack = match opcode_raw {
-            0x0084 => {
-                // ReadMem: payload = [8-byte addr][2-byte reserved][2-byte count]
-                let addr = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-                let count = u16::from_be_bytes(payload[10..12].try_into().unwrap()) as usize;
-                read_ack(&mut state, OpCode::ReadMem, request_id, addr, count)
-            }
-            0x0086 => {
-                // WriteMem: payload = [8-byte addr][data...]
-                let addr = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-                let write_data = &payload[8..];
-                state.registers.write(addr, write_data);
-                build_ack(StatusCode::Success, OpCode::WriteMem, request_id, &[])
-            }
-            0x0080 => {
-                // ReadRegister: payload = [8-byte addr]
-                let addr = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-                read_ack(&mut state, OpCode::ReadRegister, request_id, addr, 4)
-            }
-            0x0082 => {
-                // WriteRegister: payload = [8-byte addr][4-byte value]
-                let addr = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-                let value = &payload[8..12];
-                state.registers.write(addr, value);
-                build_ack(StatusCode::Success, OpCode::WriteRegister, request_id, &[])
-            }
-            _ => build_ack(StatusCode::NotImplemented, OpCode::ReadMem, request_id, &[]),
-        };
-
-        state.pending_ack = Some(ack);
+        state.pending_ack = execute(&mut state, data);
         Ok(data.len())
     }
 
@@ -143,55 +153,128 @@ impl UsbTransfer for FakeU3vTransport {
         &self,
         endpoint: u8,
         buf: &mut [u8],
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<usize, U3vError> {
         let mut state = self.state.lock().unwrap();
 
-        // Stream endpoint: generate a frame.
-        if endpoint == 0x82 {
-            return generate_stream_transfer(&mut state, buf);
+        if endpoint == STREAM_EP {
+            if !(state.registers.stream_enabled() && state.acquiring) {
+                drop(state);
+                std::thread::sleep(timeout.min(IDLE_READ));
+                return Err(U3vError::Timeout);
+            }
+            return stream_transfer(&mut state, buf);
         }
 
-        // Control endpoint: return pending ack.
-        let ack = state.pending_ack.take().ok_or_else(|| {
-            U3vError::Protocol("no pending ack (bulk_read before bulk_write)".into())
-        })?;
-        let n = ack.len().min(buf.len());
-        buf[..n].copy_from_slice(&ack[..n]);
-        Ok(n)
+        // Control endpoint: the acknowledge, if the command asked for one.
+        let Some(ack) = state.pending_ack.take() else {
+            drop(state);
+            std::thread::sleep(timeout.min(IDLE_READ));
+            return Err(U3vError::Timeout);
+        };
+        if buf.len() < ack.len() {
+            return Err(U3vError::Usb(format!(
+                "overflow: a {}-byte acknowledge into a {}-byte buffer",
+                ack.len(),
+                buf.len()
+            )));
+        }
+        buf[..ack.len()].copy_from_slice(&ack);
+        Ok(ack.len())
     }
 }
 
-/// Record a read and answer it, refusing one that touches a `WO` register with
-/// `ACCESS_DENIED` as a device does.
-fn read_ack(
-    state: &mut TransportState,
-    opcode: OpCode,
-    request_id: u16,
-    addr: u64,
-    len: usize,
-) -> Vec<u8> {
-    state.reads.push((addr, len));
-    if state.registers.is_write_only(addr, len) {
-        return build_ack(StatusCode::AccessDenied, opcode, request_id, &[]);
+/// Execute one command packet; the acknowledge, or `None` when the command
+/// did not ask for one or is not a GenCP command at all.
+fn execute(state: &mut TransportState, packet: &[u8]) -> Option<Vec<u8>> {
+    if packet.len() < HEADER_SIZE || packet[..4] != CONTROL_PREFIX {
+        return None;
     }
-    let mem = state.registers.read(addr, len);
-    build_ack(StatusCode::Success, opcode, request_id, &mem)
+    let le16 = |at: usize| u16::from_le_bytes([packet[at], packet[at + 1]]);
+    let le64 = |at: usize| u64::from_le_bytes(packet[at..at + 8].try_into().unwrap());
+    let (flags, command, length, request_id) = (le16(4), le16(6), le16(8), le16(10));
+    if flags & REQUEST_ACK == 0 {
+        return None;
+    }
+    let ack_id = command | 1;
+    if packet.len() != HEADER_SIZE + length as usize {
+        return Some(build_ack(
+            StatusCode::from_raw(INVALID_HEADER),
+            ack_id,
+            request_id,
+            &[],
+        ));
+    }
+
+    Some(match command {
+        READMEM_CMD if length == 12 => {
+            let (addr, reserved, count) = (le64(12), le16(20), le16(22) as usize);
+            state.reads.push((addr, count));
+            let status = if reserved != 0 {
+                StatusCode::InvalidParameter
+            } else if !state.registers.is_mapped(addr, count) {
+                StatusCode::InvalidAddress
+            } else if state.registers.is_write_only(addr, count) {
+                StatusCode::AccessDenied
+            } else {
+                let data = state.registers.read(addr, count);
+                return Some(build_ack(StatusCode::Success, ack_id, request_id, &data));
+            };
+            build_ack(status, ack_id, request_id, &[])
+        }
+        WRITEMEM_CMD if length >= 8 => {
+            let (addr, data) = (le64(12), &packet[HEADER_SIZE + 8..]);
+            let status = if request_id == 0 {
+                // GenCP §3.1: request_id 0 is for reads only.
+                StatusCode::InvalidParameter
+            } else if !state.registers.is_mapped(addr, data.len()) {
+                StatusCode::InvalidAddress
+            } else if state.registers.is_read_only(addr, data.len()) {
+                StatusCode::WriteProtect
+            } else {
+                state.registers.write(addr, data);
+                state.writes.push((addr, data.to_vec()));
+                apply_side_effects(state, addr, data);
+                // The Written Length Field capability: reserved, then the
+                // bytes written (GenCP 1.2 Table 11).
+                let mut scd = [0u8; 4];
+                scd[2..].copy_from_slice(&(data.len() as u16).to_le_bytes());
+                return Some(build_ack(StatusCode::Success, ack_id, request_id, &scd));
+            };
+            build_ack(status, ack_id, request_id, &[])
+        }
+        _ => build_ack(StatusCode::NotImplemented, ack_id, request_id, &[]),
+    })
 }
 
-/// Build a U3V ack packet.
-fn build_ack(status: StatusCode, opcode: OpCode, request_id: u16, payload: &[u8]) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(PREFIX_SIZE + payload.len());
-    buf.put_u32_le(ACK_PREFIX);
+/// What a write starts or stops.
+fn apply_side_effects(state: &mut TransportState, addr: u64, data: &[u8]) {
+    let touches = |reg: u64| addr < reg + 4 && reg < addr + data.len() as u64;
+    if touches(REG_ACQ_START) {
+        state.acquiring = true;
+    }
+    if touches(REG_ACQ_STOP) {
+        state.acquiring = false;
+    }
+    // A stream disabled mid-block abandons it.
+    if touches(SIRM_CONTROL) && !state.registers.stream_enabled() {
+        state.block = None;
+    }
+}
+
+/// Build an acknowledge.
+fn build_ack(status: StatusCode, command: u16, request_id: u16, scd: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(HEADER_SIZE + scd.len());
+    buf.extend_from_slice(&CONTROL_PREFIX);
     buf.put_u16_le(status.to_raw());
-    buf.put_u16_le(opcode.ack_code());
-    buf.put_u16_le(payload.len() as u16);
+    buf.put_u16_le(command);
+    buf.put_u16_le(scd.len() as u16);
     buf.put_u16_le(request_id);
-    buf.extend_from_slice(payload);
+    buf.extend_from_slice(scd);
     buf.to_vec()
 }
 
-/// Bytes per pixel for the given PFNC code.
+/// Bytes per pixel for the test pattern.
 fn bytes_per_pixel(pixel_format: u32) -> usize {
     match pixel_format {
         0x0218_0014 => 3, // RGB8Packed
@@ -199,51 +282,88 @@ fn bytes_per_pixel(pixel_format: u32) -> usize {
     }
 }
 
-/// Stream transfer state machine: leader → payload → trailer → leader → ...
-/// We cycle: frame_count % 3 == 0 → leader, 1 → payload, 2 → trailer.
+/// The next transfer on the stream endpoint: a leader, the payload in the
+/// host's transfer sizes, then a trailer.
 ///
-/// Reads width/height/pixel_format from the register map on every frame so
-/// that runtime changes (e.g. from the studio) take effect immediately.
-fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Result<usize, U3vError> {
-    let phase = state.frame_count % 3;
-    state.frame_count += 1;
+/// Reads width, height and pixel format at each block's start, so a format
+/// change takes effect on the next block. A host buffer smaller than what the
+/// device sends overflows, as on USB.
+fn stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Result<usize, U3vError> {
+    let overflow = |sent: usize, buf: &[u8]| {
+        U3vError::Usb(format!(
+            "overflow: the device sent {sent} bytes into a {}-byte buffer",
+            buf.len()
+        ))
+    };
 
-    // Read current dimensions from register map (may have been changed via GenApi set).
-    let width = state.registers.width();
-    let height = state.registers.height();
-    let pixel_format = state.registers.pixel_format_code();
-    let bpp = bytes_per_pixel(pixel_format);
-    let payload_size = crate::registers::payload_bytes(width, height, pixel_format);
+    let Some(block) = state.block.as_mut() else {
+        // A new block: its leader.
+        let layout = state.registers.host_layout();
+        if layout.max_leader_size < LEADER_SIZE || layout.max_trailer_size < TRAILER_SIZE {
+            return Err(U3vError::Usb(format!(
+                "the SIRM's leader/trailer sizes {}/{} are below the {LEADER_SIZE}/{TRAILER_SIZE} the device requires",
+                layout.max_leader_size, layout.max_trailer_size
+            )));
+        }
+        let (width, height) = (state.registers.width(), state.registers.height());
+        let pixel_format = state.registers.pixel_format_code();
+        let id = state.next_block_id;
+        state.next_block_id += 1;
 
-    match phase {
-        0 => {
-            // Leader
-            let leader = build_leader(width, height, pixel_format);
-            let n = leader.len().min(buf.len());
-            buf[..n].copy_from_slice(&leader[..n]);
-            Ok(n)
+        let leader = build_leader(id, width, height, pixel_format);
+        if buf.len() < leader.len() {
+            return Err(overflow(leader.len(), buf));
         }
-        1 => {
-            // Payload: animated test pattern.
-            let frame_idx = (state.frame_count / 3) as u16;
-            let mut data = generate_test_pattern(width as usize, height as usize, bpp, frame_idx);
-            // A packed format's frame is not a whole number of bytes a pixel;
-            // its payload is the declared size whatever the pattern.
-            data.resize(payload_size as usize, 0x80);
-            let n = data.len().min(buf.len());
-            buf[..n].copy_from_slice(&data[..n]);
-            Ok(n)
+        buf[..leader.len()].copy_from_slice(&leader);
+
+        let mut payload = generate_test_pattern(
+            width as usize,
+            height as usize,
+            bytes_per_pixel(pixel_format),
+            id as u16,
+        );
+        // A packed format's frame is not a whole number of bytes a pixel;
+        // its payload is the declared size whatever the pattern.
+        payload.resize(state.registers.payload_size() as usize, 0x80);
+        let transfers: Vec<u32> = std::iter::repeat_n(
+            layout.payload_transfer_size,
+            layout.payload_transfer_count as usize,
+        )
+        .chain([layout.final_transfer1_size, layout.final_transfer2_size])
+        .filter(|&size| size > 0)
+        .collect();
+        state.block = Some(Block {
+            id,
+            payload,
+            sent: 0,
+            transfers: transfers.into_iter(),
+            height,
+        });
+        return Ok(leader.len());
+    };
+
+    // The payload, a transfer at a time; a transfer past the payload's end
+    // is a zero-length one, which ends it as a short transfer does.
+    if block.sent < block.payload.len()
+        && let Some(size) = block.transfers.next()
+    {
+        let n = (size as usize).min(block.payload.len() - block.sent);
+        if buf.len() < n {
+            return Err(overflow(n, buf));
         }
-        2 => {
-            // Trailer
-            let block_id = state.frame_count / 3;
-            let trailer = build_trailer(block_id, payload_size);
-            let n = trailer.len().min(buf.len());
-            buf[..n].copy_from_slice(&trailer[..n]);
-            Ok(n)
-        }
-        _ => unreachable!(),
+        buf[..n].copy_from_slice(&block.payload[block.sent..block.sent + n]);
+        block.sent += n;
+        return Ok(n);
     }
+
+    // The trailer: what was sent is what is valid.
+    let trailer = build_trailer(block.id, block.sent as u64, block.height);
+    state.block = None;
+    if buf.len() < trailer.len() {
+        return Err(overflow(trailer.len(), buf));
+    }
+    buf[..trailer.len()].copy_from_slice(&trailer);
+    Ok(trailer.len())
 }
 
 /// Mono8: concentric rings radiating from center, shifting with each frame.
@@ -307,60 +427,68 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
-fn build_leader(width: u32, height: u32, pixel_format: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; 42];
-    buf[0..4].copy_from_slice(&LEADER_PREFIX.to_le_bytes());
-    buf[6..8].copy_from_slice(&42u16.to_le_bytes());
-    buf[10..12].copy_from_slice(&0x0001u16.to_le_bytes()); // payload_type = image
-    buf[12..20].copy_from_slice(&0u64.to_le_bytes()); // timestamp
-    buf[20..24].copy_from_slice(&pixel_format.to_le_bytes());
-    buf[24..28].copy_from_slice(&width.to_le_bytes());
-    buf[28..32].copy_from_slice(&height.to_le_bytes());
+/// A 52-byte image leader, as Wireshark's `dissect_u3v_stream_leader`
+/// reads one.
+fn build_leader(block_id: u64, width: u32, height: u32, pixel_format: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; LEADER_SIZE as usize];
+    buf[0..4].copy_from_slice(&LEADER_PREFIX);
+    buf[6..8].copy_from_slice(&(LEADER_SIZE as u16).to_le_bytes());
+    buf[8..16].copy_from_slice(&block_id.to_le_bytes());
+    buf[18..20].copy_from_slice(&0x0001u16.to_le_bytes()); // payload type: image
+    buf[20..28].copy_from_slice(&(block_id * 1_000_000).to_le_bytes()); // timestamp
+    buf[28..32].copy_from_slice(&pixel_format.to_le_bytes());
+    buf[32..36].copy_from_slice(&width.to_le_bytes());
+    buf[36..40].copy_from_slice(&height.to_le_bytes());
     buf
 }
 
-fn build_trailer(block_id: u64, valid_payload_size: u64) -> Vec<u8> {
-    let mut buf = vec![0u8; 28];
-    buf[0..4].copy_from_slice(&TRAILER_PREFIX.to_le_bytes());
-    buf[6..8].copy_from_slice(&28u16.to_le_bytes());
-    // status = 0 (success)
-    buf[12..20].copy_from_slice(&block_id.to_le_bytes());
+/// A 32-byte image trailer, as `dissect_u3v_stream_trailer` reads one.
+fn build_trailer(block_id: u64, valid_payload_size: u64, height: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; TRAILER_SIZE as usize];
+    buf[0..4].copy_from_slice(&TRAILER_PREFIX);
+    buf[6..8].copy_from_slice(&(TRAILER_SIZE as u16).to_le_bytes());
+    buf[8..16].copy_from_slice(&block_id.to_le_bytes());
+    // status 0: success
     buf[20..28].copy_from_slice(&valid_payload_size.to_le_bytes());
+    buf[28..32].copy_from_slice(&height.to_le_bytes());
     buf
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registers::{REG_ACQ_START, SIRM_BASE, SIRM_REQUIRED_LEADER_SIZE};
     use std::sync::Arc;
     use viva_u3v::device::U3vDevice;
+
+    fn open(transport: &Arc<FakeU3vTransport>) -> U3vDevice<FakeU3vTransport> {
+        U3vDevice::open(Arc::clone(transport), 0x81, 0x01, Some(STREAM_EP), None).unwrap()
+    }
 
     #[test]
     fn fake_transport_open_device() {
         let transport = Arc::new(FakeU3vTransport::new(640, 480, 0x0108_0001));
-        let device = U3vDevice::open(transport, 0x81, 0x01, Some(0x82), None).unwrap();
+        let device = open(&transport);
         assert_eq!(device.abrm().manufacturer_name, "FakeCorp");
         assert_eq!(device.abrm().model_name, "FakeU3V");
+        assert_eq!(device.abrm().family_name, "Test");
         assert_eq!(device.sbrm().max_cmd_transfer, 4096);
+        assert_eq!(device.sbrm().sirm_address, SIRM_BASE);
     }
 
     #[test]
     fn fake_transport_fetch_xml() {
         let transport = Arc::new(FakeU3vTransport::new(320, 240, 0x0108_0001));
-        let mut device = U3vDevice::open(transport, 0x81, 0x01, None, None).unwrap();
-        let xml = device.fetch_xml().unwrap();
+        let xml = open(&transport).fetch_xml().unwrap();
         assert!(xml.contains("RegisterDescription"));
         assert!(xml.contains("Width"));
-        assert!(xml.contains("Height"));
     }
 
     /// The fake refuses what a device refuses, and records the attempt.
     #[test]
     fn a_write_only_register_read_is_refused_and_recorded() {
-        use crate::registers::REG_ACQ_START;
-
         let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
-        let mut device = U3vDevice::open(transport.clone(), 0x81, 0x01, None, None).unwrap();
+        let mut device = open(&transport);
         transport.clear_reads();
 
         let err = device
@@ -378,20 +506,64 @@ mod tests {
         assert!(transport.was_read(REG_ACQ_START));
 
         device
-            .write_mem(REG_ACQ_START, &1u32.to_be_bytes())
+            .write_mem(REG_ACQ_START, &1u32.to_le_bytes())
             .expect("a WO register still accepts a write");
     }
 
     #[test]
-    fn fake_transport_stream_frame() {
+    fn a_required_size_refuses_a_write() {
         let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
-        let payload_size = 64 * 64;
+        let err = open(&transport)
+            .write_mem(SIRM_REQUIRED_LEADER_SIZE, &64u32.to_le_bytes())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                U3vError::Status {
+                    status: StatusCode::WriteProtect
+                }
+            ),
+            "{err:?}"
+        );
+    }
 
-        let mut stream = viva_u3v::stream::U3vStream::new(transport, 0x82, 256, 256, payload_size);
+    #[test]
+    fn an_unmapped_address_is_refused() {
+        let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
+        let err = open(&transport).read_mem(0x0228, 8).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                U3vError::Status {
+                    status: StatusCode::InvalidAddress
+                }
+            ),
+            "{err:?}"
+        );
+    }
 
+    /// Nothing streams until the host has enabled the stream and started
+    /// acquisition; then blocks arrive in the configured transfers.
+    #[test]
+    fn a_stream_flows_only_when_enabled_and_acquiring() {
+        let transport = Arc::new(FakeU3vTransport::new(64, 48, 0x0108_0001));
+        let mut device = open(&transport);
+        let mut stream = device.open_stream(0).unwrap();
+        assert!(transport.stream_enabled());
+        assert!(matches!(
+            stream.next_frame_within(Duration::from_millis(1)),
+            Ok(None)
+        ));
+
+        device
+            .write_mem(REG_ACQ_START, &1u32.to_le_bytes())
+            .unwrap();
         let frame = stream.next_frame().unwrap();
-        assert_eq!(frame.leader.width, 64);
-        assert_eq!(frame.leader.height, 64);
-        assert_eq!(frame.payload.len(), payload_size);
+        assert_eq!((frame.leader.width, frame.leader.height), (64, 48));
+        assert_eq!(frame.payload.len(), 64 * 48);
+        assert_eq!(frame.trailer.block_id, frame.leader.block_id);
+
+        device.stop_stream().unwrap();
+        assert!(!transport.stream_enabled());
     }
 }

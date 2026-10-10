@@ -1,7 +1,8 @@
 //! In-process fake USB3 Vision camera for testing.
 //!
 //! [`FakeU3vTransport`] implements [`UsbTransfer`](viva_u3v::usb::UsbTransfer)
-//! with an in-memory register map and GenCP command handling. It can be used
+//! with an in-memory register map and GenCP command handling, both laid out
+//! from the standards rather than from `viva-u3v` ([`registers`]). It can be used
 //! with `U3vDevice::open()` to create a fully functional `Camera` without any
 //! USB hardware.
 //!
@@ -18,8 +19,7 @@
 //! assert_eq!(width, "640");
 //! ```
 
-#[allow(dead_code)]
-mod registers;
+pub mod registers;
 mod transport;
 
 pub use registers::{REG_TRIGGER_SOFTWARE, WRITE_ONLY_REGISTERS};

@@ -5,6 +5,8 @@ mod backend;
 mod bindings;
 mod commands;
 mod error;
+#[cfg(test)]
+mod permissions;
 mod state;
 
 use std::sync::Arc;

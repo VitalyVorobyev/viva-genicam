@@ -4,6 +4,10 @@
 //! fails in the running app only — "Generate report" did (Codex review of
 //! #174) — so the sets are checked here against the commands `main.rs`
 //! registers and the commands the UI invokes.
+//!
+//! A unit test rather than one under `tests/`: a separate test binary that
+//! links Tauri lacks the Windows manifest tauri-build embeds in the app's,
+//! and on Windows dies before `main` (`STATUS_ENTRYPOINT_NOT_FOUND`).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -143,7 +147,8 @@ fn in_no_permission() {}
 fn tauri_refuses_what_no_permission_allows() {
     let app = tauri::test::mock_builder()
         .invoke_handler(tauri::generate_handler![generate_report, in_no_permission])
-        .build(tauri::generate_context!())
+        // `test = true` leaves out the Info.plist that `main` already embeds.
+        .build(tauri::generate_context!(test = true))
         .unwrap();
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()

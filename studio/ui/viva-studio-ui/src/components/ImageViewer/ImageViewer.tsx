@@ -146,11 +146,9 @@ export function ImageViewer({
     const bytes = snapshotRef.current;
     if (!bytes) return;
 
-    const width = imageMeta?.width ?? wsStreamInfo?.width ?? streamerInfo?.width ?? 0;
-    const height = imageMeta?.height ?? wsStreamInfo?.height ?? streamerInfo?.height ?? 0;
-    const imageData = snapshotImageData(bytes, { width, height, pixelFormat });
+    const imageData = snapshotImageData(bytes);
     if (!imageData) {
-      // Unsupported format or truncated buffer — silent no-op
+      // Not a BMP the decoder understands — nothing to save.
       return;
     }
 
@@ -158,14 +156,14 @@ export function ImageViewer({
     try {
       const blob = await encodeImageDataToPng(imageData);
       if (!blob) return;
-      const filename = suggestFilename(pixelFormat, width, height);
+      const filename = suggestFilename(pixelFormat, imageData.width, imageData.height);
       await saveSnapshot(blob, filename);
     } catch (err) {
       console.error("Snapshot save failed:", err);
     } finally {
       setIsSnapshotBusy(false);
     }
-  }, [isSnapshotBusy, imageMeta, wsStreamInfo, streamerInfo, pixelFormat]);
+  }, [isSnapshotBusy, pixelFormat]);
 
   const handleApplyRoi = useCallback(async () => {
     if (!roiRect) return;

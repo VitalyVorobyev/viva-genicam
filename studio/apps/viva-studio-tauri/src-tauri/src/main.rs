@@ -141,6 +141,7 @@ fn main() {
 
     // Clone for the setup closure.
     let embedded_for_setup = embedded_backend.clone();
+    let embedded_for_exit = embedded_backend.clone();
 
     if let Err(err) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -219,15 +220,36 @@ fn main() {
             commands::ip_config::get_network_config,
             commands::ip_config::set_persistent_ip,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
+        .map(|app| app.run(move |_, event| on_run_event(&event, embedded_for_exit.as_deref())))
     {
         tracing::error!("error while running tauri application: {err}");
     }
 }
 
+/// What the app does as its event loop ends.
+fn on_run_event(_event: &tauri::RunEvent, _embedded: Option<&backend::embedded::EmbeddedBackend>) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tauri ends the process without dropping managed state, so the exit
+    /// hook is the only place an embedded camera can be released.
+    #[test]
+    fn exit_releases_the_embedded_camera() {
+        use backend::embedded::fake_camera;
+
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = fake_camera::connect_and_acquire(&fake).await;
+
+            on_run_event(&tauri::RunEvent::Exit, Some(&backend));
+
+            fake_camera::assert_released(&fake).await;
+        });
+    }
 
     #[test]
     fn config_error_message_names_the_path_and_the_cause() {

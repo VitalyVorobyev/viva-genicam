@@ -978,13 +978,104 @@ fn camera_bayer_pattern(pf: viva_genicam::pfnc::PixelFormat) -> viva_streamer::b
     }
 }
 
+/// The in-process fake GigE camera, for tests that drive this backend end to
+/// end. Every such test binds UDP 3956, so they take [`fake_camera::lock`]
+/// first.
+#[cfg(test)]
+pub(crate) mod fake_camera {
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Duration;
+
+    use viva_fake_gige::registers::{CCP, REG_ACQ_STOP};
+    use viva_fake_gige::{FakeCamera, GvcpCommand};
+
+    use super::EmbeddedBackend;
+    use crate::backend::DeviceBackend;
+
+    static PORT_3956: Mutex<()> = Mutex::new(());
+
+    /// Serialise the tests that bind the GVCP port.
+    pub(crate) fn lock() -> MutexGuard<'static, ()> {
+        PORT_3956
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) async fn start() -> FakeCamera {
+        loop {
+            let built = FakeCamera::builder()
+                .bind_ip([127, 0, 0, 1].into())
+                .port(3956)
+                .width(64)
+                .height(48)
+                .fps(30)
+                .build()
+                .await;
+            match built {
+                Ok(camera) => return camera,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("failed to start the fake camera: {e}"),
+            }
+        }
+    }
+
+    /// Connect to `fake`, start streaming, and check the camera is held:
+    /// without that the release assertions would pass vacuously.
+    pub(crate) async fn connect_and_acquire(fake: &FakeCamera) -> EmbeddedBackend {
+        let backend = EmbeddedBackend::new();
+        backend.connect("127.0.0.1").await.expect("connect");
+        backend
+            .start_acquisition()
+            .await
+            .expect("start acquisition");
+        assert_ne!(
+            fake.peek(CCP, 4).await,
+            vec![0; 4],
+            "precondition: the backend holds control privilege"
+        );
+        fake.commands().reset();
+        backend
+    }
+
+    /// The camera was told to stop acquiring and no longer has a controller.
+    pub(crate) async fn assert_released(fake: &FakeCamera) {
+        let stops = fake.commands().at(GvcpCommand::WriteReg, REG_ACQ_STOP)
+            + fake.commands().at(GvcpCommand::WriteMem, REG_ACQ_STOP);
+        assert!(stops >= 1, "AcquisitionStop was never written");
+        assert_eq!(
+            fake.peek(CCP, 4).await,
+            vec![0; 4],
+            "control privilege is still held"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
 
     use viva_genicam::genapi::{GenApiError, NodeMap, RegisterIo};
 
-    use super::{build_feature_state, camera_stream_info};
+    use super::{build_feature_state, camera_stream_info, fake_camera};
+    use crate::backend::DeviceBackend;
+
+    /// Disconnecting must leave the camera free for the next client: not
+    /// still streaming into a closed socket, and not still claimed until its
+    /// heartbeat runs out.
+    #[test]
+    fn disconnect_stops_acquisition_and_releases_control() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = fake_camera::connect_and_acquire(&fake).await;
+
+            backend.disconnect("127.0.0.1").await.expect("disconnect");
+
+            fake_camera::assert_released(&fake).await;
+        });
+    }
 
     #[test]
     fn stream_info_preserves_camera_pixel_format() {

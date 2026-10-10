@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zenoh = "1"
 
 [dev-dependencies]
+viva-fake-gige = { path = "../../../../crates/viva-fake-gige" }
 viva-genapi-xml = { path = "../../../../crates/viva-genapi-xml" }
 
 [build-dependencies]

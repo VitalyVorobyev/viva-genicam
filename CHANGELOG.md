@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hold one attempt for up to 4 × 500 ms; they are now drained against the
   attempt's fixed deadline. The count-based mismatch handling this replaces is
   removed.
+- A feature that is itself a `<Converter>` or `<IntConverter>` can be written.
+  A converter declares no `<AccessMode>`; it reads and writes through its
+  `<pValue>`, but `effective_access_mode` reported it `RO` and `Camera::set`
+  refused it with a type error, so `viva-camctl set` and Python's `set` could
+  not write it either. The new `NodeMap::declared_access_mode` gives a
+  converter the access mode of the first non-converter node down its
+  `<pValue>` chain (aravis does the same); `effective_access_mode`,
+  `viva-service`'s `FeatureState` and Python's node `access` build on it, and
+  `Camera::set` writes through the converter's `<FormulaTo>`. In the vendor
+  corpus this is AVT Manta and Prosilica's `AcquisitionFrameRateAbs`; a
+  `<Float>` that delegates to a converter, which is how most cameras model
+  `ExposureTime` and `Gain`, was never affected. `Node::access_mode` cannot
+  see the chain and still answers `RO` for a converter.
 
 ### Viva Studio and documentation — not part of any published crate
 
@@ -72,6 +85,21 @@ section changes the library.
   gate. It found one latent defect: `TriggerSection` returned before calling
   its hooks. React 19 tolerates that today only because the early path calls
   no hooks at all.
+- **Studio releases the camera on disconnect and at exit.** Disconnect only
+  aborted the streaming tasks, and exit did nothing, because Tauri ends the
+  process without dropping managed state; either way the camera kept
+  acquiring and stayed claimed until its heartbeat expired, so an immediate
+  reconnect could be refused. Both now stop the stream, send
+  `AcquisitionStop`, release control privilege and drop the camera, each step
+  best-effort with a short timeout. The first backend tests against
+  `viva-fake-gige` cover both paths (ST-03).
+- **Studio writes features that are converters** (see Fixed above for the
+  library side): the UI model and the write pre-flight took a converter's
+  access mode as a fixed `RO` and refused the write before it was sent.
+- **Studio CI builds the Tauri app on Linux, Windows and macOS, and runs on
+  library changes.** It used to compile the app on macOS only, which no known
+  user runs, and to trigger only on `studio/` paths, so a library-only change
+  could break Studio unseen (#105, repaired in #106).
 - **Studio has a role and a plan**
   ([ADR-0024](docs/adrs/adr0024-studio-reference-viewer.md)). It is the
   library's reference viewer: a single-camera tool to configure, view and

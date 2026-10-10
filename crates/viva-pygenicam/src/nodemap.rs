@@ -27,11 +27,13 @@ pub(crate) fn to_node_info<'py>(
     py: Python<'py>,
     name: &str,
     node: &Node,
+    nodemap: &NodeMap,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("name", name)?;
     dict.set_item("kind", node.kind_name())?;
-    dict.set_item("access", access_str(node.access_mode()))?;
+    // Declared through the nodemap: a converter takes its `<pValue>`'s mode.
+    dict.set_item("access", access_str(nodemap.declared_access_mode(name)))?;
     dict.set_item("visibility", visibility_str(node.visibility()))?;
     dict.set_item("display_name", node.display_name())?;
     dict.set_item("description", node.description())?;
@@ -76,7 +78,7 @@ pub(crate) fn node_info_with_state<'py>(
     nodemap: &NodeMap,
     io: &dyn viva_genapi::RegisterIo,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let dict = to_node_info(py, name, node)?;
+    let dict = to_node_info(py, name, node, nodemap)?;
     add_effective_access(&dict, nodemap, name, io)?;
     Ok(dict)
 }
@@ -92,7 +94,7 @@ pub(crate) fn collect_node_info<'py>(
     let list = PyList::empty(py);
     for name in nodemap.node_names() {
         if let Some(node) = nodemap.node(name) {
-            list.append(to_node_info(py, name, node)?)?;
+            list.append(to_node_info(py, name, node, nodemap)?)?;
         }
     }
     Ok(list)

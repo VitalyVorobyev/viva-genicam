@@ -1,14 +1,21 @@
 name: Studio CI
 
+# Studio builds against the library crates through path dependencies, so a
+# library-only change can break it: #105 did, and nothing ran until #106
+# repaired main (ADR-0024 amends ADR-0017 here).
 on:
   push:
     branches: [ main ]
     paths:
       - "studio/**"
+      - "crates/**"
+      - "Cargo.toml"
       - ".github/workflows/studio-ci.yml"
   pull_request:
     paths:
       - "studio/**"
+      - "crates/**"
+      - "Cargo.toml"
       - ".github/workflows/studio-ci.yml"
   workflow_dispatch:
 
@@ -57,12 +64,21 @@ jobs:
   # gate: #81 deleted the code behind a `use` there and the dead import sat on
   # `main` unnoticed. Linting it needs no frontend build, so it is cheap.
   tauri-lint:
-    # macOS for the same reason `tauri-build` uses it: no GTK/WebKit system
-    # packages to install, and no apt package names to rot.
-    runs-on: macos-latest
+    # Every OS Studio users run it on. The known reporters are on Windows 11
+    # and Ubuntu 24.04, where this job never used to compile the app.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, ubuntu-24.04, windows-latest ]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # Pinned to 24.04 so the package name cannot drift under ubuntu-latest.
+      - name: Install WebKitGTK
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -75,6 +91,7 @@ jobs:
           workspaces: studio/apps/viva-studio-tauri/src-tauri
 
       - name: Cargo fmt
+        if: runner.os == 'Linux'
         working-directory: studio/apps/viva-studio-tauri/src-tauri
         run: cargo fmt --all --check
 
@@ -83,10 +100,10 @@ jobs:
         working-directory: studio/apps/viva-studio-tauri/src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      # The crate carries 50 unit tests that no job had ever run: it is excluded
-      # from the studio workspace (`studio/Cargo.toml`), so `cargo test
-      # --workspace` never reached it, and this job stopped at clippy. Running
-      # them costs almost nothing once `--all-targets` has compiled them.
+      # The crate's tests were run by no job until this one: it is excluded from
+      # the studio workspace (`studio/Cargo.toml`), so `cargo test --workspace`
+      # never reaches it. Two of them drive the embedded backend against
+      # viva-fake-gige on UDP 3956 and serialise on a lock.
       - name: Cargo test
         if: ${{ !cancelled() }}
         working-directory: studio/apps/viva-studio-tauri/src-tauri

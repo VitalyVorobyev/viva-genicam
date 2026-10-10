@@ -211,6 +211,7 @@ and, because `src-tauri` is outside that workspace:
 cd apps/viva-studio-tauri/src-tauri
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
 plus the UI:

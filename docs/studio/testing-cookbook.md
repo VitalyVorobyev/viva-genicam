@@ -145,7 +145,7 @@ What runs today, and where:
 | `viva-service --test fake_camera_e2e` | repo root | yes (`ci.yml`) |
 | Studio workspace unit tests (`viva_xml_model`, `viva_streamer`, mock service) | `studio/`: `cargo test --workspace` | yes (`studio-ci.yml`) |
 | `streamer_e2e`: synthetic frames over Zenoh, BMP over WebSocket | `studio/`: `cargo test -p e2e-tests --test streamer_e2e` | yes (`studio-ci.yml`) |
-| Tauri backend unit tests | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, macOS only (`studio-ci.yml`) |
+| Tauri backend tests, two of them against `viva-fake-gige` | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, on macOS, Ubuntu and Windows (`studio-ci.yml`) |
 | UI tests (vitest): pure functions in node, components on jsdom | `studio/ui/viva-studio-ui`: `bun run test -- --run` | yes (`studio-ci.yml`) |
 | `e2e` and `feature_state` | `studio/tests/e2e` | **no** — `#[ignore]`d, and the harness still targets aravis's `arv-fake-gv-camera-0.8` and a pre-rename service path. Backlog ST-03 replaces them with backend tests on `viva-fake-gige` |
 

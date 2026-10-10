@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use viva_service::device::DeviceOps;
-use viva_service::{nodes, status, xml};
+use viva_service::{nodes, report, status, xml};
 use viva_u3v::usb::UsbTransfer;
 use viva_zenoh_api::{DeviceAnnounce, keys};
 
@@ -126,6 +126,31 @@ async fn spawn_service_tasks<T: UsbTransfer + 'static>(
         session.clone(),
         device_id.clone(),
         handle.raw_xml().to_string(),
+        shutdown.clone(),
+    ));
+    // The report cannot open the camera this service holds — a USB device
+    // admits one owner — so it describes it from what the service read
+    // (backlog DX-06).
+    tokio::spawn(report::serve(
+        session.clone(),
+        device_id.clone(),
+        format!("viva-service-u3v {}", env!("CARGO_PKG_VERSION")),
+        viva_genicam::report::ReportTarget::Open(viva_genicam::report::OpenCamera {
+            transport: "USB3 Vision".to_string(),
+            identity: vec![
+                ("name".to_string(), announce.name.clone()),
+                ("model".to_string(), announce.model.clone()),
+                ("serial".to_string(), announce.serial.clone()),
+                (
+                    "manufacturer".to_string(),
+                    announce
+                        .manufacturer
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+            ],
+            xml: handle.raw_xml().to_string(),
+        }),
         shutdown.clone(),
     ));
     tokio::spawn(nodes::run_set_queryable(

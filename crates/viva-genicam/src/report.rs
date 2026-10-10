@@ -64,7 +64,7 @@ impl ReportRequest {
 }
 
 /// The camera a report describes in detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportTarget {
     /// None: the report covers the host and discovery only.
     None,
@@ -74,6 +74,24 @@ pub enum ReportTarget {
     Ip(Ipv4Addr),
     /// The `n`th camera discovery found.
     Index(usize),
+    /// A camera the caller already holds open. A USB3 Vision device admits
+    /// one owner, so the report cannot open it a second time the way it opens
+    /// a GigE Vision camera's control channel; the caller hands over what it
+    /// read instead (backlog DX-06).
+    Open(OpenCamera),
+}
+
+/// What a caller holding a camera open knows about it, for
+/// [`ReportTarget::Open`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCamera {
+    /// How the camera is attached, such as `"USB3 Vision"`.
+    pub transport: String,
+    /// Its identity, one line each: manufacturer, model, serial, and
+    /// whatever else tells it apart.
+    pub identity: Vec<(String, String)>,
+    /// Its GenApi XML.
+    pub xml: String,
 }
 
 /// How to render a register's value beside its raw hex.
@@ -175,6 +193,7 @@ pub async fn build_report(request: &ReportRequest) -> String {
         request.discovery_timeout.as_millis() as u64,
     )
     .await;
+    usb_devices(&mut out).await;
     camera(&mut out, request, &devices).await;
 
     let _ = writeln!(out, "## End of report");
@@ -317,11 +336,56 @@ async fn discovery(
     }
 }
 
+/// The USB3 Vision devices on this host, when built with `u3v-usb`.
+#[cfg(feature = "u3v-usb")]
+async fn usb_devices(out: &mut String) {
+    let _ = writeln!(out, "## USB3 Vision devices");
+    let _ = writeln!(out);
+    // USB enumeration blocks.
+    match tokio::task::spawn_blocking(viva_u3v::discovery::discover).await {
+        Ok(Ok(devices)) if devices.is_empty() => {
+            let _ = writeln!(out, "none found");
+        }
+        Ok(Ok(devices)) => {
+            for (index, dev) in devices.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "[{index}] {:04x}:{:04x} on bus {} address {}",
+                    dev.vendor_id, dev.product_id, dev.bus, dev.address
+                );
+                let _ = writeln!(out, "     manufacturer: {}", opt(&dev.manufacturer));
+                let _ = writeln!(out, "     model:        {}", opt(&dev.model));
+                let _ = writeln!(out, "     serial:       {}", opt(&dev.serial));
+            }
+        }
+        Ok(Err(err)) => {
+            let _ = writeln!(out, "FAILED: {err}");
+        }
+        Err(err) => {
+            let _ = writeln!(out, "FAILED: {err}");
+        }
+    }
+    let _ = writeln!(out);
+}
+
+#[cfg(not(feature = "u3v-usb"))]
+async fn usb_devices(_out: &mut String) {}
+
 async fn camera(out: &mut String, request: &ReportRequest, discovered: &[DeviceInfo]) {
     let _ = writeln!(out, "## Camera");
     let _ = writeln!(out);
 
-    let device = match select(request.target, discovered) {
+    if let ReportTarget::Open(camera) = &request.target {
+        let _ = writeln!(out, "transport: {}", camera.transport);
+        for (key, value) in &camera.identity {
+            let _ = writeln!(out, "{key}: {value}");
+        }
+        let _ = writeln!(out);
+        genapi(out, &camera.xml, request.include_xml);
+        return;
+    }
+
+    let device = match select(&request.target, discovered) {
         Some(device) => device,
         None => {
             let _ = writeln!(
@@ -378,9 +442,9 @@ async fn fetch_xml(control: Arc<Mutex<GigeDevice>>) -> Result<String, XmlError> 
     .await
 }
 
-fn select(target: ReportTarget, discovered: &[DeviceInfo]) -> Option<DeviceInfo> {
-    match target {
-        ReportTarget::None => None,
+fn select(target: &ReportTarget, discovered: &[DeviceInfo]) -> Option<DeviceInfo> {
+    match *target {
+        ReportTarget::None | ReportTarget::Open(_) => None,
         ReportTarget::Ip(ip) => Some(
             discovered
                 .iter()

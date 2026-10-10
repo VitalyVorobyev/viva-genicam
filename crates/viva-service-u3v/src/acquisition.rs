@@ -151,8 +151,11 @@ async fn handle_start<T: UsbTransfer + 'static>(
                     break;
                 }
                 let t0 = std::time::Instant::now();
-                match stream.next_frame() {
-                    Ok(frame) => {
+                // No frame within the poll is a stream waiting, as in trigger
+                // mode; a timeout used to end the stream (Codex review of #179).
+                match stream.next_frame_within(std::time::Duration::from_millis(250)) {
+                    Ok(None) => continue,
+                    Ok(Some(frame)) => {
                         if tx
                             .blocking_send(FrameData {
                                 width: frame.leader.width,

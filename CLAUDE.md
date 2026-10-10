@@ -118,6 +118,7 @@ instead of stopping:
 ```bash
 viva-camctl report --ip <CAMERA-IP> --out viva-report.txt   # everything
 viva-camctl xml    --ip <CAMERA-IP> --out camera.xml        # just the XML
+viva-camctl report --usb 0 --out viva-report.txt            # a USB3 Vision camera
 ```
 
 A node we cannot handle does not fail the document: the XML layer records it in

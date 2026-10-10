@@ -56,7 +56,7 @@ mod rusb_impl {
         ) -> Result<usize, U3vError> {
             self.handle
                 .write_bulk(endpoint, data, timeout)
-                .map_err(|e| U3vError::Usb(e.to_string()))
+                .map_err(usb_error)
         }
 
         fn bulk_read(
@@ -67,7 +67,16 @@ mod rusb_impl {
         ) -> Result<usize, U3vError> {
             self.handle
                 .read_bulk(endpoint, buf, timeout)
-                .map_err(|e| U3vError::Usb(e.to_string()))
+                .map_err(usb_error)
+        }
+    }
+
+    /// A timeout is its own error: a stream waiting for its next frame, as in
+    /// trigger mode, times out without anything being wrong.
+    fn usb_error(error: rusb::Error) -> U3vError {
+        match error {
+            rusb::Error::Timeout => U3vError::Timeout,
+            other => U3vError::Usb(other.to_string()),
         }
     }
 }

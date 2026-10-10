@@ -162,8 +162,9 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] Plug in a USB3 Vision camera, start Studio without `ZENOH_CONFIG` -> it
       appears in the device list with a USB3 badge
 - [ ] Connect -> features read and write; Start -> frames and a frame rate
-- [ ] Diagnostics -> the Camera panel says IP configuration is GigE's; the
-      report names the camera
+- [ ] Diagnostics -> the Camera panel says IP configuration is GigE's; Save
+      report… -> the report's Camera section says "transport: USB3 Vision"
+      and holds the camera's XML
 - [ ] Linux: without a udev rule granting access, the camera is missing or
       fails to open — note which
 

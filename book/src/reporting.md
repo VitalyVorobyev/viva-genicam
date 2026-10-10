@@ -46,6 +46,12 @@ interfaces and what discovery did or did not hear:
 viva-camctl report --out viva-report.txt
 ```
 
+For a USB3 Vision camera, name it by its place in `viva-camctl list-usb`:
+
+```bash
+viva-camctl report --usb 0 --out viva-report.txt
+```
+
 The `.txt` extension is not cosmetic: GitHub rejects `.xml` attachments, so the
 bundle is written as text you can drag onto an issue. Zip the raw XML if you
 send it separately.
@@ -70,8 +76,9 @@ Sections, in order:
 | Environment | `viva-camctl` version, host OS and architecture |
 | Network interfaces | Every interface **as the library sees it**, with index and IPv4 addresses |
 | Discovery | Each camera that answered: IP, MAC, manufacturer, model, version, serial, user name |
+| USB3 Vision devices | Each USB3 Vision camera on the host: vendor and product, bus position, manufacturer, model, serial |
 | Camera | Which device the rest of the report is about |
-| Bootstrap registers | The GVCP standard register block, decoded |
+| Bootstrap registers | The GVCP standard register block, decoded (GigE Vision only) |
 | GenApi | XML size, schema version, node and feature counts, and any node that was dropped |
 | GenApi XML | The document itself |
 

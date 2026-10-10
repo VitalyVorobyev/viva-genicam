@@ -47,6 +47,10 @@ struct ConnectedCamera {
     camera: Box<dyn Device>,
     /// The id discovery reported, to find the camera's MAC again.
     device_id: String,
+    /// What the diagnostic report says about a camera it cannot open itself:
+    /// a USB3 Vision device admits one owner, and this app is it (DX-06).
+    /// `None` for GigE Vision, which the report opens read-only.
+    report: Option<viva_genicam::report::OpenCamera>,
 }
 
 /// State for an active image acquisition session.
@@ -65,6 +69,9 @@ const RELEASE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// more, and encoding each as a BMP costs CPU the user cannot see.
 const DISPLAY_FPS: u32 = 30;
 
+/// How long stopping waits for a streaming task to finish on its own.
+const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// How often a stream reports its frame rate and dropped frames.
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -76,6 +83,9 @@ pub struct EmbeddedBackend {
     discovered: RwLock<Vec<DeviceInfo>>,
     /// The USB3 Vision cameras the last scan found, by device id.
     usb: RwLock<HashMap<String, U3vDeviceInfo>>,
+    /// The id each USB position was last given: a camera keeps its
+    /// serial-based id when a later scan cannot read the serial.
+    u3v_ids: RwLock<HashMap<(u8, u8), String>>,
     /// The host address each camera's discovery reply arrived at, by MAC.
     /// Kept across scans: one scan can miss a camera the list still shows.
     local_ips: RwLock<HashMap<[u8; 6], Ipv4Addr>>,
@@ -92,6 +102,7 @@ impl EmbeddedBackend {
             discovered: RwLock::new(Vec::new()),
             local_ips: RwLock::new(HashMap::new()),
             usb: RwLock::new(HashMap::new()),
+            u3v_ids: RwLock::new(HashMap::new()),
             acquisition: AsyncMutex::new(None),
             events,
         }
@@ -120,11 +131,21 @@ impl EmbeddedBackend {
     ) {
         let (mut devices, local_ips) = discovered_gige(found);
         let mut by_id = HashMap::new();
+        let mut known = self.u3v_ids.write().await;
         for info in usb {
-            let device = u3v_device_info(&info);
-            by_id.insert(device.id.clone(), info);
+            let position = (info.bus, info.address);
+            // A serial that cannot be read now — the camera may be busy, open
+            // in this app — keeps the id it had (Codex review of #179).
+            let id = match (&info.serial, known.get(&position)) {
+                (None, Some(id)) => id.clone(),
+                _ => u3v_id(&info),
+            };
+            known.insert(position, id.clone());
+            let device = u3v_device_info(&info, id.clone());
+            by_id.insert(id, info);
             devices.push(device);
         }
+        drop(known);
         *self.usb.write().await = by_id;
         *self.discovered.write().await = devices.clone();
         // Updated, never cleared: a camera one scan misses keeps its address
@@ -167,12 +188,18 @@ impl EmbeddedBackend {
             .model
             .clone()
             .unwrap_or_else(|| "USB3 Vision camera".to_string());
+        let identity = u3v_identity(&info);
         let (camera, xml) =
             tauri::async_runtime::spawn_blocking(move || viva_genicam::connect_u3v_with_xml(&info))
                 .await
                 .map_err(|e| format!("Camera task failed: {e}"))?
                 .map_err(|e| format!("Failed to open USB3 Vision camera {device_id}: {e}"))?;
-        self.attach(Box::new(camera), device_id).await;
+        let report = viva_genicam::report::OpenCamera {
+            transport: "USB3 Vision".to_string(),
+            identity,
+            xml: xml.clone(),
+        };
+        self.attach(Box::new(camera), device_id, Some(report)).await;
         Ok(ConnectResult {
             xml,
             device_name: model.clone(),
@@ -181,10 +208,16 @@ impl EmbeddedBackend {
     }
 
     /// Hold `camera` as the connected one.
-    async fn attach(&self, camera: Box<dyn Device>, device_id: &str) {
+    async fn attach(
+        &self,
+        camera: Box<dyn Device>,
+        device_id: &str,
+        report: Option<viva_genicam::report::OpenCamera>,
+    ) {
         *self.camera.lock().await = Some(ConnectedCamera {
             camera,
             device_id: device_id.to_string(),
+            report,
         });
     }
 
@@ -215,11 +248,17 @@ impl EmbeddedBackend {
         let mut acq = self.acquisition.lock().await;
         if let Some(state) = acq.take() {
             let _ = state.shutdown_tx.send(true);
-            for handle in state.task_handles {
-                handle.abort();
-                // Wait for the task to go, so no frame reader outlives the
-                // stream it reads; an aborted task resolves as cancelled.
-                let _ = handle.await;
+            for mut handle in state.task_handles {
+                // Let each task finish: the frame reader shuts its stream down
+                // on the way out, so no reader outlives it (Codex review of
+                // #179). One that does not finish in time is cancelled.
+                if tokio::time::timeout(TASK_STOP_TIMEOUT, &mut handle)
+                    .await
+                    .is_err()
+                {
+                    handle.abort();
+                    let _ = handle.await;
+                }
             }
         }
     }
@@ -309,7 +348,7 @@ impl DeviceBackend for EmbeddedBackend {
             "Camera connected, XML fetched"
         );
 
-        self.attach(Box::new(camera), device_id).await;
+        self.attach(Box::new(camera), device_id, None).await;
 
         Ok(ConnectResult {
             xml,
@@ -469,21 +508,24 @@ impl DeviceBackend for EmbeddedBackend {
                         .map(|device| device.remote_addr().ip())
                         .ok()
                 });
-                Ok((connected.device_id.clone(), ip))
+                Ok((connected.device_id.clone(), ip, connected.report.clone()))
             })
             .await
             .ok();
         let mut notes = vec!["mode:        embedded".to_string()];
         let target = match connected {
-            Some((device_id, Some(std::net::IpAddr::V4(ip)))) => {
+            // A USB3 Vision camera this app holds: the report cannot open it
+            // again, so it is described from what was read at connect (DX-06).
+            Some((device_id, _, Some(open))) => {
+                notes.push(format!("connected:   {device_id}"));
+                ReportTarget::Open(open)
+            }
+            Some((device_id, Some(std::net::IpAddr::V4(ip)), None)) => {
                 notes.push(format!("connected:   {device_id}"));
                 ReportTarget::Ip(ip)
             }
-            Some((device_id, _)) => {
-                // The report covers GigE Vision only so far (backlog DX-06).
-                notes.push(format!(
-                    "connected:   {device_id}, which this report does not cover"
-                ));
+            Some((device_id, _, None)) => {
+                notes.push(format!("connected:   {device_id}"));
                 ReportTarget::None
             }
             None => ReportTarget::None,
@@ -678,6 +720,10 @@ async fn run_frame_reader(
             Err(e) => warn!("BMP encode error: {e}"),
         }
     }
+    // Wait for the stream to let go of the camera before this task ends: the
+    // backend awaits this task before it starts another stream or releases
+    // the camera.
+    frame_stream.shutdown().await;
 }
 
 /// The stream description the viewer last got, re-sent when a frame
@@ -773,18 +819,39 @@ async fn discover_u3v_devices() -> Vec<U3vDeviceInfo> {
     }
 }
 
-/// A USB3 Vision camera as the device list shows it. USB has no MAC or IP,
-/// so the id is the vendor and product, told apart by the serial, or by the
-/// bus position when the camera reports none.
-fn u3v_device_info(info: &U3vDeviceInfo) -> DeviceInfo {
+/// A USB3 Vision camera's identity, for the diagnostic report.
+fn u3v_identity(info: &U3vDeviceInfo) -> Vec<(String, String)> {
+    let opt = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_string());
+    vec![
+        (
+            "usb".to_string(),
+            format!(
+                "{:04x}:{:04x} on bus {} address {}",
+                info.vendor_id, info.product_id, info.bus, info.address
+            ),
+        ),
+        ("manufacturer".to_string(), opt(&info.manufacturer)),
+        ("model".to_string(), opt(&info.model)),
+        ("serial".to_string(), opt(&info.serial)),
+    ]
+}
+
+/// A USB3 Vision camera's id. USB has no MAC or IP, so it is the vendor and
+/// product, told apart by the serial, or by the bus position when the camera
+/// reports none.
+fn u3v_id(info: &U3vDeviceInfo) -> String {
     let instance = match &info.serial {
         Some(serial) => serial.clone(),
         None => format!("{}.{}", info.bus, info.address),
     };
-    let id = format!(
+    format!(
         "u3v-{:04x}{:04x}-{instance}",
         info.vendor_id, info.product_id
-    );
+    )
+}
+
+/// A USB3 Vision camera as the device list shows it, under `id`.
+fn u3v_device_info(info: &U3vDeviceInfo, id: String) -> DeviceInfo {
     let model = info
         .model
         .clone()
@@ -1225,9 +1292,16 @@ mod tests {
             let device = viva_fake_u3v::FakeU3vCamera::new(64, 48)
                 .open_device()
                 .expect("fake U3V camera");
-            let (camera, _xml) = viva_genicam::open_u3v_device(device).expect("open");
+            let (camera, xml) = viva_genicam::open_u3v_device(device).expect("open");
             let backend = super::EmbeddedBackend::new(Default::default());
-            backend.attach(Box::new(camera), "u3v-fake").await;
+            let open = viva_genicam::report::OpenCamera {
+                transport: "USB3 Vision".to_string(),
+                identity: vec![("model".to_string(), "FakeU3V".to_string())],
+                xml,
+            };
+            backend
+                .attach(Box::new(camera), "u3v-fake", Some(open))
+                .await;
 
             let width = backend.get_feature_state("Width").await.expect("Width");
             assert_eq!(width.value, serde_json::json!(64));
@@ -1246,9 +1320,23 @@ mod tests {
             fake_camera::first_frame(&streamer.ws_url).await;
             backend.stop_acquisition().await.expect("stop");
 
+            // Stopping waits for the USB reader, so a stream started right
+            // away has the endpoint to itself (Codex review of #179).
+            let streamer = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("restart");
+            fake_camera::first_frame(&streamer.ws_url).await;
+            backend.stop_acquisition().await.expect("stop again");
+
             // An IP configuration is GigE Vision's alone.
             let refused = backend.get_network_config().await.unwrap_err();
             assert!(refused.contains("GigE Vision"), "{refused}");
+
+            // The report describes the camera this app holds (DX-06).
+            let report = backend.report(false).await.expect("report");
+            assert!(report.contains("transport: USB3 Vision"), "{report}");
+            assert!(report.contains("model: FakeU3V"), "{report}");
 
             backend.disconnect().await.expect("disconnect");
         });
@@ -1278,10 +1366,53 @@ mod tests {
                 event_ep_in: None,
             },
         };
-        let named = super::u3v_device_info(&info(Some("A123")));
-        assert_eq!(named.id, "u3v-2676ba02-A123");
-        assert_eq!(named.transport, "usb3");
-        assert_eq!(super::u3v_device_info(&info(None)).id, "u3v-2676ba02-2.7");
+        assert_eq!(super::u3v_id(&info(Some("A123"))), "u3v-2676ba02-A123");
+        assert_eq!(super::u3v_id(&info(None)), "u3v-2676ba02-2.7");
+        let listed = super::u3v_device_info(&info(Some("A123")), "u3v-x".to_string());
+        assert_eq!(
+            (listed.id.as_str(), listed.transport.as_str()),
+            ("u3v-x", "usb3")
+        );
+    }
+
+    /// A camera keeps its id when a later scan cannot read its serial — it
+    /// may be busy, open in this very app — so the list does not grow a
+    /// second entry for it and its first id still connects (Codex review of
+    /// #179).
+    #[test]
+    fn a_usb3_vision_camera_keeps_its_id_when_its_serial_goes_unread() {
+        tauri::async_runtime::block_on(async {
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend
+                .record_scan(vec![], vec![u3v_info(Some("A123"))])
+                .await;
+            backend.record_scan(vec![], vec![u3v_info(None)]).await;
+
+            let ids: Vec<String> = backend.discover().await.into_iter().map(|d| d.id).collect();
+            assert_eq!(ids, ["u3v-2676ba02-A123"]);
+            assert!(backend.usb.read().await.contains_key("u3v-2676ba02-A123"));
+        });
+    }
+
+    fn u3v_info(serial: Option<&str>) -> viva_genicam::u3v::discovery::U3vDeviceInfo {
+        viva_genicam::u3v::discovery::U3vDeviceInfo {
+            bus: 2,
+            address: 7,
+            vendor_id: 0x2676,
+            product_id: 0xba02,
+            serial: serial.map(str::to_string),
+            manufacturer: Some("Vendor".to_string()),
+            model: Some("Model".to_string()),
+            interface_info: viva_genicam::u3v::descriptor::U3vInterfaceInfo {
+                control_iface: 0,
+                control_ep_in: 0x81,
+                control_ep_out: 0x01,
+                stream_iface: Some(1),
+                stream_ep_in: Some(0x82),
+                event_iface: None,
+                event_ep_in: None,
+            },
+        }
     }
 
     /// The camera's `GevSCPSPacketSize`, low 16 bits.

@@ -13,6 +13,9 @@ pub const REG_ACQ_START: u64 = 0x20024;
 pub const REG_ACQ_STOP: u64 = 0x20028;
 pub const REG_ACQ_FRAME_RATE: u64 = 0x2002c;
 pub const REG_EXPOSURE_TIME: u64 = 0x20030;
+/// `PayloadSize`, read-only: computed on every read from the current width,
+/// height and pixel format's bit depth, packed formats included.
+pub const REG_PAYLOAD_SIZE: u64 = 0x20048;
 pub const REG_DEVICE_MODEL: u64 = 0x20200;
 pub const REG_DEVICE_VENDOR: u64 = 0x20220;
 /// Backs `ActionDeviceKey`, an `Integer` that reaches this `WO` register
@@ -143,6 +146,9 @@ impl RegisterMap {
     }
 
     pub fn read(&self, addr: u64, len: usize) -> Vec<u8> {
+        if addr == REG_PAYLOAD_SIZE && len == 4 {
+            return (self.payload_size() as u32).to_be_bytes().to_vec();
+        }
         let mut result = vec![0u8; len];
         for (i, byte) in result.iter_mut().enumerate() {
             let a = addr + i as u64;
@@ -159,6 +165,13 @@ impl RegisterMap {
     }
 
     /// Current image width from the register map.
+    /// Bytes in one frame: width × height × the pixel format's bit depth
+    /// (PFNC bits 23-16), rounded up to whole bytes — so a packed format such
+    /// as `Mono12Packed` takes 1.5 bytes a pixel, as on a real camera.
+    pub fn payload_size(&self) -> u64 {
+        payload_bytes(self.width(), self.height(), self.pixel_format_code())
+    }
+
     pub fn width(&self) -> u32 {
         let b = self.read(REG_WIDTH, 4);
         u32::from_be_bytes(b[..4].try_into().unwrap())
@@ -307,8 +320,19 @@ fn generate_xml() -> String {
     <EnumEntry Name="RGB8Packed" NameSpace="Standard">
       <Value>35127316</Value>
     </EnumEntry>
+    <EnumEntry Name="Mono12Packed" NameSpace="Standard">
+      <Value>17563719</Value>
+    </EnumEntry>
     <pValue>PixelFormatReg</pValue>
   </Enumeration>
+  <IntReg Name="PayloadSize" NameSpace="Standard">
+    <Address>0x20048</Address>
+    <Length>4</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </IntReg>
   <IntReg Name="PixelFormatReg">
     <Address>0x20008</Address>
     <Length>4</Length>
@@ -400,6 +424,12 @@ fn generate_xml() -> String {
   <Port Name="Device" NameSpace="Standard" />
 </RegisterDescription>"#
         .to_string()
+}
+
+/// Bytes in a `width` × `height` frame of PFNC format `pixel_format`.
+pub fn payload_bytes(width: u32, height: u32, pixel_format: u32) -> u64 {
+    let bits = u64::from((pixel_format >> 16) & 0xFF);
+    (u64::from(width) * u64::from(height) * bits).div_ceil(8)
 }
 
 #[cfg(test)]

@@ -2753,6 +2753,90 @@ mod tests {
         assert_eq!(io.regs.borrow()[&0x100], 2048u32.to_be_bytes());
     }
 
+    /// `invalidate` makes the next read ask the device, for a value it
+    /// changed on its own.
+    #[test]
+    fn invalidate_forgets_a_cached_value() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="Ticks">
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RO</AccessMode>
+                    <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+                </Integer>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MockIo::with_registers(&[(0x100, 1u32.to_be_bytes().to_vec())]);
+
+        assert_eq!(nodemap.get_integer("Ticks", &io).unwrap(), 1);
+        io.write(0x100, &2u32.to_be_bytes()).unwrap();
+        assert_eq!(nodemap.get_integer("Ticks", &io).unwrap(), 1, "cached");
+        nodemap.invalidate("Ticks");
+        assert_eq!(nodemap.get_integer("Ticks", &io).unwrap(), 2);
+    }
+
+    /// An imposed ceiling binds every path to the node, not only the
+    /// primitive getters (Codex review of #186): an imposed-`WO` feature is
+    /// write-only for feature state, an imposed-`RO` command does not
+    /// execute, and computed nodes refuse a read their ceiling forbids.
+    #[test]
+    fn an_imposed_ceiling_binds_every_path() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="Key">
+                    <ImposedAccessMode>WO</ImposedAccessMode>
+                    <pValue>KeyReg</pValue>
+                </Integer>
+                <IntReg Name="KeyReg">
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Command Name="Reset">
+                    <ImposedAccessMode>RO</ImposedAccessMode>
+                    <Address>0x104</Address><Length>4</Length>
+                    <CommandValue>1</CommandValue>
+                </Command>
+                <Converter Name="Scaled">
+                    <ImposedAccessMode>WO</ImposedAccessMode>
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO</FormulaFrom>
+                    <pValue>ScaledReg</pValue>
+                </Converter>
+                <FloatReg Name="ScaledReg">
+                    <Address>0x108</Address><Length>8</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </FloatReg>
+                <IntSwissKnife Name="Twice">
+                    <ImposedAccessMode>WO</ImposedAccessMode>
+                    <pVariable Name="K">KeyReg</pVariable>
+                    <Formula>K * 2</Formula>
+                </IntSwissKnife>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let mut nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MockIo::with_registers(&[
+            (0x100, 7u32.to_be_bytes().to_vec()),
+            (0x104, 0u32.to_be_bytes().to_vec()),
+            (0x108, 2.0f64.to_be_bytes().to_vec()),
+        ]);
+
+        assert!(nodemap.is_write_only("Key"));
+        nodemap
+            .feature_state("Key", &io)
+            .expect("a write-only feature's state is readable");
+
+        assert!(
+            nodemap.exec_command("Reset", &io).is_err(),
+            "an imposed-RO command ran"
+        );
+        assert_eq!(io.regs.borrow()[&0x104], 0u32.to_be_bytes());
+
+        assert!(nodemap.get_converter("Scaled", &io).is_err());
+        assert!(nodemap.get_integer("Twice", &io).is_err());
+    }
+
     /// A converter's access comes from the whole `<pValue>` chain, not from
     /// the first node on it. The AVT `AcquisitionFrameRateLimit` shape: a
     /// converter over a `<Float>` that declares no access of its own and

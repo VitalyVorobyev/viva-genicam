@@ -383,6 +383,12 @@ impl<T: RegisterIo> Camera<T> {
                     .map_err(GenicamError::from)?;
             }
 
+            // The latch changed the value behind the cache's back: unless the
+            // XML links the two, the cached first reading came back every
+            // time, no fit was possible, and calibration reported success on
+            // default coefficients (found once a fit had to succeed, Codex
+            // review of #185).
+            self.nodemap.invalidate(value_node);
             let raw_ticks = self
                 .nodemap
                 .get_integer(value_node, &self.transport)

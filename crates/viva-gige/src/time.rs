@@ -118,6 +118,9 @@ pub struct TimeSync {
     auto_fit: bool,
     /// Whether to trim outliers when fitting (10% from each end when n≥10).
     trim_outliers: bool,
+    /// Whether `a` and `b` hold a fit of the samples, rather than their
+    /// defaults: a mapping exists only then.
+    fitted: bool,
 }
 
 impl TimeSync {
@@ -138,6 +141,7 @@ impl TimeSync {
             freq_hz: None,
             auto_fit: true,
             trim_outliers: false,
+            fitted: false,
         }
     }
 
@@ -236,11 +240,7 @@ impl TimeSync {
             self.freq_hz = Some(freq);
         }
         self.recompute();
-        if self.window.len() >= 2 {
-            Some((self.a, self.b))
-        } else {
-            None
-        }
+        self.fitted.then_some((self.a, self.b))
     }
 
     fn recompute(&mut self) {
@@ -301,6 +301,7 @@ impl TimeSync {
         let intercept = intercept_rel - slope * base_tick;
         self.a = slope;
         self.b = intercept;
+        self.fitted = true;
 
         trace!(
             slope = self.a,
@@ -310,14 +311,15 @@ impl TimeSync {
         );
     }
 
-    /// Convert a device timestamp into a host `SystemTime`, or `None` before
-    /// two samples give a mapping.
+    /// Convert a device timestamp into a host `SystemTime`, or `None` until a
+    /// fit of the samples has succeeded: samples alone are not a mapping when
+    /// auto-fit is off, or when they cannot be fitted (Codex review of #185).
     ///
     /// Without a mapping this returned `SystemTime::now()`, which looks like a
     /// device time mapped to the host but is only when it was asked; every
     /// frame of a Python GigE stream carried one (backlog DOC-11).
     pub fn to_host_time(&self, dev_ts: u64) -> Option<SystemTime> {
-        if self.window.len() < 2 {
+        if !self.fitted {
             return None;
         }
         let origin = self.origin_system?;
@@ -402,6 +404,30 @@ mod tests {
         assert_eq!(sync.to_host_time(1_000), None);
         sync.update(2_000, Instant::now() + Duration::from_millis(1));
         assert!(sync.to_host_time(1_500).is_some());
+    }
+
+    /// Samples are not a mapping: with auto-fit off and no `fit()`, or with
+    /// samples a fit rejects, there is still no host time to give (Codex
+    /// review of #185).
+    #[test]
+    fn nothing_maps_without_a_successful_fit() {
+        let start = Instant::now();
+        let mut manual = TimeSync::new();
+        manual.set_auto_fit(false);
+        manual.update(1_000, start);
+        manual.update(2_000, start + Duration::from_millis(1));
+        assert_eq!(manual.to_host_time(1_500), None, "no fit() was called");
+        manual.fit(None);
+        assert!(manual.to_host_time(1_500).is_some());
+
+        let mut stuck = TimeSync::new();
+        stuck.update(5_000, start);
+        stuck.update(5_000, start + Duration::from_millis(1));
+        assert_eq!(
+            stuck.to_host_time(5_000),
+            None,
+            "a device clock that did not move"
+        );
     }
 
     #[test]

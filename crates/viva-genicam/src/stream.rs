@@ -1756,14 +1756,25 @@ pub struct U3vFrameStream {
     rx: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     reader: Option<tokio::task::JoinHandle<()>>,
-    /// Clears StreamEnable; called with `true` to wait for the device lock,
-    /// `false` to give up if someone holds it.
+    /// Clears StreamEnable; see [`DisableStream`].
     disable: Option<DisableStream>,
+    /// Blocks dropped because their trailer reported an error.
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Clears a device's StreamEnable.
+/// Clears a device's StreamEnable. Called with `true` it waits for the
+/// device lock; with `false` it gives up if someone holds the lock, and
+/// returns whether it ran.
 #[cfg(feature = "u3v")]
-type DisableStream = Box<dyn FnOnce(bool) + Send>;
+type DisableStream = std::sync::Arc<dyn Fn(bool) -> bool + Send + Sync>;
+
+/// Whether a USB3 Vision trailer status is an error: the severity bit (15)
+/// of a GenCP-style status code (GenCP 1.2 §4.3.2.1). A warning or info
+/// status leaves the block valid.
+#[cfg(feature = "u3v")]
+fn trailer_reports_an_error(status: u16) -> bool {
+    status & 0x8000 != 0
+}
 
 /// How long the U3V reader waits for a frame to start before checking whether
 /// it was told to stop.
@@ -1792,6 +1803,8 @@ impl U3vFrameStream {
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let reader_dropped = std::sync::Arc::clone(&dropped);
 
         let reader = tokio::task::spawn_blocking(move || {
             loop {
@@ -1804,6 +1817,16 @@ impl U3vFrameStream {
                 // mode, not a failure; it is also when the reader can stop.
                 match stream.next_frame_within(U3V_READ_POLL) {
                     Ok(None) => continue,
+                    // A block the device marks failed is not an image to
+                    // hand on, short or not (Codex review of #184).
+                    Ok(Some(raw)) if trailer_reports_an_error(raw.trailer.status) => {
+                        reader_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::debug!(
+                            block_id = raw.trailer.block_id,
+                            status = format_args!("{:#06x}", raw.trailer.status),
+                            "dropping a block the device marked failed"
+                        );
+                    }
                     Ok(Some(raw)) => {
                         let pixel_format = PixelFormat::from_code(raw.leader.pixel_format);
                         let frame = Frame {
@@ -1832,7 +1855,14 @@ impl U3vFrameStream {
             stop_tx,
             reader: Some(reader),
             disable,
+            dropped,
         }
+    }
+
+    /// Blocks dropped since the stream started because their trailer
+    /// reported an error.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Receive the next complete frame.
@@ -1872,12 +1902,17 @@ impl U3vFrameStream {
 #[cfg(feature = "u3v")]
 impl Drop for U3vFrameStream {
     /// A stream dropped without [`shutdown`](Self::shutdown) still stops the
-    /// device's stream, unless the device is busy: this must not block on a
-    /// lock its own thread may hold.
+    /// device's stream. If the device is busy, a thread of its own waits for
+    /// it: the dropping thread must not block on a lock it may hold, and
+    /// giving up left StreamEnable set (Codex review of #184).
     fn drop(&mut self) {
         let _ = self.stop_tx.send(true);
-        if let Some(disable) = self.disable.take() {
-            disable(false);
+        if let Some(disable) = self.disable.take()
+            && !disable(false)
+        {
+            std::thread::spawn(move || {
+                disable(true);
+            });
         }
     }
 }
@@ -1991,20 +2026,19 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
             .open_stream(payload_hint)
             .map_err(|e| GenicamError::transport(e.to_string()))?;
 
-        let disable: DisableStream = Box::new(move |wait: bool| {
+        let disable: DisableStream = std::sync::Arc::new(move |wait: bool| {
             let guard = if wait {
                 device.lock().ok()
             } else {
                 device.try_lock().ok()
             };
-            match guard {
-                Some(mut device) => {
-                    if let Err(error) = device.stop_stream() {
-                        tracing::debug!(%error, "clearing StreamEnable");
-                    }
-                }
-                None => tracing::debug!("device busy; StreamEnable left set"),
+            let Some(mut device) = guard else {
+                return false;
+            };
+            if let Err(error) = device.stop_stream() {
+                tracing::debug!(%error, "clearing StreamEnable");
             }
+            true
         });
         Ok(U3vFrameStream::start_inner(stream, Some(disable)))
     }

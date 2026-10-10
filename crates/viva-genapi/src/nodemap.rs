@@ -247,9 +247,10 @@ impl NodeMap {
     /// unknown name.
     pub fn is_write_only(&self, name: &str) -> bool {
         self.value_chain(name).into_iter().any(|link| {
-            self.nodes
-                .get(link)
-                .is_some_and(|node| matches!(node.access_mode(), Some(AccessMode::WO)))
+            self.nodes.get(link).is_some_and(|node| {
+                matches!(node.access_mode(), Some(AccessMode::WO))
+                    || node.meta().imposed_access == Some(AccessMode::WO)
+            })
         })
     }
 
@@ -357,6 +358,7 @@ impl NodeMap {
             Node::SwissKnife(sk) => Some(sk.output),
             _ => None,
         }) {
+            self.ensure_not_imposed(name, AccessMode::WO)?;
             return match output {
                 SkOutput::Integer => {
                     let node = match self.nodes.get(name) {
@@ -486,6 +488,7 @@ impl NodeMap {
             Node::SwissKnife(sk) => Some(sk.output),
             _ => None,
         }) {
+            self.ensure_not_imposed(name, AccessMode::WO)?;
             return match output {
                 SkOutput::Float => {
                     let node = match self.nodes.get(name) {
@@ -764,6 +767,16 @@ impl NodeMap {
     /// `<AccessMode>` (backlog GA-23).
     fn imposed_access(&self, name: &str) -> Option<AccessMode> {
         self.nodes.get(name).and_then(|n| n.meta().imposed_access)
+    }
+
+    /// Refuse a read of `name` that its imposed access forbids: for the
+    /// computed nodes, which have no access mode of their own to check
+    /// (Codex review of #186).
+    fn ensure_not_imposed(&self, name: &str, forbidden: AccessMode) -> Result<(), GenApiError> {
+        if self.imposed_access(name) == Some(forbidden) {
+            return Err(GenApiError::Access(name.to_string()));
+        }
+        Ok(())
     }
 
     /// Refuse a read of `name` that its `access`, or the access imposed on
@@ -1073,6 +1086,8 @@ impl NodeMap {
     /// Execute a command feature by writing a value to the command register.
     pub fn exec_command(&mut self, name: &str, io: &dyn RegisterIo) -> Result<(), GenApiError> {
         let node = self.get_command_node(name)?;
+        // An imposed `RO` forbids the command's write, wherever it goes.
+        self.ensure_not_imposed(name, AccessMode::RO)?;
         // Determine the value to write and the target.
         let cmd_value = node.command_value.unwrap_or(1);
 
@@ -1624,6 +1639,19 @@ impl NodeMap {
         })
     }
 
+    /// Forget `name`'s cached value, and those of the nodes that depend on
+    /// it, so the next read asks the device.
+    ///
+    /// For a value the device changes on its own whose XML does not say so:
+    /// `Cachable` and `PollingTime` are not honoured yet (backlog GA-05), so
+    /// a latched timestamp read twice came back the same.
+    pub fn invalidate(&self, name: &str) {
+        if let Some(node) = self.nodes.get(name) {
+            node.invalidate_cache();
+        }
+        self.invalidate_dependents(name);
+    }
+
     fn invalidate_dependents(&self, name: &str) {
         self.bump_generation();
         if let Some(children) = self.dependents.get(name) {
@@ -1692,6 +1720,7 @@ impl NodeMap {
     /// Read a Converter feature value (float) using the provided transport.
     pub fn get_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<f64, GenApiError> {
         let node = self.get_converter_node(name)?;
+        self.ensure_not_imposed(name, AccessMode::WO)?;
         if let Some((value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
@@ -1706,6 +1735,7 @@ impl NodeMap {
     /// Read an IntConverter feature value (integer) using the provided transport.
     pub fn get_int_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
         let node = self.get_int_converter_node(name)?;
+        self.ensure_not_imposed(name, AccessMode::WO)?;
         if let Some((value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {

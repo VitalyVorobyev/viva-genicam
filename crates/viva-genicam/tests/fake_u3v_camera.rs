@@ -208,3 +208,77 @@ async fn no_frame_arrives_before_acquisition_starts() {
     assert_eq!(frame.payload.len(), 64 * 64);
     frames.shutdown().await;
 }
+
+/// A leader and a trailer as Wireshark's `packet-u3v.c` reads them.
+fn u3v_block(block_id: u64, status: u16, payload: &[u8]) -> [Vec<u8>; 3] {
+    let mut leader = vec![0u8; 52];
+    leader[0..4].copy_from_slice(b"U3VL");
+    leader[6..8].copy_from_slice(&52u16.to_le_bytes());
+    leader[8..16].copy_from_slice(&block_id.to_le_bytes());
+    leader[18..20].copy_from_slice(&1u16.to_le_bytes()); // image
+    leader[28..32].copy_from_slice(&0x0108_0001u32.to_le_bytes()); // Mono8
+    leader[32..36].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    leader[36..40].copy_from_slice(&1u32.to_le_bytes());
+    let mut trailer = vec![0u8; 32];
+    trailer[0..4].copy_from_slice(b"U3VT");
+    trailer[6..8].copy_from_slice(&32u16.to_le_bytes());
+    trailer[8..16].copy_from_slice(&block_id.to_le_bytes());
+    trailer[16..18].copy_from_slice(&status.to_le_bytes());
+    trailer[20..28].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+    [leader, payload.to_vec(), trailer]
+}
+
+/// A block whose trailer reports an error is dropped and counted, not handed
+/// on as an image; a warning status is not an error (GenCP's severity bit,
+/// bit 15). Codex review of #184.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_block_the_device_marks_failed_is_dropped_and_counted() {
+    use std::sync::Arc;
+    use viva_genicam::U3vFrameStream;
+    use viva_u3v::stream::{StreamLayout, U3vStream};
+    use viva_u3v::usb::MockUsbTransfer;
+
+    let mock = Arc::new(MockUsbTransfer::new());
+    for (id, status) in [(1, 0xA101), (2, 0x0000), (3, 0x2001)] {
+        for transfer in u3v_block(id, status, &[id as u8; 64]) {
+            mock.enqueue_read(0x82, transfer);
+        }
+    }
+    let layout = StreamLayout::new(64, 52, 32, 4, 1 << 20).unwrap();
+    let mut frames = U3vFrameStream::start(U3vStream::new(mock, 0x82, layout));
+
+    let first = frames.next_frame().await.unwrap().expect("a frame");
+    assert_eq!(first.payload[0], 2, "the failed block 1 was handed on");
+    let second = frames.next_frame().await.unwrap().expect("a frame");
+    assert_eq!(second.payload[0], 3, "a warning dropped block 3");
+    assert_eq!(frames.dropped(), 1);
+    frames.shutdown().await;
+}
+
+/// A stream dropped while another thread holds the device still clears
+/// StreamEnable once the device is free; it used to give up (Codex review of
+/// #184).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_dropped_while_the_device_is_busy_still_stops() {
+    use std::time::{Duration, Instant};
+    use viva_genicam::U3vStreamBuilder;
+
+    let (transport, mut camera) = inspectable_camera();
+    let frames = U3vStreamBuilder::new(&mut camera).build().expect("stream");
+    {
+        let _busy = camera.transport().lock_device().unwrap();
+        drop(frames);
+        assert!(
+            transport.stream_enabled(),
+            "cleared while the device was locked"
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while transport.stream_enabled() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !transport.stream_enabled(),
+        "StreamEnable left set after a busy drop"
+    );
+}

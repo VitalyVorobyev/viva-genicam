@@ -107,7 +107,15 @@ fn build_from_nodemap(xml_model: &XmlModel, nodemap: &NodeMap) -> Result<UiGraph
 
     // Map each node from NodeDecl to UiNode
     for decl in &xml_model.nodes {
-        let ui_node = node_decl_to_ui_node(decl, Some(nodemap));
+        let mut ui_node = node_decl_to_ui_node(decl, Some(nodemap));
+        // The access the whole `<pValue>` chain allows, ceilings included, as
+        // the runtime enforces it; the node's own is only the first link
+        // (Codex review of #186).
+        if ui_node.access_mode.is_some()
+            && let Some(declared) = nodemap.declared_access_mode(&ui_node.name)
+        {
+            ui_node.access_mode = Some(access_mode_str(declared));
+        }
         nodes_by_name.insert(ui_node.name.clone(), ui_node);
     }
 
@@ -547,6 +555,30 @@ mod tests {
         let graph = parse_genicam_xml(xml).expect("parse");
         assert_eq!(
             graph.nodes_by_name["SensorWidth"].access_mode.as_deref(),
+            Some("RO")
+        );
+    }
+
+    /// A feature takes the ceiling of the register it delegates to, as the
+    /// runtime does: an `RW` integer over an imposed-`RO` register is `RO`
+    /// (Codex review of #186).
+    #[test]
+    fn a_ceiling_down_the_pvalue_chain_caps_the_feature() {
+        let xml = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="Width">
+                    <pValue>WidthReg</pValue>
+                </Integer>
+                <IntReg Name="WidthReg">
+                    <ImposedAccessMode>RO</ImposedAccessMode>
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let graph = parse_genicam_xml(xml).expect("parse");
+        assert_eq!(
+            graph.nodes_by_name["Width"].access_mode.as_deref(),
             Some("RO")
         );
     }

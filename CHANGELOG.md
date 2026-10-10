@@ -101,6 +101,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An `<ImposedAccessMode>` binds every path to a node, not only the plain
+  getters and setters (Codex review of #186): an imposed `WO` makes a feature
+  write-only for feature state and the service's snapshots, an imposed `RO`
+  stops a command from executing, a converter or SwissKnife refuses a read its
+  ceiling forbids, and Studio shows the access the whole `<pValue>` chain
+  allows rather than the first node's.
+- `viva-service` stops serving and announcing a camera that a successful
+  discovery pass no longer finds, including when it finds none: an empty pass
+  was treated as a failed one, so an unplugged only camera was announced
+  forever. And a device time maps to host time only once a fit of the samples
+  has succeeded, not as soon as two samples exist (Codex review of #185).
+- `Camera::time_calibrate` fits real samples. It read the latched timestamp
+  through the feature cache, which nothing invalidated unless the camera's
+  XML links the latch to the value, so every sample after the first repeated
+  it, no fit was possible — and calibration reported success on default
+  coefficients that mapped every timestamp to when calibration began. Each
+  sample is now read fresh; `NodeMap::invalidate` forgets a node's cached
+  value. Found once a fit had to succeed.
+- A USB3 Vision block whose trailer reports an error (the status's severity
+  bit) is dropped and counted by `U3vFrameStream::dropped`, which Studio's
+  dropped-frame count now includes, rather than handed on as an image; and a
+  stream dropped while another thread holds the device still clears
+  StreamEnable once it is free (Codex review of #184).
 - **USB3 Vision now speaks the protocol the standards describe** (backlog
   TC-27). It could not have worked with a real camera: no layer matched what
   GenCP 1.2, a Grasshopper3's own XML, aravis and Wireshark agree on, and the

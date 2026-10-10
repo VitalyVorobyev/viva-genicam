@@ -13,7 +13,7 @@ export function nodeKindLabel(kind: UiNodeKind): string {
   return `Unknown (${kind.Unknown.tag})`;
 }
 
-export function isUnknownKind(kind: UiNodeKind): boolean {
+export function isUnknownKind(kind: UiNodeKind): kind is Exclude<UiNodeKind, string> {
   return typeof kind !== "string";
 }
 

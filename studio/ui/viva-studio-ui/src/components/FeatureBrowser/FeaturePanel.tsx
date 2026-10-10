@@ -12,7 +12,7 @@ import { EnumEditor } from "./editors/EnumEditor";
 import { FloatEditor } from "./editors/FloatEditor";
 import { IntegerEditor } from "./editors/IntegerEditor";
 import { StringEditor } from "./editors/StringEditor";
-import { UnknownDebugView } from "./editors/UnknownDebugView";
+import { UnknownNodeView } from "./editors/UnknownNodeView";
 
 interface FeaturePanelProps {
   graph: UiGraph | null;
@@ -321,7 +321,7 @@ function renderEditor(
   liveState: FeatureState | undefined
 ) {
   if (isUnknownKind(node.kind)) {
-    return <UnknownDebugView raw={node.raw} />;
+    return <UnknownNodeView tag={node.kind.Unknown.tag} />;
   }
 
   switch (node.kind) {

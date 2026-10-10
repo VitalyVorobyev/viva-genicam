@@ -17,13 +17,17 @@ import { useDraftValues } from "../../state/useDraftValues";
 import { useSplitter } from "../Layout/useSplitter";
 import { CategoryList } from "./CategoryList";
 import { FeatureList } from "./FeatureList";
-import { formatLiveValue, graphSummary } from "./treeUtils";
+import { categoryPath, formatLiveValue, graphSummary } from "./treeUtils";
+import { useInView } from "./useInView";
 import { countApplicableDrafts, formatBatchProgress } from "./batchApplyUtils";
 import { buildLiveValuePreset, presetValueToDraft } from "./presetUtils";
 import { FeaturePanel } from "./FeaturePanel";
 
 // T7.1 — visibility levels; rank determines filtering inclusivity
 export type VisibilityFilter = "Beginner" | "Expert" | "Guru" | "All";
+
+/** The most search results listed; the header says when there are more. */
+const SEARCH_LIMIT = 200;
 
 const VISIBILITY_RANK: Record<string, number> = {
   Beginner: 0,
@@ -324,11 +328,10 @@ export function FeatureBrowserPage({
   const breadcrumb = useMemo(() => {
     const parts: Array<{ name: string; label: string }> = [];
     if (!graph) return parts;
-    const rootCat = graph.categories[graph.root_category];
-    if (rootCat) parts.push({ name: graph.root_category, label: rootCat.display_name });
-    if (selectedCategory && selectedCategory !== graph.root_category) {
-      const cat = graph.categories[selectedCategory];
-      if (cat) parts.push({ name: selectedCategory, label: cat.display_name });
+    const path = categoryPath(graph, selectedCategory ?? graph.root_category);
+    for (const name of path.length > 0 ? path : [graph.root_category]) {
+      const cat = graph.categories[name];
+      if (cat) parts.push({ name, label: cat.display_name });
     }
     if (selectedNodeName && selectedNodeName !== selectedCategory) {
       const node = graph.nodes_by_name[selectedNodeName];
@@ -473,18 +476,18 @@ export function FeatureBrowserPage({
     }
   }, [provider, graph, drafts, errors, resetDraft, store, toast]);
 
-  // T7.1+T7.2 — filtered search results
-  const searchResults = useMemo(() => {
-    if (!graph || !searchText.trim()) return [] as UiNode[];
+  // T7.1+T7.2 — filtered search results; the list shows the first
+  // SEARCH_LIMIT and says so.
+  const { searchResults, searchMatchCount } = useMemo(() => {
+    if (!graph || !searchText.trim()) return { searchResults: [] as UiNode[], searchMatchCount: 0 };
     const query = searchText.trim().toLowerCase();
-    return Object.values(graph.nodes_by_name)
-      .filter((node) => {
-        if (hideUnknown && isUnknownKind(node.kind)) return false;
-        if (!visibilityPassesFilter(node.visibility, visibilityFilter)) return false;
-        const display = nodeDisplayName(node).toLowerCase();
-        return node.name.toLowerCase().includes(query) || display.includes(query);
-      })
-      .slice(0, 200);
+    const matches = Object.values(graph.nodes_by_name).filter((node) => {
+      if (hideUnknown && isUnknownKind(node.kind)) return false;
+      if (!visibilityPassesFilter(node.visibility, visibilityFilter)) return false;
+      const display = nodeDisplayName(node).toLowerCase();
+      return node.name.toLowerCase().includes(query) || display.includes(query);
+    });
+    return { searchResults: matches.slice(0, SEARCH_LIMIT), searchMatchCount: matches.length };
   }, [graph, hideUnknown, searchText, visibilityFilter]);
 
   // T7.2 — keyboard nav in search results
@@ -672,6 +675,7 @@ export function FeatureBrowserPage({
               <div className="pane__scroll">
                 <SearchResults
                   results={searchResults}
+                  matchCount={searchMatchCount}
                   query={searchText.trim()}
                   selectedNodeName={selectedNodeName}
                   focusIndex={searchFocusIndex}
@@ -760,6 +764,8 @@ export function FeatureBrowserPage({
 
 interface SearchResultsProps {
   results: UiNode[];
+  /** How many features matched; `results` holds the first SEARCH_LIMIT. */
+  matchCount: number;
   query: string;
   selectedNodeName: string | null;
   focusIndex: number;
@@ -768,6 +774,7 @@ interface SearchResultsProps {
 
 function SearchResults({
   results,
+  matchCount,
   query,
   selectedNodeName,
   focusIndex,
@@ -778,7 +785,9 @@ function SearchResults({
       <div className="search-results__header">
         {results.length === 0
           ? "No matches"
-          : `${results.length} result${results.length !== 1 ? "s" : ""}`}
+          : matchCount > results.length
+            ? `First ${results.length} of ${matchCount} matches — refine the search`
+            : `${results.length} result${results.length !== 1 ? "s" : ""}`}
       </div>
       {results.length === 0 ? (
         <div className="search-results__empty">No features match "{query}"</div>
@@ -800,7 +809,7 @@ function SearchResults({
   );
 }
 
-/** One search result, following its feature's live value like a list row. */
+/** One search result, following its feature's live value while on screen. */
 function SearchResultItem({
   node,
   query,
@@ -814,7 +823,8 @@ function SearchResultItem({
   isKeyboardFocused: boolean;
   onSelect: () => void;
 }) {
-  const state = useFeature(node.kind === "Category" ? null : node.name);
+  const [ref, inView] = useInView<HTMLButtonElement>();
+  const state = useFeature(node.kind === "Category" || !inView ? null : node.name);
   const liveText = state ? formatLiveValue(state) : null;
   const classes = [
     "tree-item",
@@ -825,7 +835,7 @@ function SearchResultItem({
     .join(" ");
   return (
     <li>
-      <button type="button" className={classes} onClick={onSelect}>
+      <button ref={ref} type="button" className={classes} onClick={onSelect}>
         <span className={`tree-item__icon tree-item__icon--${nodeKindCssKey(node.kind)}`}>
           {nodeKindIcon(node.kind)}
         </span>

@@ -6,6 +6,7 @@ import { formatBackendChip } from "../../device/backendStatus";
 import { FeatureStoreProvider } from "../../device/FeatureStoreContext";
 import { loadPacketSize } from "../../device/packetSize";
 import { useAcquisition } from "../../device/useAcquisition";
+import { describeAcquisition } from "../../device/acquisitionStatus";
 import { useImageMeta } from "../../device/useImageMeta";
 import { AppLogProvider, useAppLog } from "../../context/AppLogContext";
 import { ToastProvider, useToast } from "../../context/ToastContext";
@@ -45,6 +46,7 @@ function AppLayoutInner() {
   // Offered at most once per session; read only by the effect that offers it.
   const autoReconnectOffered = useRef(false);
   const { status: acqStatus, streamerInfo, start: startAcq, stop: stopAcq } = useAcquisition();
+  const acquisition = describeAcquisition(acqStatus);
   const { imageMeta } = useImageMeta();
   const backendStatus = useBackendStatus();
   const { log } = useAppLog();
@@ -231,7 +233,16 @@ function AppLayoutInner() {
           {acqStatus.active && (
             <div className="app-header__acq-indicator">
               <span className="app-header__acq-dot" />
-              {acqStatus.fps != null ? `${acqStatus.fps.toFixed(1)} fps` : "Acquiring"}
+              <span
+                className={acquisition.dropping ? "app-header__acq-text--dropping" : undefined}
+                title={
+                  acquisition.dropping
+                    ? "Frames the camera sent that never arrived complete, or that Studio could not keep up with"
+                    : undefined
+                }
+              >
+                {acquisition.text}
+              </span>
             </div>
           )}
           {isConnected && acqStatus.active && (
@@ -280,7 +291,7 @@ function AppLayoutInner() {
                 imageMeta={imageMeta}
               />
             )}
-            {activeTab === "diagnostics" && <DiagnosticsTab />}
+            {activeTab === "diagnostics" && <DiagnosticsTab connected={isConnected} />}
           </div>
         </main>
       </div>

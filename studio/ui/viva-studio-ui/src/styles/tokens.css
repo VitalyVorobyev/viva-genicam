@@ -21,7 +21,7 @@
   /* Text */
   --text-primary:   #e6edf3;
   --text-secondary: #8b949e;
-  --text-muted:     #484f58;
+  --text-muted:     #818a95;  /* 4.5:1 or more on base, surface and elevated */
   --text-on-accent: #ffffff;
 
   /* Accent (interactive) */

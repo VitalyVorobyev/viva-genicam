@@ -242,16 +242,7 @@ pub async fn execute_command(
 #[cfg(test)]
 mod tests {
     use super::{nodes_affected_by_command, validate_node_write, validate_numeric_constraints};
-    use std::collections::HashMap;
-    use viva_xml_model::{EnumEntry, NumericConstraints, RawNode, UiNode, UiNodeKind};
-
-    fn raw_node(tag: &str) -> RawNode {
-        RawNode {
-            tag: tag.to_string(),
-            attributes: HashMap::new(),
-            children_text: HashMap::new(),
-        }
-    }
+    use viva_xml_model::{EnumEntry, NumericConstraints, UiNode, UiNodeKind};
 
     fn integer_node(name: &str, min: Option<f64>, max: Option<f64>, inc: Option<f64>) -> UiNode {
         UiNode {
@@ -272,7 +263,6 @@ mod tests {
                 value: None,
             }),
             enum_entries: vec![],
-            raw: raw_node("Integer"),
             dependencies: vec![],
             dependents: vec![],
             expression: None,
@@ -301,7 +291,6 @@ mod tests {
                 value: None,
             }),
             enum_entries: vec![],
-            raw: raw_node("Float"),
             dependencies: vec![],
             dependents: vec![],
             expression: None,
@@ -325,7 +314,6 @@ mod tests {
             representation: None,
             constraints: None,
             enum_entries: vec![],
-            raw: raw_node("Boolean"),
             dependencies: vec![],
             dependents: vec![],
             expression: None,
@@ -356,7 +344,6 @@ mod tests {
                     display_name: None,
                 })
                 .collect(),
-            raw: raw_node("Enumeration"),
             dependencies: vec![],
             dependents: vec![],
             expression: None,
@@ -513,7 +500,6 @@ mod tests {
             representation: None,
             constraints: None,
             enum_entries: vec![],
-            raw: raw_node("Command"),
             dependencies: vec![],
             dependents: vec![],
             expression: None,

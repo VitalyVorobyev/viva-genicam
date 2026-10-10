@@ -86,19 +86,23 @@ fastest way for someone with a camera to exercise the library and report what
 they saw.
 
 - **Services**: SVC-01, SVC-03, SVC-04, SVC-05.
-- **Studio foundations**: ST-33, ST-34, ST-45. Done: one
+- **Studio foundations**: ST-45. Done: one
   feature-state implementation (ST-26), one backend trait with a real remote
   implementation (ST-27), generated IPC types (ST-28), one UI data layer and
   `<FeatureControl>` (ST-29), re-reading what a write invalidates (ST-30),
   camera I/O off the runtime workers (ST-31), one frame encoder (ST-32), the
   React Compiler lint rules (ST-43), backend tests in both modes (ST-03), the
   mock service retired (ST-02), every command's permission checked by a
-  test (ST-44).
-- **Studio viewer parity**: ST-36, ST-37, ST-38, ST-39, ST-40, ST-14. Done:
-  a packet size the user sets (ST-22, seen on hardware), greying out what the
+  test (ST-44), the experiment's leftovers gone (ST-33), one UiGraph mapper
+  (ST-34).
+- **Studio viewer parity**: ST-39, ST-14, ST-37 (ForceIP). Done: a
+  packet size the user sets (ST-22, seen on hardware), greying out what the
   camera refuses (ST-35), the stream description following a mid-stream
   format change (ST-17), "Generate report" (ST-41), dropped features named
-  in Studio and Python (DX-05).
+  in Studio and Python (DX-05), dropped frames shown (ST-36), the camera's
+  information and persistent IP (ST-37), user sets (ST-38), a Feature
+  Browser that reads only what is on screen and works from the keyboard
+  (ST-40).
 - **Studio distribution**: ST-07. Done: unsigned bundles on every release
   tag, versioned with the library (ST-06).
 - **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-42.

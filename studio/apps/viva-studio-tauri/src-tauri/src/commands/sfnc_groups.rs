@@ -180,4 +180,30 @@ mod tests {
             }
         }
     }
+
+    /// User sets are how a camera keeps its settings across a power cycle,
+    /// and the vendor viewers put them on the main panel; Studio's only
+    /// persistence was its own JSON preset, which holds no selector state
+    /// (ST-38). In the vendor corpus the default set goes by `UserSetDefault`
+    /// in 13 documents and `UserSetDefaultSelector` in 22, so both are listed:
+    /// a feature the camera lacks is not drawn.
+    #[test]
+    fn bundled_groups_offer_the_user_sets() {
+        let bytes = include_bytes!("../../resources/sfnc-groups.json");
+        let groups = parse_sfnc_groups(bytes).expect("bundled groups parse");
+        let shown: Vec<&str> = groups
+            .iter()
+            .flat_map(|group| &group.features)
+            .map(|feature| feature.node.as_str())
+            .collect();
+        for node in [
+            "UserSetSelector",
+            "UserSetLoad",
+            "UserSetSave",
+            "UserSetDefault",
+            "UserSetDefaultSelector",
+        ] {
+            assert!(shown.contains(&node), "{node} is in no group");
+        }
+    }
 }

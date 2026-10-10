@@ -25,6 +25,7 @@ export type {
   FeaturesInvalidated,
   ImageMeta,
   JsonValue,
+  NetworkConfig,
   NumericRange,
   SfncFeature,
   SfncGroup,

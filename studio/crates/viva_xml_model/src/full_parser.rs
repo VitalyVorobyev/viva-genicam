@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use viva_genapi::NodeMap;
-use viva_genapi_xml::{AccessMode, EnumValueSrc, NodeDecl, NodeMeta, XmlModel};
+use viva_genapi_xml::{AccessMode, EnumValueSrc, NodeDecl, NodeMeta, SkOutput, XmlModel};
 
 use crate::error::ParseError;
 use crate::model::*;
@@ -107,8 +107,8 @@ fn build_from_nodemap(xml_model: &XmlModel, nodemap: &NodeMap) -> Result<UiGraph
 
     // Map each node from NodeDecl to UiNode
     for decl in &xml_model.nodes {
-        let (name, ui_node) = node_decl_to_ui_node(decl, nodemap);
-        nodes_by_name.insert(name, ui_node);
+        let ui_node = node_decl_to_ui_node(decl, Some(nodemap));
+        nodes_by_name.insert(ui_node.name.clone(), ui_node);
     }
 
     Ok(UiGraph {
@@ -130,7 +130,7 @@ fn build_from_xml_model(xml_model: &XmlModel) -> Result<UiGraph, ParseError> {
 
     for decl in &xml_model.nodes {
         let name = decl_name(decl);
-        let ui_node = node_decl_to_ui_node_simple(decl);
+        let ui_node = node_decl_to_ui_node(decl, None);
 
         if let NodeDecl::Category {
             name: cat_name,
@@ -190,13 +190,13 @@ fn representation_str(meta: &NodeMeta) -> Option<String> {
     meta.representation.map(|r| format!("{r:?}"))
 }
 
-fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: &NodeMap) -> (String, UiNode) {
+/// One `UiNode` per declaration. With the `NodeMap` the library built, a
+/// node's dependents and a converter's access come from it; without one — a
+/// document the library could not build — they stay empty.
+fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
     let name = decl_name(decl);
-    let dependents = nodemap.dependents(&name).to_vec();
-
-    match decl {
+    let mut node = match decl {
         NodeDecl::Integer {
-            name,
             meta,
             access,
             min,
@@ -207,45 +207,21 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: &NodeMap) -> (String, UiNode) 
             p_min,
             p_max,
             ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-            if let Some(pm) = p_min {
-                deps.push(pm.clone());
-            }
-            if let Some(pm) = p_max {
-                deps.push(pm.clone());
-            }
-
-            (
-                name.clone(),
-                UiNode {
-                    name: name.clone(),
-                    kind: UiNodeKind::Integer,
-                    display_name: meta.display_name.clone(),
-                    comment: None,
-                    tooltip: meta.tooltip.clone(),
-                    description: meta.description.clone(),
-                    visibility: visibility_str(meta),
-                    access_mode: Some(access_mode_str(*access)),
-                    unit: unit.clone(),
-                    representation: representation_str(meta),
-                    constraints: integer_constraints(*min, *max, *inc),
-                    enum_entries: vec![],
-                    raw: empty_raw("Integer"),
-                    dependencies: deps,
-                    dependents,
-                    expression: None,
-                    int_min: Some(*min),
-                    int_max: Some(*max),
-                    int_inc: *inc,
-                },
-            )
-        }
+        } => UiNode {
+            access_mode: Some(access_mode_str(*access)),
+            unit: unit.clone(),
+            constraints: integer_constraints(*min, *max, *inc),
+            dependencies: [pvalue, p_min, p_max]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect(),
+            int_min: Some(*min),
+            int_max: Some(*max),
+            int_inc: *inc,
+            ..described(&name, UiNodeKind::Integer, meta)
+        },
         NodeDecl::Float {
-            name,
             meta,
             access,
             min,
@@ -253,736 +229,167 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: &NodeMap) -> (String, UiNode) 
             unit,
             pvalue,
             ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-
-            (
-                name.clone(),
-                UiNode {
-                    name: name.clone(),
-                    kind: UiNodeKind::Float,
-                    display_name: meta.display_name.clone(),
-                    comment: None,
-                    tooltip: meta.tooltip.clone(),
-                    description: meta.description.clone(),
-                    visibility: visibility_str(meta),
-                    access_mode: Some(access_mode_str(*access)),
-                    unit: unit.clone(),
-                    representation: representation_str(meta),
-                    constraints: float_constraints(*min, *max),
-                    enum_entries: vec![],
-                    raw: empty_raw("Float"),
-                    dependencies: deps,
-                    dependents,
-                    expression: None,
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
+        } => UiNode {
+            access_mode: Some(access_mode_str(*access)),
+            unit: unit.clone(),
+            constraints: float_constraints(*min, *max),
+            dependencies: pvalue.iter().cloned().collect(),
+            ..described(&name, UiNodeKind::Float, meta)
+        },
         NodeDecl::Enum {
-            name,
             meta,
             access,
             entries,
             pvalue,
             ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-
-            (
-                name.clone(),
-                UiNode {
-                    name: name.clone(),
-                    kind: UiNodeKind::Enumeration,
-                    display_name: meta.display_name.clone(),
-                    comment: None,
-                    tooltip: meta.tooltip.clone(),
-                    description: meta.description.clone(),
-                    visibility: visibility_str(meta),
-                    access_mode: Some(access_mode_str(*access)),
-                    unit: None,
-                    representation: representation_str(meta),
-                    constraints: None,
-                    enum_entries: entries
-                        .iter()
-                        .map(|e| EnumEntry {
-                            name: e.name.clone(),
-                            value: match &e.value {
-                                EnumValueSrc::Literal(v) => Some(v.to_string()),
-                                EnumValueSrc::FromNode(_) => None,
-                            },
-                            display_name: e.display_name.clone(),
-                        })
-                        .collect(),
-                    raw: empty_raw("Enumeration"),
-                    dependencies: deps,
-                    dependents,
-                    expression: None,
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
+        } => UiNode {
+            access_mode: Some(access_mode_str(*access)),
+            enum_entries: entries
+                .iter()
+                .map(|e| EnumEntry {
+                    name: e.name.clone(),
+                    value: match &e.value {
+                        EnumValueSrc::Literal(v) => Some(v.to_string()),
+                        EnumValueSrc::FromNode(_) => None,
+                    },
+                    display_name: e.display_name.clone(),
+                })
+                .collect(),
+            dependencies: pvalue.iter().cloned().collect(),
+            ..described(&name, UiNodeKind::Enumeration, meta)
+        },
         NodeDecl::Boolean {
-            name,
             meta,
             access,
             pvalue,
             ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-
-            (
-                name.clone(),
-                UiNode {
-                    name: name.clone(),
-                    kind: UiNodeKind::Boolean,
-                    display_name: meta.display_name.clone(),
-                    comment: None,
-                    tooltip: meta.tooltip.clone(),
-                    description: meta.description.clone(),
-                    visibility: visibility_str(meta),
-                    access_mode: Some(access_mode_str(*access)),
-                    unit: None,
-                    representation: representation_str(meta),
-                    constraints: None,
-                    enum_entries: vec![],
-                    raw: empty_raw("Boolean"),
-                    dependencies: deps,
-                    dependents,
-                    expression: None,
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
-        NodeDecl::Command {
-            name, meta, pvalue, ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-
-            (
-                name.clone(),
-                UiNode {
-                    name: name.clone(),
-                    kind: UiNodeKind::Command,
-                    display_name: meta.display_name.clone(),
-                    comment: None,
-                    tooltip: meta.tooltip.clone(),
-                    description: meta.description.clone(),
-                    visibility: visibility_str(meta),
-                    access_mode: Some("WO".to_string()),
-                    unit: None,
-                    representation: None,
-                    constraints: None,
-                    enum_entries: vec![],
-                    raw: empty_raw("Command"),
-                    dependencies: deps,
-                    dependents,
-                    expression: None,
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
-        NodeDecl::Category {
-            name,
-            meta,
-            children,
-            ..
-        } => (
-            name.clone(),
-            UiNode {
-                name: name.clone(),
-                kind: UiNodeKind::Category,
-                display_name: meta.display_name.clone(),
-                comment: None,
-                tooltip: meta.tooltip.clone(),
-                description: meta.description.clone(),
-                visibility: visibility_str(meta),
-                access_mode: None,
-                unit: None,
-                representation: None,
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("Category"),
-                dependencies: children.clone(),
-                dependents: vec![],
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            },
-        ),
+        } => UiNode {
+            access_mode: Some(access_mode_str(*access)),
+            dependencies: pvalue.iter().cloned().collect(),
+            ..described(&name, UiNodeKind::Boolean, meta)
+        },
+        NodeDecl::Command { meta, pvalue, .. } => UiNode {
+            access_mode: Some("WO".to_string()),
+            representation: None,
+            dependencies: pvalue.iter().cloned().collect(),
+            ..described(&name, UiNodeKind::Command, meta)
+        },
+        NodeDecl::Category { meta, children, .. } => UiNode {
+            representation: None,
+            dependencies: children.clone(),
+            ..described(&name, UiNodeKind::Category, meta)
+        },
+        // A computed, read-only value of its declared output type.
         NodeDecl::SwissKnife(sk) => {
-            let deps: Vec<String> = sk
-                .variables
-                .iter()
-                .map(|(_, target)| target.clone())
-                .collect();
-            (
-                sk.name.clone(),
-                UiNode {
-                    name: sk.name.clone(),
-                    kind: UiNodeKind::Unknown {
-                        tag: "SwissKnife".to_string(),
-                    },
-                    display_name: sk.meta.display_name.clone(),
-                    comment: None,
-                    tooltip: sk.meta.tooltip.clone(),
-                    description: sk.meta.description.clone(),
-                    visibility: visibility_str(&sk.meta),
-                    access_mode: Some("RO".to_string()),
-                    unit: None,
-                    representation: representation_str(&sk.meta),
-                    constraints: None,
-                    enum_entries: vec![],
-                    raw: empty_raw("SwissKnife"),
-                    dependencies: deps,
-                    dependents,
-                    expression: Some(sk.expr.clone()),
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
-        NodeDecl::Converter(cv) => {
-            let mut deps = vec![cv.p_value.clone()];
-            for (_, target) in &cv.variables_to {
-                deps.push(target.clone());
-            }
-            for (_, target) in &cv.variables_from {
-                deps.push(target.clone());
-            }
-            (
-                cv.name.clone(),
-                UiNode {
-                    name: cv.name.clone(),
-                    kind: UiNodeKind::Float,
-                    display_name: cv.meta.display_name.clone(),
-                    comment: None,
-                    tooltip: cv.meta.tooltip.clone(),
-                    description: cv.meta.description.clone(),
-                    visibility: visibility_str(&cv.meta),
-                    access_mode: nodemap.declared_access_mode(&cv.name).map(access_mode_str),
-                    unit: cv.unit.clone(),
-                    representation: representation_str(&cv.meta),
-                    constraints: None,
-                    enum_entries: vec![],
-                    raw: empty_raw("Converter"),
-                    dependencies: deps,
-                    dependents,
-                    expression: Some(cv.formula_to.clone()),
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
-        NodeDecl::IntConverter(cv) => {
-            let mut deps = vec![cv.p_value.clone()];
-            for (_, target) in &cv.variables_to {
-                deps.push(target.clone());
-            }
-            for (_, target) in &cv.variables_from {
-                deps.push(target.clone());
-            }
-            (
-                cv.name.clone(),
-                UiNode {
-                    name: cv.name.clone(),
-                    kind: UiNodeKind::Integer,
-                    display_name: cv.meta.display_name.clone(),
-                    comment: None,
-                    tooltip: cv.meta.tooltip.clone(),
-                    description: cv.meta.description.clone(),
-                    visibility: visibility_str(&cv.meta),
-                    access_mode: nodemap.declared_access_mode(&cv.name).map(access_mode_str),
-                    unit: None,
-                    representation: representation_str(&cv.meta),
-                    constraints: None,
-                    enum_entries: vec![],
-                    raw: empty_raw("IntConverter"),
-                    dependencies: deps,
-                    dependents,
-                    expression: Some(cv.formula_to.clone()),
-                    int_min: None,
-                    int_max: None,
-                    int_inc: None,
-                },
-            )
-        }
-        NodeDecl::String(s) => (
-            s.name.clone(),
+            let kind = match sk.output {
+                SkOutput::Integer => UiNodeKind::Integer,
+                SkOutput::Float => UiNodeKind::Float,
+            };
             UiNode {
-                name: s.name.clone(),
-                kind: UiNodeKind::String,
-                display_name: s.meta.display_name.clone(),
-                comment: None,
-                tooltip: s.meta.tooltip.clone(),
-                description: s.meta.description.clone(),
-                visibility: visibility_str(&s.meta),
-                access_mode: Some(access_mode_str(s.access)),
-                unit: None,
-                representation: representation_str(&s.meta),
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("String"),
-                dependencies: vec![],
-                dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            },
-        ),
-        NodeDecl::Register(r) => (
-            r.name.clone(),
-            UiNode {
-                name: r.name.clone(),
-                kind: UiNodeKind::Register,
-                display_name: r.meta.display_name.clone(),
-                comment: None,
-                tooltip: r.meta.tooltip.clone(),
-                description: r.meta.description.clone(),
-                visibility: visibility_str(&r.meta),
-                access_mode: Some(access_mode_str(r.access)),
-                unit: None,
-                representation: representation_str(&r.meta),
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("Register"),
-                dependencies: vec![],
-                dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            },
-        ),
+                access_mode: Some("RO".to_string()),
+                dependencies: sk
+                    .variables
+                    .iter()
+                    .map(|(_, target)| target.clone())
+                    .collect(),
+                expression: Some(sk.expr.clone()),
+                ..described(&name, kind, &sk.meta)
+            }
+        }
+        NodeDecl::Converter(cv) => UiNode {
+            access_mode: converter_access(nodemap, &cv.name),
+            unit: cv.unit.clone(),
+            dependencies: converter_dependencies(&cv.p_value, &cv.variables_to, &cv.variables_from),
+            expression: Some(cv.formula_to.clone()),
+            ..described(&name, UiNodeKind::Float, &cv.meta)
+        },
+        NodeDecl::IntConverter(cv) => UiNode {
+            access_mode: converter_access(nodemap, &cv.name),
+            dependencies: converter_dependencies(&cv.p_value, &cv.variables_to, &cv.variables_from),
+            expression: Some(cv.formula_to.clone()),
+            ..described(&name, UiNodeKind::Integer, &cv.meta)
+        },
+        NodeDecl::String(s) => UiNode {
+            access_mode: Some(access_mode_str(s.access)),
+            ..described(&name, UiNodeKind::String, &s.meta)
+        },
+        NodeDecl::Register(r) => UiNode {
+            access_mode: Some(access_mode_str(r.access)),
+            ..described(&name, UiNodeKind::Register, &r.meta)
+        },
         // `NodeDecl` is `#[non_exhaustive]`, so a node type added upstream no
         // longer breaks this build. Surface it with its own kind rather than
         // dropping it, so an unmodelled node is visible in the tree instead of
         // silently absent.
-        other => (
-            decl_name(other),
-            UiNode {
-                name: decl_name(other),
-                kind: UiNodeKind::Unknown {
-                    tag: other.kind().to_string(),
-                },
-                display_name: None,
-                comment: None,
-                tooltip: None,
-                description: None,
-                visibility: None,
-                access_mode: None,
-                unit: None,
-                representation: None,
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw(other.kind()),
-                dependencies: vec![],
-                dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
+        other => bare(
+            &name,
+            UiNodeKind::Unknown {
+                tag: other.kind().to_string(),
             },
         ),
+    };
+    // A category's members are its dependencies; nothing depends on it.
+    if !matches!(decl, NodeDecl::Category { .. }) {
+        node.dependents = nodemap
+            .map(|map| map.dependents(&name).to_vec())
+            .unwrap_or_default();
+    }
+    node
+}
+
+/// A node with only its name and kind.
+fn bare(name: &str, kind: UiNodeKind) -> UiNode {
+    UiNode {
+        name: name.to_string(),
+        kind,
+        display_name: None,
+        comment: None,
+        tooltip: None,
+        description: None,
+        visibility: None,
+        access_mode: None,
+        unit: None,
+        representation: None,
+        constraints: None,
+        enum_entries: vec![],
+        dependencies: vec![],
+        dependents: vec![],
+        expression: None,
+        int_min: None,
+        int_max: None,
+        int_inc: None,
     }
 }
 
-/// Simplified node conversion without NodeMap (no dependents/dependency tracking).
-fn node_decl_to_ui_node_simple(decl: &NodeDecl) -> UiNode {
-    let empty_nodemap_dependents = vec![];
-    match decl {
-        NodeDecl::Integer {
-            name,
-            meta,
-            access,
-            min,
-            max,
-            inc,
-            unit,
-            pvalue,
-            p_min,
-            p_max,
-            ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-            if let Some(pm) = p_min {
-                deps.push(pm.clone());
-            }
-            if let Some(pm) = p_max {
-                deps.push(pm.clone());
-            }
-            UiNode {
-                name: name.clone(),
-                kind: UiNodeKind::Integer,
-                display_name: meta.display_name.clone(),
-                comment: None,
-                tooltip: meta.tooltip.clone(),
-                description: meta.description.clone(),
-                visibility: visibility_str(meta),
-                access_mode: Some(access_mode_str(*access)),
-                unit: unit.clone(),
-                representation: representation_str(meta),
-                constraints: integer_constraints(*min, *max, *inc),
-                enum_entries: vec![],
-                raw: empty_raw("Integer"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: None,
-                int_min: Some(*min),
-                int_max: Some(*max),
-                int_inc: *inc,
-            }
-        }
-        NodeDecl::Float {
-            name,
-            meta,
-            access,
-            min,
-            max,
-            unit,
-            pvalue,
-            ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-            UiNode {
-                name: name.clone(),
-                kind: UiNodeKind::Float,
-                display_name: meta.display_name.clone(),
-                comment: None,
-                tooltip: meta.tooltip.clone(),
-                description: meta.description.clone(),
-                visibility: visibility_str(meta),
-                access_mode: Some(access_mode_str(*access)),
-                unit: unit.clone(),
-                representation: representation_str(meta),
-                constraints: float_constraints(*min, *max),
-                enum_entries: vec![],
-                raw: empty_raw("Float"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::Enum {
-            name,
-            meta,
-            access,
-            entries,
-            pvalue,
-            ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-            UiNode {
-                name: name.clone(),
-                kind: UiNodeKind::Enumeration,
-                display_name: meta.display_name.clone(),
-                comment: None,
-                tooltip: meta.tooltip.clone(),
-                description: meta.description.clone(),
-                visibility: visibility_str(meta),
-                access_mode: Some(access_mode_str(*access)),
-                unit: None,
-                representation: representation_str(meta),
-                constraints: None,
-                enum_entries: entries
-                    .iter()
-                    .map(|e| EnumEntry {
-                        name: e.name.clone(),
-                        value: match &e.value {
-                            EnumValueSrc::Literal(v) => Some(v.to_string()),
-                            EnumValueSrc::FromNode(_) => None,
-                        },
-                        display_name: e.display_name.clone(),
-                    })
-                    .collect(),
-                raw: empty_raw("Enumeration"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::Boolean {
-            name,
-            meta,
-            access,
-            pvalue,
-            ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-            UiNode {
-                name: name.clone(),
-                kind: UiNodeKind::Boolean,
-                display_name: meta.display_name.clone(),
-                comment: None,
-                tooltip: meta.tooltip.clone(),
-                description: meta.description.clone(),
-                visibility: visibility_str(meta),
-                access_mode: Some(access_mode_str(*access)),
-                unit: None,
-                representation: representation_str(meta),
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("Boolean"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::Command {
-            name, meta, pvalue, ..
-        } => {
-            let mut deps = Vec::new();
-            if let Some(pv) = pvalue {
-                deps.push(pv.clone());
-            }
-            UiNode {
-                name: name.clone(),
-                kind: UiNodeKind::Command,
-                display_name: meta.display_name.clone(),
-                comment: None,
-                tooltip: meta.tooltip.clone(),
-                description: meta.description.clone(),
-                visibility: visibility_str(meta),
-                access_mode: Some("WO".to_string()),
-                unit: None,
-                representation: None,
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("Command"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: None,
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::Category {
-            name,
-            meta,
-            children,
-            ..
-        } => UiNode {
-            name: name.clone(),
-            kind: UiNodeKind::Category,
-            display_name: meta.display_name.clone(),
-            comment: None,
-            tooltip: meta.tooltip.clone(),
-            description: meta.description.clone(),
-            visibility: visibility_str(meta),
-            access_mode: None,
-            unit: None,
-            representation: None,
-            constraints: None,
-            enum_entries: vec![],
-            raw: empty_raw("Category"),
-            dependencies: children.clone(),
-            dependents: vec![],
-            expression: None,
-            int_min: None,
-            int_max: None,
-            int_inc: None,
-        },
-        NodeDecl::SwissKnife(sk) => {
-            let deps: Vec<String> = sk.variables.iter().map(|(_, t)| t.clone()).collect();
-            UiNode {
-                name: sk.name.clone(),
-                kind: UiNodeKind::Unknown {
-                    tag: "SwissKnife".to_string(),
-                },
-                display_name: sk.meta.display_name.clone(),
-                comment: None,
-                tooltip: sk.meta.tooltip.clone(),
-                description: sk.meta.description.clone(),
-                visibility: visibility_str(&sk.meta),
-                access_mode: Some("RO".to_string()),
-                unit: None,
-                representation: representation_str(&sk.meta),
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("SwissKnife"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: Some(sk.expr.clone()),
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::Converter(cv) => {
-            let mut deps = vec![cv.p_value.clone()];
-            for (_, t) in &cv.variables_to {
-                deps.push(t.clone());
-            }
-            for (_, t) in &cv.variables_from {
-                deps.push(t.clone());
-            }
-            UiNode {
-                name: cv.name.clone(),
-                kind: UiNodeKind::Float,
-                display_name: cv.meta.display_name.clone(),
-                comment: None,
-                tooltip: cv.meta.tooltip.clone(),
-                description: cv.meta.description.clone(),
-                visibility: visibility_str(&cv.meta),
-                // Inherited through `<pValue>`, which this mapper has no NodeMap to follow.
-                access_mode: None,
-                unit: cv.unit.clone(),
-                representation: representation_str(&cv.meta),
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("Converter"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: Some(cv.formula_to.clone()),
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::IntConverter(cv) => {
-            let mut deps = vec![cv.p_value.clone()];
-            for (_, t) in &cv.variables_to {
-                deps.push(t.clone());
-            }
-            for (_, t) in &cv.variables_from {
-                deps.push(t.clone());
-            }
-            UiNode {
-                name: cv.name.clone(),
-                kind: UiNodeKind::Integer,
-                display_name: cv.meta.display_name.clone(),
-                comment: None,
-                tooltip: cv.meta.tooltip.clone(),
-                description: cv.meta.description.clone(),
-                visibility: visibility_str(&cv.meta),
-                // Inherited through `<pValue>`, which this mapper has no NodeMap to follow.
-                access_mode: None,
-                unit: None,
-                representation: representation_str(&cv.meta),
-                constraints: None,
-                enum_entries: vec![],
-                raw: empty_raw("IntConverter"),
-                dependencies: deps,
-                dependents: empty_nodemap_dependents,
-                expression: Some(cv.formula_to.clone()),
-                int_min: None,
-                int_max: None,
-                int_inc: None,
-            }
-        }
-        NodeDecl::String(s) => UiNode {
-            name: s.name.clone(),
-            kind: UiNodeKind::String,
-            display_name: s.meta.display_name.clone(),
-            comment: None,
-            tooltip: s.meta.tooltip.clone(),
-            description: s.meta.description.clone(),
-            visibility: visibility_str(&s.meta),
-            access_mode: Some(access_mode_str(s.access)),
-            unit: None,
-            representation: representation_str(&s.meta),
-            constraints: None,
-            enum_entries: vec![],
-            raw: empty_raw("String"),
-            dependencies: vec![],
-            dependents: empty_nodemap_dependents,
-            expression: None,
-            int_min: None,
-            int_max: None,
-            int_inc: None,
-        },
-        NodeDecl::Register(r) => UiNode {
-            name: r.name.clone(),
-            kind: UiNodeKind::Register,
-            display_name: r.meta.display_name.clone(),
-            comment: None,
-            tooltip: r.meta.tooltip.clone(),
-            description: r.meta.description.clone(),
-            visibility: visibility_str(&r.meta),
-            access_mode: Some(access_mode_str(r.access)),
-            unit: None,
-            representation: representation_str(&r.meta),
-            constraints: None,
-            enum_entries: vec![],
-            raw: empty_raw("Register"),
-            dependencies: vec![],
-            dependents: empty_nodemap_dependents,
-            expression: None,
-            int_min: None,
-            int_max: None,
-            int_inc: None,
-        },
-        // See the matching arm above.
-        other => UiNode {
-            name: decl_name(other),
-            kind: UiNodeKind::Unknown {
-                tag: other.kind().to_string(),
-            },
-            display_name: None,
-            comment: None,
-            tooltip: None,
-            description: None,
-            visibility: None,
-            access_mode: None,
-            unit: None,
-            representation: None,
-            constraints: None,
-            enum_entries: vec![],
-            raw: empty_raw(other.kind()),
-            dependencies: vec![],
-            dependents: empty_nodemap_dependents,
-            expression: None,
-            int_min: None,
-            int_max: None,
-            int_inc: None,
-        },
+/// A node with its name, kind and the metadata every declaration carries.
+fn described(name: &str, kind: UiNodeKind, meta: &NodeMeta) -> UiNode {
+    UiNode {
+        display_name: meta.display_name.clone(),
+        tooltip: meta.tooltip.clone(),
+        description: meta.description.clone(),
+        visibility: visibility_str(meta),
+        representation: representation_str(meta),
+        ..bare(name, kind)
     }
+}
+
+/// A converter's access is its `<pValue>` chain's, which only the `NodeMap`
+/// resolves.
+fn converter_access(nodemap: Option<&NodeMap>, name: &str) -> Option<String> {
+    nodemap
+        .and_then(|map| map.declared_access_mode(name))
+        .map(access_mode_str)
+}
+
+fn converter_dependencies(
+    p_value: &str,
+    variables_to: &[(String, String)],
+    variables_from: &[(String, String)],
+) -> Vec<String> {
+    std::iter::once(p_value.to_string())
+        .chain(variables_to.iter().map(|(_, target)| target.clone()))
+        .chain(variables_from.iter().map(|(_, target)| target.clone()))
+        .collect()
 }
 
 fn decl_name(decl: &NodeDecl) -> String {
@@ -999,14 +406,6 @@ fn decl_name(decl: &NodeDecl) -> String {
         NodeDecl::String(s) => s.name.clone(),
         NodeDecl::Register(r) => r.name.clone(),
         other => other.name().to_string(),
-    }
-}
-
-fn empty_raw(tag: &str) -> RawNode {
-    RawNode {
-        tag: tag.to_string(),
-        attributes: HashMap::new(),
-        children_text: HashMap::new(),
     }
 }
 
@@ -1122,8 +521,12 @@ mod tests {
         assert!(graph.categories.is_empty());
     }
 
+    /// A SwissKnife is a read-only value of its declared output type. It was
+    /// an `Unknown` node, which the category list skips: in the vendor corpus
+    /// 55 SwissKnives listed under a category never showed — `WidthMax`,
+    /// `HeightMax` and `UserSetCurrent` among them (backlog ST-34).
     #[test]
-    fn test_swissknife_expression() {
+    fn test_swissknife_is_a_read_only_value_of_its_output_type() {
         let xml = r#"
             <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
                 <Integer Name="GainRaw">
@@ -1138,20 +541,23 @@ mod tests {
                     <pVariable Name="GainRaw">GainRaw</pVariable>
                     <Output>Float</Output>
                 </SwissKnife>
+                <IntSwissKnife Name="WidthMax">
+                    <Expression>GainRaw - 16</Expression>
+                    <pVariable Name="GainRaw">GainRaw</pVariable>
+                </IntSwissKnife>
             </RegisterDescription>
         "#;
         let graph = parse_genicam_xml(xml).expect("parse swissknife");
 
-        let sk = graph
-            .nodes_by_name
-            .get("ComputedGain")
-            .expect("SwissKnife present");
-        assert!(matches!(
-            &sk.kind,
-            UiNodeKind::Unknown { tag } if tag == "SwissKnife"
-        ));
+        let sk = &graph.nodes_by_name["ComputedGain"];
+        assert_eq!(sk.kind, UiNodeKind::Float);
+        assert_eq!(sk.access_mode.as_deref(), Some("RO"));
         assert_eq!(sk.expression.as_deref(), Some("(GainRaw * 0.5)"));
         assert_eq!(sk.dependencies, vec!["GainRaw"]);
+
+        let int_sk = &graph.nodes_by_name["WidthMax"];
+        assert_eq!(int_sk.kind, UiNodeKind::Integer);
+        assert_eq!(int_sk.access_mode.as_deref(), Some("RO"));
     }
 
     #[test]
@@ -1159,14 +565,6 @@ mod tests {
         assert_eq!(access_mode_str(AccessMode::RO), "RO");
         assert_eq!(access_mode_str(AccessMode::WO), "WO");
         assert_eq!(access_mode_str(AccessMode::RW), "RW");
-    }
-
-    #[test]
-    fn test_empty_raw_creates_correct_structure() {
-        let raw = empty_raw("TestTag");
-        assert_eq!(raw.tag, "TestTag");
-        assert!(raw.attributes.is_empty());
-        assert!(raw.children_text.is_empty());
     }
 
     #[test]

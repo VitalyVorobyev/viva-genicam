@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useAppLog } from "../../context/AppLogContext";
+import { DevicePanel } from "./DevicePanel";
 import { ReportPanel } from "./ReportPanel";
 
 // DiagnosticsTab renders the timestamped event log from AppLogContext.
 // The log auto-scrolls to the newest entry (top, since entries are newest-first).
-export function DiagnosticsTab() {
+export function DiagnosticsTab({ connected }: { connected: boolean }) {
   const { entries, clear } = useAppLog();
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -25,6 +26,7 @@ export function DiagnosticsTab() {
 
   return (
     <div className="diagnostics-tab">
+      <DevicePanel connected={connected} />
       <ReportPanel />
       <div className="diagnostics-tab__toolbar">
         <span className="diagnostics-tab__title">Event Log</span>

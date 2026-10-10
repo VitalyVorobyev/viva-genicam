@@ -17,6 +17,8 @@ export default defineConfig({
           name: "unit",
           include: ["src/**/*.test.ts"],
           environment: "node",
+          // Vitest stubs CSS out; the contrast test reads the tokens' text.
+          css: { include: [/tokens\.css/] },
         },
       },
       {

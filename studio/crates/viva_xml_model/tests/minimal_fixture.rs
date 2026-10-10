@@ -40,14 +40,13 @@ fn parse_minimal_fixture() {
     assert_eq!(pixel_format.enum_entries[1].name, "Mono12");
     assert_eq!(pixel_format.enum_entries[2].name, "RGB8");
 
-    let unknown = graph
+    // A SwissKnife is a read-only value of its output type, Float by default.
+    let computed = graph
         .nodes_by_name
         .get("MagicCalc")
-        .expect("unknown node present");
-    assert!(matches!(
-        &unknown.kind,
-        UiNodeKind::Unknown { tag } if tag == "SwissKnife"
-    ));
+        .expect("swissknife present");
+    assert_eq!(computed.kind, UiNodeKind::Float);
+    assert_eq!(computed.access_mode.as_deref(), Some("RO"));
 }
 
 #[test]

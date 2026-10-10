@@ -8,7 +8,6 @@ export type {
   ModelSummary,
   NumericConstraints,
   ParseXmlResponse,
-  RawNode,
   UiCategory,
   UiGraph,
   UiNode,

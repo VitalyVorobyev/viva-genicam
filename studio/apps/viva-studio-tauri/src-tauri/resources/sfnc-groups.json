@@ -55,6 +55,19 @@
       ]
     },
     {
+      "id": "user_sets",
+      "title": "User Sets",
+      "icon": "▤",
+      "default_open": false,
+      "features": [
+        { "node": "UserSetSelector", "widget": "enum_select" },
+        { "node": "UserSetLoad", "widget": "command_button" },
+        { "node": "UserSetSave", "widget": "command_button" },
+        { "node": "UserSetDefault", "widget": "enum_select" },
+        { "node": "UserSetDefaultSelector", "widget": "enum_select" }
+      ]
+    },
+    {
       "id": "transport_layer",
       "title": "Transport Layer",
       "icon": "⇌",

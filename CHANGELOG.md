@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `viva-service`'s `acquisition/status` reports the stream's dropped frames
+  (`StreamStats::drops`: frames abandoned incomplete or discarded because the
+  service fell behind); `dropped` was always 0.
 - `NodeMap::command_targets` returns `&HashSet<String>`, computed once when
   the map is built, instead of a fresh set on every call.
 - `viva_service::device::build_feature_state` is gone; use
@@ -208,6 +211,39 @@ section changes the library.
   report query shared the 5-second timeout of a feature read, though the
   service reads the camera's whole XML to write it, and the cameras worth
   reporting on are the slow ones.
+- **Dropped frames are shown** (ST-36). The header shows the camera's frame
+  rate and, once there are any, the frames lost between camera and app — the
+  symptom of a link problem like #112's. Embedded mode reported neither (the
+  header read "Acquiring"), and remote mode's `dropped` was always 0.
+- **The camera's identity and persistent IP** (ST-37). The Diagnostics tab
+  shows the connected camera's vendor, model, serial, firmware, user ID, MAC
+  and IP address — what a report asks for — and sets the persistent IP
+  address the camera takes from its next restart.
+- **User sets** (ST-38). The Image tab's sidebar has a User Sets group:
+  `UserSetSelector`, `UserSetLoad`, `UserSetSave`, and the default set under
+  either SFNC name (`UserSetDefault` or `UserSetDefaultSelector`). Studio's own
+  JSON presets hold no selector state; a user set is the camera's.
+- **The Feature Browser reads only the rows on screen** (ST-40; Codex review
+  of #172). Every row of a category or a search followed its feature's live
+  state, so opening a category of hundreds of features, or searching broadly,
+  read every one of them from the camera. Rows now read while in view. A
+  search that matches more than 200 features says it shows the first 200,
+  where it stopped silently.
+- **The Feature Browser works from the keyboard** (ST-40). The arrow keys,
+  Home and End move through the category and feature lists, the splitters
+  resize with the arrow keys, and the breadcrumb shows every category between
+  the root and the selected one. Muted text (`--text-muted`, about 80 rules)
+  reached 2.3:1 against the background; it now meets WCAG AA's 4.5:1, and a
+  test keeps it there.
+- **Computed features show in the Feature Browser** (ST-34). A `<SwissKnife>`
+  or `<IntSwissKnife>` became an `Unknown` node, which the category list
+  skips, so none of the 55 listed under a category in the vendor corpus
+  appeared there — `WidthMax`, `HeightMax` and `UserSetCurrent` among them. Each is now a
+  read-only Float or Integer, as its output declares. `viva_xml_model` builds
+  every node with one mapper where it had two near-identical 370-line copies;
+  over the corpus the result is unchanged but for the SwissKnives. `UiNode`
+  loses `raw`, which was always empty; `UiGraph.skipped` reports what the
+  library could not build.
 - **"Generate report" in the Diagnostics tab** (ST-41). Studio writes the
   report `viva-camctl report` writes — the same library code — and saves it
   to a file or copies it, with or without the camera's GenApi XML. In remote

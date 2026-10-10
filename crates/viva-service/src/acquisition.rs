@@ -253,7 +253,7 @@ async fn frame_loop(
                             let status = AcquisitionStatus {
                                 active: true,
                                 fps: Some(fps),
-                                dropped: 0,
+                                dropped: frame_stream.stats().drops,
                             };
                             if let Ok(payload) = serde_json::to_vec(&status) {
                                 let _ = session.put(&status_key, payload).await;

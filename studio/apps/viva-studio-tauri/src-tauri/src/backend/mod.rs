@@ -7,6 +7,7 @@
 //! Both implement [`DeviceBackend`], and the Tauri commands call only the
 //! trait: no command asks which mode it is in (ADR-0024, backlog ST-27).
 
+pub(crate) mod camera;
 pub mod embedded;
 pub mod remote;
 

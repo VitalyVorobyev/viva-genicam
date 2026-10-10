@@ -158,6 +158,15 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] With two network cards, the camera on the non-default one -> the same
       works (ForceIP leaves through the interface the camera answered on)
 
+### 6f. A USB3 Vision camera in embedded mode (real hardware)
+- [ ] Plug in a USB3 Vision camera, start Studio without `ZENOH_CONFIG` -> it
+      appears in the device list with a USB3 badge
+- [ ] Connect -> features read and write; Start -> frames and a frame rate
+- [ ] Diagnostics -> the Camera panel says IP configuration is GigE's; the
+      report names the camera
+- [ ] Linux: without a udev rule granting access, the camera is missing or
+      fails to open — note which
+
 ### 6b. Report
 - [ ] Diagnostics tab -> Save report… -> the file holds
       "# viva-genicam diagnostic report" and a "## Camera" section on the

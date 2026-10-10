@@ -240,10 +240,19 @@ describe("mouseToImageCoordsClamped", () => {
 // showed the camera's pixels (backlog ST-39).
 describe("canvasLayout", () => {
   it("keeps every camera pixel and shows the canvas at the fit size", () => {
-    expect(canvasLayout(2448, 2048, 800, 600)).toEqual({
-      backing: { width: 2448, height: 2048 },
-      css: { width: 717, height: 600 },
-    });
+    const layout = canvasLayout(2448, 2048, 800, 600);
+    expect(layout.backing).toEqual({ width: 2448, height: 2048 });
+    expect(layout.css.height).toBe(600);
+    expect(layout.css.width).toBeCloseTo(717.1875, 6);
+  });
+
+  // The zoom transform multiplies the fit size by scale / fitScale. A rounded
+  // fit size (717 for 717.19) made 1:1 come out at 2447.4 CSS pixels for a
+  // 2448-pixel image, which the browser resamples (Codex review of #178).
+  it("sizes the canvas so that 1:1 is exactly the camera's width", () => {
+    const { css } = canvasLayout(2448, 2048, 800, 600);
+    const fitScale = Math.min(800 / 2448, 600 / 2048, 1);
+    expect(css.width * (1 / fitScale)).toBeCloseTo(2448, 9);
   });
 
   it("shows a small image at its own size", () => {

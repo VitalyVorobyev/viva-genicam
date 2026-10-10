@@ -41,10 +41,14 @@ export function canvasLayout(
   boxW: number,
   boxH: number,
 ): { backing: { width: number; height: number }; css: { width: number; height: number } } {
-  const fit = fitContain(imgW, imgH, boxW, boxH);
+  // Unrounded: the zoom transform multiplies this size by scale / fitScale,
+  // so 1:1 lands on the camera's exact size only if nothing was rounded
+  // (Codex review of #178). CSS takes fractional pixels.
+  const fitScale =
+    imgW > 0 && imgH > 0 && boxW > 0 && boxH > 0 ? Math.min(boxW / imgW, boxH / imgH, 1) : 0;
   return {
     backing: { width: imgW, height: imgH },
-    css: { width: fit.width, height: fit.height },
+    css: { width: imgW * fitScale, height: imgH * fitScale },
   };
 }
 

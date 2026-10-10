@@ -43,6 +43,7 @@ toml = "0.9"
 # The image WebSocket's client side, for the frame-delivery tests.
 tokio-tungstenite = "0.30"
 viva-fake-gige = { path = "../../../../crates/viva-fake-gige" }
+viva-fake-u3v = { path = "../../../../crates/viva-fake-u3v" }
 # The service, run in-process for the remote-mode tests.
 viva-service = { path = "../../../../crates/viva-service" }
 

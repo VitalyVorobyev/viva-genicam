@@ -6,8 +6,9 @@
 //!
 //! ## Thread safety
 //!
-//! `Camera<GigeRegisterIo>` is `!Sync`: its `NodeMap` caches in `RefCell`s, and
-//! its register I/O blocks the calling thread on the runtime. So the camera
+//! A camera, GigE Vision or USB3 Vision ([`super::camera::Device`]), is `!Sync`:
+//! its `NodeMap` caches in `RefCell`s, and its register I/O blocks the calling
+//! thread. So the camera
 //! lives behind an async mutex, and every operation on it runs on the blocking
 //! pool ([`EmbeddedBackend::with_camera`]): a command waiting for the camera
 //! waits asynchronously, and camera I/O never occupies a runtime worker
@@ -21,8 +22,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
-use tracing::{debug, info, warn};
-use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
+use tracing::{info, warn};
+use viva_genicam::Camera;
+use viva_genicam::u3v::discovery::U3vDeviceInfo;
 use viva_streamer::bmp::BayerPattern;
 use viva_streamer::frame::{FrameEncoder, FramePacer, PixelLayout};
 use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState};
@@ -30,31 +32,21 @@ use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState};
 use crate::state::device_state::{DeviceInfo, StreamerInfo};
 use crate::state::events::Events;
 
+use super::camera::{Device, Frames};
 use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig, StartOptions};
 
 // ── Internal types ──────────────────────────────────────────────────────────
 
-/// A connected GigE Vision camera and its associated state.
+/// A connected camera, GigE Vision or USB3 Vision, and its associated state.
 ///
 /// `Send` is derived, not asserted: every field is `Send` already. The
 /// `unsafe impl Send` this type used to carry was redundant, and a redundant
 /// unsafe impl is worse than none — it would have gone on silently covering
 /// for a genuinely non-`Send` field added later.
 struct ConnectedCamera {
-    camera: Camera<GigeRegisterIo>,
+    camera: Box<dyn Device>,
     /// The id discovery reported, to find the camera's MAC again.
     device_id: String,
-}
-
-impl ConnectedCamera {
-    /// Snapshot one feature of this camera, computed by `viva-genapi` exactly
-    /// as `viva-service` computes it (backlog ST-26).
-    fn feature_state(&self, name: &str) -> Result<FeatureState, String> {
-        self.camera
-            .feature_state(name)
-            .map(FeatureState::from)
-            .map_err(|e| format!("Failed to read '{name}': {e}"))
-    }
 }
 
 /// State for an active image acquisition session.
@@ -82,6 +74,8 @@ pub struct EmbeddedBackend {
     camera: Arc<AsyncMutex<Option<ConnectedCamera>>>,
     /// Cache of discovered devices, updated periodically.
     discovered: RwLock<Vec<DeviceInfo>>,
+    /// The USB3 Vision cameras the last scan found, by device id.
+    usb: RwLock<HashMap<String, U3vDeviceInfo>>,
     /// The host address each camera's discovery reply arrived at, by MAC.
     /// Kept across scans: one scan can miss a camera the list still shows.
     local_ips: RwLock<HashMap<[u8; 6], Ipv4Addr>>,
@@ -97,27 +91,41 @@ impl EmbeddedBackend {
             camera: Arc::new(AsyncMutex::new(None)),
             discovered: RwLock::new(Vec::new()),
             local_ips: RwLock::new(HashMap::new()),
+            usb: RwLock::new(HashMap::new()),
             acquisition: AsyncMutex::new(None),
             events,
         }
     }
 
-    /// Start a background task that periodically discovers GigE cameras.
+    /// Start a background task that periodically discovers GigE Vision and
+    /// USB3 Vision cameras.
     pub fn start_discovery_task(self: &Arc<Self>, interval: Duration) {
         let backend = self.clone();
         tauri::async_runtime::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                let found = discover_gige_devices().await;
-                backend.record_scan(found).await;
+                let gige = discover_gige_devices().await;
+                let usb = discover_u3v_devices().await;
+                backend.record_scan(gige, usb).await;
             }
         });
     }
 
     /// Take in what one discovery scan found, and announce it.
-    async fn record_scan(&self, found: Vec<viva_genicam::gige::DeviceInfo>) {
-        let (devices, local_ips) = discovered_gige(found);
+    async fn record_scan(
+        &self,
+        found: Vec<viva_genicam::gige::DeviceInfo>,
+        usb: Vec<U3vDeviceInfo>,
+    ) {
+        let (mut devices, local_ips) = discovered_gige(found);
+        let mut by_id = HashMap::new();
+        for info in usb {
+            let device = u3v_device_info(&info);
+            by_id.insert(device.id.clone(), info);
+            devices.push(device);
+        }
+        *self.usb.write().await = by_id;
         *self.discovered.write().await = devices.clone();
         // Updated, never cleared: a camera one scan misses keeps its address
         // (Codex review of #177).
@@ -142,6 +150,42 @@ impl EmbeddedBackend {
                     .map_err(|e| format!("ForceIP: the interface with {ip}: {e}"))
             })
             .transpose()
+    }
+
+    /// Open a USB3 Vision camera discovery found (ST-14). Opening it reads its
+    /// descriptors and XML over USB, so on the blocking pool.
+    async fn connect_u3v(
+        &self,
+        device_id: &str,
+        info: U3vDeviceInfo,
+    ) -> Result<ConnectResult, String> {
+        info!(
+            device_id,
+            "Connecting to USB3 Vision camera (embedded mode)"
+        );
+        let model = info
+            .model
+            .clone()
+            .unwrap_or_else(|| "USB3 Vision camera".to_string());
+        let (camera, xml) =
+            tauri::async_runtime::spawn_blocking(move || viva_genicam::connect_u3v_with_xml(&info))
+                .await
+                .map_err(|e| format!("Camera task failed: {e}"))?
+                .map_err(|e| format!("Failed to open USB3 Vision camera {device_id}: {e}"))?;
+        self.attach(Box::new(camera), device_id).await;
+        Ok(ConnectResult {
+            xml,
+            device_name: model.clone(),
+            model,
+        })
+    }
+
+    /// Hold `camera` as the connected one.
+    async fn attach(&self, camera: Box<dyn Device>, device_id: &str) {
+        *self.camera.lock().await = Some(ConnectedCamera {
+            camera,
+            device_id: device_id.to_string(),
+        });
     }
 
     /// Run `op` on the connected camera, on the blocking pool.
@@ -193,21 +237,7 @@ impl EmbeddedBackend {
             return;
         };
         let released = tauri::async_runtime::spawn_blocking(move || {
-            if let Ok(mut device) = connected.camera.transport().lock_device() {
-                device.set_control_timeout(RELEASE_ACK_TIMEOUT);
-            }
-            if let Err(error) = connected.camera.acquisition_stop() {
-                debug!(%error, "AcquisitionStop while releasing the camera");
-            }
-            let handle = tokio::runtime::Handle::current();
-            match connected.camera.transport().lock_device() {
-                Ok(mut device) => {
-                    if let Err(error) = handle.block_on(device.release_control()) {
-                        debug!(%error, "releasing control privilege");
-                    }
-                }
-                Err(error) => debug!(%error, "releasing control privilege"),
-            }
+            connected.camera.release(RELEASE_ACK_TIMEOUT);
             drop(connected);
         })
         .await;
@@ -231,6 +261,11 @@ impl DeviceBackend for EmbeddedBackend {
     async fn connect(&self, device_id: &str) -> Result<ConnectResult, String> {
         // Disconnect any existing camera first.
         self.release_camera().await;
+
+        let usb = self.usb.read().await.get(device_id).cloned();
+        if let Some(info) = usb {
+            return self.connect_u3v(device_id, info).await;
+        }
 
         // Look up device info from discovery cache. The id is MAC-derived, so
         // the address comes from the cache; a bare IPv4 id is still accepted
@@ -274,10 +309,7 @@ impl DeviceBackend for EmbeddedBackend {
             "Camera connected, XML fetched"
         );
 
-        *self.camera.lock().await = Some(ConnectedCamera {
-            camera,
-            device_id: device_id.to_string(),
-        });
+        self.attach(Box::new(camera), device_id).await;
 
         Ok(ConnectResult {
             xml,
@@ -293,7 +325,7 @@ impl DeviceBackend for EmbeddedBackend {
 
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         let name = name.to_string();
-        self.with_camera(move |connected| connected.feature_state(&name))
+        self.with_camera(move |connected| connected.camera.feature_state(&name))
             .await
     }
 
@@ -304,26 +336,14 @@ impl DeviceBackend for EmbeddedBackend {
     ) -> Result<Vec<String>, String> {
         let value = json_value_to_string(value);
         let name = name.to_string();
-        self.with_camera(move |connected| {
-            connected
-                .camera
-                .set(&name, &value)
-                .map_err(|e| format!("Failed to write feature '{name}': {e}"))?;
-            Ok(connected.camera.nodemap().invalidated_by(&name))
-        })
-        .await
+        self.with_camera(move |connected| connected.camera.set(&name, &value))
+            .await
     }
 
     async fn exec_command(&self, name: &str) -> Result<Vec<String>, String> {
         let name = name.to_string();
-        self.with_camera(move |connected| {
-            connected
-                .camera
-                .set(&name, "")
-                .map_err(|e| format!("Failed to execute command '{name}': {e}"))?;
-            Ok(connected.camera.nodemap().invalidated_by(&name))
-        })
-        .await
+        self.with_camera(move |connected| connected.camera.set(&name, ""))
+            .await
     }
 
     async fn bulk_feature_state(
@@ -334,7 +354,7 @@ impl DeviceBackend for EmbeddedBackend {
         self.with_camera(move |connected| {
             let mut result = HashMap::with_capacity(names.len());
             for name in names {
-                match connected.feature_state(&name) {
+                match connected.camera.feature_state(&name) {
                     Ok(state) => {
                         result.insert(name, state);
                     }
@@ -352,68 +372,11 @@ impl DeviceBackend for EmbeddedBackend {
         // Stop any previous acquisition.
         self.stop_acquisition_inner().await;
 
-        let (width, height, pixel_format, frame_stream) = self
+        let (width, height, pixel_format, frames) = self
             .with_camera(move |connected| {
-                let cam = &mut connected.camera;
-                let width = cam
-                    .get("Width")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(640);
-                let height = cam
-                    .get("Height")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(480);
-                let pixel_format = cam.get("PixelFormat").unwrap_or_else(|error| {
-                    warn!(%error, "Failed to read PixelFormat before acquisition");
-                    "Unknown".to_string()
-                });
-
-                let mut device_guard = cam
-                    .transport()
-                    .lock_device()
-                    .map_err(|e| format!("Failed to access device: {e}"))?;
-
-                let handle = tokio::runtime::Handle::current();
-                handle
-                    .block_on(device_guard.claim_control())
-                    .map_err(|e| format!("Failed to claim camera control: {e}"))?;
-
-                let camera_ip = device_guard.remote_addr().ip();
-                let camera_ipv4 = match camera_ip {
-                    std::net::IpAddr::V4(ip) => ip,
-                    _ => return Err("IPv6 cameras are not supported".to_string()),
-                };
-
-                // camera_ipv4 belongs to the remote camera, not the host. Probe
-                // the OS route to find the local NIC and source address that
-                // the OS selected to reach that camera.
-                let iface = viva_genicam::gige::nic::Iface::from_remote_ipv4(camera_ipv4)
-                    .map_err(|e| format!("Failed to detect network interface: {e}"))?;
-
-                let builder = viva_genicam::StreamBuilder::new(&mut device_guard)
-                    .iface(iface)
-                    .rcvbuf_bytes(64 << 20); // 64 MiB to absorb bursty GVSP traffic
-                // A size the user measured for their link is a ceiling the
-                // path probe stays under; otherwise negotiate from the NIC MTU
-                // (backlog ST-22, issue #112).
-                let builder = match options.packet_size {
-                    Some(size) => builder.packet_size(size),
-                    None => builder.auto_packet_size(),
-                };
-                let stream = handle
-                    .block_on(builder.build())
-                    .map_err(|e| format!("Failed to build stream: {e}"))?;
-
-                drop(device_guard);
-
-                let frame_stream = FrameStream::new(stream, None);
-
-                cam.acquisition_start()
-                    .map_err(|e| format!("Failed to start acquisition: {e}"))?;
-
-                Ok((width, height, pixel_format, frame_stream))
+                let (width, height, pixel_format) = connected.camera.image_format();
+                let frames = connected.camera.start(&options)?;
+                Ok((width, height, pixel_format, frames))
             })
             .await?;
 
@@ -435,7 +398,7 @@ impl DeviceBackend for EmbeddedBackend {
         info!(ws_url, width, height, "Embedded streamer starting");
 
         let frame_reader_handle = tauri::async_runtime::spawn(run_frame_reader(
-            frame_stream,
+            frames,
             frame_tx.clone(),
             info_tx.clone(),
             shutdown_rx.clone(),
@@ -482,12 +445,7 @@ impl DeviceBackend for EmbeddedBackend {
         self.stop_acquisition_inner().await;
         // Stop acquisition on the camera, if one is still connected.
         match self
-            .with_camera(|connected| {
-                connected
-                    .camera
-                    .acquisition_stop()
-                    .map_err(|e| format!("Failed to stop acquisition: {e}"))
-            })
+            .with_camera(|connected| connected.camera.acquisition_stop())
             .await
         {
             Err(e) if e == "No camera connected" => Ok(()),
@@ -504,23 +462,31 @@ impl DeviceBackend for EmbeddedBackend {
 
         let connected = self
             .with_camera(|connected| {
-                let ip = connected
-                    .camera
-                    .transport()
-                    .lock_device()
-                    .map(|device| device.remote_addr().ip())
-                    .map_err(|e| e.to_string())?;
+                let ip = gige_of(connected).ok().and_then(|camera| {
+                    camera
+                        .transport()
+                        .lock_device()
+                        .map(|device| device.remote_addr().ip())
+                        .ok()
+                });
                 Ok((connected.device_id.clone(), ip))
             })
             .await
             .ok();
         let mut notes = vec!["mode:        embedded".to_string()];
         let target = match connected {
-            Some((device_id, std::net::IpAddr::V4(ip))) => {
+            Some((device_id, Some(std::net::IpAddr::V4(ip)))) => {
                 notes.push(format!("connected:   {device_id}"));
                 ReportTarget::Ip(ip)
             }
-            _ => ReportTarget::None,
+            Some((device_id, _)) => {
+                // The report covers GigE Vision only so far (backlog DX-06).
+                notes.push(format!(
+                    "connected:   {device_id}, which this report does not cover"
+                ));
+                ReportTarget::None
+            }
+            None => ReportTarget::None,
         };
         let request = ReportRequest {
             notes,
@@ -551,8 +517,8 @@ impl DeviceBackend for EmbeddedBackend {
     async fn get_network_config(&self) -> Result<NetworkConfig, String> {
         let (current_ip, persistent_ip, persistent_subnet, persistent_gateway, device_id) = self
             .with_camera(|connected| {
-                let mut device_guard = connected
-                    .camera
+                let device_id = connected.device_id.clone();
+                let mut device_guard = gige_of(connected)?
                     .transport()
                     .lock_device()
                     .map_err(|e| format!("Failed to access device: {e}"))?;
@@ -566,7 +532,7 @@ impl DeviceBackend for EmbeddedBackend {
                     pip.to_string(),
                     psub.to_string(),
                     pgw.to_string(),
-                    connected.device_id.clone(),
+                    device_id,
                 ))
             })
             .await?;
@@ -596,8 +562,7 @@ impl DeviceBackend for EmbeddedBackend {
         gateway: Ipv4Addr,
     ) -> Result<(), String> {
         self.with_camera(move |connected| {
-            let mut device_guard = connected
-                .camera
+            let mut device_guard = gige_of(connected)?
                 .transport()
                 .lock_device()
                 .map_err(|e| format!("Failed to access device: {e}"))?;
@@ -617,6 +582,16 @@ impl DeviceBackend for EmbeddedBackend {
     }
 }
 
+/// The connected camera as GigE Vision, for what only GigE Vision has.
+fn gige_of(
+    connected: &mut ConnectedCamera,
+) -> Result<&mut Camera<viva_genicam::GigeRegisterIo>, String> {
+    connected
+        .camera
+        .gige()
+        .ok_or_else(|| "Only a GigE Vision camera has an IP configuration".to_string())
+}
+
 // ── Streaming ───────────────────────────────────────────────────────────────
 
 /// Read frames until shutdown, sending the viewer a BMP of each as often as
@@ -625,7 +600,7 @@ impl DeviceBackend for EmbeddedBackend {
 /// Once a second it also reports the stream's frame rate and dropped frames,
 /// as `viva-service` does (ST-36).
 async fn run_frame_reader(
-    mut frame_stream: FrameStream,
+    mut frame_stream: Frames,
     frame_tx: watch::Sender<Bytes>,
     info_tx: watch::Sender<viva_streamer::ws::StreamInfo>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -634,6 +609,7 @@ async fn run_frame_reader(
 ) {
     let mut pacer = FramePacer::new(Duration::from_secs(1) / DISPLAY_FPS);
     let mut last_status = Instant::now();
+    let mut frames_since_status = 0u32;
     let mut encoder = FrameEncoder::new();
     let mut unsupported = None;
     let mut logged_first = false;
@@ -672,14 +648,16 @@ async fn run_frame_reader(
         {
             let _ = info_tx.send(changed);
         }
-        if last_status.elapsed() >= STATUS_INTERVAL {
-            let stats = frame_stream.stats();
+        frames_since_status += 1;
+        let elapsed = last_status.elapsed();
+        if elapsed >= STATUS_INTERVAL {
             events.send(&AcquisitionStatus {
                 active: true,
-                fps: Some(stats.avg_fps as f32),
-                dropped: stats.drops,
+                fps: Some(frames_since_status as f32 / elapsed.as_secs_f32()),
+                dropped: frame_stream.dropped(),
             });
             last_status = Instant::now();
+            frames_since_status = 0;
         }
         if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
             continue;
@@ -776,6 +754,49 @@ async fn discover_gige_devices() -> Vec<viva_genicam::gige::DeviceInfo> {
             warn!("GigE discovery failed: {e}");
             Vec::new()
         })
+}
+
+/// USB3 Vision cameras on this host. USB enumeration blocks, so on the
+/// blocking pool; a host without USB access finds none.
+async fn discover_u3v_devices() -> Vec<U3vDeviceInfo> {
+    let found = tauri::async_runtime::spawn_blocking(viva_genicam::u3v::discovery::discover).await;
+    match found {
+        Ok(Ok(devices)) => devices,
+        Ok(Err(e)) => {
+            tracing::debug!("USB3 Vision discovery failed: {e}");
+            Vec::new()
+        }
+        Err(e) => {
+            warn!("USB3 Vision discovery task failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// A USB3 Vision camera as the device list shows it. USB has no MAC or IP,
+/// so the id is the vendor and product, told apart by the serial, or by the
+/// bus position when the camera reports none.
+fn u3v_device_info(info: &U3vDeviceInfo) -> DeviceInfo {
+    let instance = match &info.serial {
+        Some(serial) => serial.clone(),
+        None => format!("{}.{}", info.bus, info.address),
+    };
+    let id = format!(
+        "u3v-{:04x}{:04x}-{instance}",
+        info.vendor_id, info.product_id
+    );
+    let model = info
+        .model
+        .clone()
+        .unwrap_or_else(|| "USB3 Vision camera".to_string());
+    let mut announce = DeviceAnnounce::new(
+        id,
+        model.clone(),
+        model,
+        info.serial.clone().unwrap_or_default(),
+    );
+    announce.manufacturer = info.manufacturer.clone();
+    DeviceInfo::from_announce(announce, "usb3")
 }
 
 /// The device list for what discovery found, and the host address each
@@ -1185,14 +1206,82 @@ mod tests {
             };
             let backend = super::EmbeddedBackend::new(Default::default());
 
-            backend.record_scan(vec![found]).await;
-            backend.record_scan(vec![]).await;
+            backend.record_scan(vec![found], vec![]).await;
+            backend.record_scan(vec![], vec![]).await;
 
             let iface = backend.forceip_interface(&mac).await.expect("resolve");
             let iface = iface.expect("the interface was forgotten after one missed scan");
             // The address discovery used, not the interface's first one.
             assert_eq!(iface.ipv4(), Some(std::net::Ipv4Addr::LOCALHOST));
         });
+    }
+
+    /// A USB3 Vision camera works in embedded mode: its features read and
+    /// write, and its frames reach the viewer. Embedded mode held only a GigE
+    /// Vision camera, so a USB3 Vision one needed `viva-service-u3v` (ST-14).
+    #[test]
+    fn a_usb3_vision_camera_reads_writes_and_streams() {
+        tauri::async_runtime::block_on(async {
+            let device = viva_fake_u3v::FakeU3vCamera::new(64, 48)
+                .open_device()
+                .expect("fake U3V camera");
+            let (camera, _xml) = viva_genicam::open_u3v_device(device).expect("open");
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.attach(Box::new(camera), "u3v-fake").await;
+
+            let width = backend.get_feature_state("Width").await.expect("Width");
+            assert_eq!(width.value, serde_json::json!(64));
+            backend
+                .set_feature("Width", &serde_json::json!(32))
+                .await
+                .expect("write Width");
+            let width = backend.get_feature_state("Width").await.expect("Width");
+            assert_eq!(width.value, serde_json::json!(32));
+
+            let streamer = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+            assert_eq!((streamer.width, streamer.height), (32, 48));
+            fake_camera::first_frame(&streamer.ws_url).await;
+            backend.stop_acquisition().await.expect("stop");
+
+            // An IP configuration is GigE Vision's alone.
+            let refused = backend.get_network_config().await.unwrap_err();
+            assert!(refused.contains("GigE Vision"), "{refused}");
+
+            backend.disconnect().await.expect("disconnect");
+        });
+    }
+
+    /// Two cameras of one model are told apart by serial, or by bus position
+    /// when the camera reports none.
+    #[test]
+    fn a_usb3_vision_camera_is_named_by_serial_or_bus_position() {
+        use viva_genicam::u3v::descriptor::U3vInterfaceInfo;
+        use viva_genicam::u3v::discovery::U3vDeviceInfo;
+        let info = |serial: Option<&str>| U3vDeviceInfo {
+            bus: 2,
+            address: 7,
+            vendor_id: 0x2676,
+            product_id: 0xba02,
+            serial: serial.map(str::to_string),
+            manufacturer: Some("Vendor".to_string()),
+            model: Some("Model".to_string()),
+            interface_info: U3vInterfaceInfo {
+                control_iface: 0,
+                control_ep_in: 0x81,
+                control_ep_out: 0x01,
+                stream_iface: Some(1),
+                stream_ep_in: Some(0x82),
+                event_iface: None,
+                event_ep_in: None,
+            },
+        };
+        let named = super::u3v_device_info(&info(Some("A123")));
+        assert_eq!(named.id, "u3v-2676ba02-A123");
+        assert_eq!(named.transport, "usb3");
+        assert_eq!(super::u3v_device_info(&info(None)).id, "u3v-2676ba02-2.7");
     }
 
     /// The camera's `GevSCPSPacketSize`, low 16 bits.

@@ -1,0 +1,234 @@
+//! A connected camera, whatever carries its registers (backlog ST-14).
+//!
+//! The library types a camera by its register transport — `Camera<GigeRegisterIo>`
+//! for GigE Vision, `Camera<U3vRegisterIo<T>>` for USB3 Vision over any USB
+//! transfer `T` — so the embedded backend holds one behind [`Device`], and
+//! reads frames from either kind of stream through [`Frames`].
+
+use std::time::Duration;
+
+use viva_genicam::genapi::RegisterIo;
+use viva_genicam::u3v::usb::UsbTransfer;
+use viva_genicam::{
+    Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, U3vFrameStream, U3vRegisterIo,
+    U3vStreamBuilder,
+};
+use viva_zenoh_api::FeatureState;
+
+use super::StartOptions;
+
+/// What the backend asks of a connected camera. Every method blocks on the
+/// camera's I/O, so the backend calls them on the blocking pool.
+pub(crate) trait Device: Send {
+    /// One feature's live state, as `viva-service` computes it (ST-26).
+    fn feature_state(&self, name: &str) -> Result<FeatureState, String>;
+
+    /// Write `value` to `name`, and name the features the write may change.
+    /// A command executes on any value.
+    fn set(&mut self, name: &str, value: &str) -> Result<Vec<String>, String>;
+
+    /// The image size and pixel format a stream would start with.
+    fn image_format(&self) -> (u32, u32, String);
+
+    /// Open the stream and start acquiring.
+    fn start(&mut self, options: &StartOptions) -> Result<Frames, String>;
+
+    fn acquisition_stop(&mut self) -> Result<(), String>;
+
+    /// Let go of the camera as far as its transport allows, best-effort: the
+    /// caller is disconnecting or exiting, and the camera may be gone.
+    fn release(&mut self, ack_timeout: Duration);
+
+    /// The GigE Vision camera, for what only GigE Vision has: an IP address
+    /// and control privilege.
+    fn gige(&mut self) -> Option<&mut Camera<GigeRegisterIo>> {
+        None
+    }
+}
+
+fn feature_state_of<R: RegisterIo>(camera: &Camera<R>, name: &str) -> Result<FeatureState, String> {
+    camera
+        .feature_state(name)
+        .map(FeatureState::from)
+        .map_err(|e| format!("Failed to read '{name}': {e}"))
+}
+
+fn set_on<R: RegisterIo>(
+    camera: &mut Camera<R>,
+    name: &str,
+    value: &str,
+) -> Result<Vec<String>, String> {
+    camera
+        .set(name, value)
+        .map_err(|e| format!("Failed to write '{name}': {e}"))?;
+    Ok(camera.nodemap().invalidated_by(name))
+}
+
+fn image_format_of<R: RegisterIo>(camera: &Camera<R>) -> (u32, u32, String) {
+    let dimension = |name: &str, fallback: u32| {
+        camera
+            .get(name)
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(fallback)
+    };
+    let pixel_format = camera.get("PixelFormat").unwrap_or_else(|error| {
+        tracing::warn!(%error, "Failed to read PixelFormat before acquisition");
+        "Unknown".to_string()
+    });
+    (
+        dimension("Width", 640),
+        dimension("Height", 480),
+        pixel_format,
+    )
+}
+
+impl Device for Camera<GigeRegisterIo> {
+    fn feature_state(&self, name: &str) -> Result<FeatureState, String> {
+        feature_state_of(self, name)
+    }
+
+    fn set(&mut self, name: &str, value: &str) -> Result<Vec<String>, String> {
+        set_on(self, name, value)
+    }
+
+    fn image_format(&self) -> (u32, u32, String) {
+        image_format_of(self)
+    }
+
+    fn start(&mut self, options: &StartOptions) -> Result<Frames, String> {
+        let handle = tokio::runtime::Handle::current();
+        let mut device = self
+            .transport()
+            .lock_device()
+            .map_err(|e| format!("Failed to access device: {e}"))?;
+        handle
+            .block_on(device.claim_control())
+            .map_err(|e| format!("Failed to claim camera control: {e}"))?;
+
+        let camera_ipv4 = match device.remote_addr().ip() {
+            std::net::IpAddr::V4(ip) => ip,
+            _ => return Err("IPv6 cameras are not supported".to_string()),
+        };
+        // camera_ipv4 belongs to the remote camera, not the host. Probe the OS
+        // route to find the local NIC and source address that the OS selected
+        // to reach that camera.
+        let iface = viva_genicam::gige::nic::Iface::from_remote_ipv4(camera_ipv4)
+            .map_err(|e| format!("Failed to detect network interface: {e}"))?;
+        let builder = viva_genicam::StreamBuilder::new(&mut device)
+            .iface(iface)
+            .rcvbuf_bytes(64 << 20); // 64 MiB to absorb bursty GVSP traffic
+        // A size the user measured for their link is a ceiling the path probe
+        // stays under; otherwise negotiate from the NIC MTU (backlog ST-22,
+        // issue #112).
+        let builder = match options.packet_size {
+            Some(size) => builder.packet_size(size),
+            None => builder.auto_packet_size(),
+        };
+        let stream = handle
+            .block_on(builder.build())
+            .map_err(|e| format!("Failed to build stream: {e}"))?;
+        drop(device);
+
+        let frames = Frames::Gige(Box::new(FrameStream::new(stream, None)));
+        self.acquisition_start()
+            .map_err(|e| format!("Failed to start acquisition: {e}"))?;
+        Ok(frames)
+    }
+
+    fn acquisition_stop(&mut self) -> Result<(), String> {
+        Camera::acquisition_stop(self).map_err(|e| format!("Failed to stop acquisition: {e}"))
+    }
+
+    fn release(&mut self, ack_timeout: Duration) {
+        if let Ok(mut device) = self.transport().lock_device() {
+            device.set_control_timeout(ack_timeout);
+        }
+        if let Err(error) = Camera::acquisition_stop(self) {
+            tracing::debug!(%error, "AcquisitionStop while releasing the camera");
+        }
+        let handle = tokio::runtime::Handle::current();
+        match self.transport().lock_device() {
+            Ok(mut device) => {
+                if let Err(error) = handle.block_on(device.release_control()) {
+                    tracing::debug!(%error, "releasing control privilege");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "releasing control privilege"),
+        }
+    }
+
+    fn gige(&mut self) -> Option<&mut Camera<GigeRegisterIo>> {
+        Some(self)
+    }
+}
+
+impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
+    fn feature_state(&self, name: &str) -> Result<FeatureState, String> {
+        feature_state_of(self, name)
+    }
+
+    fn set(&mut self, name: &str, value: &str) -> Result<Vec<String>, String> {
+        set_on(self, name, value)
+    }
+
+    fn image_format(&self) -> (u32, u32, String) {
+        image_format_of(self)
+    }
+
+    fn start(&mut self, _options: &StartOptions) -> Result<Frames, String> {
+        // USB3 Vision has no packet size to set: it streams in bulk transfers.
+        let frames = U3vStreamBuilder::new(self)
+            .build()
+            .map_err(|e| format!("Failed to open the USB stream: {e}"))?;
+        self.acquisition_start()
+            .map_err(|e| format!("Failed to start acquisition: {e}"))?;
+        Ok(Frames::U3v(frames))
+    }
+
+    fn acquisition_stop(&mut self) -> Result<(), String> {
+        Camera::acquisition_stop(self).map_err(|e| format!("Failed to stop acquisition: {e}"))
+    }
+
+    fn release(&mut self, _ack_timeout: Duration) {
+        // No control privilege to give back over USB; closing the device when
+        // it drops releases the interface.
+        if let Err(error) = Camera::acquisition_stop(self) {
+            tracing::debug!(%error, "AcquisitionStop while releasing the camera");
+        }
+    }
+}
+
+/// The frames of either kind of stream.
+pub(crate) enum Frames {
+    Gige(Box<FrameStream>),
+    U3v(U3vFrameStream),
+}
+
+impl Frames {
+    pub(crate) async fn next_frame(&mut self) -> Result<Option<Frame>, GenicamError> {
+        match self {
+            Frames::Gige(stream) => stream.next_frame().await,
+            Frames::U3v(stream) => stream.next_frame().await,
+        }
+    }
+
+    /// Frames lost since the stream started, where the transport counts them:
+    /// GVSP's are abandoned incomplete or discarded under backpressure; a USB
+    /// bulk stream reports none.
+    pub(crate) fn dropped(&self) -> u64 {
+        match self {
+            Frames::Gige(stream) => stream.stats().drops,
+            Frames::U3v(_) => 0,
+        }
+    }
+}
+
+impl Drop for Frames {
+    fn drop(&mut self) {
+        // The U3V reader runs on its own thread until told to stop.
+        if let Frames::U3v(stream) = self {
+            stream.stop();
+        }
+    }
+}

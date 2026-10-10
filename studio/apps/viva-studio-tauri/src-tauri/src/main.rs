@@ -202,10 +202,6 @@ fn main() {
             commands::acquisition::get_acquisition_status,
             commands::acquisition::start_acquisition,
             commands::acquisition::stop_acquisition,
-            // Recording
-            commands::recording::start_recording,
-            commands::recording::stop_recording,
-            commands::recording::get_recording_status,
             // SFNC groups config
             commands::sfnc_groups::get_sfnc_groups,
             // Embedded backend commands

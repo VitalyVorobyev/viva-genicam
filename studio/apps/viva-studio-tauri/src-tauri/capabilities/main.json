@@ -12,7 +12,6 @@
     "device",
     "nodes",
     "acquisition",
-    "recording",
     "sfnc-groups",
     "fs:default",
     "fs:allow-read-file",

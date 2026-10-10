@@ -26,10 +26,6 @@ interface ImageViewerProps {
   deviceName?: string;
   cameraModel?: string;
   imageMeta: ImageMeta | null;
-  isRecording?: boolean;
-  onToggleRecording?: () => void;
-  recordingFrameCount?: number;
-  recordingElapsed?: number;
 }
 
 export function ImageViewer({
@@ -43,10 +39,6 @@ export function ImageViewer({
   deviceName,
   cameraModel,
   imageMeta,
-  isRecording,
-  onToggleRecording,
-  recordingFrameCount,
-  recordingElapsed,
 }: ImageViewerProps) {
   const writeNode = useNodeWriter();
   const [fps, setFps] = useState<number>(0);
@@ -226,10 +218,6 @@ export function ImageViewer({
             setShowLineTool((v) => !v);
             setShowRoiTool(false);
           }}
-          isRecording={isRecording}
-          onToggleRecording={onToggleRecording}
-          recordingFrameCount={recordingFrameCount}
-          recordingElapsed={recordingElapsed}
         />
         <ViewerCanvas
           wsUrl={streamerInfo.ws_url}

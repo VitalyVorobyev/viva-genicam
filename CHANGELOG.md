@@ -225,9 +225,18 @@ section changes the library.
   shows the connected camera's vendor, model, serial, firmware, user ID, MAC
   and IP address — what a report asks for — and sets the persistent IP
   address the camera takes from its next restart.
+- **USB3 Vision cameras in embedded mode** (ST-14). Embedded mode discovered,
+  opened and streamed only GigE Vision cameras, so a USB3 Vision camera
+  needed `viva-service-u3v` and remote mode. The device list now includes
+  them, told apart by serial (or bus position), and they read, write and
+  stream like a GigE camera. The packet size, the IP configuration and the
+  diagnostic report remain GigE Vision's (DX-06); the report names the
+  connected USB3 Vision camera and says it does not cover it.
 - **The viewer shows the camera's pixels** (ST-39). The canvas held a copy
   downscaled to the window, so "1:1" and every zoom above fit enlarged that
-  copy; it now holds every camera pixel and draws enlarged pixels as squares.
+  copy; it now holds every camera pixel and draws enlarged pixels as squares,
+  and its size on screen is not rounded, so "1:1" is exactly one CSS pixel
+  per camera pixel (Codex review of #178).
   The histogram shows its axis ends and the image's minimum, maximum, mean and
   share of samples at 255. Switching tabs no longer reconnects the stream or
   resets the zoom: the viewer stays mounted and skips drawing while hidden.

@@ -23,9 +23,10 @@ wire contract is in [`../docs/studio/zenoh-api.md`](../docs/studio/zenoh-api.md)
 
 ## What works today
 
-- **Live cameras.** Discovery, connect, feature read/write, and GVSP streaming,
-  either through the embedded backend (`viva-genicam` linked directly into the
-  Tauri app) or over Zenoh from `viva-service`.
+- **Live cameras.** Discovery, connect, feature read/write and streaming of
+  GigE Vision and USB3 Vision cameras, either through the embedded backend
+  (`viva-genicam` linked directly into the Tauri app) or over Zenoh from
+  `viva-service` / `viva-service-u3v`.
 - **Feature browser.** Category tree, search, typed editors, live values, and
   access-mode handling — a read-only or locked feature is presented as such.
 - **Offline XML browsing.** Open a GenApi XML file with no camera attached and
@@ -38,9 +39,6 @@ wire contract is in [`../docs/studio/zenoh-api.md`](../docs/studio/zenoh-api.md)
 
 ## What is not there yet
 
-- **USB3 Vision discovery in the embedded backend** — it reads only the GigE
-  cache, though `u3v-usb` is compiled in (backlog ST-14). The Zenoh path via
-  `viva-service-u3v` does work.
 - **Signed builds.** The release bundles are unsigned; see
   [Install a release build](#install-a-release-build).
 - **Recording and playback**, **frame annotation**, **auto-update** — planned,

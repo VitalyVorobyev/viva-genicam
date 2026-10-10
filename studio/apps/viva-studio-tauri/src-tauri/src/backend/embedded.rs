@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tauri::Emitter;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use viva_genicam::genapi::{AccessMode, Node, NodeMap, RegisterIo};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
 use viva_zenoh_api::{DeviceAnnounce, FeatureState, NumericRange};
@@ -68,7 +68,7 @@ impl ConnectedCamera {
 /// State for an active image acquisition session.
 struct AcquisitionState {
     shutdown_tx: watch::Sender<bool>,
-    task_handles: Vec<tokio::task::JoinHandle<()>>,
+    task_handles: Vec<tauri::async_runtime::JoinHandle<()>>,
     /// Kept for diagnostics and status reporting.
     #[allow(dead_code)]
     ws_url: String,
@@ -79,6 +79,10 @@ struct AcquisitionState {
 }
 
 // ── EmbeddedBackend ─────────────────────────────────────────────────────────
+
+/// How long each step of releasing a camera waits for its acknowledgement.
+/// Short, because the camera may already be gone and app exit waits on it.
+const RELEASE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Backend that communicates directly with cameras via GigE Vision / USB3 Vision.
 pub struct EmbeddedBackend {
@@ -123,8 +127,54 @@ impl EmbeddedBackend {
             let _ = state.shutdown_tx.send(true);
             for handle in state.task_handles {
                 handle.abort();
+                // Wait for the task to go, so no frame reader outlives the
+                // stream it reads; an aborted task resolves as cancelled.
+                let _ = handle.await;
             }
         }
+    }
+
+    /// Stop streaming, tell the camera to stop acquiring, give back control
+    /// privilege, and drop the camera.
+    ///
+    /// Every step is best-effort: an unplugged camera cannot answer, and the
+    /// caller is disconnecting or exiting either way. Dropping the camera joins
+    /// its keepalive (`GigeRegisterIo`'s `Drop`), which needs the runtime this
+    /// runs on.
+    async fn release_camera(&self) {
+        self.stop_acquisition_inner().await;
+        let connected = match self.camera.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(mut connected) = connected else {
+            return;
+        };
+        tokio::task::block_in_place(move || {
+            if let Ok(mut device) = connected.camera.transport().lock_device() {
+                device.set_control_timeout(RELEASE_ACK_TIMEOUT);
+            }
+            if let Err(error) = connected.camera.acquisition_stop() {
+                debug!(%error, "AcquisitionStop while releasing the camera");
+            }
+            let handle = tokio::runtime::Handle::current();
+            match connected.camera.transport().lock_device() {
+                Ok(mut device) => {
+                    if let Err(error) = handle.block_on(device.release_control()) {
+                        debug!(%error, "releasing control privilege");
+                    }
+                }
+                Err(error) => debug!(%error, "releasing control privilege"),
+            }
+            drop(connected);
+        });
+        info!("Camera released (embedded mode)");
+    }
+
+    /// Release the camera before the app exits; see `on_run_event` in
+    /// `main.rs`.
+    pub async fn shutdown(&self) {
+        self.release_camera().await;
     }
 }
 
@@ -208,15 +258,7 @@ impl DeviceBackend for EmbeddedBackend {
     }
 
     async fn disconnect(&self, _device_id: &str) -> Result<(), String> {
-        self.stop_acquisition_inner().await;
-        {
-            let mut guard = self
-                .camera
-                .lock()
-                .map_err(|_| "Camera mutex poisoned".to_string())?;
-            *guard = None;
-        }
-        info!("Camera disconnected (embedded mode)");
+        self.release_camera().await;
         Ok(())
     }
 
@@ -405,7 +447,7 @@ impl DeviceBackend for EmbeddedBackend {
             let info_tx = info_tx.clone();
             let mut shutdown_rx = shutdown_rx.clone();
             let mut frame_stream = frame_stream;
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let mut encoder_gray = viva_streamer::bmp::BmpEncoder::new(width, height);
                 let mut encoder_rgb = viva_streamer::bmp::BmpEncoder::new_rgb24(width, height);
                 let mut stream_width = width;
@@ -493,7 +535,7 @@ impl DeviceBackend for EmbeddedBackend {
         let ws_handle = {
             let state = viva_streamer::ws::AppState { frame_tx, info_tx };
             let shutdown_rx = shutdown_rx.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 if let Err(e) = viva_streamer::ws::run_server_with_listener(
                     listener,
                     "/ws".to_string(),

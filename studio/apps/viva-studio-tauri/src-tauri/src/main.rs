@@ -227,8 +227,27 @@ fn main() {
     }
 }
 
-/// What the app does as its event loop ends.
-fn on_run_event(_event: &tauri::RunEvent, _embedded: Option<&backend::embedded::EmbeddedBackend>) {}
+/// How long the exit hook waits for the camera to be released.
+const EXIT_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Release the embedded camera as the event loop ends.
+///
+/// Tauri exits the process without dropping managed state, so this is the only
+/// chance: without it the camera keeps acquiring and stays claimed until its
+/// heartbeat expires. Remote mode has nothing to release; the service owns the
+/// camera.
+fn on_run_event(event: &tauri::RunEvent, embedded: Option<&backend::embedded::EmbeddedBackend>) {
+    if let (tauri::RunEvent::Exit, Some(embedded)) = (event, embedded) {
+        tauri::async_runtime::block_on(async {
+            if tokio::time::timeout(EXIT_RELEASE_TIMEOUT, embedded.shutdown())
+                .await
+                .is_err()
+            {
+                tracing::warn!("the camera was not released before exit");
+            }
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -241,14 +260,16 @@ mod tests {
         use backend::embedded::fake_camera;
 
         let _port = fake_camera::lock();
-        tauri::async_runtime::block_on(async {
+        let (fake, backend) = tauri::async_runtime::block_on(async {
             let fake = fake_camera::start().await;
             let backend = fake_camera::connect_and_acquire(&fake).await;
-
-            on_run_event(&tauri::RunEvent::Exit, Some(&backend));
-
-            fake_camera::assert_released(&fake).await;
+            (fake, backend)
         });
+
+        // As in the app: on the main thread, outside the runtime.
+        on_run_event(&tauri::RunEvent::Exit, Some(&backend));
+
+        tauri::async_runtime::block_on(fake_camera::assert_released(&fake));
     }
 
     #[test]

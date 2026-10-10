@@ -2231,6 +2231,22 @@ input[type="checkbox"] {
   display: flex;
   gap: 3px;
 }
+
+/* The scanning dots in the device list. */
+.device-sidebar__scanning-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: scanning-dot-pulse 1.4s ease-in-out infinite;
+}
+.device-sidebar__scanning-dot:nth-child(1) { animation-delay: 0s; }
+.device-sidebar__scanning-dot:nth-child(2) { animation-delay: 0.2s; }
+.device-sidebar__scanning-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes scanning-dot-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40%           { opacity: 1;   transform: scale(1.2); }
+}
 .device-dd__option {
   display: flex;
   align-items: center;

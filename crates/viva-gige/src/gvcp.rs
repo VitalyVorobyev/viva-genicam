@@ -836,6 +836,8 @@ pub struct GigeDevice {
     socket: UdpSocket,
     remote: SocketAddr,
     control_timeout: Duration,
+    inflight_keepalive_period: Option<Duration>,
+    last_command_sent: time::Instant,
     request_id: u16,
     rng: Rng,
     /// Single-register access goes out as READMEM/WRITEMEM instead of
@@ -883,6 +885,8 @@ impl GigeDevice {
             socket,
             remote: addr,
             control_timeout: consts::CONTROL_TIMEOUT,
+            inflight_keepalive_period: None,
+            last_command_sent: time::Instant::now(),
             request_id: 1,
             rng: Rng::new(),
             memory_access_only,
@@ -901,6 +905,19 @@ impl GigeDevice {
     /// Return the acknowledgement timeout per control transaction attempt.
     pub fn control_timeout(&self) -> Duration {
         self.control_timeout
+    }
+
+    /// Configure control-channel probes while a transaction waits for its ACK.
+    ///
+    /// After this much silence on the socket, send an idempotent CCP read using
+    /// the same source port and a separate request ID. Probe replies are drained
+    /// without extending the original transaction's deadline. Use a period
+    /// comfortably shorter than the device's heartbeat timeout.
+    ///
+    /// `None` or a zero period disables the probes (the default). This handles
+    /// in-flight requests only; an idle connection still needs a keepalive.
+    pub fn set_inflight_keepalive_period(&mut self, period: Option<Duration>) {
+        self.inflight_keepalive_period = period.filter(|period| !period.is_zero());
     }
 
     /// Send every single-register access as READMEM/WRITEMEM from now on.
@@ -1003,6 +1020,7 @@ impl GigeDevice {
                 self.backoff(attempt).await;
                 continue 'retry;
             }
+            self.last_command_sent = time::Instant::now();
 
             let mut buf = vec![
                 0u8;
@@ -1082,6 +1100,85 @@ impl GigeDevice {
         }
     }
 
+    /// Send a heartbeat without recursively entering the active transaction.
+    async fn send_inflight_keepalive(&mut self, active_request_id: u16) -> Result<(), GigeError> {
+        let mut request_id = self.next_request_id();
+        // A long transaction may outlive the 16-bit request-ID counter.
+        if request_id == active_request_id {
+            request_id = self.next_request_id();
+        }
+        let mut payload = BytesMut::with_capacity(8);
+        payload.put_u32(consts::CONTROL_CHANNEL_PRIVILEGE as u32);
+        let opcode = if self.memory_access_only {
+            payload.put_u16(0);
+            payload.put_u16(4);
+            OpCode::ReadMem
+        } else {
+            OpCode::ReadRegister
+        };
+        let header = GvcpRequestHeader {
+            flags: CommandFlags::ACK_REQUIRED,
+            command: opcode.command_code(),
+            length: payload.len() as u16,
+            request_id,
+        };
+        self.socket.send(&header.encode(&payload)).await?;
+        self.last_command_sent = time::Instant::now();
+        trace!(
+            request_id,
+            active_request_id, "sent in-flight control keepalive"
+        );
+        Ok(())
+    }
+
+    /// One socket reader owns both the active request and its heartbeat replies.
+    /// Keep an absolute deadline so unrelated or duplicate ACKs cannot postpone
+    /// a timeout, and never resend the active command merely to send a heartbeat.
+    async fn recv_for_request(
+        &mut self,
+        buf: &mut [u8],
+        request_id: u16,
+        deadline: time::Instant,
+    ) -> AckRecv {
+        loop {
+            let heartbeat_deadline = self
+                .inflight_keepalive_period
+                .and_then(|period| self.last_command_sent.checked_add(period));
+            tokio::select! {
+                _ = time::sleep_until(deadline) => return AckRecv::TimedOut,
+                _ = async {
+                    if let Some(deadline) = heartbeat_deadline {
+                        time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    if let Err(err) = self.send_inflight_keepalive(request_id).await {
+                        return AckRecv::Io(std::io::Error::other(err));
+                    }
+                }
+                received = self.socket.recv(buf) => {
+                    let len = match received {
+                        Ok(len) => len,
+                        Err(err) => return AckRecv::Io(err),
+                    };
+                    let ack_id = buf.get(..len)
+                        .and_then(|packet| packet.get(6..8))
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .map(u16::from_be_bytes);
+                    if let Some(ack_id) = ack_id
+                        && ack_id != request_id
+                    {
+                        trace!(request_id, ack_id, "drained keepalive or delayed acknowledgement");
+                        continue;
+                    }
+                    // Preserve existing validation of malformed matching ACKs.
+                    return AckRecv::Received(len);
+                }
+            }
+        }
+    }
+
     /// Receive one acknowledgement, granting the device the extra time it asks
     /// for via PENDING_ACK.
     ///
@@ -1095,8 +1192,11 @@ impl GigeDevice {
         let mut wait = self.control_timeout;
         let mut pending_seen = 0usize;
         loop {
-            match time::timeout(wait, self.socket.recv(buf)).await {
-                Ok(Ok(len)) => {
+            match self
+                .recv_for_request(buf, request_id, time::Instant::now() + wait)
+                .await
+            {
+                AckRecv::Received(len) => {
                     let Some((pending_id, requested)) = parse_pending_ack(&buf[..len]) else {
                         return AckRecv::Received(len);
                     };
@@ -1127,8 +1227,7 @@ impl GigeDevice {
                         "device requested more time (PENDING_ACK)"
                     );
                 }
-                Ok(Err(err)) => return AckRecv::Io(err),
-                Err(_) => return AckRecv::TimedOut,
+                other => return other,
             }
         }
     }
@@ -1571,9 +1670,19 @@ impl GigeDevice {
             first_packet, last_packet, request_id, "sending packet resend request"
         );
         self.socket.send(&packet).await?;
-        let mut buf = [0u8; viva_gencp::HEADER_SIZE];
-        match time::timeout(self.control_timeout, self.socket.recv(&mut buf)).await {
-            Ok(Ok(len)) => {
+        self.last_command_sent = time::Instant::now();
+        // A delayed heartbeat ACK has a payload; receive it in full before
+        // filtering by request ID rather than truncating it to a resend header.
+        let mut buf = [0u8; viva_gencp::HEADER_SIZE + consts::GENCP_MAX_BLOCK];
+        match self
+            .recv_for_request(
+                &mut buf,
+                request_id,
+                time::Instant::now() + self.control_timeout,
+            )
+            .await
+        {
+            AckRecv::Received(len) => {
                 if len != viva_gencp::HEADER_SIZE {
                     return Err(GigeError::Protocol("resend ack length mismatch".into()));
                 }
@@ -1605,8 +1714,8 @@ impl GigeDevice {
                 }
                 Ok(())
             }
-            Ok(Err(err)) => Err(err.into()),
-            Err(_) => Err(GigeError::Timeout),
+            AckRecv::Io(err) => Err(err.into()),
+            AckRecv::TimedOut => Err(GigeError::Timeout),
         }
     }
 }

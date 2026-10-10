@@ -762,6 +762,9 @@ pub struct ChunkConfig {
 /// control channel alive; see [`GigeRegisterIo::new`]. Holding a
 /// `GigeRegisterIo` is therefore enough to keep control privilege — no caller
 /// has to run a heartbeat of its own.
+/// While register I/O holds the device mutex, the GVCP receive loop sends its
+/// own probes on the same socket. Long ACK waits therefore do not starve the
+/// idle task's keepalive; ordinary requests remain serialized.
 pub struct GigeRegisterIo {
     handle: tokio::runtime::Handle,
     device: Arc<Mutex<GigeDevice>>,
@@ -789,7 +792,11 @@ impl GigeRegisterIo {
     /// The runtime must remain alive until the adapter has been dropped. On a
     /// current-thread runtime the async task is aborted, since blocking on its
     /// completion would prevent that same runtime from making progress.
-    pub fn new(handle: tokio::runtime::Handle, device: GigeDevice) -> Self {
+    pub fn new(handle: tokio::runtime::Handle, mut device: GigeDevice) -> Self {
+        // A register operation holds the device mutex while waiting for its
+        // reply. Let the socket owner send heartbeats during that wait; the
+        // background task below covers idle periods and refines this period.
+        device.set_inflight_keepalive_period(Some(keepalive_period(None)));
         let device = Arc::new(Mutex::new(device));
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let task = spawn_keepalive(handle.clone(), Arc::downgrade(&device), stopped);
@@ -995,13 +1002,19 @@ fn spawn_keepalive(
 ) -> tokio::task::JoinHandle<()> {
     handle.clone().spawn(async move {
         let reported = on_blocking_pool(&handle, &device, &mut stopped, |handle, dev, stopped| {
-            handle.block_on(async {
+            let reported = handle.block_on(async {
                 tokio::select! {
                     biased;
                     _ = stopped.changed() => Err("keepalive stopped".to_string()),
                     result = dev.heartbeat_timeout_ms() => result.map_err(|err| err.to_string()),
                 }
-            })
+            });
+            if let Ok(timeout_ms) = reported {
+                dev.set_inflight_keepalive_period(
+                    (timeout_ms != 0).then(|| keepalive_period(Some(timeout_ms))),
+                );
+            }
+            reported
         })
         .await;
 

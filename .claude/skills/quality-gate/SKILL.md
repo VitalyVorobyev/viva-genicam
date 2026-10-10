@@ -28,7 +28,11 @@ under `studio/` changed, additionally run in `studio/`:
 
 And in `studio/ui/viva-studio-ui`:
 
-4. `bun install --frozen-lockfile && bun run test -- --run && bun run build`
+4. `bun install --frozen-lockfile && bunx tsc --noEmit && bun run lint && bun run test -- --run && bun run build`
+
+   `bun run build` is Vite, which strips types without checking them, so
+   `tsc --noEmit` is the only type check. Component tests (`*.test.tsx`) run
+   on jsdom, which needs Node 22.22.2 or later on `PATH`.
 
 ## The Tauri app is a *third* workspace (run it whenever a public type changes)
 

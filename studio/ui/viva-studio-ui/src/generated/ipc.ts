@@ -62,7 +62,13 @@ export type ImageMeta = { pixel_format: PixelFormat, width: number, height: numb
 
 export type PixelFormat = "Mono8" | "Mono10" | "Mono12" | "Mono16" | "BayerRG8" | "BayerGR8" | "BayerBG8" | "BayerGB8" | "BayerRG10" | "BayerGR10" | "BayerBG10" | "BayerGB10" | "BayerRG12" | "BayerGR12" | "BayerBG12" | "BayerGB12" | "BayerRG16" | "BayerGR16" | "BayerBG16" | "BayerGB16" | "RGB8" | "BGR8" | "RGBa8" | "YCbCr422_8" | "YCbCr8" | "Coord3D_C16" | "Unknown";
 
-export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string, };
+export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string,
+/**
+ * Declarations in the XML that could not become features, so a viewer
+ * can say a feature was dropped rather than absent (backlog DX-05).
+ * Omitted when empty.
+ */
+skipped?: Array<UiSkippedNode>, };
 
 export type UiNode = { name: string, kind: UiNodeKind, display_name?: string, comment?: string, tooltip?: string, description?: string, visibility?: string, access_mode?: string, unit?: string, representation?: string, constraints?: NumericConstraints, enum_entries?: Array<EnumEntry>, raw: RawNode,
 /**
@@ -99,6 +105,20 @@ export type NumericConstraints = { min?: number, max?: number, inc?: number, val
 export type EnumEntry = { name: string, value?: string, display_name?: string, };
 
 export type RawNode = { tag: string, attributes: { [key in string]: string }, children_text: { [key in string]: string }, };
+
+export type UiSkippedNode = {
+/**
+ * The XML element, such as `Register`.
+ */
+tag: string,
+/**
+ * The node's `Name`, if it had one.
+ */
+name?: string,
+/**
+ * Why it could not be built.
+ */
+error: string, };
 
 export type ParseXmlResponse = { graph: UiGraph, xml: string, diags: Array<Diag>, summary: ModelSummary, };
 

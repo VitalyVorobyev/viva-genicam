@@ -29,7 +29,7 @@ from .errors import (
     UnsupportedPixelFormatError,
 )
 from .frame import Frame
-from .node import NodeInfo, NodeKind
+from .node import NodeInfo, NodeKind, SkippedNode
 from .stream import FrameStream
 
 # Lazy functional wrappers so the public API is a flat module.
@@ -43,6 +43,7 @@ __all__ = [
     "Frame",
     "FrameStream",
     "NodeInfo",
+    "SkippedNode",
     "NodeKind",
     "GenicamError",
     "GenApiError",

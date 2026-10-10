@@ -17,7 +17,7 @@ import { useDraftValues } from "../../state/useDraftValues";
 import { useSplitter } from "../Layout/useSplitter";
 import { CategoryList } from "./CategoryList";
 import { FeatureList } from "./FeatureList";
-import { formatLiveValue } from "./treeUtils";
+import { formatLiveValue, graphSummary } from "./treeUtils";
 import { countApplicableDrafts, formatBatchProgress } from "./batchApplyUtils";
 import { buildLiveValuePreset, presetValueToDraft } from "./presetUtils";
 import { FeaturePanel } from "./FeaturePanel";
@@ -117,7 +117,7 @@ export function FeatureBrowserPage({
       setSelectedNodeName(null);
       setDiags(response.diags || []);
       setSummaryOverride(
-        `${response.summary.node_count} nodes · ${response.summary.category_count} cat`
+        graphSummary(response.graph, response.summary.node_count, response.summary.category_count)
       );
       setStatus({ kind: "ready", fileName });
       // Auto-select first category
@@ -318,7 +318,7 @@ export function FeatureBrowserPage({
     if (!graph) return "No model loaded";
     const nodeCount = Object.keys(graph.nodes_by_name ?? {}).length;
     const categoryCount = Object.keys(graph.categories ?? {}).length;
-    return `${nodeCount} nodes · ${categoryCount} cat`;
+    return graphSummary(graph, nodeCount, categoryCount);
   }, [graph, summaryOverride]);
 
   const breadcrumb = useMemo(() => {

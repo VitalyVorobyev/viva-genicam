@@ -58,6 +58,9 @@ pip install viva-genicam
 viva-camctl report --ip <CAMERA-IP> --out viva-report.txt
 ```
 
+In Viva Studio, the Diagnostics tab's **Save report…** writes the same bundle
+for the connected camera — the same library code (`viva_genicam::report`).
+
 ## What is in the bundle
 
 Sections, in order:

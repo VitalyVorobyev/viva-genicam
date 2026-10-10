@@ -75,6 +75,15 @@ at the top of the worker as well.
 cam.nodes()            # ['AcquisitionStart', 'ExposureTime', ...]
 ```
 
+A feature you expected but cannot find may be one the library could not build
+from the camera's XML rather than one the camera lacks. `skipped()` lists those,
+with the reason — worth an issue with the camera's XML attached:
+
+```python
+for node in cam.skipped():   # [] for a document the library fully understands
+    print(node.tag, node.name, node.error)
+```
+
 ### Node metadata
 
 ```python

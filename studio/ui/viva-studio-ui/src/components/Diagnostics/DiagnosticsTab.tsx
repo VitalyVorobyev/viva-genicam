@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useAppLog } from "../../context/AppLogContext";
+import { ReportPanel } from "./ReportPanel";
 
 // DiagnosticsTab renders the timestamped event log from AppLogContext.
 // The log auto-scrolls to the newest entry (top, since entries are newest-first).
@@ -24,6 +25,7 @@ export function DiagnosticsTab() {
 
   return (
     <div className="diagnostics-tab">
+      <ReportPanel />
       <div className="diagnostics-tab__toolbar">
         <span className="diagnostics-tab__title">Event Log</span>
         <div className="diagnostics-tab__actions">

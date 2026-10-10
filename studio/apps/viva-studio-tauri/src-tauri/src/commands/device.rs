@@ -8,9 +8,9 @@ use tokio::sync::RwLock;
 use crate::backend::BackendState;
 use crate::commands::xml_model::{ModelSummary, ParseXmlResponse};
 use crate::error::HumanizeExt;
-use crate::state::ModelState;
 use crate::state::connection::Connection;
 use crate::state::device_state::{ConnectionState, DeviceInfo};
+use crate::state::{Diag, ModelState};
 use viva_xml_model::parse_genicam_xml;
 
 #[tauri::command]
@@ -73,12 +73,13 @@ pub async fn connect_device(
         },
         graph: graph.clone(),
         xml: result.xml.clone(),
-        diags: vec![],
+        diags: Diag::for_graph(&graph),
     };
+    let diags = response.diags.clone();
     model
         .write()
         .await
-        .update(result.xml, graph, vec![], Some(device_id.clone()));
+        .update(result.xml, graph, diags, Some(device_id.clone()));
 
     connection
         .set(ConnectionState::Connected {

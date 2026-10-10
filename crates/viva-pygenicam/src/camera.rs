@@ -19,7 +19,8 @@ use viva_u3v::usb::RusbTransfer;
 use crate::discovery::{PyGigeDeviceInfo, PyU3vDeviceInfo};
 use crate::errors::{parse_error, IntoPyErr};
 use crate::nodemap::{
-    collect_categories, collect_node_info, collect_node_names, node_info_with_state,
+    collect_categories, collect_node_info, collect_node_names, collect_skipped,
+    node_info_with_state,
 };
 use crate::runtime::runtime;
 use crate::stream::{build_gige_stream, build_u3v_stream, PyFrameStream};
@@ -336,6 +337,23 @@ impl PyCamera {
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
                 collect_node_info(py, g.nodemap())
+            }
+        }
+    }
+
+    fn skipped<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        match &self.inner {
+            CameraInner::Gige { camera, .. } => {
+                let g = camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?;
+                collect_skipped(py, g.nodemap())
+            }
+            CameraInner::U3v { camera, .. } => {
+                let g = camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?;
+                collect_skipped(py, g.nodemap())
             }
         }
     }

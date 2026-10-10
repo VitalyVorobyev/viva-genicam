@@ -506,6 +506,59 @@ async fn e2e_write_reply_names_what_it_invalidated() {
     }
 }
 
+/// The service writes the diagnostic report on its camera, for a client that
+/// cannot reach the camera itself (ST-41).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_report_describes_the_served_camera() {
+    let _cam = TestCamera::start().await;
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let request = viva_zenoh_api::DeviceReportRequest { include_xml: false };
+    let replies = session
+        .get(keys::report(&device_id))
+        .payload(serde_json::to_vec(&request).unwrap())
+        .timeout(Duration::from_secs(10))
+        .await
+        .unwrap();
+    let reply = replies.recv_async().await.expect("no reply");
+    let sample = reply.result().expect("query error");
+    let report = serde_json::from_slice::<viva_zenoh_api::DeviceReportResponse>(
+        &sample.payload().to_bytes(),
+    )
+    .unwrap()
+    .report;
+    for expected in [
+        "tool:        viva-service",
+        &format!("device id:   {device_id}"),
+        "selected: 127.0.0.1",
+        "No features were dropped.",
+        "Omitted on request",
+    ] {
+        assert!(report.contains(expected), "missing {expected:?}:\n{report}");
+    }
+
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+}
+
 /// A feature snapshot of every node the fake declares succeeds, write-only and
 /// command nodes included, and none of them is read on the wire (SVC-08,
 /// ST-21).

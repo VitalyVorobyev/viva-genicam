@@ -7,8 +7,8 @@
 //! - **frame subscriber** — receives framed payloads (`16-byte FrameHeader + raw
 //!   pixels`), decodes the inline header, and draws the pixels with
 //!   [`FrameEncoder`] — the same encoder embedded mode uses, which lists the
-//!   formats it can draw ([`PixelLayout::of_wire`]). A frame is not encoded
-//!   while no viewer is connected, nor above `fps_limit`.
+//!   formats it can draw ([`PixelLayout::of_wire`]), as often as
+//!   [`FramePacer`] allows.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use viva_zenoh_api::{FrameHeader, ImageMeta, PixelFormat};
 
 use crate::error::StreamerError;
-use crate::frame::{FrameEncoder, PixelLayout};
+use crate::frame::{FrameEncoder, FramePacer, PixelLayout};
 
 #[derive(Clone, Debug)]
 pub struct ZenohSourceConfig {
@@ -61,9 +61,9 @@ async fn run_inner(
     info_tx: watch::Sender<crate::ws::StreamInfo>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), StreamerError> {
-    let min_interval = source
-        .fps_limit
-        .map(|fps| Duration::from_secs_f64(1.0 / fps as f64));
+    let mut pacer = FramePacer::new(source.fps_limit.map_or(Duration::ZERO, |fps| {
+        Duration::from_secs_f64(1.0 / fps as f64)
+    }));
 
     let frame_sub = session.declare_subscriber(&source.key_expr).await?;
     let meta_sub = session.declare_subscriber(&source.meta_key).await?;
@@ -76,7 +76,6 @@ async fn run_inner(
         source.key_expr, source.meta_key
     );
 
-    let mut last_emit: Option<Instant> = None;
     let mut logged_first_meta = false;
     let mut logged_first_raw_frame = false;
     let mut logged_first_bmp = false;
@@ -138,13 +137,7 @@ async fn run_inner(
                     }
                 };
 
-                if let Some(interval) = min_interval
-                    && let Some(last) = last_emit
-                        && last.elapsed() < interval {
-                            continue;
-                        }
-                // Nobody is watching: decoding and encoding would be wasted.
-                if frame_tx.receiver_count() == 0 {
+                if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
                     continue;
                 }
 
@@ -211,9 +204,10 @@ async fn run_inner(
                 };
 
                 let bmp_len = frame.len();
-                if frame_tx.send(frame).is_err() {
-                    warn!("No WebSocket clients are listening for frames");
-                } else if !logged_first_bmp {
+                // Stored even with no viewer: the next one to connect is sent it.
+                frame_tx.send_replace(frame);
+                pacer.sent(Instant::now());
+                if !logged_first_bmp {
                     info!(
                         seq = header.seq,
                         bytes = bmp_len,
@@ -221,11 +215,70 @@ async fn run_inner(
                     );
                     logged_first_bmp = true;
                 }
-                last_emit = Some(Instant::now());
             }
         }
     }
 
     info!("Zenoh source loop exited");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame that arrives while no viewer is connected is kept for the one
+    /// that connects next. In SingleFrame mode it is the only frame, and the
+    /// viewer connects after the acquisition starts (Codex review of #173).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_nobody_watches_is_kept_for_the_next_viewer() {
+        let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+        let key = format!("viva-streamer-test/{}/image", std::process::id());
+        let source = ZenohSourceConfig {
+            key_expr: key.clone(),
+            meta_key: format!("{key}/meta"),
+            fps_limit: None,
+        };
+        let meta = ImageMeta {
+            pixel_format: PixelFormat::Mono8,
+            width: 2,
+            height: 2,
+            payload_size: 4,
+        };
+        let (frame_tx, _) = watch::channel(Bytes::new());
+        let (info_tx, _) = watch::channel(crate::ws::StreamInfo::from_image_meta(&meta));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let source_task = tokio::spawn(run_with_session(
+            session.clone(),
+            source,
+            Arc::new(RwLock::new(meta)),
+            frame_tx.clone(),
+            info_tx,
+            shutdown_rx,
+        ));
+
+        let header = FrameHeader {
+            pixel_format: PixelFormat::Mono8,
+            width: 2,
+            height: 2,
+            seq: 1,
+        };
+        let mut payload = header.encode();
+        payload.extend_from_slice(&[0, 64, 128, 255]);
+
+        // Publish until the source has subscribed and stored a frame.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while frame_tx.borrow().is_empty() && Instant::now() < deadline {
+            session.put(&key, payload.clone()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let stored = frame_tx.borrow().clone();
+        shutdown_tx.send(true).unwrap();
+        source_task.await.unwrap().unwrap();
+
+        assert!(
+            stored.starts_with(b"BM"),
+            "no frame was kept for a later viewer"
+        );
+    }
 }

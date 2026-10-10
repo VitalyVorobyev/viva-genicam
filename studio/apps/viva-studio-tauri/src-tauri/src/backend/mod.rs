@@ -106,6 +106,11 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// `main.rs`.
     async fn shutdown(&self) {}
 
+    /// The diagnostic report `viva-camctl report` writes, on the connected
+    /// camera — or on this host and what discovery finds, if none is
+    /// connected (backlog ST-41).
+    async fn report(&self, include_xml: bool) -> Result<String, String>;
+
     // ── IP configuration (GigE, embedded mode) ──────────────────────────────
 
     /// Broadcast FORCEIP: give the camera with `mac` a temporary address.

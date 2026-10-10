@@ -115,6 +115,7 @@ fn build_from_nodemap(xml_model: &XmlModel, nodemap: &NodeMap) -> Result<UiGraph
         nodes_by_name,
         categories,
         root_category,
+        skipped: nodemap.skipped().iter().map(UiSkippedNode::from).collect(),
     })
 }
 
@@ -169,6 +170,7 @@ fn build_from_xml_model(xml_model: &XmlModel) -> Result<UiGraph, ParseError> {
         nodes_by_name,
         categories,
         root_category,
+        skipped: xml_model.skipped.iter().map(UiSkippedNode::from).collect(),
     })
 }
 

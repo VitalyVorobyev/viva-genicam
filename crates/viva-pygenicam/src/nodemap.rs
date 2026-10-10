@@ -112,6 +112,23 @@ pub(crate) fn collect_categories<'py>(
     Ok(dict)
 }
 
+/// The declarations this camera has that the library could not turn into a
+/// feature, as `{"tag", "name", "error"}` dicts (backlog DX-05).
+pub(crate) fn collect_skipped<'py>(
+    py: Python<'py>,
+    nodemap: &NodeMap,
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for node in nodemap.skipped() {
+        let dict = PyDict::new(py);
+        dict.set_item("tag", &node.tag)?;
+        dict.set_item("name", node.name.as_deref())?;
+        dict.set_item("error", &node.error)?;
+        list.append(dict)?;
+    }
+    Ok(list)
+}
+
 pub(crate) fn register(_m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }

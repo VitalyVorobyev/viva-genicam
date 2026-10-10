@@ -46,6 +46,7 @@ fn render() -> String {
         viva_xml_model::NumericConstraints,
         viva_xml_model::EnumEntry,
         viva_xml_model::RawNode,
+        viva_xml_model::UiSkippedNode,
         // Command results.
         crate::commands::xml_model::ParseXmlResponse,
         crate::commands::xml_model::ModelSummary,

@@ -28,7 +28,7 @@ and only spec-derived fixtures stop them agreeing on an error
 camera we cannot open. Almost every fix so far came from a user-supplied
 artifact, so producing one must be easy even when nothing is known to be wrong.
 
-**Open**: DX-05, DX-06.
+**Open**: DX-06.
 
 ## Phase 3 — Streaming reliability
 
@@ -93,9 +93,10 @@ they saw.
   camera I/O off the runtime workers (ST-31), one frame encoder (ST-32), the
   React Compiler lint rules (ST-43), backend tests in both modes (ST-03), the
   mock service retired (ST-02).
-- **Studio viewer parity**: ST-41, then ST-36, ST-37, ST-38, ST-39, ST-40,
-  ST-14, DX-05. Done: a packet size the user sets (ST-22, seen on hardware),
-  greying out what the camera refuses (ST-35), the stream description
-  following a mid-stream format change (ST-17).
+- **Studio viewer parity**: ST-36, ST-37, ST-38, ST-39, ST-40, ST-14. Done:
+  a packet size the user sets (ST-22, seen on hardware), greying out what the
+  camera refuses (ST-35), the stream description following a mid-stream
+  format change (ST-17), "Generate report" (ST-41), dropped features named
+  in Studio and Python (DX-05).
 - **Studio distribution**, alongside parity: ST-06, then ST-07.
 - **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-42.

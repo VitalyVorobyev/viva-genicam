@@ -170,6 +170,22 @@ pub struct DeviceXmlResponse {
     pub xml: String,
 }
 
+/// Request payload for the `genicam/devices/{id}/report` queryable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceReportRequest {
+    /// Include the device's GenApi XML; on unless the client asks otherwise.
+    #[serde(default = "default_true")]
+    pub include_xml: bool,
+}
+
+/// Response to the `report` queryable: the diagnostic report the service
+/// wrote for its device, as plain text, the same report `viva-camctl report`
+/// writes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceReportResponse {
+    pub report: String,
+}
+
 // ── Node Values ──────────────────────────────────────────────────────────────
 
 /// Live node value update published by the service on change.
@@ -567,6 +583,12 @@ pub mod keys {
 
     pub fn xml(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/xml")
+    }
+
+    /// Key expression for the diagnostic report queryable.
+    /// Direction: App -> Service (queryable GET).
+    pub fn report(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/report")
     }
 
     pub fn status(device_id: &str) -> String {

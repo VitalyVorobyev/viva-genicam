@@ -213,6 +213,7 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
     let height = state.registers.height();
     let pixel_format = state.registers.pixel_format_code();
     let bpp = bytes_per_pixel(pixel_format);
+    let payload_size = crate::registers::payload_bytes(width, height, pixel_format);
 
     match phase {
         0 => {
@@ -225,7 +226,10 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
         1 => {
             // Payload: animated test pattern.
             let frame_idx = (state.frame_count / 3) as u16;
-            let data = generate_test_pattern(width as usize, height as usize, bpp, frame_idx);
+            let mut data = generate_test_pattern(width as usize, height as usize, bpp, frame_idx);
+            // A packed format's frame is not a whole number of bytes a pixel;
+            // its payload is the declared size whatever the pattern.
+            data.resize(payload_size as usize, 0x80);
             let n = data.len().min(buf.len());
             buf[..n].copy_from_slice(&data[..n]);
             Ok(n)
@@ -233,7 +237,6 @@ fn generate_stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Resul
         2 => {
             // Trailer
             let block_id = state.frame_count / 3;
-            let payload_size = (width as u64) * (height as u64) * (bpp as u64);
             let trailer = build_trailer(block_id, payload_size);
             let n = trailer.len().min(buf.len());
             buf[..n].copy_from_slice(&trailer[..n]);

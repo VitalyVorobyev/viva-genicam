@@ -1749,8 +1749,13 @@ impl Drop for FrameStream {
 pub struct U3vFrameStream {
     rx: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
-    _reader: tokio::task::JoinHandle<()>,
+    reader: tokio::task::JoinHandle<()>,
 }
+
+/// How long the U3V reader waits for a frame to start before checking whether
+/// it was told to stop.
+#[cfg(feature = "u3v")]
+const U3V_READ_POLL: Duration = Duration::from_millis(250);
 
 #[cfg(feature = "u3v")]
 impl U3vFrameStream {
@@ -1768,11 +1773,16 @@ impl U3vFrameStream {
 
         let reader = tokio::task::spawn_blocking(move || {
             loop {
-                if *stop_rx.borrow() {
+                // Told to stop, or dropped without being told: nobody is
+                // listening, and an idle reader would otherwise poll forever.
+                if *stop_rx.borrow() || tx.is_closed() {
                     break;
                 }
-                match stream.next_frame() {
-                    Ok(raw) => {
+                // No frame within the poll is a stream waiting, as in trigger
+                // mode, not a failure; it is also when the reader can stop.
+                match stream.next_frame_within(U3V_READ_POLL) {
+                    Ok(None) => continue,
+                    Ok(Some(raw)) => {
                         let pixel_format = PixelFormat::from_code(raw.leader.pixel_format);
                         let frame = Frame {
                             payload: raw.payload,
@@ -1798,7 +1808,7 @@ impl U3vFrameStream {
         Self {
             rx,
             stop_tx,
-            _reader: reader,
+            reader,
         }
     }
 
@@ -1813,9 +1823,25 @@ impl U3vFrameStream {
         }
     }
 
-    /// Signal the reader thread to stop.
+    /// Signal the reader thread to stop. It stops within one read poll, but
+    /// this does not wait for it; [`shutdown`](Self::shutdown) does.
     pub fn stop(&self) {
         let _ = self.stop_tx.send(true);
+    }
+
+    /// Stop the reader thread and wait for it to finish, so the stream's
+    /// endpoint and device are free once this returns: for another stream,
+    /// or for closing the camera (Codex review of #179).
+    pub async fn shutdown(self) {
+        let Self {
+            rx,
+            stop_tx,
+            reader,
+        } = self;
+        // A reader blocked handing over a frame nobody takes wakes up here.
+        drop(rx);
+        let _ = stop_tx.send(true);
+        let _ = reader.await;
     }
 }
 
@@ -1855,11 +1881,44 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
 
     /// Override the payload size (bytes per frame).
     ///
-    /// When not set, the builder computes it from Width, Height, and
-    /// PixelFormat camera features.
+    /// When not set, the builder reads the camera's `PayloadSize`, or
+    /// computes it from Width, Height and a whole-byte PixelFormat.
     pub fn payload_size(mut self, size: u64) -> Self {
         self.payload_size = Some(size);
         self
+    }
+
+    /// Bytes in one frame. The camera's `PayloadSize` is the authority: it
+    /// knows its own packing and padding. Without it, width × height × the
+    /// format's whole bytes a pixel; a packed format such as `Mono12Packed`
+    /// has none, and guessing one byte made the reader take the rest of the
+    /// image for the trailer and fail (Codex review of #179).
+    fn frame_size(&self) -> Result<u64, GenicamError> {
+        if let Some(size) = self
+            .camera
+            .get("PayloadSize")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&size| size > 0)
+        {
+            return Ok(size);
+        }
+        let dimension = |name: &str| -> Result<u64, GenicamError> {
+            self.camera
+                .get(name)?
+                .parse()
+                .map_err(|e| GenicamError::parse(format!("{name}: {e}")))
+        };
+        let pixel_format = self.camera.get("PixelFormat")?;
+        let bytes = PixelFormat::from_name(&pixel_format)
+            .bytes_per_pixel()
+            .ok_or_else(|| {
+                GenicamError::parse(format!(
+                    "cannot size a {pixel_format} frame: the camera has no PayloadSize and the \
+                     format has no whole-byte pixel; pass U3vStreamBuilder::payload_size"
+                ))
+            })?;
+        Ok(dimension("Width")? * dimension("Height")? * bytes as u64)
     }
 
     /// Finalise the builder: configure SIRM, start streaming, return
@@ -1867,23 +1926,7 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
     pub fn build(self) -> Result<U3vFrameStream, GenicamError> {
         let payload_size = match self.payload_size {
             Some(s) => s,
-            None => {
-                let width: u64 = self
-                    .camera
-                    .get("Width")?
-                    .parse()
-                    .map_err(|e| GenicamError::parse(format!("Width: {e}")))?;
-                let height: u64 = self
-                    .camera
-                    .get("Height")?
-                    .parse()
-                    .map_err(|e| GenicamError::parse(format!("Height: {e}")))?;
-                let pf_str = self.camera.get("PixelFormat")?;
-                let bpp = PixelFormat::from_name(&pf_str)
-                    .bytes_per_pixel()
-                    .unwrap_or(1) as u64;
-                width * height * bpp
-            }
+            None => self.frame_size()?,
         };
 
         let mut device = self.camera.transport().lock_device()?;

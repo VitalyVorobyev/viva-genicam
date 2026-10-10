@@ -51,7 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `viva_genicam::report` writes the plain-text diagnostic report
   (`build_report`, `ReportRequest`, `ReportTarget`) that `viva-camctl report`
   writes, so other tools can produce the same file; the CLI is now a thin
-  wrapper over it. GigE only, as before (DX-06).
+  wrapper over it.
+- The report covers USB3 Vision (backlog DX-06). It lists the USB3 Vision
+  devices on the host, and `ReportTarget::Open` (`OpenCamera`) describes a
+  camera the caller already holds — a USB device admits one owner, so the
+  report cannot open it a second time the way it opens a GigE control
+  channel. `viva-camctl report --usb N` reports on the Nth USB3 Vision camera,
+  and `viva-service-u3v` answers `report` queries too
+  (`viva_service::report::serve`).
 - `viva-service` answers `genicam/devices/{id}/report` (`keys::report`,
   `DeviceReportRequest`, `DeviceReportResponse`) with that report on its
   camera, written on the host the camera is attached to (backlog ST-41).
@@ -79,6 +86,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A USB3 Vision stream of a packed format is sized right. `U3vStreamBuilder`
+  sized frames as width × height × one byte when the format has no
+  whole-byte pixel (`Mono12Packed`), and the reader then took the rest of the
+  image for the trailer and failed; it now uses the camera's `PayloadSize`,
+  and refuses rather than guesses when there is none (Codex review of #179).
+- A USB3 Vision stream survives a wait for its next frame. A read timeout —
+  five seconds without a frame, as in trigger mode — ended the stream in
+  `U3vFrameStream` and in `viva-service-u3v`; they now poll with
+  `U3vStream::next_frame_within`, which returns `None` for a stream that is
+  waiting, and `RusbTransfer` reports a timeout as `U3vError::Timeout` rather
+  than a generic USB error. `U3vFrameStream::shutdown` stops the reader and
+  waits for it, so the endpoint is free for the next stream (Codex review of
+  #179).
 - GigE control heartbeats continue during long register/memory ACK waits,
   including `PENDING_ACK` extensions, while `GigeRegisterIo` holds the device
   mutex. The socket owner sends CCP reads with separate request IDs and drains
@@ -225,13 +245,16 @@ section changes the library.
   shows the connected camera's vendor, model, serial, firmware, user ID, MAC
   and IP address — what a report asks for — and sets the persistent IP
   address the camera takes from its next restart.
+- **USB3 Vision streams stop cleanly and keep their names** (Codex review of
+  #179). Stopping waits for the USB reader, so a restart or reconnect finds
+  the endpoint free, and a camera keeps its serial-based id in the device list
+  when a later scan cannot read its serial.
 - **USB3 Vision cameras in embedded mode** (ST-14). Embedded mode discovered,
   opened and streamed only GigE Vision cameras, so a USB3 Vision camera
   needed `viva-service-u3v` and remote mode. The device list now includes
   them, told apart by serial (or bus position), and they read, write and
-  stream like a GigE camera. The packet size, the IP configuration and the
-  diagnostic report remain GigE Vision's (DX-06); the report names the
-  connected USB3 Vision camera and says it does not cover it.
+  stream like a GigE camera, and "Generate report" describes them (DX-06).
+  The packet size and the IP configuration remain GigE Vision's.
 - **The viewer shows the camera's pixels** (ST-39). The canvas held a copy
   downscaled to the window, so "1:1" and every zoom above fit enlarged that
   copy; it now holds every camera pixel and draws enlarged pixels as squares,

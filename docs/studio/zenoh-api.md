@@ -80,8 +80,9 @@ opaque string without `/`).
 - **Semantics:** The plain-text diagnostic report `viva-camctl report` writes
   (`viva_genicam::report`), written by the service on the host the camera is
   attached to: the app may not reach the camera itself. Viva Studio's
-  "Generate report" asks for it in remote mode. Served by `viva-service` (GigE)
-  only; the report has no USB3 Vision form yet (backlog DX-06).
+  "Generate report" asks for it in remote mode. Served by `viva-service` and
+  `viva-service-u3v`; the U3V service describes the camera it holds from what
+  it read, since a USB device admits one owner (`ReportTarget::Open`).
 
 ### `genicam/devices/{device_id}/status`
 

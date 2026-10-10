@@ -28,7 +28,8 @@ and only spec-derived fixtures stop them agreeing on an error
 camera we cannot open. Almost every fix so far came from a user-supplied
 artifact, so producing one must be easy even when nothing is known to be wrong.
 
-**Open**: DX-06.
+**Open**: none. Done: the report in every tool (ST-41), dropped features
+named (DX-05), the report for USB3 Vision (DX-06).
 
 ## Phase 3 — Streaming reliability
 
@@ -85,7 +86,7 @@ reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)) — the
 fastest way for someone with a camera to exercise the library and report what
 they saw.
 
-- **Services**: SVC-01, SVC-03, SVC-04, SVC-05.
+- **Services**: SVC-01, SVC-03, SVC-04, SVC-05, SVC-06.
 - **Studio foundations**: ST-45, ST-46. Done: one
   feature-state implementation (ST-26), one backend trait with a real remote
   implementation (ST-27), generated IPC types (ST-28), one UI data layer and

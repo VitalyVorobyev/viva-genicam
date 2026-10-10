@@ -75,6 +75,9 @@ pub enum Cmd {
         ip: Option<Ipv4Addr>,
         #[arg(long)]
         index: Option<usize>,
+        /// Describe the Nth USB3 Vision camera (`list-usb` order) instead
+        #[arg(long, conflicts_with_all = ["ip", "index"])]
+        usb: Option<usize>,
         /// Host interface, by IPv4 address or by OS name
         #[arg(long)]
         iface: Option<IfaceSelector>,
@@ -303,6 +306,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Report {
             ip,
             index,
+            usb,
             iface: cmd_iface,
             out,
             stdout,
@@ -312,6 +316,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             let args = ReportArgs {
                 ip,
                 index,
+                usb,
                 iface: cmd_iface.or(iface),
                 out: (!stdout).then_some(out),
                 timeout_ms,

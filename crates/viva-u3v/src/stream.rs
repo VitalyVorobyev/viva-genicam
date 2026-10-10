@@ -126,6 +126,29 @@ impl<T: UsbTransfer> U3vStream<T> {
         })
     }
 
+    /// Like [`next_frame`](Self::next_frame), but `Ok(None)` when no frame
+    /// starts within `idle`: the stream is waiting — in trigger mode, say —
+    /// not broken. Once a leader arrives the rest of the frame gets the full
+    /// timeout. A reader polling with this can stop between frames.
+    pub fn next_frame_within(&mut self, idle: Duration) -> Result<Option<RawFrame>, U3vError> {
+        let n = match self
+            .transport
+            .bulk_read(self.ep_in, &mut self.leader_buf, idle)
+        {
+            Ok(n) => n,
+            Err(U3vError::Timeout) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let leader = parse_leader(&self.leader_buf[..n])?;
+        let payload = self.read_payload()?;
+        let trailer = self.read_trailer()?;
+        Ok(Some(RawFrame {
+            leader,
+            payload,
+            trailer,
+        }))
+    }
+
     fn read_leader(&mut self) -> Result<Leader, U3vError> {
         let n = self
             .transport
@@ -296,6 +319,30 @@ pub fn parse_trailer(buf: &[u8]) -> Result<Trailer, U3vError> {
 mod tests {
     use super::*;
     use crate::usb::MockUsbTransfer;
+
+    /// A camera with no frame to send — trigger mode, waiting for a trigger —
+    /// times out on every read.
+    struct Idle;
+
+    impl UsbTransfer for Idle {
+        fn bulk_write(&self, _: u8, data: &[u8], _: Duration) -> Result<usize, U3vError> {
+            Ok(data.len())
+        }
+        fn bulk_read(&self, _: u8, _: &mut [u8], _: Duration) -> Result<usize, U3vError> {
+            Err(U3vError::Timeout)
+        }
+    }
+
+    /// An idle stream is waiting, not broken, so a reader can poll it and
+    /// stop between frames. The reader took the timeout for a failure and
+    /// ended the stream after five seconds without a frame (Codex review of
+    /// #179).
+    #[test]
+    fn an_idle_stream_is_waiting_not_broken() {
+        let mut stream = U3vStream::new(Arc::new(Idle), 0x82, 64, 64, 4096);
+        let idle = stream.next_frame_within(Duration::from_millis(10));
+        assert!(matches!(idle, Ok(None)), "{idle:?}");
+    }
 
     fn build_leader(width: u32, height: u32, pixel_format: u32, timestamp: u64) -> Vec<u8> {
         let mut buf = vec![0u8; 42];

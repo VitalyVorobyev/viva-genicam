@@ -213,6 +213,16 @@ impl Frames {
         }
     }
 
+    /// End the stream and wait until its reader has let go of the camera, so
+    /// the next stream or a reconnect finds the endpoint free (Codex review
+    /// of #179).
+    pub(crate) async fn shutdown(self) {
+        match self {
+            Frames::Gige(stream) => drop(stream),
+            Frames::U3v(stream) => stream.shutdown().await,
+        }
+    }
+
     /// Frames lost since the stream started, where the transport counts them:
     /// GVSP's are abandoned incomplete or discarded under backpressure; a USB
     /// bulk stream reports none.
@@ -220,15 +230,6 @@ impl Frames {
         match self {
             Frames::Gige(stream) => stream.stats().drops,
             Frames::U3v(_) => 0,
-        }
-    }
-}
-
-impl Drop for Frames {
-    fn drop(&mut self) {
-        // The U3V reader runs on its own thread until told to stop.
-        if let Frames::U3v(stream) = self {
-            stream.stop();
         }
     }
 }

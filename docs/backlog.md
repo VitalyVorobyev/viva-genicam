@@ -48,7 +48,6 @@ offers no supported way to produce one.
 
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
-| DX-06 | The diagnostic report for USB3 Vision | P2 | M | planned | `viva_genicam::report` is GigE-only — it opens a GVCP control channel and dumps GigE bootstrap registers. So a U3V reporter gets nothing equivalent from `viva-camctl report`, Studio's "Generate report" or a `report` query to `viva-service-u3v` (which does not declare one), though `viva-camctl list-usb` exists |
 
 ## SR — Streaming reliability (roadmap Phase 3)
 
@@ -114,6 +113,7 @@ count from this table.
 | SVC-03 | U3V service streaming never configures the SIRM | P1 | M | planned | `U3vDeviceHandle::open_stream` (`crates/viva-service-u3v/src/device.rs`) builds `U3vStream::new` directly with hardcoded 256-byte leader/trailer, bypassing `U3vDevice::open_stream` (`crates/viva-u3v/src/device.rs`), which reads the SIRM and enables streaming |
 | SVC-04 | U3V service is single-device with no lifecycle | P2 | M | planned | Takes `devices[0]` once, never re-scans, never publishes disconnect (`crates/viva-service-u3v/src/main.rs`); GigE has a full discovery loop |
 | SVC-05 | GigE service clap name is still `genicam-service` | P2 | S | planned | `crates/viva-service/src/config.rs`, pre-rebrand |
+| SVC-06 | U3V service reads at most ~30 frames a second | P2 | S | planned | The reader in `crates/viva-service-u3v/src/acquisition.rs` sleeps after each frame to hold ~30 fps, a throttle written for the fake, which answers instantly. A real camera streaming faster is read late and its bulk transfers back up; throttle the publishing, as Studio's `FramePacer` does, not the USB reads. Found while fixing the same loop's idle timeout (Codex review of #179) |
 
 ## DC — Device classes beyond area-scan
 

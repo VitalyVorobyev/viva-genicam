@@ -240,3 +240,9 @@ plus the UI:
 cd ui/viva-studio-ui
 bun install --frozen-lockfile && bunx tsc --noEmit && bun run lint && bun run test -- --run && bun run build
 ```
+
+`bun run lint` is [Oxlint](https://oxc.rs), configured in `.oxlintrc.json` with
+an explicit rule list: ESLint's and typescript-eslint's recommended rules
+(all but `no-octal`, which `tsc` already rejects) and the React hooks and React
+Compiler rules. Oxlint has no `config` or `gating` rule; those check React
+Compiler options this app does not set.

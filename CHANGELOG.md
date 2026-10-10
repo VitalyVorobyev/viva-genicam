@@ -75,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Python package needs Python 3.10 or later (`abi3-py310`); 3.9 has been
+  past end of life since October 2025, and GitHub's Ubuntu 26.04 runners no
+  longer offer it, so it could not stay tested. Wheels are tested on 3.10 and
+  3.14.
 - `viva-service`'s `acquisition/status` reports the stream's dropped frames
   (`StreamStats::drops`: frames abandoned incomplete or discarded because the
   service fell behind); `dropped` was always 0.
@@ -163,6 +167,14 @@ Viva Studio lives in the `studio/` workspace, which is published nowhere: no
 crate on crates.io and no desktop binary carries these changes. Nothing in this
 section changes the library.
 
+- Studio builds on Tauri 2.12, React 19.3, Vite 8.3, Vitest 5 and
+  TypeScript 7, and lints with Oxlint instead of ESLint: typescript-eslint
+  refuses to load under TypeScript 7. The Oxlint configuration lists the same
+  rules ESLint ran — 68 of the 69 recommended ESLint and typescript-eslint
+  rules (`no-octal` is a TypeScript compile error anyway) and 14 of the 16
+  React hooks and React Compiler rules (`config` and `gating` check compiler
+  options the app does not set). A file of deliberate violations drew the same
+  seven findings from both linters before ESLint was removed.
 - **Studio snapshots are the image on screen.** A snapshot was the viewer's
   last WebSocket frame — a BMP file — read as raw pixels in the camera's
   format: the BMP header became the first row, Bayer and RGB frames were

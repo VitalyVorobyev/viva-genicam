@@ -88,7 +88,9 @@ middle:
    - The generated-type check from point 4.
    - UI hook and component tests on jsdom with Testing Library and Tauri's
      `mockIPC`.
-   - ESLint with the react-hooks rules.
+   - A linter with the react-hooks rules: ESLint until 2026-10, then Oxlint,
+     which carries the same rules and does not tie TypeScript's version to
+     typescript-eslint's.
    - Tauri compiled and tested on Linux, Windows and macOS.
    - Studio CI also triggers on the library paths it depends on.
 

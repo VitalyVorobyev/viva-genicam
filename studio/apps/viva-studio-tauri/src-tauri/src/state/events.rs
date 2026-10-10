@@ -3,13 +3,106 @@
 //! Both backends and the commands emit through [`Events`], not through a
 //! `tauri::AppHandle` directly: the backends exist before the app does, and
 //! the backend tests run without one.
+//!
+//! Every event is a [`StudioEvent`]: a payload type that carries its event
+//! name. The UI's TypeScript types, `StudioEvents` among them, are generated
+//! from these (`bindings.rs`, backlog ST-28), so an event's name and shape
+//! cannot drift from what the UI listens for.
 
 use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use viva_zenoh_api::FeatureState;
+use viva_zenoh_api::{AcquisitionStatus, FeatureState, ImageMeta};
+
+use super::device_state::{ApiVersionMismatch, ConnectionState, DeviceInfo, DisconnectReason};
+
+/// A payload the backend sends to the UI, and the event name it goes under.
+pub trait StudioEvent: Serialize {
+    const NAME: &'static str;
+}
+
+/// A feature's new state, in the one shape both modes send: the legacy flat
+/// `value` and `access_mode`, plus the whole `state`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeStateChanged {
+    pub node_name: String,
+    pub value: serde_json::Value,
+    pub access_mode: String,
+    pub state: FeatureState,
+}
+
+/// The features a write or command may have changed, for the UI to re-read
+/// the ones it shows (backlog ST-30).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FeaturesInvalidated {
+    /// The feature written or the command executed.
+    pub cause: String,
+    pub names: Vec<String>,
+}
+
+/// A device stopped announcing itself (remote mode).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DeviceLost {
+    pub device_id: String,
+}
+
+/// Remote mode found a lost device again and resubscribed.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DeviceReconnected {
+    pub device_id: String,
+    pub node_count: usize,
+}
+
+/// The Zenoh session stopped answering (remote mode).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ZenohSessionLost {
+    pub message: String,
+}
+
+/// The Zenoh session answers again (remote mode).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ZenohSessionRestored {
+    pub message: String,
+}
+
+macro_rules! studio_events {
+    ($($ty:ty => $name:literal),* $(,)?) => {
+        $(impl StudioEvent for $ty {
+            const NAME: &'static str = $name;
+        })*
+
+        /// Every event, as `(name, TypeScript payload type)`; the generated
+        /// `StudioEvents` map is built from this.
+        #[cfg(test)]
+        pub fn all(cfg: &ts_rs::Config) -> Vec<(&'static str, String)> {
+            use ts_rs::TS;
+            vec![$(($name, <$ty>::name(cfg))),*]
+        }
+    };
+}
+
+studio_events! {
+    DeviceInfo => "device-discovered",
+    DeviceLost => "device-lost",
+    ApiVersionMismatch => "api-version-mismatch",
+    ConnectionState => "connection-state-changed",
+    DisconnectReason => "disconnect-reason",
+    DeviceReconnected => "device-reconnected",
+    ZenohSessionLost => "zenoh-session-lost",
+    ZenohSessionRestored => "zenoh-session-restored",
+    NodeStateChanged => "node-value-changed",
+    FeaturesInvalidated => "features-invalidated",
+    AcquisitionStatus => "acquisition-status",
+    ImageMeta => "image-meta-changed",
+}
 
 /// Where events go: the webview in the app, a recorder in tests.
 pub trait EventSink: Send + Sync + 'static {
@@ -35,38 +128,33 @@ impl Events {
         let _ = self.0.set(Box::new(sink));
     }
 
-    pub fn emit(&self, event: &str, payload: impl Serialize) {
+    pub fn send<E: StudioEvent>(&self, event: &E) {
         let Some(sink) = self.0.get() else {
             return;
         };
-        match serde_json::to_value(payload) {
-            Ok(payload) => sink.emit(event, payload),
-            Err(error) => tracing::warn!(event, %error, "event payload not serializable"),
+        match serde_json::to_value(event) {
+            Ok(payload) => sink.emit(E::NAME, payload),
+            Err(error) => tracing::warn!(event = E::NAME, %error, "event payload not serializable"),
         }
     }
 
-    /// A feature's new state, in the one shape both modes send: the legacy
-    /// flat `value` and `access_mode`, plus the whole `state`.
+    /// A feature's new state.
     pub fn node_state(&self, node_name: &str, state: &FeatureState) {
-        self.emit(
-            "node-value-changed",
-            serde_json::json!({
-                "node_name": node_name,
-                "value": state.value,
-                "access_mode": state.access_mode,
-                "state": state,
-            }),
-        );
+        self.send(&NodeStateChanged {
+            node_name: node_name.to_string(),
+            value: state.value.clone(),
+            access_mode: state.access_mode.clone(),
+            state: state.clone(),
+        });
     }
 
-    /// The features a write or command may have changed; the UI re-reads the
-    /// ones it shows (backlog ST-30).
+    /// The features `cause` may have changed, if any.
     pub fn invalidated(&self, cause: &str, names: &[String]) {
         if !names.is_empty() {
-            self.emit(
-                "features-invalidated",
-                serde_json::json!({ "cause": cause, "names": names }),
-            );
+            self.send(&FeaturesInvalidated {
+                cause: cause.to_string(),
+                names: names.to_vec(),
+            });
         }
     }
 }

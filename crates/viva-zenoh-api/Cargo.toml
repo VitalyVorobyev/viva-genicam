@@ -20,9 +20,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 # that read features through `viva-genapi`. Off by default: a client needs only
 # the payload types.
 genapi = ["dep:viva-genapi"]
+# `ts_rs::TS` on the payloads a UI receives, so Viva Studio generates its
+# TypeScript types from these definitions instead of keeping a copy (backlog
+# ST-28). Off by default.
+ts = ["dep:ts-rs"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ts-rs = { version = "12.0.1", optional = true, features = ["no-serde-warnings", "serde-json-impl"] }
 viva-genapi = { version = "0.7", path = "../viva-genapi", optional = true }

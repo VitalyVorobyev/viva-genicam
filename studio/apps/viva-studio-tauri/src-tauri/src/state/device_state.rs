@@ -6,6 +6,7 @@ use viva_zenoh_api::DeviceAnnounce;
 
 /// Payload for the `disconnect-reason` Tauri event emitted on unexpected loss of device.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DisconnectReason {
     pub message: String,
     pub device_id: String,
@@ -16,6 +17,7 @@ pub struct DisconnectReason {
 /// Emitted when the announced `api_version` of a discovered device does not
 /// match `viva_zenoh_api::API_VERSION`, or is absent (old service).
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ApiVersionMismatch {
     pub device_id: String,
     /// Version reported by the service, or `null` if absent.
@@ -27,6 +29,8 @@ pub struct ApiVersionMismatch {
 // ── Types exposed to the UI via Tauri IPC ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(optional_fields))]
 pub struct DeviceInfo {
     pub id: String,
     pub name: String,
@@ -74,6 +78,7 @@ fn default_transport() -> String {
 
 /// Connection state, serialized with a `kind` tag so TypeScript can switch on it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectionState {
     Disconnected,
@@ -97,6 +102,8 @@ pub enum ConnectionState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(optional_fields))]
 pub struct NodeValueEntry {
     pub value: serde_json::Value,
     pub access_mode: String,
@@ -125,6 +132,7 @@ impl From<&viva_zenoh_api::FeatureState> for NodeValueEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct StreamerInfo {
     pub ws_url: String,
     pub width: u32,

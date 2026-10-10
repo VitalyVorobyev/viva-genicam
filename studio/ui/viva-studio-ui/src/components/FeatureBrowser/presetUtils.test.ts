@@ -12,6 +12,15 @@ describe("buildLiveValuePreset", () => {
     expect(buildLiveValuePreset(new Map())).toEqual({});
   });
 
+  // A register's state is a summary of its size, not a value to restore.
+  it("leaves out a register's size summary", () => {
+    const map = new Map<string, NodeValueEntry>([
+      ["Width", entry(640)],
+      ["FileAccessBuffer", { value: { kind: "register", length: 100000 }, access_mode: "RW" }],
+    ]);
+    expect(buildLiveValuePreset(map)).toEqual({ Width: 640 });
+  });
+
   it("test_buildLiveValuePreset_numbers", () => {
     const map = new Map([
       ["Width", entry(640)],

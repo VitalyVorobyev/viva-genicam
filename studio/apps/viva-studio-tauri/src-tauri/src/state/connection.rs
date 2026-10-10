@@ -29,6 +29,6 @@ impl Connection {
     pub async fn set(&self, state: ConnectionState) {
         let mut current = self.state.lock().await;
         *current = state.clone();
-        self.events.emit("connection-state-changed", state);
+        self.events.send(&state);
     }
 }

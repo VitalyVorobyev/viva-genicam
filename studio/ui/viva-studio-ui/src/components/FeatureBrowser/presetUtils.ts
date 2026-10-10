@@ -9,8 +9,9 @@ import type { NodeValue } from "../../xml_model/values";
  * re-imported with "Import Preset" and applied with "Apply All" to restore
  * the device state on a subsequent session.
  *
- * Features without a value (commands, write-only nodes) are left out: there
- * is no state to restore.
+ * Features without a scalar value are left out: commands and write-only nodes
+ * have none, and a register reports only its size. There is no state to
+ * restore.
  *
  * @param liveValues  Current live node values from the Tauri backend.
  * @returns           A plain object mapping node names to their scalar values.
@@ -20,7 +21,7 @@ export function buildLiveValuePreset(
 ): Record<string, number | string | boolean> {
   const result: Record<string, number | string | boolean> = {};
   for (const [name, entry] of liveValues) {
-    if (entry.value === null) continue;
+    if (entry.value === null || typeof entry.value === "object") continue;
     result[name] = entry.value;
   }
   return result;

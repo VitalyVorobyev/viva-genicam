@@ -6,8 +6,14 @@ edition.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+# `ts_rs::TS` on the UiGraph contract, so the UI's TypeScript types are
+# generated from it (backlog ST-28). Only the Tauri crate's tests enable it.
+ts = ["dep:ts-rs"]
+
 [dependencies]
 serde.workspace = true
+ts-rs = { version = "12.0.1", optional = true, features = ["no-serde-warnings"] }
 serde_json.workspace = true
 viva-genapi-xml.workspace = true
 viva-genapi.workspace = true

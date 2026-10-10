@@ -108,7 +108,7 @@ impl EmbeddedBackend {
                 let devices = discover_gige_devices().await;
                 *backend.discovered.write().await = devices.clone();
                 for d in &devices {
-                    backend.events.emit("device-discovered", d);
+                    backend.events.send(d);
                 }
             }
         });

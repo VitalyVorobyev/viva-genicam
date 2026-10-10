@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backend;
+#[cfg(test)]
+mod bindings;
 mod commands;
 mod error;
 mod state;

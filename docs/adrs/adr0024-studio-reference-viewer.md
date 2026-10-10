@@ -72,7 +72,11 @@ middle:
    feature converts it to the wire form — the snapshot is GenApi's business,
    the JSON spelling the contract's.
 4. **One contract.** The TypeScript types for IPC payloads are generated from
-   the Rust types, and CI fails when the generated file is stale.
+   the Rust types, and CI fails when the generated file is stale. *Settled:*
+   ts-rs, behind a `ts` feature on `viva-zenoh-api` and `viva_xml_model`; the
+   Tauri crate's `bindings.rs` test writes and checks
+   `ui/viva-studio-ui/src/generated/ipc.ts`, including a map from each event
+   name to its payload.
 5. **Distribution.** Every release tag attaches **unsigned** desktop bundles —
    DMG, AppImage/deb and MSI — with documentation for the Gatekeeper and
    SmartScreen prompts. Studio carries the single workspace version

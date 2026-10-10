@@ -47,8 +47,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Two of its tests drive the embedded backend against `viva-fake-gige` on UDP
-3956, so do not run them alongside another fake-camera suite.
+Its backend tests drive both modes against `viva-fake-gige` on UDP 3956 (the
+remote ones through `viva-service` in-process), so do not run them alongside
+another fake-camera suite.
+
+`cargo test` there also fails when `ui/viva-studio-ui/src/generated/ipc.ts` is
+stale. Regenerate it with `UPDATE_BINDINGS=1 cargo test bindings` and commit
+it — after any change to a type the UI receives, including the `viva-zenoh-api`
+payloads and `viva_xml_model`'s UiGraph.
 
 Run it whenever a public `enum`, trait or signature changes in the library
 workspace, not only when `studio/` files are edited — a new public enum variant

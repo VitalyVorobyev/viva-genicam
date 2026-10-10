@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-10
+
+A breaking release. Read these before upgrading:
+- **USB3 Vision was rebuilt to the standards**, from USB discovery up. Before
+  this release no layer matched GenCP 1.2, a vendor's own XML, aravis or
+  Wireshark, so it could not have worked with a real camera. It has still not
+  been run on one: if you have a USB3 Vision camera, `viva-camctl report --usb
+  0` is the most useful thing you can send. The `viva-u3v` API changed with it.
+- **`TimeSync::to_host_time` and `Camera::map_dev_ts` return `Option`.** A
+  frame's `ts_host` is `None` until `time_calibrate` has fitted the clocks.
+  Calibration now fits real samples; before, it reported success while mapping
+  every timestamp to its own start.
+- **`<ImposedAccessMode>` is enforced.** A feature a camera declares read-only,
+  such as FLIR's `SensorWidth`, now refuses writes.
+- **The Python package needs Python 3.10 or later.**
+
+Viva Studio ships as unsigned desktop bundles on this release for the first
+time; see the user guide's Viva Studio chapter.
+
 ### Added
 
 - `GigeDevice::set_control_timeout` / `control_timeout` configure the GVCP ACK
@@ -2268,7 +2287,8 @@ Initial public release of the viva-genicam workspace.
 - `viva-fake-gige` -- In-process fake GigE Vision camera for self-contained integration testing (no external dependencies required)
 - `viva-fake-u3v` -- In-process fake USB3 Vision camera for testing
 
-[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.8.0
 [0.7.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.7.0
 [0.6.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.6.0
 [0.5.0]: https://github.com/VitalyVorobyev/viva-genicam/releases/tag/v0.5.0

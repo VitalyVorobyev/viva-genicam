@@ -38,11 +38,17 @@ And in `studio/ui/viva-studio-ui`:
 
 **`studio/apps/viva-studio-tauri/src-tauri` is not a member of the `studio/`
 workspace.** `cargo clippy --workspace` in `studio/` does not reach it, and the
-only thing that covers it is CI's `tauri-lint` job. Run:
+only thing that covers it is CI's `tauri-lint` job. Run what it runs:
 
 ```bash
-cd studio/apps/viva-studio-tauri/src-tauri && cargo clippy --all-targets -- -D warnings
+cd studio/apps/viva-studio-tauri/src-tauri
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
+
+Two of its tests drive the embedded backend against `viva-fake-gige` on UDP
+3956, so do not run them alongside another fake-camera suite.
 
 Run it whenever a public `enum`, trait or signature changes in the library
 workspace, not only when `studio/` files are edited — a new public enum variant

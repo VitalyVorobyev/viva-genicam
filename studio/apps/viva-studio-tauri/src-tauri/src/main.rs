@@ -141,6 +141,7 @@ fn main() {
 
     // Clone for the setup closure.
     let embedded_for_setup = embedded_backend.clone();
+    let embedded_for_exit = embedded_backend.clone();
 
     if let Err(err) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -219,15 +220,57 @@ fn main() {
             commands::ip_config::get_network_config,
             commands::ip_config::set_persistent_ip,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
+        .map(|app| app.run(move |_, event| on_run_event(&event, embedded_for_exit.as_deref())))
     {
         tracing::error!("error while running tauri application: {err}");
+    }
+}
+
+/// How long the exit hook waits for the camera to be released.
+const EXIT_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Release the embedded camera as the event loop ends.
+///
+/// Tauri exits the process without dropping managed state, so this is the only
+/// chance: without it the camera keeps acquiring and stays claimed until its
+/// heartbeat expires. Remote mode has nothing to release; the service owns the
+/// camera.
+fn on_run_event(event: &tauri::RunEvent, embedded: Option<&backend::embedded::EmbeddedBackend>) {
+    if let (tauri::RunEvent::Exit, Some(embedded)) = (event, embedded) {
+        tauri::async_runtime::block_on(async {
+            if tokio::time::timeout(EXIT_RELEASE_TIMEOUT, embedded.shutdown())
+                .await
+                .is_err()
+            {
+                tracing::warn!("the camera was not released before exit");
+            }
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tauri ends the process without dropping managed state, so the exit
+    /// hook is the only place an embedded camera can be released.
+    #[test]
+    fn exit_releases_the_embedded_camera() {
+        use backend::embedded::fake_camera;
+
+        let _port = fake_camera::lock();
+        let (fake, backend) = tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = fake_camera::connect_and_acquire(&fake).await;
+            (fake, backend)
+        });
+
+        // As in the app: on the main thread, outside the runtime.
+        on_run_event(&tauri::RunEvent::Exit, Some(&backend));
+
+        tauri::async_runtime::block_on(fake_camera::assert_released(&fake));
+    }
 
     #[test]
     fn config_error_message_names_the_path_and_the_cause() {

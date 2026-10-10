@@ -253,7 +253,9 @@ impl<T: RegisterIo> Camera<T> {
     /// Set a feature value using a string representation.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), GenicamError> {
         match self.nodemap.node(name) {
-            Some(Node::Integer(_)) => {
+            // A converter writes through its `<FormulaTo>`: `set_integer` and
+            // `set_float` dispatch to it.
+            Some(Node::Integer(_) | Node::IntConverter(_)) => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| GenicamError::parse(format!("invalid integer for {name}")))?;
@@ -261,7 +263,7 @@ impl<T: RegisterIo> Camera<T> {
                     .set_integer(name, parsed, &self.transport)
                     .map_err(Into::into)
             }
-            Some(Node::Float(_)) => {
+            Some(Node::Float(_) | Node::Converter(_)) => {
                 let parsed: f64 = value
                     .parse()
                     .map_err(|_| GenicamError::parse(format!("invalid float for {name}")))?;
@@ -282,12 +284,6 @@ impl<T: RegisterIo> Camera<T> {
                     .map_err(Into::into)
             }
             Some(Node::SwissKnife(_)) => Err(GenApiError::Type(name.to_string()).into()),
-            Some(Node::Converter(_)) => {
-                // Converters are read-only from the user perspective
-                // (they transform values from underlying nodes)
-                Err(GenApiError::Type(name.to_string()).into())
-            }
-            Some(Node::IntConverter(_)) => Err(GenApiError::Type(name.to_string()).into()),
             Some(Node::String(_)) => self
                 .nodemap
                 .set_string(name, value, &self.transport)
@@ -1353,6 +1349,57 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Registers in memory, for driving `Camera` without a transport.
+    #[derive(Default)]
+    struct MemoryIo(Mutex<std::collections::HashMap<u64, Vec<u8>>>);
+
+    impl RegisterIo for MemoryIo {
+        fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+            let regs = self.0.lock().unwrap();
+            let data = regs.get(&addr).cloned().unwrap_or_else(|| vec![0; len]);
+            Ok(data)
+        }
+
+        fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
+            self.0.lock().unwrap().insert(addr, data.to_vec());
+            Ok(())
+        }
+    }
+
+    /// `Camera::set` on a feature that is itself a `<Converter>` writes through
+    /// its `<FormulaTo>`, as `NodeMap::set_float` already does.
+    #[test]
+    fn set_writes_a_converter_through_its_formula() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntReg Name="FrameRateRaw">
+                    <Address>0x1000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <Converter Name="AcquisitionFrameRateAbs">
+                    <FormulaTo>FROM * 100</FormulaTo>
+                    <FormulaFrom>TO / 100</FormulaFrom>
+                    <pValue>FrameRateRaw</pValue>
+                </Converter>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let mut camera = Camera::new(MemoryIo::default(), nodemap);
+
+        camera
+            .set("AcquisitionFrameRateAbs", "12.5")
+            .expect("write the converter");
+
+        assert_eq!(camera.get("FrameRateRaw").expect("read raw"), "1250");
+        assert_eq!(
+            camera.get("AcquisitionFrameRateAbs").expect("read back"),
+            "12.5"
+        );
+    }
 
     #[test]
     fn keepalive_period_fits_four_pings_in_the_reported_window() {

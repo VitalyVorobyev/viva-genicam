@@ -740,6 +740,31 @@ impl NodeMap {
         Ok(())
     }
 
+    /// The access mode `name` declares, before availability and locks.
+    ///
+    /// A `<Converter>` or `<IntConverter>` declares none of its own: it reads
+    /// and writes through its `<pValue>`, so it takes the access mode of the
+    /// first node down that chain that is not itself a converter. aravis does
+    /// the same — a feature node's access mode is its linked feature's. A chain
+    /// that ends without such a node (a dangling `<pValue>`, or converters
+    /// naming each other) reports `RO`. Every other node reports
+    /// [`Node::access_mode`]. Returns `None` for an unknown name or a node with
+    /// no access mode, such as a category.
+    pub fn declared_access_mode(&self, name: &str) -> Option<AccessMode> {
+        let node = self.nodes.get(name)?;
+        if !matches!(node, Node::Converter(_) | Node::IntConverter(_)) {
+            return node.access_mode();
+        }
+        for link in self.value_chain(name).into_iter().skip(1) {
+            match self.nodes.get(link) {
+                Some(Node::Converter(_) | Node::IntConverter(_)) => continue,
+                Some(target) => return target.access_mode(),
+                None => break,
+            }
+        }
+        Some(AccessMode::RO)
+    }
+
     /// Return the effective [`AccessMode`] for `name` given the current
     /// device state.
     ///
@@ -755,11 +780,10 @@ impl NodeMap {
         name: &str,
         io: &dyn RegisterIo,
     ) -> Result<AccessMode, GenApiError> {
-        let node = self
-            .nodes
-            .get(name)
-            .ok_or_else(|| GenApiError::NodeNotFound(name.to_string()))?;
-        let base = node.access_mode().unwrap_or(AccessMode::RO);
+        if !self.nodes.contains_key(name) {
+            return Err(GenApiError::NodeNotFound(name.to_string()));
+        }
+        let base = self.declared_access_mode(name).unwrap_or(AccessMode::RO);
         if !self.is_available(name, io)? {
             return Ok(AccessMode::RO);
         }

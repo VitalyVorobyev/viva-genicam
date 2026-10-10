@@ -146,11 +146,33 @@ What runs today, and where:
 | Studio workspace unit tests (`viva_xml_model`, `viva_streamer`, mock service) | `studio/`: `cargo test --workspace` | yes (`studio-ci.yml`) |
 | `streamer_e2e`: synthetic frames over Zenoh, BMP over WebSocket | `studio/`: `cargo test -p e2e-tests --test streamer_e2e` | yes (`studio-ci.yml`) |
 | Tauri backend unit tests | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, macOS only (`studio-ci.yml`) |
-| UI unit tests (vitest) | `studio/ui/viva-studio-ui`: `bun run test -- --run` | yes (`studio-ci.yml`) |
+| UI tests (vitest): pure functions in node, components on jsdom | `studio/ui/viva-studio-ui`: `bun run test -- --run` | yes (`studio-ci.yml`) |
 | `e2e` and `feature_state` | `studio/tests/e2e` | **no** — `#[ignore]`d, and the harness still targets aravis's `arv-fake-gv-camera-0.8` and a pre-rename service path. Backlog ST-03 replaces them with backend tests on `viva-fake-gige` |
 
 Every fake-camera suite binds UDP 3956, so two of them running at once — for
 example in two worktrees — cross-talk and fail spuriously.
+
+### UI component tests
+
+`*.test.ts` files run in node and test pure functions. `*.test.tsx` files run
+on jsdom with Testing Library (`vite.config.ts` splits them into two vitest
+projects), and talk to a mocked backend through Tauri's own IPC mock:
+
+```tsx
+import { mockIPC } from "@tauri-apps/api/mocks";
+
+mockIPC((cmd, args) => {
+  if (cmd === "write_node") throw new Error("node is locked");
+  return undefined;
+});
+```
+
+`src/test/setup-dom.ts` clears the mock after every test. `src/test/model.ts`
+builds a `ParseXmlResponse` from a few partial nodes, and `src/test/bmp.ts`
+builds frames shaped like the streamer's. A component that calls `useToast`
+needs a `ToastProvider` around it, and a `ToastContainer` if the test reads
+the toast. A regression test must fail against the unfixed code: say in the PR
+how you saw it fail.
 
 ## Troubleshooting
 

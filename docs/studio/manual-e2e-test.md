@@ -75,6 +75,8 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] ExposureTime, Gain visible
 
 ### 3. Node writes
+- [ ] Select Width and PixelFormat without editing -> no "Apply N" button
+      appears, and PixelFormat shows its current entry with no error
 - [ ] Change Width to 320 -> readback shows 320
 - [ ] Change Height to 240 -> readback shows 240
 - [ ] Change PixelFormat (Mono8 -> RGB8)
@@ -92,11 +94,13 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] Histogram toggle works (if available)
 - [ ] Pixel inspector shows coordinates on hover
 
-### 6. Recording (if implemented)
-- [ ] Click record button -> icon pulses
-- [ ] Tooltip shows frame count incrementing
-- [ ] Click stop -> recording stops
-- [ ] File created in `~/.viva-studio/recordings/`
+### 6. Snapshot and the Image tab's controls
+- [ ] Click the camera icon -> the saved PNG matches the viewer (not shifted
+      or striped), for Mono8 and for RGB8
+- [ ] Type an exposure value but do not leave the box -> it stays while frames
+      and other features update
+- [ ] Edit a feature in the Feature Browser without applying, switch to the
+      Image tab, press Ctrl+Enter -> nothing is written
 
 ### 7. Stop & disconnect
 - [ ] Click Stop -> frames stop, FPS goes to 0

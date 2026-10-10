@@ -295,7 +295,7 @@ export function ViewerCanvas({
       disposed = true;
       ws.close();
     };
-  }, [wsUrl]);
+  }, [wsUrl, snapshotRef]);
 
   // rAF-throttled mouse move handler to avoid 60Hz React re-renders
   const rafPendingRef = useRef(false);

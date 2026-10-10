@@ -10,6 +10,8 @@ import type { Diag, ParseXmlResponse, UiGraph, UiNode } from "../../xml_model/ui
 import type { NodeValue } from "../../xml_model/values";
 import type { FeatureState, NodeValueEntry } from "../../device/types";
 import { useToast } from "../../context/ToastContext";
+import { formatErrorMessage } from "../../device/errorMessage";
+import { entryToFeatureState } from "../../device/useNodeValues";
 import { TauriProvider, type XmlModelProvider } from "../../xml_model/provider";
 import { isUnknownKind, nodeDisplayName, nodeKindCssKey, nodeKindIcon } from "../../xml_model/helpers";
 import { useDraftValues } from "../../state/useDraftValues";
@@ -18,7 +20,7 @@ import { CategoryList } from "./CategoryList";
 import { FeatureList } from "./FeatureList";
 import { formatLiveValue } from "./treeUtils";
 import { countApplicableDrafts, formatBatchProgress } from "./batchApplyUtils";
-import { buildLiveValuePreset } from "./presetUtils";
+import { buildLiveValuePreset, presetValueToDraft } from "./presetUtils";
 import { FeaturePanel } from "./FeaturePanel";
 
 // T7.1 — visibility levels; rank determines filtering inclusivity
@@ -62,6 +64,11 @@ interface FeatureBrowserPageProps {
   onMergeState?: (name: string, state: FeatureState) => void;
   isConnected?: boolean;
   onRefreshAll?: () => Promise<void>;
+  /**
+   * Whether the Feature Browser is the visible tab. The page stays mounted
+   * while hidden, so it must not act on keyboard shortcuts then.
+   */
+  isActive?: boolean;
 }
 
 export function FeatureBrowserPage({
@@ -71,8 +78,10 @@ export function FeatureBrowserPage({
   onMergeState,
   isConnected = false,
   onRefreshAll,
+  isActive = true,
 }: FeatureBrowserPageProps = {}) {
   const toast = useToast();
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const presetInputRef = useRef<HTMLInputElement | null>(null);
   // T7.2 — search input ref for Ctrl+F focus
@@ -186,8 +195,9 @@ export function FeatureBrowserPage({
     }
   }, [externalModel, applyResponse]);
 
-  // T7.6 — keyboard shortcuts
+  // T7.6 — keyboard shortcuts, only while this tab is the one shown
   useEffect(() => {
+    if (!isActive) return;
     function onKeyDown(e: globalThis.KeyboardEvent) {
       const ctrl = e.ctrlKey || e.metaKey;
 
@@ -213,7 +223,7 @@ export function FeatureBrowserPage({
 
       // Ctrl+Enter — apply if enabled
       if (ctrl && e.key === "Enter") {
-        const applyBtn = document.querySelector<HTMLButtonElement>(
+        const applyBtn = rootRef.current?.querySelector<HTMLButtonElement>(
           ".editor-actions button:last-child:not(:disabled)"
         );
         applyBtn?.click();
@@ -223,7 +233,7 @@ export function FeatureBrowserPage({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [searchInput]);
+  }, [isActive, searchInput]);
 
   const onLoadXml = useCallback(() => { fileInputRef.current?.click(); }, []);
 
@@ -289,12 +299,12 @@ export function FeatureBrowserPage({
       if (!file || !graph) return;
       try {
         const text = await file.text();
-        const imported = JSON.parse(text) as Record<string, NodeValue>;
-        Object.entries(imported).forEach(([name, value]) => {
+        const imported = JSON.parse(text) as Record<string, unknown>;
+        Object.entries(imported).forEach(([name, raw]) => {
           const node = graph.nodes_by_name[name];
-          if (node && value !== undefined) {
-            setDraft(node, value);
-          }
+          if (!node) return;
+          const value = presetValueToDraft(node, raw);
+          if (value !== undefined) setDraft(node, value);
         });
       } catch {
         // Silently ignore malformed preset files
@@ -341,23 +351,21 @@ export function FeatureBrowserPage({
     : false;
 
   const selectedLiveValue = selectedNode ? liveValues.get(selectedNode.name) : undefined;
-  const selectedLiveState = selectedNode ? liveStates.get(selectedNode.name) : undefined;
+  // The editors show the camera's value until the user edits it; only an edit
+  // makes a draft, so selecting a feature never queues a write.
+  const selectedLiveState = useMemo<FeatureState | undefined>(() => {
+    if (!selectedNode) return undefined;
+    const state = liveStates.get(selectedNode.name);
+    if (state) return state;
+    if (!selectedLiveValue) return undefined;
+    const kind = typeof selectedNode.kind === "string" ? selectedNode.kind : "Unknown";
+    return entryToFeatureState(selectedLiveValue, kind);
+  }, [liveStates, selectedLiveValue, selectedNode]);
 
-  const onSelectNode = useCallback(
-    (name: string) => {
-      setSelectedNodeName(name);
-      setSearchFocusIndex(-1);
-      if (!isConnected) return;
-      const node = graph?.nodes_by_name[name];
-      if (!node) return;
-      if (Object.prototype.hasOwnProperty.call(drafts, name)) return;
-      const live = liveValues.get(name);
-      if (!live) return;
-      const nodeValue = liveValueToNodeValue(live.value);
-      if (nodeValue !== null) setDraft(node, nodeValue);
-    },
-    [graph, drafts, isConnected, liveValues, setDraft]
-  );
+  const onSelectNode = useCallback((name: string) => {
+    setSelectedNodeName(name);
+    setSearchFocusIndex(-1);
+  }, []);
 
   const onDraftChange = useCallback(
     (value: NodeValue) => { if (selectedNode) setDraft(selectedNode, value); },
@@ -456,6 +464,7 @@ export function FeatureBrowserPage({
 
     setBatchProgress({ done: 0, total: applicable.length });
 
+    const failed: string[] = [];
     for (let i = 0; i < applicable.length; i++) {
       const item = applicable[i];
       if (!item) continue;
@@ -465,12 +474,19 @@ export function FeatureBrowserPage({
         resetDraft(item.name);
       } catch {
         // Keep failed drafts in state so the user can inspect and retry.
+        failed.push(item.name);
       }
       setBatchProgress({ done: i + 1, total: applicable.length });
     }
 
     setBatchProgress(null);
-  }, [provider, graph, drafts, errors, resetDraft, onMergeState]);
+    if (failed.length > 0) {
+      toast.addToast(
+        "error",
+        `${failed.length} of ${applicable.length} writes failed (${failed.join(", ")}); their drafts are kept`,
+      );
+    }
+  }, [provider, graph, drafts, errors, resetDraft, onMergeState, toast]);
 
   // T7.1+T7.2 — filtered search results
   const searchResults = useMemo(() => {
@@ -515,7 +531,7 @@ export function FeatureBrowserPage({
   );
 
   return (
-    <div className="feature-browser">
+    <div className="feature-browser" ref={rootRef}>
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" accept=".xml,text/xml" onChange={onFileSelected} hidden />
       <input ref={presetInputRef} type="file" accept=".json,application/json" onChange={onPresetFileSelected} hidden />
@@ -848,26 +864,4 @@ function highlightMatch(text: string, query: string): React.ReactNode {
       {text.slice(idx + query.length)}
     </>
   );
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** `null` (a write-only or command node) stays `null`: there is no draft to seed. */
-function liveValueToNodeValue(
-  raw: number | string | boolean | null
-): import("../../xml_model/values").NodeValue {
-  return raw as import("../../xml_model/values").NodeValue;
-}
-
-function formatErrorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object") {
-    const message = (error as { message?: string }).message;
-    const details = (error as { details?: string }).details;
-    if (message && details) return `${message} (${details})`;
-    if (message) return message;
-    if (details) return details;
-  }
-  return String(error);
 }

@@ -1,85 +1,64 @@
-/** Returns the expected byte count for a given pixel format and dimensions. */
-function expectedByteCount(
-  width: number,
-  height: number,
-  pixelFormat: string,
-): number {
-  if (pixelFormat === "Mono16") return width * height * 2;
-  if (pixelFormat === "RGB8" || pixelFormat === "BGR8") return width * height * 3;
-  // Mono8 and all Bayer*8 formats: 1 byte per pixel
-  return width * height;
+/**
+ * Decode a BMP file — what `viva_streamer::bmp` sends over the viewer's
+ * WebSocket — into RGBA pixels.
+ *
+ * Handles what the streamer writes and what a BMP reader must expect:
+ * - 8bpp through its colour palette (the streamer's is identity grayscale);
+ * - 24bpp, stored B, G, R;
+ * - rows padded to 4 bytes;
+ * - top-down (negative height) and bottom-up row order.
+ *
+ * Returns null for anything else — a buffer without the `BM` signature, a
+ * compressed or other-depth image, or one shorter than its header claims.
+ */
+export function decodeBmp(
+  bytes: Uint8Array,
+): { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> } | null {
+  if (bytes.length < 54 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const dataOffset = view.getUint32(10, true);
+  const headerSize = view.getUint32(14, true);
+  const width = view.getInt32(18, true);
+  const signedHeight = view.getInt32(22, true);
+  const bitsPerPixel = view.getUint16(28, true);
+  const compression = view.getUint32(30, true);
+  if (width <= 0 || signedHeight === 0 || compression !== 0) return null;
+  if (bitsPerPixel !== 8 && bitsPerPixel !== 24) return null;
+
+  const height = Math.abs(signedHeight);
+  const topDown = signedHeight < 0;
+  const rowStride = ((width * bitsPerPixel) / 8 + 3) & ~3;
+  if (dataOffset + rowStride * height > bytes.length) return null;
+
+  const paletteOffset = 14 + headerSize;
+  if (bitsPerPixel === 8 && paletteOffset + 256 * 4 > dataOffset) return null;
+
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const row = dataOffset + (topDown ? y : height - 1 - y) * rowStride;
+    for (let x = 0; x < width; x++) {
+      const out = (y * width + x) * 4;
+      // Both layouts store a pixel as B, G, R: in the palette entry for 8bpp,
+      // in place for 24bpp.
+      const src = bitsPerPixel === 8 ? paletteOffset + bytes[row + x]! * 4 : row + x * 3;
+      data[out] = bytes[src + 2]!;
+      data[out + 1] = bytes[src + 1]!;
+      data[out + 2] = bytes[src]!;
+      data[out + 3] = 255;
+    }
+  }
+  return { width, height, data };
 }
 
 /**
- * Convert raw frame bytes to RGBA ImageData for PNG encoding.
- *
- * Supported formats:
- * - Mono8 and all Bayer*8: each byte v → [v, v, v, 255]
- * - RGB8: [r, g, b] → [r, g, b, 255]
- * - BGR8: [b, g, r] → [r, g, b, 255]
- * - Mono16: 2 bytes LE → high byte used as 8-bit approximation → [hb, hb, hb, 255]
- *   // best-effort until ST-02 delivers 16-bit depth
- * - Unknown: returns null
- *
- * Returns null if bytes.length < expectedByteCount or format is unsupported.
+ * The image a snapshot saves: the frame the viewer last received, as the
+ * viewer shows it. The streamer has already reduced the camera's pixel format
+ * to 8-bit gray or RGB, so this is not a raw-depth capture.
  */
-export function frameToImageData(
-  bytes: Uint8Array,
-  width: number,
-  height: number,
-  pixelFormat: string,
-): ImageData | null {
-  if (bytes.length < expectedByteCount(width, height, pixelFormat)) {
-    return null;
-  }
-
-  const pixels = width * height;
-  const rgba = new Uint8ClampedArray(pixels * 4);
-
-  if (pixelFormat === "Mono8" || pixelFormat.startsWith("Bayer")) {
-    for (let i = 0; i < pixels; i++) {
-      const v = bytes[i]!;
-      rgba[i * 4] = v;
-      rgba[i * 4 + 1] = v;
-      rgba[i * 4 + 2] = v;
-      rgba[i * 4 + 3] = 255;
-    }
-    return new ImageData(rgba, width, height);
-  }
-
-  if (pixelFormat === "RGB8") {
-    for (let i = 0; i < pixels; i++) {
-      rgba[i * 4] = bytes[i * 3]!;
-      rgba[i * 4 + 1] = bytes[i * 3 + 1]!;
-      rgba[i * 4 + 2] = bytes[i * 3 + 2]!;
-      rgba[i * 4 + 3] = 255;
-    }
-    return new ImageData(rgba, width, height);
-  }
-
-  if (pixelFormat === "BGR8") {
-    for (let i = 0; i < pixels; i++) {
-      rgba[i * 4] = bytes[i * 3 + 2]!;
-      rgba[i * 4 + 1] = bytes[i * 3 + 1]!;
-      rgba[i * 4 + 2] = bytes[i * 3]!;
-      rgba[i * 4 + 3] = 255;
-    }
-    return new ImageData(rgba, width, height);
-  }
-
-  if (pixelFormat === "Mono16") {
-    // best-effort until ST-02 delivers 16-bit depth
-    for (let i = 0; i < pixels; i++) {
-      const hb = bytes[i * 2 + 1]!;
-      rgba[i * 4] = hb;
-      rgba[i * 4 + 1] = hb;
-      rgba[i * 4 + 2] = hb;
-      rgba[i * 4 + 3] = 255;
-    }
-    return new ImageData(rgba, width, height);
-  }
-
-  return null;
+export function snapshotImageData(frame: Uint8Array): ImageData | null {
+  const decoded = decodeBmp(frame);
+  if (!decoded) return null;
+  return new ImageData(decoded.data, decoded.width, decoded.height);
 }
 
 /**

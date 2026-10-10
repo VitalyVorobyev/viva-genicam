@@ -15,7 +15,6 @@ import { ImageViewer } from "../ImageViewer/ImageViewer";
 import { DiagnosticsTab } from "../Diagnostics/DiagnosticsTab";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ToastContainer } from "./ToastContainer";
-import { useRecording } from "../../device/useRecording";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 
 type MainTab = "features" | "image" | "diagnostics";
@@ -47,7 +46,6 @@ function AppLayoutInner() {
   const { liveValues, liveStates, seedValues, mergeState } = useNodeValues();
   const { readBulk } = useNodeBulkRead();
   const { status: acqStatus, streamerInfo, start: startAcq, stop: stopAcq } = useAcquisition();
-  const { recordingStatus, startRecording, stopRecording } = useRecording();
   const { imageMeta } = useImageMeta();
   const backendStatus = useBackendStatus();
   const { log } = useAppLog();
@@ -185,20 +183,6 @@ function AppLayoutInner() {
     }
   }, [externalModel, readBulk, seedValues, addToast]);
 
-  const handleToggleRecording = useCallback(async () => {
-    try {
-      if (recordingStatus.active) {
-        await stopRecording();
-        addToast("info", "Recording stopped");
-      } else {
-        await startRecording();
-        addToast("success", "Recording started");
-      }
-    } catch (e) {
-      addToast("error", `Recording error: ${String(e)}`);
-    }
-  }, [recordingStatus.active, startRecording, stopRecording, addToast]);
-
   return (
     <div className="app-layout">
       <header className="app-header">
@@ -303,6 +287,7 @@ function AppLayoutInner() {
                 onMergeState={mergeState}
                 isConnected={isConnected}
                 onRefreshAll={handleRefreshAll}
+                isActive={activeTab === "features"}
               />
             </div>
             {activeTab === "image" && (
@@ -317,10 +302,6 @@ function AppLayoutInner() {
                 deviceName={connectedDeviceName ?? undefined}
                 cameraModel={connectedModel ?? undefined}
                 imageMeta={imageMeta}
-                isRecording={recordingStatus.active}
-                onToggleRecording={handleToggleRecording}
-                recordingFrameCount={recordingStatus.frame_count}
-                recordingElapsed={recordingStatus.elapsed_secs}
               />
             )}
             {activeTab === "diagnostics" && <DiagnosticsTab />}

@@ -217,5 +217,5 @@ plus the UI:
 
 ```sh
 cd ui/viva-studio-ui
-bun install --frozen-lockfile && bun run test -- --run && bun run build
+bun install --frozen-lockfile && bunx tsc --noEmit && bun run lint && bun run test -- --run && bun run build
 ```

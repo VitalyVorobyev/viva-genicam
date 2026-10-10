@@ -1,6 +1,6 @@
 import type { EnumEntry } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
+import { useNodeWriter } from "../../device/useNodeWriter";
 import { formatFrameCount } from "./viewerUtils";
 import { resolveLiveEnumValue } from "./triggerUtils";
 
@@ -21,19 +21,14 @@ export function AcquisitionSection({
   acquisitionModeEntries,
   liveValues,
 }: AcquisitionSectionProps) {
+  const writeNode = useNodeWriter();
+
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
   }
 
   const handleModeChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newMode = e.target.value;
-    if (!isTauri()) return;
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("write_node", { nodeName: "AcquisitionMode", value: newMode });
-    } catch (err) {
-      console.error("AcquisitionMode write failed:", err);
-    }
+    await writeNode("AcquisitionMode", e.target.value);
   };
 
   const frameDisplay =

@@ -2025,12 +2025,6 @@
           "markdownDescription": "Allows invoking the app ping() command."
         },
         {
-          "description": "Allows recording start/stop/status commands.",
-          "type": "string",
-          "const": "recording",
-          "markdownDescription": "Allows recording start/stop/status commands."
-        },
-        {
           "description": "Allows reading SFNC group configuration.",
           "type": "string",
           "const": "sfnc-groups",

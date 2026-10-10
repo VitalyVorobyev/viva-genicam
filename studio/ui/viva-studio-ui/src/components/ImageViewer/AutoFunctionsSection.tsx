@@ -1,7 +1,7 @@
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { NodeValueEntry } from "../../device/types";
-import { isTauri } from "../../tauri";
 import { resolveLiveEnumValue } from "./triggerUtils";
+import { useNodeWriter } from "../../device/useNodeWriter";
 
 interface AutoFunctionsSectionProps {
   isConnected: boolean;
@@ -9,21 +9,12 @@ interface AutoFunctionsSectionProps {
   liveValues: Map<string, NodeValueEntry>;
 }
 
-async function writeNode(nodeName: string, value: number | string): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_node", { nodeName, value });
-  } catch (err) {
-    console.error(`write_node(${nodeName}) failed:`, err);
-  }
-}
-
 export function AutoFunctionsSection({
   isConnected,
   externalModel,
   liveValues,
 }: AutoFunctionsSectionProps) {
+  const writeNode = useNodeWriter();
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
   }

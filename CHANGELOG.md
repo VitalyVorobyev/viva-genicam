@@ -37,6 +37,41 @@ Viva Studio lives in the `studio/` workspace, which is published nowhere: no
 crate on crates.io and no desktop binary carries these changes. Nothing in this
 section changes the library.
 
+- **Studio snapshots are the image on screen.** A snapshot was the viewer's
+  last WebSocket frame — a BMP file — read as raw pixels in the camera's
+  format: the BMP header became the first row, Bayer and RGB frames were
+  misread, and Mono10/12 saved nothing. The frame is now decoded as a BMP
+  first. The PNG is the 8-bit image the viewer shows, not a raw-depth capture
+  (ST-39).
+- **Looking at a feature no longer queues a write.** Selecting a feature while
+  connected copied its live value into a draft. Every one counted towards
+  "Apply N", so a batch apply wrote back values the user had only looked at,
+  possibly stale ones. An enumeration's draft took the wrong form, so its editor
+  showed "(unset)" with a validation error until the user picked an entry. The
+  editors now show the camera's value until the user edits it; the Boolean and
+  String editors gain the same fallback. Preset import converts each entry by
+  the feature's kind and leaves out read-only features, so an "Export State"
+  file imports again. A batch apply that loses writes reports them.
+- **The Image tab reports refused writes, and stops resetting what you type.**
+  Its controls sent a failed write to the console only; it now appears as a
+  toast, and ROI apply stops at the first refused write. Every slider field
+  also re-synced from the camera whenever *any* feature changed, which reset a
+  value mid-typing; each now follows its own feature and waits while its box
+  has focus.
+- **Ctrl+Enter on the Image tab no longer applies the Feature Browser's
+  draft.** The Feature Browser kept its keyboard shortcuts while hidden, and
+  Ctrl+Enter clicked its hidden Apply button, writing to the camera.
+- **Studio no longer offers Record.** The button started a `.gsr` writer that
+  never received a frame, so every recording held only a header. Recording
+  returns together with playback (ST-10).
+- **The UI has component tests and a linter.** Vitest runs `*.test.tsx` on
+  jsdom with Testing Library and Tauri's IPC mock. The snapshot, draft,
+  Image-tab and shortcut fixes above each come with a test that failed before
+  the fix. ESLint runs typescript-eslint and
+  react-hooks' `rules-of-hooks` and `exhaustive-deps`, in CI and in the quality
+  gate. It found one latent defect: `TriggerSection` returned before calling
+  its hooks. React 19 tolerates that today only because the early path calls
+  no hooks at all.
 - **Studio has a role and a plan**
   ([ADR-0024](docs/adrs/adr0024-studio-reference-viewer.md)). It is the
   library's reference viewer: a single-camera tool to configure, view and

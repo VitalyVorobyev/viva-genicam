@@ -21,6 +21,27 @@ function featureStateToEntry(state: FeatureState): NodeValueEntry {
 }
 
 /**
+ * Lift a legacy [`NodeValueEntry`] to the [`FeatureState`] the editors read,
+ * for a node the live state map does not hold yet: the connect-time bulk read
+ * fills only the legacy map (backlog ST-29). The entry does not say whether
+ * the feature is implemented or available, so both are reported `true`.
+ */
+export function entryToFeatureState(entry: NodeValueEntry, kind: string): FeatureState {
+  const state: FeatureState = {
+    value: entry.value,
+    access_mode: entry.access_mode,
+    kind,
+    is_implemented: true,
+    is_available: true,
+  };
+  if (entry.min !== undefined && entry.max !== undefined) {
+    state.numeric = { min: entry.min, max: entry.max };
+    if (entry.inc !== undefined) state.numeric.inc = entry.inc;
+  }
+  return state;
+}
+
+/**
  * Reject numeric values that are clearly nonsensical (NaN / Infinity). We do
  * not reject based on range, because the device's declared range may itself
  * be wrong (see the `viva-genapi` numeric-dispatch handoff). The goal here is

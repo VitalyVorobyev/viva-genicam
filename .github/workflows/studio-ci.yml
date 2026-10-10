@@ -101,6 +101,13 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 
+      # Vitest's binary runs under Node even when bun starts it, and jsdom 30
+      # (the component tests' DOM) needs Node 22.22.2 or later.
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
       - name: Install dependencies
         working-directory: studio/ui/viva-studio-ui
         run: bun install --frozen-lockfile
@@ -111,6 +118,12 @@ jobs:
       - name: Type check
         working-directory: studio/ui/viva-studio-ui
         run: bunx tsc --noEmit
+
+      # typescript-eslint plus react-hooks' rules-of-hooks and exhaustive-deps.
+      - name: Lint
+        if: ${{ !cancelled() }}
+        working-directory: studio/ui/viva-studio-ui
+        run: bun run lint
 
       - name: Test
         if: ${{ !cancelled() }}

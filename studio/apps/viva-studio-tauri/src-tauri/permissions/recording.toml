@@ -1,8 +1,0 @@
-[[permission]]
-identifier = "recording"
-description = "Allows recording start/stop/status commands."
-commands.allow = [
-  "start_recording",
-  "stop_recording",
-  "get_recording_status"
-]

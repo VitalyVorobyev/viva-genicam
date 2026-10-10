@@ -105,8 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   getters and setters (Codex review of #186): an imposed `WO` makes a feature
   write-only for feature state and the service's snapshots, an imposed `RO`
   stops a command from executing, a converter or SwissKnife refuses a read its
-  ceiling forbids, and Studio shows the access the whole `<pValue>` chain
-  allows rather than the first node's.
+  ceiling forbids — directly or as a formula variable — and Studio shows the
+  access the whole `<pValue>` chain allows rather than the first node's, `NA`
+  when it allows nothing (Codex reviews of #186 and #187).
 - `viva-service` stops serving and announcing a camera that a successful
   discovery pass no longer finds, including when it finds none: an empty pass
   was treated as a failed one, so an unplugged only camera was announced
@@ -117,8 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   XML links the latch to the value, so every sample after the first repeated
   it, no fit was possible — and calibration reported success on default
   coefficients that mapped every timestamp to when calibration began. Each
-  sample is now read fresh; `NodeMap::invalidate` forgets a node's cached
-  value. Found once a fit had to succeed.
+  sample is now read fresh: `NodeMap::invalidate` forgets the cached value of
+  a node and of everything behind its `<pValue>` — where a timestamp's
+  reading is held in all 30 corpus cameras that have one (Codex review of
+  #187). The fake GigE camera now declares its timestamp the same way. Found
+  once a fit had to succeed.
 - A USB3 Vision block whose trailer reports an error (the status's severity
   bit) is dropped and counted by `U3vFrameStream::dropped`, which Studio's
   dropped-frame count now includes, rather than handed on as an image; and a

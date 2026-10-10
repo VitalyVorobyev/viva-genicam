@@ -2776,6 +2776,63 @@ mod tests {
         assert_eq!(nodemap.get_integer("Ticks", &io).unwrap(), 2);
     }
 
+    /// `invalidate` reaches the register behind a `<pValue>`, which holds the
+    /// reading: every timestamp in the vendor corpus is an `Integer` over an
+    /// `IntReg` (Codex review of #187).
+    #[test]
+    fn invalidate_reaches_the_register_behind_a_pvalue() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="Ticks">
+                    <pValue>TicksReg</pValue>
+                </Integer>
+                <IntReg Name="TicksReg">
+                    <Address>0x100</Address><Length>4</Length><AccessMode>RO</AccessMode>
+                    <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MockIo::with_registers(&[(0x100, 1u32.to_be_bytes().to_vec())]);
+
+        assert_eq!(nodemap.get_integer("Ticks", &io).unwrap(), 1);
+        io.write(0x100, &2u32.to_be_bytes()).unwrap();
+        nodemap.invalidate("Ticks");
+        assert_eq!(nodemap.get_integer("Ticks", &io).unwrap(), 2);
+    }
+
+    /// A formula cannot read through a ceiling either: an outer node reading
+    /// an imposed-`WO` converter is refused (Codex review of #187).
+    #[test]
+    fn a_formula_cannot_read_an_imposed_write_only_node() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Converter Name="Hidden">
+                    <ImposedAccessMode>WO</ImposedAccessMode>
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO</FormulaFrom>
+                    <pValue>HiddenReg</pValue>
+                </Converter>
+                <FloatReg Name="HiddenReg">
+                    <Address>0x100</Address><Length>8</Length><AccessMode>RW</AccessMode>
+                    <Endianess>BigEndian</Endianess>
+                </FloatReg>
+                <SwissKnife Name="Outer">
+                    <pVariable Name="H">Hidden</pVariable>
+                    <Formula>H * 2</Formula>
+                </SwissKnife>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MockIo::with_registers(&[(0x100, 3.0f64.to_be_bytes().to_vec())]);
+        assert!(
+            nodemap.get_float("Outer", &io).is_err(),
+            "read through a WO ceiling"
+        );
+    }
+
     /// An imposed ceiling binds every path to the node, not only the
     /// primitive getters (Codex review of #186): an imposed-`WO` feature is
     /// write-only for feature state, an imposed-`RO` command does not

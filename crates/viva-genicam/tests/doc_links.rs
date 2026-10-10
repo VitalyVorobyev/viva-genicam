@@ -68,8 +68,10 @@ fn link_targets(markdown: &str) -> Vec<String> {
             .map(|(_, part)| part)
             .collect::<Vec<_>>()
             .join(" ");
+        // A reference definition: `[label]:` and the target, after optional
+        // whitespace (Codex review of #188).
         if let Some(rest) = line.trim_start().strip_prefix('[')
-            && let Some((_, target)) = rest.split_once("]: ")
+            && let Some((_, target)) = rest.split_once("]:")
         {
             targets.push(target.split_whitespace().next().unwrap_or("").to_string());
         }
@@ -148,6 +150,9 @@ fn every_relative_markdown_link_resolves() {
 
 #[test]
 fn link_targets_are_found_outside_code() {
-    let md = "See [a](a.md) and [b](b.md#x \"t\").\n```\n[c](c.md)\n```\n`[d](d.md)`\n[e]: e.md\n";
-    assert_eq!(link_targets(md), vec!["a.md", "b.md#x", "e.md"]);
+    let md = "See [a](a.md) and [b](b.md#x \"t\").\n```\n[c](c.md)\n```\n`[d](d.md)`\n[e]: e.md\n[f]:f.md\n[g]:\tg.md\n";
+    assert_eq!(
+        link_targets(md),
+        vec!["a.md", "b.md#x", "e.md", "f.md", "g.md"]
+    );
 }

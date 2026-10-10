@@ -111,10 +111,15 @@ fn build_from_nodemap(xml_model: &XmlModel, nodemap: &NodeMap) -> Result<UiGraph
         // The access the whole `<pValue>` chain allows, ceilings included, as
         // the runtime enforces it; the node's own is only the first link
         // (Codex review of #186).
-        if ui_node.access_mode.is_some()
-            && let Some(declared) = nodemap.declared_access_mode(&ui_node.name)
-        {
-            ui_node.access_mode = Some(access_mode_str(declared));
+        // `None` from a node that has an access mode is a chain that permits
+        // neither reading nor writing: `NA`, as the live feature state says,
+        // not the first node's own mode (Codex review of #187).
+        if ui_node.access_mode.is_some() {
+            ui_node.access_mode = Some(
+                nodemap
+                    .declared_access_mode(&ui_node.name)
+                    .map_or_else(|| "NA".to_string(), access_mode_str),
+            );
         }
         nodes_by_name.insert(ui_node.name.clone(), ui_node);
     }
@@ -216,7 +221,11 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             p_max,
             ..
         } => UiNode {
-            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
+            access_mode: Some(
+                access
+                    .capped_by(meta.imposed_access)
+                    .map_or_else(|| "NA".to_string(), access_mode_str),
+            ),
             unit: unit.clone(),
             constraints: integer_constraints(*min, *max, *inc),
             dependencies: [pvalue, p_min, p_max]
@@ -238,7 +247,11 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             ..
         } => UiNode {
-            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
+            access_mode: Some(
+                access
+                    .capped_by(meta.imposed_access)
+                    .map_or_else(|| "NA".to_string(), access_mode_str),
+            ),
             unit: unit.clone(),
             constraints: float_constraints(*min, *max),
             dependencies: pvalue.iter().cloned().collect(),
@@ -251,7 +264,11 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             ..
         } => UiNode {
-            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
+            access_mode: Some(
+                access
+                    .capped_by(meta.imposed_access)
+                    .map_or_else(|| "NA".to_string(), access_mode_str),
+            ),
             enum_entries: entries
                 .iter()
                 .map(|e| EnumEntry {
@@ -272,7 +289,11 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             ..
         } => UiNode {
-            access_mode: access.capped_by(meta.imposed_access).map(access_mode_str),
+            access_mode: Some(
+                access
+                    .capped_by(meta.imposed_access)
+                    .map_or_else(|| "NA".to_string(), access_mode_str),
+            ),
             dependencies: pvalue.iter().cloned().collect(),
             ..described(&name, UiNodeKind::Boolean, meta)
         },
@@ -556,6 +577,26 @@ mod tests {
         assert_eq!(
             graph.nodes_by_name["SensorWidth"].access_mode.as_deref(),
             Some("RO")
+        );
+    }
+
+    /// A command imposed `RO` permits nothing — its own access is `WO` — and
+    /// shows as `NA`, not as executable (Codex review of #187).
+    #[test]
+    fn a_node_left_with_no_access_shows_na() {
+        let xml = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Command Name="Reset">
+                    <ImposedAccessMode>RO</ImposedAccessMode>
+                    <Address>0x104</Address><Length>4</Length>
+                    <CommandValue>1</CommandValue>
+                </Command>
+            </RegisterDescription>
+        "#;
+        let graph = parse_genicam_xml(xml).expect("parse");
+        assert_eq!(
+            graph.nodes_by_name["Reset"].access_mode.as_deref(),
+            Some("NA")
         );
     }
 

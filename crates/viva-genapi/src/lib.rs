@@ -1446,6 +1446,10 @@ mod tests {
         let io = MockIo::default();
 
         assert_eq!(
+            nodemap.declared_access_mode("ExposureTime"),
+            Some(AccessMode::RW)
+        );
+        assert_eq!(
             nodemap.effective_access_mode("ExposureTime", &io).unwrap(),
             AccessMode::RW
         );

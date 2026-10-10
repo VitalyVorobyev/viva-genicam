@@ -723,10 +723,12 @@ fn build_feature_state(
     // write or the execute.
     let write_only = nodemap.is_write_only(name);
     let has_value = !write_only && !command_targets.contains(name);
-    let access_mode = match node.access_mode() {
+    // A converter inherits its access from its `<pValue>`.
+    let declared = nodemap.declared_access_mode(name);
+    let access_mode = match declared {
         // Declared `RW` but delegating to a `WO` register: say what it is.
         Some(AccessMode::RW) if write_only => "WO".to_string(),
-        _ => access_mode_string(node),
+        _ => access_mode_string(declared),
     };
 
     let value = match node {
@@ -841,10 +843,10 @@ fn build_feature_state(
     })
 }
 
-/// Map `Node::access_mode()` to the GenICam string spelling, treating `None`
-/// (e.g. Category nodes) as `"NA"`.
-fn access_mode_string(node: &Node) -> String {
-    match node.access_mode() {
+/// The GenICam spelling of a declared access mode, treating `None` (e.g.
+/// Category nodes) as `"NA"`.
+fn access_mode_string(access: Option<AccessMode>) -> String {
+    match access {
         Some(AccessMode::RO) => "RO".to_string(),
         Some(AccessMode::RW) => "RW".to_string(),
         Some(AccessMode::WO) => "WO".to_string(),

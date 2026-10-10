@@ -57,6 +57,11 @@ impl Node {
     }
 
     /// Return the access mode of the node, if applicable.
+    ///
+    /// A converter declares none; it is as writable as its `<pValue>`, which
+    /// the node alone cannot see, so it reports `RO` here. Ask
+    /// [`NodeMap::declared_access_mode`](crate::NodeMap::declared_access_mode)
+    /// for the inherited mode.
     pub fn access_mode(&self) -> Option<viva_genapi_xml::AccessMode> {
         match self {
             Node::Integer(n) => Some(n.access),

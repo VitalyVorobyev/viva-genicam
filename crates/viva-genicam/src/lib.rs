@@ -253,7 +253,9 @@ impl<T: RegisterIo> Camera<T> {
     /// Set a feature value using a string representation.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), GenicamError> {
         match self.nodemap.node(name) {
-            Some(Node::Integer(_)) => {
+            // A converter writes through its `<FormulaTo>`: `set_integer` and
+            // `set_float` dispatch to it.
+            Some(Node::Integer(_) | Node::IntConverter(_)) => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| GenicamError::parse(format!("invalid integer for {name}")))?;
@@ -261,7 +263,7 @@ impl<T: RegisterIo> Camera<T> {
                     .set_integer(name, parsed, &self.transport)
                     .map_err(Into::into)
             }
-            Some(Node::Float(_)) => {
+            Some(Node::Float(_) | Node::Converter(_)) => {
                 let parsed: f64 = value
                     .parse()
                     .map_err(|_| GenicamError::parse(format!("invalid float for {name}")))?;
@@ -282,12 +284,6 @@ impl<T: RegisterIo> Camera<T> {
                     .map_err(Into::into)
             }
             Some(Node::SwissKnife(_)) => Err(GenApiError::Type(name.to_string()).into()),
-            Some(Node::Converter(_)) => {
-                // Converters are read-only from the user perspective
-                // (they transform values from underlying nodes)
-                Err(GenApiError::Type(name.to_string()).into())
-            }
-            Some(Node::IntConverter(_)) => Err(GenApiError::Type(name.to_string()).into()),
             Some(Node::String(_)) => self
                 .nodemap
                 .set_string(name, value, &self.transport)

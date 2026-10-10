@@ -1410,6 +1410,52 @@ mod tests {
         assert!((roundtrip - 75.0).abs() < 1e-9, "got {roundtrip}");
     }
 
+    /// A converter declares no `<AccessMode>`: it reads and writes through its
+    /// `<pValue>`, so it is exactly as writable as that node. AVT and
+    /// Prosilica cameras expose `AcquisitionFrameRateAbs` as a `<Converter>`
+    /// itself, so a fixed RO here made a real feature unwritable.
+    #[test]
+    fn a_converter_is_as_writable_as_its_pvalue() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <IntReg Name="ExposureTimeRaw">
+                    <Address>0x1000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                </IntReg>
+                <Converter Name="ExposureTime">
+                    <FormulaTo>FROM * 100</FormulaTo>
+                    <FormulaFrom>TO / 100</FormulaFrom>
+                    <pValue>ExposureTimeRaw</pValue>
+                </Converter>
+                <IntReg Name="TemperatureRaw">
+                    <Address>0x2000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                </IntReg>
+                <IntConverter Name="Temperature">
+                    <FormulaTo>FROM</FormulaTo>
+                    <FormulaFrom>TO / 10</FormulaFrom>
+                    <pValue>TemperatureRaw</pValue>
+                </IntConverter>
+            </RegisterDescription>
+        "#;
+
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MockIo::default();
+
+        assert_eq!(
+            nodemap.effective_access_mode("ExposureTime", &io).unwrap(),
+            AccessMode::RW
+        );
+        // Negative control: over a read-only register a converter stays read-only.
+        assert_eq!(
+            nodemap.effective_access_mode("Temperature", &io).unwrap(),
+            AccessMode::RO
+        );
+    }
+
     /// A read-modify-write `<FormulaTo>` sees the register's current contents
     /// through `OLD`.
     #[test]

@@ -740,6 +740,30 @@ mod tests {
         assert!(err.contains("not writable"), "error: {err}");
     }
 
+    /// A feature that is itself a `<Converter>` is written through its
+    /// `<pValue>`, so it is writable when that register is — the pre-flight
+    /// check must not refuse what the camera would accept.
+    #[test]
+    fn test_validate_node_write_accepts_a_converter_over_a_writable_register() {
+        let graph = viva_xml_model::parse_genicam_xml(
+            r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Category Name="Root"><pFeature>AcquisitionFrameRateAbs</pFeature></Category>
+                <IntReg Name="FrameRateRaw">
+                    <Address>0x1000</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                </IntReg>
+                <Converter Name="AcquisitionFrameRateAbs">
+                    <FormulaTo>FROM * 100</FormulaTo>
+                    <FormulaFrom>TO / 100</FormulaFrom>
+                    <pValue>FrameRateRaw</pValue>
+                </Converter>
+            </RegisterDescription>"#,
+        )
+        .expect("parse");
+        let node = &graph.nodes_by_name["AcquisitionFrameRateAbs"];
+        validate_node_write(node, None, &serde_json::json!(12.5))
+            .expect("a converter over a writable register is writable");
+    }
+
     // ── validate_node_write — Command ───────────────────────────────────────────
 
     #[test]

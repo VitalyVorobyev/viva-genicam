@@ -75,7 +75,9 @@ Key invariants:
 - **Parsing lives in Rust.** The UI renders a contract, it does not read
   GenICam tags.
 - **The UI depends on `UiGraph`**, not on the XML.
-- **Unknown nodes are preserved** rather than dropped.
+- **Nothing is dropped silently**: a declaration the library cannot build is
+  listed in `UiGraph.skipped`, and a node kind the mapper does not know is
+  kept as `Unknown`.
 
 ## Data model: `UiGraph`
 
@@ -85,11 +87,12 @@ The minimal model the UI needs, from `crates/viva_xml_model`:
 - `categories` — category name → `UiCategory` (with `features: string[]`)
 - `root_category` — the chosen root, preferring `"Root"` when present
 
-Each `UiNode` carries a `RawNode` snapshot: the original element `tag`, its
-`attributes` (always including `Name` when present) and `children_text`, with
-repeated fields such as `pFeature` joined by newlines. The TypeScript copy of
-the contract is `ui/viva-studio-ui/src/xml_model/uigraph.ts` and must stay in
-step with `crates/viva_xml_model/src/model.rs`.
+- `skipped` — declarations the library could not turn into features, with
+  each one's tag, name and reason (omitted when empty)
+
+The TypeScript types are generated from `crates/viva_xml_model/src/model.rs`
+into `ui/viva-studio-ui/src/generated/ipc.ts` (backlog ST-28); a test fails
+while that file is stale.
 
 ---
 

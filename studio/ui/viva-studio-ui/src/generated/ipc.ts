@@ -70,7 +70,7 @@ export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: 
  */
 skipped?: Array<UiSkippedNode>, };
 
-export type UiNode = { name: string, kind: UiNodeKind, display_name?: string, comment?: string, tooltip?: string, description?: string, visibility?: string, access_mode?: string, unit?: string, representation?: string, constraints?: NumericConstraints, enum_entries?: Array<EnumEntry>, raw: RawNode,
+export type UiNode = { name: string, kind: UiNodeKind, display_name?: string, comment?: string, tooltip?: string, description?: string, visibility?: string, access_mode?: string, unit?: string, representation?: string, constraints?: NumericConstraints, enum_entries?: Array<EnumEntry>,
 /**
  * Nodes that this node depends on (pValue, pMin, pMax references).
  */
@@ -103,8 +103,6 @@ export type UiCategory = { name: string, display_name: string, features: Array<s
 export type NumericConstraints = { min?: number, max?: number, inc?: number, value?: number, };
 
 export type EnumEntry = { name: string, value?: string, display_name?: string, };
-
-export type RawNode = { tag: string, attributes: { [key in string]: string }, children_text: { [key in string]: string }, };
 
 export type UiSkippedNode = {
 /**

@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
 use viva_streamer::bmp::BayerPattern;
 use viva_streamer::frame::{FrameEncoder, FramePacer, PixelLayout};
-use viva_zenoh_api::{DeviceAnnounce, FeatureState};
+use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState};
 
 use crate::state::device_state::{DeviceInfo, StreamerInfo};
 use crate::state::events::Events;
@@ -72,6 +72,9 @@ const RELEASE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// The most frames a second the viewer is sent. A camera can deliver far
 /// more, and encoding each as a BMP costs CPU the user cannot see.
 const DISPLAY_FPS: u32 = 30;
+
+/// How often a stream reports its frame rate and dropped frames.
+const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Backend that communicates directly with cameras via GigE Vision / USB3 Vision.
 pub struct EmbeddedBackend {
@@ -407,6 +410,7 @@ impl DeviceBackend for EmbeddedBackend {
             info_tx.clone(),
             shutdown_rx.clone(),
             StreamInfoTracker::new(width, height, pixel_format),
+            self.events.clone(),
         ));
 
         // Spawn WS server task.
@@ -584,14 +588,18 @@ impl DeviceBackend for EmbeddedBackend {
 /// Read frames until shutdown, sending the viewer a BMP of each as often as
 /// [`FramePacer`] allows: at most [`DISPLAY_FPS`] a second, and once a second
 /// while no viewer is connected, so one that connects later has a frame.
+/// Once a second it also reports the stream's frame rate and dropped frames,
+/// as `viva-service` does (ST-36).
 async fn run_frame_reader(
     mut frame_stream: FrameStream,
     frame_tx: watch::Sender<Bytes>,
     info_tx: watch::Sender<viva_streamer::ws::StreamInfo>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut info: StreamInfoTracker,
+    events: Arc<Events>,
 ) {
     let mut pacer = FramePacer::new(Duration::from_secs(1) / DISPLAY_FPS);
+    let mut last_status = Instant::now();
     let mut encoder = FrameEncoder::new();
     let mut unsupported = None;
     let mut logged_first = false;
@@ -629,6 +637,15 @@ async fn run_frame_reader(
             info.observe(frame.width, frame.height, &frame.pixel_format.to_string())
         {
             let _ = info_tx.send(changed);
+        }
+        if last_status.elapsed() >= STATUS_INTERVAL {
+            let stats = frame_stream.stats();
+            events.send(&AcquisitionStatus {
+                active: true,
+                fps: Some(stats.avg_fps as f32),
+                dropped: stats.drops,
+            });
+            last_status = Instant::now();
         }
         if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
             continue;
@@ -996,6 +1013,90 @@ mod tests {
             fake_camera::first_frame(&streamer.ws_url).await;
 
             backend.stop_acquisition().await.expect("stop");
+            backend.disconnect().await.expect("disconnect");
+        });
+    }
+
+    /// While streaming, the backend reports the camera's frame rate and the
+    /// frames lost on the way, from the library's stream statistics, once a
+    /// second. Embedded mode reported neither, and the header showed only
+    /// "Acquiring" (ST-36).
+    #[test]
+    fn streaming_reports_the_frame_rate_and_the_dropped_frames() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let _fake = fake_camera::start().await;
+            let (events, recorder) = crate::state::events::Recorder::events();
+            let backend = super::EmbeddedBackend::new(events);
+            backend.connect("127.0.0.1").await.expect("connect");
+            backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+
+            let reported = async {
+                loop {
+                    let streaming = recorder.of("acquisition-status").into_iter().find(|s| {
+                        s["active"] == true && s["fps"].as_f64().is_some_and(|fps| fps > 0.0)
+                    });
+                    if let Some(status) = streaming {
+                        return status;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            };
+            let status = tokio::time::timeout(std::time::Duration::from_secs(5), reported)
+                .await
+                .expect("no acquisition-status with a frame rate within 5 s");
+            assert_eq!(status["dropped"], 0, "{status}");
+
+            backend.stop_acquisition().await.expect("stop");
+            backend.disconnect().await.expect("disconnect");
+        });
+    }
+
+    /// The device panel's IP configuration (ST-37): the backend reads the
+    /// camera's current and persistent address, and writes a persistent one
+    /// the camera keeps. Tauri refused these commands until #175 granted
+    /// them, so nothing had run this path.
+    #[test]
+    fn network_config_reads_and_writes_the_persistent_address() {
+        use viva_fake_gige::registers::{
+            PERSISTENT_DEFAULT_GATEWAY, PERSISTENT_IP_ADDRESS, PERSISTENT_SUBNET_MASK,
+        };
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+
+            let config = backend.get_network_config().await.expect("read");
+            assert_eq!(config.current_ip, "127.0.0.1");
+            assert_eq!(config.persistent_ip, "0.0.0.0", "the fake boots with none");
+
+            backend
+                .set_persistent_ip(
+                    "192.168.1.100".parse().unwrap(),
+                    "255.255.255.0".parse().unwrap(),
+                    "192.168.1.1".parse().unwrap(),
+                )
+                .await
+                .expect("write");
+            assert_eq!(
+                fake.peek(PERSISTENT_IP_ADDRESS, 4).await,
+                [192, 168, 1, 100]
+            );
+            assert_eq!(
+                fake.peek(PERSISTENT_SUBNET_MASK, 4).await,
+                [255, 255, 255, 0]
+            );
+            assert_eq!(
+                fake.peek(PERSISTENT_DEFAULT_GATEWAY, 4).await,
+                [192, 168, 1, 1]
+            );
+            let config = backend.get_network_config().await.expect("read back");
+            assert_eq!(config.persistent_ip, "192.168.1.100");
+
             backend.disconnect().await.expect("disconnect");
         });
     }

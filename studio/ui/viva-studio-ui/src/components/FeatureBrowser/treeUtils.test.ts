@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatLiveValue, graphSummary } from "./treeUtils";
+import { categoryPath, formatLiveValue, graphSummary } from "./treeUtils";
 import type { UiGraph } from "../../xml_model/uigraph";
 function entry(value: number | string | boolean) {
   return { value };
@@ -74,5 +74,32 @@ describe("graphSummary", () => {
       { tag: "Integer", error: "no Name" },
     ];
     expect(graphSummary(graph(skipped), 12, 3)).toBe("12 nodes · 3 cat · 2 not shown");
+  });
+});
+
+describe("categoryPath", () => {
+  const graph: UiGraph = {
+    nodes_by_name: {},
+    root_category: "Root",
+    categories: {
+      Root: { name: "Root", display_name: "Root", features: ["Analog", "Image"] },
+      Analog: { name: "Analog", display_name: "Analog", features: ["GainControl"] },
+      GainControl: { name: "GainControl", display_name: "Gain Control", features: ["Gain"] },
+      Image: { name: "Image", display_name: "Image", features: [] },
+    },
+  };
+
+  // The breadcrumb showed the root and the selected category only, dropping
+  // every category between them (backlog ST-40).
+  it("walks from the root to a nested category", () => {
+    expect(categoryPath(graph, "GainControl")).toEqual(["Root", "Analog", "GainControl"]);
+  });
+
+  it("is the root alone for the root", () => {
+    expect(categoryPath(graph, "Root")).toEqual(["Root"]);
+  });
+
+  it("is empty for a category the root does not reach", () => {
+    expect(categoryPath(graph, "Orphan")).toEqual([]);
   });
 });

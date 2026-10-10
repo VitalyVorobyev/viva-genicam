@@ -10,6 +10,37 @@ export function clampSplitter(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/** How far one arrow key moves a splitter, in pixels. */
+const KEY_STEP = 16;
+
+/**
+ * The size a key press asks a focused splitter for, or `null` for a key it
+ * does not handle. Left/right splitters follow the horizontal arrows; a
+ * vertical one sizes the pane below it, which ArrowUp grows. Home and End jump
+ * to the bounds.
+ */
+export function splitterKeySize(
+  key: string,
+  size: number,
+  orientation: "horizontal" | "vertical",
+  { minSize, maxSize }: { minSize: number; maxSize: number },
+): number | null {
+  const [grow, shrink] =
+    orientation === "vertical" ? ["ArrowUp", "ArrowDown"] : ["ArrowRight", "ArrowLeft"];
+  switch (key) {
+    case grow:
+      return clampSplitter(size + KEY_STEP, minSize, maxSize);
+    case shrink:
+      return clampSplitter(size - KEY_STEP, minSize, maxSize);
+    case "Home":
+      return minSize;
+    case "End":
+      return maxSize;
+    default:
+      return null;
+  }
+}
+
 function loadSize(key: string, defaultSize: number): number {
   try {
     const raw = localStorage.getItem(key);
@@ -41,9 +72,13 @@ interface SplitterOptions {
 interface HandleProps {
   role: "separator";
   "aria-orientation": "vertical" | "horizontal";
+  "aria-valuenow": number;
+  "aria-valuemin": number;
+  "aria-valuemax": number;
   className: string;
   tabIndex: number;
   onPointerDown: (e: React.PointerEvent) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
 }
 
 interface SplitterResult {
@@ -117,14 +152,29 @@ export function useSplitter({
     [minSize, maxSize, storageKey, orientation],
   );
 
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const next = splitterKeySize(e.key, sizeRef.current, orientation, { minSize, maxSize });
+      if (next === null) return;
+      e.preventDefault();
+      setSize(next);
+      saveSize(storageKey, next);
+    },
+    [minSize, maxSize, storageKey, orientation],
+  );
+
   const isVertical = orientation === "vertical";
 
   const handleProps: HandleProps = {
     role: "separator",
     "aria-orientation": isVertical ? "horizontal" : "vertical",
+    "aria-valuenow": size,
+    "aria-valuemin": minSize,
+    "aria-valuemax": maxSize,
     className: isVertical ? "pane-splitter pane-splitter--horizontal" : "pane-splitter",
     tabIndex: 0,
     onPointerDown,
+    onKeyDown,
   };
 
   return { size, handleProps };

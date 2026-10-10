@@ -121,6 +121,28 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] Export State -> the JSON holds every feature with a value, registers
       left out
 
+### 6c. Camera panel, user sets and dropped frames
+- [ ] Diagnostics tab while connected -> "Camera" lists the model, serial and
+      firmware, the MAC and the IP address
+- [ ] Persistent IP: enter 192.168.1.100 / 255.255.255.0 / 192.168.1.1, Save to
+      camera -> a toast says it applies from the next restart;
+      `viva-camctl` (or a reconnect) reads it back
+- [ ] Remote mode -> the panel says IP configuration is not supported there
+- [ ] Image tab -> User Sets: choose a set, Execute Load -> the features it
+      holds change
+- [ ] While streaming, the header shows the camera's fps in both modes; on a
+      real camera over a lossy link it adds "· N dropped" in amber
+
+### 6d. Feature Browser on a large camera
+- [ ] Open a category with many features and scroll -> values fill in as
+      rows come into view
+- [ ] Search for a common word ("Gain", "Selector") -> results appear at once;
+      over 200 matches says "First 200 of N matches"
+- [ ] Focus a list, use the arrow keys, Home and End -> focus moves through the
+      options; Enter opens the focused one
+- [ ] Focus a splitter (Tab) and use the arrow keys -> the pane resizes
+- [ ] Select a category two levels deep -> the breadcrumb shows both levels
+
 ### 6b. Report
 - [ ] Diagnostics tab -> Save report… -> the file holds
       "# viva-genicam diagnostic report" and a "## Camera" section on the

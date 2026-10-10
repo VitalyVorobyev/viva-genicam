@@ -94,7 +94,6 @@ function node(kind: UiNode["kind"], access_mode = "RW"): UiNode {
     name: "N",
     kind,
     access_mode,
-    raw: { tag: String(kind), attributes: {}, children_text: {} },
   };
 }
 

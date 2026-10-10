@@ -255,6 +255,12 @@ opaque string without `/`).
   { "active": false, "fps": null, "dropped": 0 }
   ```
 - **Rust type:** `AcquisitionStatus` in `viva-zenoh-api`
+- **Semantics:** Published on start and stop, and once a second while frames
+  arrive. `fps` is the rate frames reach the service; `dropped` counts the
+  frames lost since the stream started — abandoned incomplete or discarded
+  because the service fell behind (`StreamStats::drops`). Viva
+  Studio's embedded mode sends the same status as its `acquisition-status`
+  event.
 
 ### `genicam/devices/{device_id}/image`
 

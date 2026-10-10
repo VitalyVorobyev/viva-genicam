@@ -37,3 +37,28 @@ export function formatLiveValue(state: { value: JsonValue }): string | null {
   if (!Array.isArray(value) && typeof value.length === "number") return `${value.length} B`;
   return null;
 }
+
+/**
+ * The categories from the root down to `category`, both included; empty when
+ * the root does not reach it. Breadth-first, so a category listed under two
+ * parents takes the shorter path, and a cycle in a malformed document ends.
+ */
+export function categoryPath(graph: UiGraph, category: string): string[] {
+  const parent = new Map<string, string | null>([[graph.root_category, null]]);
+  const queue = [graph.root_category];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current === category) {
+      const path = [current];
+      for (let up = parent.get(current); up != null; up = parent.get(up)) path.unshift(up);
+      return path;
+    }
+    for (const child of graph.categories[current]?.features ?? []) {
+      if (graph.categories[child] && !parent.has(child)) {
+        parent.set(child, current);
+        queue.push(child);
+      }
+    }
+  }
+  return [];
+}

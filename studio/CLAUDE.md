@@ -45,8 +45,9 @@ skips loopback — so the fake camera never appears. See `#132`.
   `viva-genapi-xml`). The UI consumes UiGraph JSON and never parses XML.
 - UiGraph contract fields `nodes_by_name` / `categories` / `root_category`
   are frozen.
-- Unknown XML nodes are never dropped: preserved as `UiNodeKind::Unknown`.
-  `RawNode` is meant to carry their XML but is empty today (backlog ST-34).
+- No declaration is dropped silently: one the library cannot build is listed
+  in `UiGraph.skipped` with its tag, name and reason (DX-05), and a
+  `NodeDecl` kind the mapper does not know becomes `UiNodeKind::Unknown`.
 - In the Tauri backend use `tauri::async_runtime::spawn`, never bare
   `tokio::spawn`. Reach the embedded camera only through
   `EmbeddedBackend::with_camera`, which runs the operation on the blocking

@@ -10,6 +10,8 @@ import {
 } from "../../xml_model/helpers";
 import { visibilityPassesFilter } from "./FeatureBrowserPage";
 import { formatLiveValue } from "./treeUtils";
+import { onListboxKeyDown } from "./listboxKeys";
+import { useInView } from "./useInView";
 
 interface FeatureListProps {
   graph: UiGraph | null;
@@ -89,7 +91,12 @@ export function FeatureList({
   }
 
   return (
-    <div className="feat-list" role="listbox" aria-label={categoryTitle}>
+    <div
+      className="feat-list"
+      role="listbox"
+      aria-label={categoryTitle}
+      onKeyDown={onListboxKeyDown}
+    >
       <div className="feat-list__header">{categoryTitle}</div>
       <div className="feat-list__scroll">
         {features.length === 0 ? (
@@ -112,8 +119,9 @@ export function FeatureList({
 }
 
 /**
- * One row. It follows its feature's live state itself, so the list reads from
- * the camera only the features it shows, and a change re-renders one row.
+ * One row. It follows its feature's live state itself while on screen, so the
+ * list reads from the camera only the features in view, and a change
+ * re-renders one row.
  */
 function FeatureListItem({
   feat,
@@ -124,11 +132,13 @@ function FeatureListItem({
   isActive: boolean;
   onSelect: () => void;
 }) {
-  const state = useFeature(feat.isCategory ? null : feat.name);
+  const [ref, inView] = useInView<HTMLButtonElement>();
+  const state = useFeature(feat.isCategory || !inView ? null : feat.name);
   const liveText = state ? formatLiveValue(state) : null;
   const access = state?.access_mode ?? feat.declaredAccess;
   return (
     <button
+      ref={ref}
       type="button"
       role="option"
       aria-selected={isActive}

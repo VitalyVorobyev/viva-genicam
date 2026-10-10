@@ -67,7 +67,6 @@ pub struct UiNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub enum_entries: Vec<EnumEntry>,
-    pub raw: RawNode,
     /// Nodes that this node depends on (pValue, pMin, pMax references).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
@@ -140,12 +139,4 @@ pub struct EnumEntry {
     pub value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct RawNode {
-    pub tag: String,
-    pub attributes: HashMap<String, String>,
-    pub children_text: HashMap<String, String>,
 }

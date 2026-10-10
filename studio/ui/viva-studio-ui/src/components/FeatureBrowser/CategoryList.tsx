@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { UiGraph } from "../../xml_model/uigraph";
+import { onListboxKeyDown } from "./listboxKeys";
 
 interface CategoryListProps {
   graph: UiGraph | null;
@@ -46,7 +47,7 @@ export function CategoryList({
   }
 
   return (
-    <nav className="cat-list" role="listbox" aria-label="Categories">
+    <nav className="cat-list" role="listbox" aria-label="Categories" onKeyDown={onListboxKeyDown}>
       <div className="cat-list__header">Categories</div>
       {categories.map((cat) => {
         const isActive = cat.name === selectedCategory;

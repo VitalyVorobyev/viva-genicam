@@ -16,7 +16,6 @@ export function makeModel(
       name,
       kind: "Integer",
       access_mode: "RW",
-      raw: { tag: "Integer", attributes: {}, children_text: {} },
       enum_entries: [],
       ...partial,
     };
@@ -28,7 +27,6 @@ export function makeModel(
     nodes_by_name[name] ??= {
       name,
       kind: "Category",
-      raw: { tag: "Category", attributes: {}, children_text: {} },
       enum_entries: [],
     };
   }

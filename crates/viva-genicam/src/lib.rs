@@ -1201,7 +1201,9 @@ pub async fn connect_gige_with_xml(
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub struct U3vRegisterIo<T: u3v::usb::UsbTransfer + 'static> {
-    device: Mutex<u3v::device::U3vDevice<T>>,
+    /// Shared with a [`U3vFrameStream`](crate::U3vFrameStream), which clears
+    /// StreamEnable through it when it stops.
+    device: Arc<Mutex<u3v::device::U3vDevice<T>>>,
 }
 
 #[cfg(feature = "u3v")]
@@ -1209,7 +1211,7 @@ impl<T: u3v::usb::UsbTransfer + 'static> U3vRegisterIo<T> {
     /// Create a new adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
     pub fn new(device: u3v::device::U3vDevice<T>) -> Self {
         Self {
-            device: Mutex::new(device),
+            device: Arc::new(Mutex::new(device)),
         }
     }
 
@@ -1218,6 +1220,11 @@ impl<T: u3v::usb::UsbTransfer + 'static> U3vRegisterIo<T> {
         self.device
             .lock()
             .map_err(|_| GenicamError::transport("u3v device mutex poisoned"))
+    }
+
+    /// The device, shared: a frame stream holds it to stop the stream.
+    pub(crate) fn shared_device(&self) -> Arc<Mutex<u3v::device::U3vDevice<T>>> {
+        Arc::clone(&self.device)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, u3v::device::U3vDevice<T>>, GenApiError> {

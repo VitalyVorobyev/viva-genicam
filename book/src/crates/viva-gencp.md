@@ -4,10 +4,21 @@
 decodes **GenCP control messages** and nothing else. No sockets, no retries, no
 async, no device state.
 
-That is the point. GigE Vision carries GenCP over UDP (GVCP) and USB3 Vision
-carries it over bulk endpoints; the message layout, the opcodes and the status
-codes are the same in both. Keeping them in a transport-free crate means the
-two transports share one definition rather than two that drift.
+GigE Vision and USB3 Vision both control a camera with GenCP-style register
+reads and writes, but they do not put the same bytes on the wire:
+
+| | GigE Vision (GVCP) | USB3 Vision (GenCP proper) |
+|---|---|---|
+| Read / write memory | opcodes `0x0084` / `0x0086` | command ids `0x0800` / `0x0802` |
+| Register commands | `0x0080` / `0x0082` | none: a register is a 4-byte memory access |
+| "Answer me" flag | bit 0 of the flag byte | bit 14 of the 16-bit flags |
+| Byte order | big-endian | little-endian |
+
+What they share is a core of status codes and the pending-acknowledge
+mechanism. This crate holds both tables: `OpCode` is GVCP's, and
+`command_id` and `ccd_flags` are GenCP's (GenCP 1.2, Tables 4 and 7). Until
+0.8 the USB3 Vision transport sent GVCP's opcodes, which no USB3 Vision camera
+understands.
 
 ---
 
@@ -15,15 +26,17 @@ two transports share one definition rather than two that drift.
 
 | Item | Purpose |
 |---|---|
-| `OpCode` | `ReadRegister`, `WriteRegister`, `ReadMem`, `WriteMem` |
+| `OpCode` | GVCP's `ReadRegister`, `WriteRegister`, `ReadMem`, `WriteMem` |
+| `command_id` | GenCP's command ids: `READMEM_CMD` `0x0800` … `EVENT_ACK` `0x0C01` |
+| `ccd_flags` | GenCP's `REQUEST_ACK` (bit 14) and `COMMAND_RESEND` (bit 15) |
 | `StatusCode` | Transport-neutral status, with `Unknown(u16)` for anything not in the table |
-| `CommandHeader` / `AckHeader` | The 8-byte headers |
+| `CommandHeader` / `AckHeader` | GVCP's 8-byte headers |
 | `GenCpCmd` / `GenCpAck` | Header plus payload |
 | `encode_cmd` / `decode_ack` | The two functions you call |
 | `GenCpError` | Decode failures |
 | `HEADER_SIZE`, `PENDING_ACK_COMMAND` | `8` and `0x0805` |
 
-`OpCode::command_code()` gives the wire value (`0x0080`, `0x0082`, `0x0084`,
+`OpCode::command_code()` gives GVCP's wire value (`0x0080`, `0x0082`, `0x0084`,
 `0x0086`); `StatusCode::from_raw` / `to_raw` convert the status field.
 
 ---
@@ -105,8 +118,11 @@ write_mem}`, or `Camera::{get, set}` above them.
 
 ## Endianness and alignment
 
-GenCP is big-endian on the wire; `encode_cmd` and `decode_ack` handle that, and
-the structs hold host-order values. Register widths must match the address
+GenCP leaves the byte order to the transport, but requires it to match the
+device's bootstrap registers (GenCP 1.2 §2.3): GVCP is big-endian, USB3
+Vision little-endian. `encode_cmd` and `decode_ack` are GVCP's and handle the
+big-endian side; `viva-u3v` encodes its own little-endian packets. The structs
+hold host-order values. Register widths must match the address
 alignment, and devices do return `BadAlignment` when they do not — which is why
 that status has a name of its own rather than being folded into
 `InvalidParameter`.

@@ -79,6 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   past end of life since October 2025, and GitHub's Ubuntu 26.04 runners no
   longer offer it, so it could not stay tested. Wheels are tested on 3.10 and
   3.14.
+- USB3 Vision API, reshaped with the TC-27 fix: `ControlChannel` has no
+  `read_register`/`write_register` (GenCP has no such commands) and gains
+  `set_max_transfer`; `U3vStream::new` takes a `StreamLayout`; `Leader` gains
+  `block_id` and `Trailer::status` is a `u16`; `Sbrm` gains
+  `u3vcp_capability`; `Sirm` holds the device's half only, with `alignment()`
+  and `configure(&StreamLayout)`; `ManifestEntry::read_first` is
+  `read_device_xml`; `U3vDevice::open_stream`'s argument is a fallback for a
+  device whose SIRM leaves the payload size at 0. `viva-gencp` gains GenCP's
+  `command_id` and `ccd_flags`, and `OpCode` is documented as GVCP's.
 - `viva-service`'s `acquisition/status` reports the stream's dropped frames
   (`StreamStats::drops`: frames abandoned incomplete or discarded because the
   service fell behind); `dropped` was always 0.
@@ -90,6 +99,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **USB3 Vision now speaks the protocol the standards describe** (backlog
+  TC-27). It could not have worked with a real camera: no layer matched what
+  GenCP 1.2, a Grasshopper3's own XML, aravis and Wireshark agree on, and the
+  fake camera had been written to the same misreading, so every test passed.
+  No USB3 Vision camera has been reported either way. What changed:
+  - Discovery matched interface *subclass* 0, 1 and 2; USB3 Vision interfaces
+    are subclass `0x05` and differ by *protocol*. It found no camera.
+  - Commands used GVCP's opcodes (`0x0084` …) and acknowledge flag (bit 0)
+    with a big-endian address. GenCP's are READMEM `0x0800` and WRITEMEM
+    `0x0802` with RequestAck at bit 14, every field little-endian, and an
+    acknowledge carries the same `U3VC` prefix as a command; the decoder
+    expected a prefix that spells `A3VC`. Request ids no longer start at, or
+    wrap to, 0, which GenCP forbids for a write.
+  - The ABRM was read at offsets of our own (the SBRM address at `0x230`
+    instead of `0x1D8`) and big-endian, as were the SBRM, whose SIRM address
+    was at +0x10 instead of +0x20, and the manifest.
+  - The stream configuration wrote the payload, leader and trailer sizes to
+    the SIRM's read-only *required* sizes, and never set the transfer layout
+    a camera streams by (Codex review of #181); a stream now reads the
+    required sizes, writes the layout, and reads each transfer at its size.
+  - Stopping a stream never cleared StreamEnable (Codex review of #181);
+    `U3vFrameStream` now does once its reader has stopped, and when dropped.
+  - The stream leader and trailer were read without their 8-byte block id,
+    so every field after it was misplaced.
+  - The control timeout follows the camera's Maximum Device Response Time, a
+    pending acknowledge extends the wait instead of sleeping it out, and a
+    late answer to an earlier command is skipped.
+  `viva-fake-u3v` is rebuilt from those sources with constants of its own; it
+  refuses what a device refuses and streams only after StreamEnable and
+  AcquisitionStart. `viva-camctl report --usb N`, Studio and
+  `viva-service-u3v` add the camera's bootstrap registers, decoded and raw, to
+  the report, and `report --usb` still describes a camera whose XML cannot be
+  read.
 - `viva-service-u3v` streams as the library does (backlog SVC-03, SVC-06). It
   built its own `U3vStream`, which skipped the SIRM — the streaming registers
   — and sized a packed format's frames at one byte a pixel, and read in a

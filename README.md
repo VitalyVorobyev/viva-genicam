@@ -36,6 +36,12 @@
 - **Discovery** -- find GigE Vision cameras via GVCP broadcast; USB3 Vision cameras via USB enumeration
 - **Control** -- read and write device registers and GenApi features (Integer, Float, Enumeration, Boolean, Command, String, Register, SwissKnife, Converter, IntConverter)
 - **Streaming** -- GigE: GVSP reassembly with backpressure, plus raw capture from event-vision cameras (packet resend is not wired into the receive path yet); U3V: async frame iterator over USB bulk reads
+
+> **USB3 Vision has not met a camera yet.** It follows the GenCP standard and
+> what independent implementations agree on, and is tested against a fake built
+> from those sources, but no one has reported running it on real hardware. If
+> you have a USB3 Vision camera, `viva-camctl report --usb 0 --out report.txt`
+> attached to an issue is the most useful thing you can send.
 - **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
 - **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)

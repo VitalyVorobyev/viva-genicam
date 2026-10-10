@@ -24,10 +24,26 @@ impl<T: UsbTransfer + Send + 'static> U3vDeviceHandle<T> {
         }
     }
 
-    /// Open the camera's frame stream as the library does: sized by its
-    /// `PayloadSize`, with the SIRM configured and streaming enabled. The
-    /// service built a `U3vStream` itself, which skipped the SIRM and sized a
-    /// packed format's frames at one byte a pixel (backlog SVC-03).
+    /// The camera's bootstrap registers, decoded and raw, for the report:
+    /// nothing about USB3 Vision has met a camera yet (backlog TC-27).
+    pub async fn bootstrap(&self) -> Vec<(String, String)> {
+        let camera = self.camera.clone();
+        tokio::task::spawn_blocking(move || {
+            let camera = camera.lock().ok()?;
+            let mut device = camera.transport().lock_device().ok()?;
+            Some(device.describe())
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    }
+
+    /// Open the camera's frame stream as the library does: sized by the
+    /// device's SIRM, with the transfer layout configured and streaming
+    /// enabled. The service built a `U3vStream` itself, which skipped the
+    /// SIRM and sized a packed format's frames at one byte a pixel (backlog
+    /// SVC-03).
     pub async fn open_frame_stream(&self) -> Result<U3vFrameStream, GenicamError> {
         let camera = self.camera.clone();
         tokio::task::spawn_blocking(move || {
@@ -112,6 +128,27 @@ mod tests {
         let (camera, xml) = open_u3v_device(device).expect("camera");
         let handle = U3vDeviceHandle::new(camera, xml, "cam-fake-u3v".to_string());
         (handle, transport)
+    }
+
+    /// The report describes the camera's bootstrap registers, decoded and as
+    /// the raw bytes a USB3 Vision reporter's report would settle TC-27 with.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_report_carries_the_bootstrap_registers() {
+        let (handle, _transport) = open_fake();
+        let lines = handle.bootstrap().await;
+        let value = |key: &str| {
+            lines
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("no {key} in {lines:?}"))
+        };
+        assert_eq!(value("GenCP version"), "1.2");
+        assert_eq!(value("U3V version"), "1.0");
+        assert_eq!(value("max command / ack transfer"), "4096 / 4096 bytes");
+        // The SBRM's first bytes: U3V 1.0, little-endian.
+        assert!(value("SBRM bytes").starts_with("00000100"), "{lines:?}");
+        assert_eq!(value("SIRM bytes").len(), 2 * 0x30);
     }
 
     /// SVC-02: a U3V feature state is the typed one, not the default's

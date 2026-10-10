@@ -1729,28 +1729,41 @@ impl Drop for FrameStream {
 
 /// Async frame iterator wrapping blocking USB3 Vision bulk reads.
 ///
-/// Internally spawns a blocking reader thread that calls
-/// `U3vStream::next_frame()` in a loop and sends converted [`Frame`]
-/// values through an mpsc channel. The async consumer reads from the
-/// channel via [`next_frame()`](U3vFrameStream::next_frame).
+/// Internally spawns a blocking reader thread that reads blocks from a
+/// [`U3vStream`] in a loop and sends converted [`Frame`] values through an
+/// mpsc channel. The async consumer reads from the channel via
+/// [`next_frame()`](U3vFrameStream::next_frame).
+///
+/// A stream from [`U3vStreamBuilder`] also clears the device's StreamEnable
+/// when it ends: [`shutdown`](Self::shutdown) once the reader has stopped, or
+/// a drop.
+///
+/// [`U3vStream`]: crate::u3v::stream::U3vStream
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let u3v_stream = device.open_stream(payload_size)?;
-/// let mut frames = U3vFrameStream::start(u3v_stream);
+/// let mut frames = U3vStreamBuilder::new(&mut camera).build()?;
+/// camera.acquisition_start()?;
 /// while let Some(frame) = frames.next_frame().await? {
 ///     println!("{}x{} frame", frame.width, frame.height);
 /// }
-/// frames.stop();
+/// frames.shutdown().await;
 /// ```
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub struct U3vFrameStream {
     rx: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
-    reader: tokio::task::JoinHandle<()>,
+    reader: Option<tokio::task::JoinHandle<()>>,
+    /// Clears StreamEnable; called with `true` to wait for the device lock,
+    /// `false` to give up if someone holds it.
+    disable: Option<DisableStream>,
 }
+
+/// Clears a device's StreamEnable.
+#[cfg(feature = "u3v")]
+type DisableStream = Box<dyn FnOnce(bool) + Send>;
 
 /// How long the U3V reader waits for a frame to start before checking whether
 /// it was told to stop.
@@ -1762,11 +1775,20 @@ impl U3vFrameStream {
     /// Start the frame stream from a configured [`U3vStream`].
     ///
     /// The reader thread runs until [`stop()`](Self::stop) is called,
-    /// the [`U3vStream`] errors, or the `U3vFrameStream` is dropped.
+    /// the [`U3vStream`] errors, or the `U3vFrameStream` is dropped. Nothing
+    /// clears the device's StreamEnable; [`U3vStreamBuilder`] starts streams
+    /// that do.
     ///
     /// [`U3vStream`]: crate::u3v::stream::U3vStream
     pub fn start<T: crate::u3v::usb::UsbTransfer + 'static>(
+        stream: crate::u3v::stream::U3vStream<T>,
+    ) -> Self {
+        Self::start_inner(stream, None)
+    }
+
+    fn start_inner<T: crate::u3v::usb::UsbTransfer + 'static>(
         mut stream: crate::u3v::stream::U3vStream<T>,
+        disable: Option<DisableStream>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -1808,7 +1830,8 @@ impl U3vFrameStream {
         Self {
             rx,
             stop_tx,
-            reader,
+            reader: Some(reader),
+            disable,
         }
     }
 
@@ -1829,19 +1852,33 @@ impl U3vFrameStream {
         let _ = self.stop_tx.send(true);
     }
 
-    /// Stop the reader thread and wait for it to finish, so the stream's
-    /// endpoint and device are free once this returns: for another stream,
-    /// or for closing the camera (Codex review of #179).
-    pub async fn shutdown(self) {
-        let Self {
-            rx,
-            stop_tx,
-            reader,
-        } = self;
+    /// Stop the reader thread, wait for it to finish, then clear the device's
+    /// StreamEnable: the endpoint and device are free once this returns, for
+    /// another stream or for closing the camera (Codex reviews of #179 and
+    /// #181).
+    pub async fn shutdown(mut self) {
         // A reader blocked handing over a frame nobody takes wakes up here.
-        drop(rx);
-        let _ = stop_tx.send(true);
-        let _ = reader.await;
+        self.rx.close();
+        let _ = self.stop_tx.send(true);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.await;
+        }
+        if let Some(disable) = self.disable.take() {
+            let _ = tokio::task::spawn_blocking(move || disable(true)).await;
+        }
+    }
+}
+
+#[cfg(feature = "u3v")]
+impl Drop for U3vFrameStream {
+    /// A stream dropped without [`shutdown`](Self::shutdown) still stops the
+    /// device's stream, unless the device is busy: this must not block on a
+    /// lock its own thread may hold.
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(true);
+        if let Some(disable) = self.disable.take() {
+            disable(false);
+        }
     }
 }
 
@@ -1935,20 +1972,41 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
         Ok(dimension("Width")? * dimension("Height")? * bytes as u64)
     }
 
-    /// Finalise the builder: configure SIRM, start streaming, return
-    /// an async [`U3vFrameStream`].
+    /// Finalise the builder: configure the SIRM, set StreamEnable, and return
+    /// an async [`U3vFrameStream`] that clears it again when it ends.
+    ///
+    /// The device's SIRM Required Payload Size sizes the frames; the
+    /// builder's payload size — set, or read from the camera — is used only
+    /// when the device leaves that register at 0.
     pub fn build(self) -> Result<U3vFrameStream, GenicamError> {
-        let payload_size = match self.payload_size {
+        let payload_hint = match self.payload_size {
             Some(s) => s,
             None => self.frame_size()?,
         };
 
-        let mut device = self.camera.transport().lock_device()?;
+        let device = self.camera.transport().shared_device();
         let stream = device
-            .open_stream(payload_size)
+            .lock()
+            .map_err(|_| GenicamError::transport("u3v device mutex poisoned"))?
+            .open_stream(payload_hint)
             .map_err(|e| GenicamError::transport(e.to_string()))?;
 
-        Ok(U3vFrameStream::start(stream))
+        let disable: DisableStream = Box::new(move |wait: bool| {
+            let guard = if wait {
+                device.lock().ok()
+            } else {
+                device.try_lock().ok()
+            };
+            match guard {
+                Some(mut device) => {
+                    if let Err(error) = device.stop_stream() {
+                        tracing::debug!(%error, "clearing StreamEnable");
+                    }
+                }
+                None => tracing::debug!("device busy; StreamEnable left set"),
+            }
+        });
+        Ok(U3vFrameStream::start_inner(stream, Some(disable)))
     }
 }
 

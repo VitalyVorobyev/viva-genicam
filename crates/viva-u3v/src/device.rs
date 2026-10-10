@@ -3,24 +3,23 @@
 //! [`U3vDevice`] combines a control channel with parsed bootstrap registers
 //! to provide register I/O, XML fetching, and stream configuration.
 
+use std::fmt::Write as _;
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::U3vError;
-use crate::bootstrap::{Abrm, ManifestEntry, Sbrm, Sirm};
-use crate::control::ControlChannel;
+use crate::bootstrap::{Abrm, FileFormat, ManifestEntry, Sbrm, Sirm, sbrm, sirm};
+use crate::control::{ControlChannel, DEFAULT_TIMEOUT};
+use crate::stream::{DEFAULT_MAX_TRANSFER_SIZE, StreamLayout, U3vStream};
 use crate::usb::UsbTransfer;
 
 /// ZIP local file header magic: `PK\x03\x04`.
 const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
 
-/// If `data` starts with a ZIP signature, extract the first file's contents.
-/// Otherwise return `data` unchanged.
-fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, U3vError> {
-    if data.len() < 4 || &data[..4] != ZIP_MAGIC {
-        return Ok(data);
-    }
-    let cursor = std::io::Cursor::new(&data);
+/// Extract the first file of a ZIP archive.
+fn unzip_first(data: &[u8]) -> Result<Vec<u8>, U3vError> {
+    let cursor = std::io::Cursor::new(data);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| U3vError::Protocol(format!("bad ZIP: {e}")))?;
     if archive.is_empty() {
@@ -35,11 +34,14 @@ fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, U3vError> {
     Ok(xml)
 }
 
-/// Default maximum command/ack transfer size used before reading SBRM.
-///
-/// The USB3 Vision spec guarantees at least 1024 bytes for the initial
-/// bootstrap reads.
+/// Transfer limit used for the bootstrap reads, before the SBRM gives the
+/// device's own: small enough for any device.
 const INITIAL_MAX_TRANSFER: u32 = 1024;
+
+/// Added to the device's Maximum Device Response Time, which counts only
+/// the command's execution, for the two transfers around it (GenCP 1.2
+/// §3.1.2).
+const TRANSFER_MARGIN: Duration = Duration::from_millis(100);
 
 /// High-level handle for a USB3 Vision device.
 ///
@@ -57,8 +59,8 @@ pub struct U3vDevice<T: UsbTransfer> {
 impl<T: UsbTransfer> U3vDevice<T> {
     /// Open a U3V device given a shared USB transport and endpoint addresses.
     ///
-    /// Reads the ABRM and SBRM bootstrap registers, then re-creates the
-    /// control channel with the device-reported maximum transfer sizes.
+    /// Reads the ABRM and SBRM bootstrap registers, then uses the device's
+    /// response time and transfer limits on the same control channel.
     pub fn open(
         transport: Arc<T>,
         ep_in: u8,
@@ -66,9 +68,8 @@ impl<T: UsbTransfer> U3vDevice<T> {
         stream_ep: Option<u8>,
         event_ep: Option<u8>,
     ) -> Result<Self, U3vError> {
-        // Bootstrap with conservative transfer limits.
         let mut control = ControlChannel::new(
-            Arc::clone(&transport),
+            transport,
             ep_in,
             ep_out,
             INITIAL_MAX_TRANSFER,
@@ -76,16 +77,12 @@ impl<T: UsbTransfer> U3vDevice<T> {
         );
 
         let abrm = Abrm::read_from(&mut control)?;
-        let sbrm = Sbrm::read_from(&mut control, abrm.sbrm_address)?;
+        let response_time =
+            Duration::from_millis(u64::from(abrm.max_device_response_time_ms)) + TRANSFER_MARGIN;
+        control.set_timeout(response_time.max(DEFAULT_TIMEOUT));
 
-        // Re-create the control channel with the actual device limits.
-        let control = ControlChannel::new(
-            transport,
-            ep_in,
-            ep_out,
-            sbrm.max_cmd_transfer,
-            sbrm.max_ack_transfer,
-        );
+        let sbrm = Sbrm::read_from(&mut control, abrm.sbrm_address)?;
+        control.set_max_transfer(sbrm.max_cmd_transfer, sbrm.max_ack_transfer);
 
         Ok(Self {
             control,
@@ -121,21 +118,29 @@ impl<T: UsbTransfer> U3vDevice<T> {
         self.control.write_mem(addr, data)
     }
 
-    /// Read the SIRM (Streaming Interface Register Map) from the device.
+    /// Read the device's half of the SIRM (Streaming Interface Register Map).
     pub fn read_sirm(&mut self) -> Result<Sirm, U3vError> {
+        if self.sbrm.sirm_address == 0 {
+            return Err(U3vError::Protocol(
+                "the device has no streaming interface (SIRM address 0)".into(),
+            ));
+        }
         Sirm::read_from(&mut self.control, self.sbrm.sirm_address)
     }
 
     /// Fetch the GenICam XML descriptor from the device's manifest table.
     ///
-    /// If the manifest payload is ZIP-compressed (starts with `PK\x03\x04`),
-    /// it is decompressed transparently. Returns the XML as a UTF-8 string.
+    /// A ZIP-compressed file — by the manifest's file format, or by its
+    /// `PK\x03\x04` signature — is decompressed. Returns the XML as a UTF-8
+    /// string.
     pub fn fetch_xml(&mut self) -> Result<String, U3vError> {
-        let entry = ManifestEntry::read_first(&mut self.control, self.abrm.manifest_table_address)?;
+        let entry =
+            ManifestEntry::read_device_xml(&mut self.control, self.abrm.manifest_table_address)?;
         let raw = self
             .control
             .read_mem(entry.file_address, entry.file_size as usize)?;
-        let xml_bytes = decompress_if_zip(raw)?;
+        let zipped = entry.format == FileFormat::Zip || raw.starts_with(ZIP_MAGIC);
+        let xml_bytes = if zipped { unzip_first(&raw)? } else { raw };
         String::from_utf8(xml_bytes)
             .map_err(|e| U3vError::Protocol(format!("XML is not valid UTF-8: {e}")))
     }
@@ -150,42 +155,118 @@ impl<T: UsbTransfer> U3vDevice<T> {
         self.event_ep
     }
 
-    /// Read the SIRM, configure stream sizes, and create a [`crate::stream::U3vStream`]
-    /// for receiving frames.
+    /// Configure the SIRM and enable streaming, returning a
+    /// [`U3vStream`] that reads with the configured transfer layout.
     ///
-    /// The stream endpoint must have been discovered during device open.
-    /// Configures the SIRM with the device's maximum leader/trailer sizes
-    /// and the specified payload size, then enables streaming.
-    pub fn open_stream(
-        &mut self,
-        payload_size: u64,
-    ) -> Result<crate::stream::U3vStream<T>, U3vError> {
+    /// The payload size is the SIRM's Required Payload Size: the device's
+    /// own figure for this stream channel. `payload_hint` — from the
+    /// `PayloadSize` feature, say — is used only when the device leaves that
+    /// register at 0.
+    pub fn open_stream(&mut self, payload_hint: u64) -> Result<U3vStream<T>, U3vError> {
         let ep = self
             .stream_ep
             .ok_or_else(|| U3vError::Protocol("device has no streaming endpoint".into()))?;
 
         let sirm = self.read_sirm()?;
-        sirm.configure(
-            &mut self.control,
+        let payload_size = match sirm.required_payload_size {
+            0 => payload_hint,
+            required => {
+                if payload_hint != 0 && payload_hint != required {
+                    tracing::debug!(
+                        required,
+                        payload_hint,
+                        "SIRM requires a payload size other than the hint; using the SIRM's"
+                    );
+                }
+                required
+            }
+        };
+        let layout = StreamLayout::new(
             payload_size,
-            sirm.max_leader_size,
-            sirm.max_trailer_size,
+            sirm.required_leader_size,
+            sirm.required_trailer_size,
+            sirm.alignment()?,
+            DEFAULT_MAX_TRANSFER_SIZE,
         )?;
+        sirm.configure(&mut self.control, &layout)?;
         sirm.enable(&mut self.control)?;
 
-        Ok(crate::stream::U3vStream::new(
-            self.control.transport().clone(),
-            ep,
-            sirm.max_leader_size as usize,
-            sirm.max_trailer_size as usize,
-            payload_size as usize,
-        ))
+        Ok(U3vStream::new(self.control.transport().clone(), ep, layout))
     }
 
-    /// Disable streaming via the SIRM control register.
+    /// Clear StreamEnable: the device stops sending on the stream endpoint.
     pub fn stop_stream(&mut self) -> Result<(), U3vError> {
         let sirm = self.read_sirm()?;
         sirm.disable(&mut self.control)
+    }
+
+    /// The bootstrap registers as read, decoded and raw, for a diagnostic
+    /// report. Nothing about USB3 Vision has been checked against a camera
+    /// (backlog TC-27), so the raw SBRM and SIRM bytes are what settles a
+    /// disagreement. A register the device refuses is listed as such.
+    pub fn describe(&mut self) -> Vec<(String, String)> {
+        let abrm = &self.abrm;
+        let sbrm = &self.sbrm;
+        let version = |v: u32| format!("{}.{}", v >> 16, v & 0xFFFF);
+        let mut lines = vec![
+            ("GenCP version".to_string(), version(abrm.gencp_version)),
+            (
+                "device capability".to_string(),
+                format!("{:#018x}", abrm.device_capability),
+            ),
+            (
+                "max device response time".to_string(),
+                format!("{} ms", abrm.max_device_response_time_ms),
+            ),
+            (
+                "manifest table".to_string(),
+                format!("{:#x}", abrm.manifest_table_address),
+            ),
+            ("SBRM".to_string(), format!("{:#x}", sbrm.base)),
+            ("U3V version".to_string(), version(sbrm.u3v_version)),
+            (
+                "U3VCP capability".to_string(),
+                format!("{:#018x}", sbrm.u3vcp_capability),
+            ),
+            (
+                "max command / ack transfer".to_string(),
+                format!(
+                    "{} / {} bytes",
+                    sbrm.max_cmd_transfer, sbrm.max_ack_transfer
+                ),
+            ),
+            (
+                "stream channels".to_string(),
+                sbrm.num_stream_channels.to_string(),
+            ),
+            (
+                "SIRM".to_string(),
+                format!("{:#x} ({} bytes)", sbrm.sirm_address, sbrm.sirm_length),
+            ),
+        ];
+        let sbrm_base = sbrm.base;
+        let sirm_base = sbrm.sirm_address;
+        lines.push((
+            "SBRM bytes".to_string(),
+            self.hex(sbrm_base, sbrm::LEN as usize),
+        ));
+        if sirm_base != 0 {
+            lines.push((
+                "SIRM bytes".to_string(),
+                self.hex(sirm_base, sirm::LEN as usize),
+            ));
+        }
+        lines
+    }
+
+    fn hex(&mut self, addr: u64, len: usize) -> String {
+        match self.control.read_mem(addr, len) {
+            Ok(bytes) => bytes.iter().fold(String::new(), |mut out, b| {
+                let _ = write!(out, "{b:02x}");
+                out
+            }),
+            Err(e) => format!("unreadable: {e}"),
+        }
     }
 }
 
@@ -236,151 +317,5 @@ impl U3vDevice<crate::usb::RusbTransfer> {
             iface.stream_ep_in,
             iface.event_ep_in,
         )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::usb::MockUsbTransfer;
-    use bytes::{BufMut, BytesMut};
-
-    const EP_OUT: u8 = 0x01;
-    const EP_IN: u8 = 0x81;
-    const ACK_PREFIX_LE: u32 = 0x4356_3341;
-    const PREFIX_SIZE: usize = 12;
-
-    fn success_ack(request_id: u16, payload: &[u8]) -> Vec<u8> {
-        let mut buf = BytesMut::with_capacity(PREFIX_SIZE + payload.len());
-        buf.put_u32_le(ACK_PREFIX_LE);
-        buf.put_u16_le(0x0000); // Success
-        buf.put_u16_le(0x0085); // ReadMem ack
-        buf.put_u16_le(payload.len() as u16);
-        buf.put_u16_le(request_id);
-        buf.extend_from_slice(payload);
-        buf.to_vec()
-    }
-
-    /// Enqueue all the ack responses needed for Abrm::read_from + Sbrm::read_from.
-    /// Returns the next request_id.
-    fn enqueue_bootstrap_responses(mock: &MockUsbTransfer, sbrm_addr: u64) -> u16 {
-        let mut req: u16 = 0;
-
-        // -- ABRM reads --
-        // gencp_version (4 bytes)
-        mock.enqueue_read(EP_IN, success_ack(req, &0x0001_0000u32.to_be_bytes()));
-        req += 1;
-        // manufacturer_name (64 bytes)
-        let mut s = vec![0u8; 64];
-        s[..4].copy_from_slice(b"Test");
-        mock.enqueue_read(EP_IN, success_ack(req, &s));
-        req += 1;
-        // model_name
-        s = vec![0u8; 64];
-        s[..7].copy_from_slice(b"MockCam");
-        mock.enqueue_read(EP_IN, success_ack(req, &s));
-        req += 1;
-        // family_name
-        mock.enqueue_read(EP_IN, success_ack(req, &[0u8; 64]));
-        req += 1;
-        // device_version
-        mock.enqueue_read(EP_IN, success_ack(req, &[0u8; 64]));
-        req += 1;
-        // serial_number
-        mock.enqueue_read(EP_IN, success_ack(req, &[0u8; 64]));
-        req += 1;
-        // user_defined_name
-        mock.enqueue_read(EP_IN, success_ack(req, &[0u8; 64]));
-        req += 1;
-        // manifest_table_address (8 bytes)
-        mock.enqueue_read(EP_IN, success_ack(req, &0x0005_0000u64.to_be_bytes()));
-        req += 1;
-        // sbrm_address (8 bytes)
-        mock.enqueue_read(EP_IN, success_ack(req, &sbrm_addr.to_be_bytes()));
-        req += 1;
-        // device_capability (8 bytes)
-        mock.enqueue_read(EP_IN, success_ack(req, &0u64.to_be_bytes()));
-        req += 1;
-
-        // -- SBRM reads --
-        // u3v_version
-        mock.enqueue_read(EP_IN, success_ack(req, &0x0001_0000u32.to_be_bytes()));
-        req += 1;
-        // max_cmd_transfer
-        mock.enqueue_read(EP_IN, success_ack(req, &2048u32.to_be_bytes()));
-        req += 1;
-        // max_ack_transfer
-        mock.enqueue_read(EP_IN, success_ack(req, &2048u32.to_be_bytes()));
-        req += 1;
-        // num_stream_channels
-        mock.enqueue_read(EP_IN, success_ack(req, &1u32.to_be_bytes()));
-        req += 1;
-        // sirm_address
-        mock.enqueue_read(EP_IN, success_ack(req, &0x0002_0000u64.to_be_bytes()));
-        req += 1;
-        // sirm_length
-        mock.enqueue_read(EP_IN, success_ack(req, &256u32.to_be_bytes()));
-        req += 1;
-        // eirm_address
-        mock.enqueue_read(EP_IN, success_ack(req, &0x0003_0000u64.to_be_bytes()));
-        req += 1;
-        // eirm_length
-        mock.enqueue_read(EP_IN, success_ack(req, &64u32.to_be_bytes()));
-        req += 1;
-
-        req
-    }
-
-    #[test]
-    fn open_device_reads_bootstrap() {
-        let mock = Arc::new(MockUsbTransfer::new());
-        let sbrm_addr: u64 = 0x0001_0000;
-        enqueue_bootstrap_responses(&mock, sbrm_addr);
-
-        let dev = U3vDevice::open(Arc::clone(&mock), EP_IN, EP_OUT, Some(0x82), None).unwrap();
-
-        assert_eq!(dev.abrm().manufacturer_name, "Test");
-        assert_eq!(dev.sbrm().max_cmd_transfer, 2048);
-        assert_eq!(dev.sbrm().max_ack_transfer, 2048);
-        assert_eq!(dev.sbrm().num_stream_channels, 1);
-        assert_eq!(dev.stream_ep(), Some(0x82));
-        assert_eq!(dev.event_ep(), None);
-    }
-
-    #[test]
-    fn fetch_xml_from_manifest() {
-        let mock = Arc::new(MockUsbTransfer::new());
-        let sbrm_addr: u64 = 0x0001_0000;
-        enqueue_bootstrap_responses(&mock, sbrm_addr);
-
-        let mut dev = U3vDevice::open(Arc::clone(&mock), EP_IN, EP_OUT, None, None).unwrap();
-
-        // After open(), the control channel is re-created with request_id = 0.
-        let mut req: u16 = 0;
-
-        // Manifest table: count = 1
-        mock.enqueue_read(EP_IN, success_ack(req, &1u32.to_be_bytes()));
-        req += 1;
-
-        // Manifest entry: [8 info][8 addr][8 size]
-        let xml_addr: u64 = 0x0010_0000;
-        let xml_content = b"<RegisterDescription />";
-        let xml_size = xml_content.len() as u64;
-        let mut entry_data = BytesMut::with_capacity(24);
-        entry_data.put_u64(0); // file info
-        entry_data.put_u64(xml_addr);
-        entry_data.put_u64(xml_size);
-        mock.enqueue_read(EP_IN, success_ack(req, &entry_data));
-        req += 1;
-
-        // XML content
-        mock.enqueue_read(EP_IN, success_ack(req, xml_content));
-
-        let xml = dev.fetch_xml().unwrap();
-        assert_eq!(xml, "<RegisterDescription />");
     }
 }

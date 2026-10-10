@@ -6,153 +6,320 @@
 //! ```text
 //! ABRM (addr 0x0000, GenCP standard)
 //!   ├─ manufacturer / model / serial strings
-//!   ├─ ManifestTable address → GenICam XML location
-//!   └─ SBRM address → technology-specific registers
+//!   ├─ Manifest Table address → GenICam XML location
+//!   └─ SBRM address → USB3 Vision registers
 //!         ├─ max transfer sizes
 //!         ├─ SIRM address → streaming config
 //!         └─ EIRM address → event config
 //! ```
-
-use bytes::Buf;
+//!
+//! Every bootstrap register is **little-endian**: GenCP requires the
+//! bootstrap registers to share the protocol's byte order (GenCP 1.2 §2.3),
+//! which for USB3 Vision is little-endian (see [`crate::control`]). Where the
+//! layouts come from, strongest evidence first:
+//!
+//! - **ABRM**: GenCP 1.2, Table 15, with the capability bits of Table 17 and
+//!   the manifest of Tables 29-30.
+//! - **SBRM**: the USB3 Vision standard, which is not freely available. A
+//!   Grasshopper3's own XML maps U3VCP capability (+0x04), max command and
+//!   acknowledge transfer (+0x14, +0x18) and stream channel count (+0x1C),
+//!   all `LittleEndian` (`PGR_GS3_U3_23S6M.xml`); aravis (`arvuvcpprivate.h`)
+//!   and Wireshark (`packet-u3v.c`) agree on those and add the SIRM and EIRM
+//!   addresses.
+//! - **SIRM**: aravis and Wireshark, which agree with each other.
+//!
+//! Until backlog TC-27 this module read every register big-endian at offsets
+//! of its own; no USB3 Vision camera had been reported against it.
 
 use crate::U3vError;
 use crate::control::ControlChannel;
+use crate::stream::StreamLayout;
 use crate::usb::UsbTransfer;
 
 // ---------------------------------------------------------------------------
-// ABRM — Application Bootstrap Register Map (GenCP standard, at addr 0x0000)
+// ABRM — Technology Agnostic Bootstrap Register Map (GenCP standard, at 0)
 // ---------------------------------------------------------------------------
 
-/// ABRM register offsets (GenCP §5.3).
-mod abrm_reg {
+/// ABRM register offsets (GenCP 1.2, Table 15).
+pub mod abrm {
+    /// `u32`: major version in the upper 16 bits, minor in the lower.
     pub const GENCP_VERSION: u64 = 0x0000;
-    pub const MANUFACTURER_NAME: u64 = 0x0048;
-    pub const MODEL_NAME: u64 = 0x0088;
-    pub const FAMILY_NAME: u64 = 0x00C8;
-    pub const DEVICE_VERSION: u64 = 0x0108;
-    pub const SERIAL_NUMBER: u64 = 0x01A8;
-    pub const USER_DEFINED_NAME: u64 = 0x01E8;
-    pub const MANIFEST_TABLE_ADDR: u64 = 0x0228;
-    pub const SBRM_ADDRESS: u64 = 0x0230;
-    pub const DEVICE_CAPABILITY: u64 = 0x0238;
-
-    /// Maximum length of a string register (64 bytes including NUL).
+    /// 64-byte string.
+    pub const MANUFACTURER_NAME: u64 = 0x0004;
+    /// 64-byte string.
+    pub const MODEL_NAME: u64 = 0x0044;
+    /// 64-byte string; present when [`capability::FAMILY_NAME`](super::capability::FAMILY_NAME) is set.
+    pub const FAMILY_NAME: u64 = 0x0084;
+    /// 64-byte string.
+    pub const DEVICE_VERSION: u64 = 0x00C4;
+    /// 64-byte string.
+    pub const MANUFACTURER_INFO: u64 = 0x0104;
+    /// 64-byte string.
+    pub const SERIAL_NUMBER: u64 = 0x0144;
+    /// 64-byte string; present when [`capability::USER_DEFINED_NAME`](super::capability::USER_DEFINED_NAME) is set.
+    pub const USER_DEFINED_NAME: u64 = 0x0184;
+    /// `u64` bit field, [`capability`](super::capability).
+    pub const DEVICE_CAPABILITY: u64 = 0x01C4;
+    /// `u32`, milliseconds.
+    pub const MAX_DEVICE_RESPONSE_TIME: u64 = 0x01CC;
+    /// `u64`.
+    pub const MANIFEST_TABLE_ADDRESS: u64 = 0x01D0;
+    /// `u64`; present when [`capability::SBRM`](super::capability::SBRM) is set.
+    pub const SBRM_ADDRESS: u64 = 0x01D8;
+    /// `u64` bit field.
+    pub const DEVICE_CONFIGURATION: u64 = 0x01E0;
+    /// `u32`, milliseconds.
+    pub const HEARTBEAT_TIMEOUT: u64 = 0x01E8;
+    /// `u32`.
+    pub const ACCESS_PRIVILEGE: u64 = 0x0204;
+    /// `u32`: 0 big-endian, `0xFFFF_FFFF` little-endian, for the device's own
+    /// registers; present when [`capability::ENDIANNESS_REGISTER`](super::capability::ENDIANNESS_REGISTER) is set.
+    pub const IMPLEMENTATION_ENDIANNESS: u64 = 0x020C;
+    /// Bytes from the start of the ABRM to the reserved space.
+    pub const LEN: u64 = 0x0210;
+    /// Length of every string register.
     pub const STRING_LEN: usize = 64;
 }
 
-/// Application Bootstrap Register Map — GenCP standard registers at address 0.
+/// Device Capability bits (GenCP 1.2, Table 17).
+pub mod capability {
+    /// The User Defined Name register exists.
+    pub const USER_DEFINED_NAME: u64 = 1 << 0;
+    /// Heartbeat and Access Privilege are supported.
+    pub const ACCESS_PRIVILEGE: u64 = 1 << 1;
+    /// The device has a message channel.
+    pub const MESSAGE_CHANNEL: u64 = 1 << 2;
+    /// The device has a timestamp register.
+    pub const TIMESTAMP: u64 = 1 << 3;
+    /// Bits 4-7: the bootstrap strings' encoding, 0 ASCII, 1 UTF-8, 2 UTF-16.
+    pub const STRING_ENCODING_SHIFT: u32 = 4;
+    /// The Family Name register exists.
+    pub const FAMILY_NAME: u64 = 1 << 8;
+    /// The device has an SBRM.
+    pub const SBRM: u64 = 1 << 9;
+    /// The Implementation Endianness register exists.
+    pub const ENDIANNESS_REGISTER: u64 = 1 << 10;
+    /// A WRITEMEM_ACK says how many bytes were written.
+    pub const WRITTEN_LENGTH: u64 = 1 << 11;
+}
+
+/// Technology Agnostic Bootstrap Register Map — GenCP's registers at address 0.
 #[derive(Debug, Clone)]
 pub struct Abrm {
+    /// Major version in the upper 16 bits, minor in the lower.
     pub gencp_version: u32,
     pub manufacturer_name: String,
     pub model_name: String,
+    /// Empty when the device has no Family Name register.
     pub family_name: String,
     pub device_version: String,
+    pub manufacturer_info: String,
     pub serial_number: String,
+    /// Empty when the device has no User Defined Name register.
     pub user_defined_name: String,
+    /// [`capability`] bits.
+    pub device_capability: u64,
+    /// How long the device may take to execute a command, not counting the
+    /// transfers, in milliseconds.
+    pub max_device_response_time_ms: u32,
     pub manifest_table_address: u64,
     pub sbrm_address: u64,
-    pub device_capability: u64,
 }
 
 impl Abrm {
     /// Read the ABRM from the device.
+    ///
+    /// The GenCP version is read first, as GenCP recommends for the first
+    /// command of a session (§3.1); conditional registers are read only when
+    /// the Device Capability register says they exist, since a device answers
+    /// a missing one with `GENCP_INVALID_ADDRESS` (§5.3).
     pub fn read_from<T: UsbTransfer>(control: &mut ControlChannel<T>) -> Result<Self, U3vError> {
-        let read_string = |ctrl: &mut ControlChannel<T>, addr: u64| -> Result<String, U3vError> {
-            let raw = ctrl.read_mem(addr, abrm_reg::STRING_LEN)?;
-            Ok(parse_nul_string(&raw))
-        };
-
-        let gencp_ver_bytes = control.read_mem(abrm_reg::GENCP_VERSION, 4)?;
-        let gencp_version = read_u32_be(&gencp_ver_bytes);
-
-        let manufacturer_name = read_string(control, abrm_reg::MANUFACTURER_NAME)?;
-        let model_name = read_string(control, abrm_reg::MODEL_NAME)?;
-        let family_name = read_string(control, abrm_reg::FAMILY_NAME)?;
-        let device_version = read_string(control, abrm_reg::DEVICE_VERSION)?;
-        let serial_number = read_string(control, abrm_reg::SERIAL_NUMBER)?;
-        let user_defined_name = read_string(control, abrm_reg::USER_DEFINED_NAME)?;
-
-        let manifest_bytes = control.read_mem(abrm_reg::MANIFEST_TABLE_ADDR, 8)?;
-        let manifest_table_address = read_u64_be(&manifest_bytes);
-
-        let sbrm_bytes = control.read_mem(abrm_reg::SBRM_ADDRESS, 8)?;
-        let sbrm_address = read_u64_be(&sbrm_bytes);
-
-        let cap_bytes = control.read_mem(abrm_reg::DEVICE_CAPABILITY, 8)?;
-        let device_capability = read_u64_be(&cap_bytes);
+        let gencp_version = read_u32(control, abrm::GENCP_VERSION)?;
+        let device_capability = read_u64(control, abrm::DEVICE_CAPABILITY)?;
+        let encoding = StringEncoding::from_capability(device_capability);
+        let read_string =
+            |control: &mut ControlChannel<T>, addr: u64| -> Result<String, U3vError> {
+                let raw = control.read_mem(addr, abrm::STRING_LEN)?;
+                Ok(encoding.decode(&raw))
+            };
+        let read_optional_string =
+            |control: &mut ControlChannel<T>, bit: u64, addr: u64| -> Result<String, U3vError> {
+                if device_capability & bit == 0 {
+                    return Ok(String::new());
+                }
+                read_string(control, addr)
+            };
 
         Ok(Self {
             gencp_version,
-            manufacturer_name,
-            model_name,
-            family_name,
-            device_version,
-            serial_number,
-            user_defined_name,
-            manifest_table_address,
-            sbrm_address,
+            manufacturer_name: read_string(control, abrm::MANUFACTURER_NAME)?,
+            model_name: read_string(control, abrm::MODEL_NAME)?,
+            family_name: read_optional_string(control, capability::FAMILY_NAME, abrm::FAMILY_NAME)?,
+            device_version: read_string(control, abrm::DEVICE_VERSION)?,
+            manufacturer_info: read_string(control, abrm::MANUFACTURER_INFO)?,
+            serial_number: read_string(control, abrm::SERIAL_NUMBER)?,
+            user_defined_name: read_optional_string(
+                control,
+                capability::USER_DEFINED_NAME,
+                abrm::USER_DEFINED_NAME,
+            )?,
             device_capability,
+            max_device_response_time_ms: read_u32(control, abrm::MAX_DEVICE_RESPONSE_TIME)?,
+            manifest_table_address: read_u64(control, abrm::MANIFEST_TABLE_ADDRESS)?,
+            // Conditional in GenCP, but a USB3 Vision device without one has
+            // no stream and no transfer limits; aravis reads it regardless.
+            sbrm_address: read_u64(control, abrm::SBRM_ADDRESS)?,
         })
     }
 }
 
-// ---------------------------------------------------------------------------
-// SBRM — Serial (technology-specific) Bootstrap Register Map
-// ---------------------------------------------------------------------------
-
-/// SBRM register offsets relative to the SBRM base address.
-mod sbrm_reg {
-    pub const U3V_VERSION: u64 = 0x0000;
-    pub const MAX_CMD_TRANSFER: u64 = 0x0004;
-    pub const MAX_ACK_TRANSFER: u64 = 0x0008;
-    pub const NUM_STREAM_CHANNELS: u64 = 0x000C;
-    pub const SIRM_ADDRESS: u64 = 0x0010;
-    pub const SIRM_LENGTH: u64 = 0x0018;
-    pub const EIRM_ADDRESS: u64 = 0x001C;
-    pub const EIRM_LENGTH: u64 = 0x0024;
+/// How the bootstrap strings are encoded (Device Capability bits 4-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringEncoding {
+    Ascii,
+    Utf8,
+    Utf16,
 }
 
-/// Technology-specific Bootstrap Register Map for USB3 Vision.
+impl StringEncoding {
+    fn from_capability(capability: u64) -> Self {
+        match (capability >> capability::STRING_ENCODING_SHIFT) & 0xF {
+            1 => Self::Utf8,
+            2 => Self::Utf16,
+            // 0 is ASCII; reserved values are read as the most common case.
+            _ => Self::Ascii,
+        }
+    }
+
+    /// Decode a string register: unused bytes are 0, and a full register may
+    /// omit the terminator (GenCP 1.2 §5.2). UTF-16 code units follow the
+    /// bootstrap byte order, little-endian.
+    fn decode(self, raw: &[u8]) -> String {
+        match self {
+            Self::Ascii | Self::Utf8 => parse_nul_string(raw),
+            Self::Utf16 => {
+                let units: Vec<u16> = raw
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| u16::from_le_bytes(pair))
+                    .take_while(|&unit| unit != 0)
+                    .collect();
+                String::from_utf16_lossy(&units)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SBRM — USB3 Vision (technology-specific) Bootstrap Register Map
+// ---------------------------------------------------------------------------
+
+/// SBRM register offsets from the SBRM base address.
+pub mod sbrm {
+    /// `u32`: major version in the upper 16 bits, minor in the lower.
+    pub const U3V_VERSION: u64 = 0x0000;
+    /// `u64` bit field, [`u3vcp_capability`](super::u3vcp_capability).
+    pub const U3VCP_CAPABILITY: u64 = 0x0004;
+    /// `u64` bit field.
+    pub const U3VCP_CONFIGURATION: u64 = 0x000C;
+    /// `u32`, bytes.
+    pub const MAX_CMD_TRANSFER: u64 = 0x0014;
+    /// `u32`, bytes.
+    pub const MAX_ACK_TRANSFER: u64 = 0x0018;
+    /// `u32`.
+    pub const NUM_STREAM_CHANNELS: u64 = 0x001C;
+    /// `u64`.
+    pub const SIRM_ADDRESS: u64 = 0x0020;
+    /// `u32`, bytes.
+    pub const SIRM_LENGTH: u64 = 0x0028;
+    /// `u64`.
+    pub const EIRM_ADDRESS: u64 = 0x002C;
+    /// `u32`, bytes.
+    pub const EIRM_LENGTH: u64 = 0x0034;
+    /// `u64`.
+    pub const IIDC2_ADDRESS: u64 = 0x0038;
+    /// `u32`: the bus speed the device runs at.
+    pub const CURRENT_SPEED: u64 = 0x0040;
+    /// Bytes from the SBRM base to its reserved space.
+    pub const LEN: u64 = 0x0044;
+}
+
+/// U3VCP Capability bits, as the Grasshopper3 XML maps them
+/// (`U3VCPSIRMAvailable` bit 0, `U3VCPEIRMAvailable` bit 1,
+/// `U3VCPIIDC2Available` bit 2).
+pub mod u3vcp_capability {
+    /// The device has a SIRM.
+    pub const SIRM_AVAILABLE: u64 = 1 << 0;
+    /// The device has an EIRM.
+    pub const EIRM_AVAILABLE: u64 = 1 << 1;
+    /// The device has an IIDC2 register map.
+    pub const IIDC2_AVAILABLE: u64 = 1 << 2;
+}
+
+/// USB3 Vision's technology-specific Bootstrap Register Map.
 #[derive(Debug, Clone)]
 pub struct Sbrm {
     pub base: u64,
+    /// Major version in the upper 16 bits, minor in the lower.
     pub u3v_version: u32,
+    /// [`u3vcp_capability`] bits.
+    pub u3vcp_capability: u64,
     pub max_cmd_transfer: u32,
     pub max_ack_transfer: u32,
     pub num_stream_channels: u32,
+    /// 0 when the device has no SIRM.
     pub sirm_address: u64,
     pub sirm_length: u32,
+    /// 0 when the device has no EIRM.
     pub eirm_address: u64,
     pub eirm_length: u32,
 }
 
 impl Sbrm {
     /// Read the SBRM from the device at the given base address (from ABRM).
+    ///
+    /// The SIRM and EIRM registers are read whatever the capability bits
+    /// say, as aravis does, and a refusal reads as "absent": a device whose
+    /// bit and register disagree still streams.
     pub fn read_from<T: UsbTransfer>(
         control: &mut ControlChannel<T>,
         base: u64,
     ) -> Result<Self, U3vError> {
-        let read_u32 = |ctrl: &mut ControlChannel<T>, off: u64| -> Result<u32, U3vError> {
-            let bytes = ctrl.read_mem(base + off, 4)?;
-            Ok(read_u32_be(&bytes))
+        let u3vcp_capability = read_u64(control, base + sbrm::U3VCP_CAPABILITY)?;
+        let optional_u64 = |control: &mut ControlChannel<T>, offset: u64| {
+            or_absent(read_u64(control, base + offset))
         };
-        let read_u64 = |ctrl: &mut ControlChannel<T>, off: u64| -> Result<u64, U3vError> {
-            let bytes = ctrl.read_mem(base + off, 8)?;
-            Ok(read_u64_be(&bytes))
+        let optional_u32 = |control: &mut ControlChannel<T>, offset: u64| {
+            or_absent(read_u32(control, base + offset))
         };
-
         Ok(Self {
             base,
-            u3v_version: read_u32(control, sbrm_reg::U3V_VERSION)?,
-            max_cmd_transfer: read_u32(control, sbrm_reg::MAX_CMD_TRANSFER)?,
-            max_ack_transfer: read_u32(control, sbrm_reg::MAX_ACK_TRANSFER)?,
-            num_stream_channels: read_u32(control, sbrm_reg::NUM_STREAM_CHANNELS)?,
-            sirm_address: read_u64(control, sbrm_reg::SIRM_ADDRESS)?,
-            sirm_length: read_u32(control, sbrm_reg::SIRM_LENGTH)?,
-            eirm_address: read_u64(control, sbrm_reg::EIRM_ADDRESS)?,
-            eirm_length: read_u32(control, sbrm_reg::EIRM_LENGTH)?,
+            u3v_version: read_u32(control, base + sbrm::U3V_VERSION)?,
+            u3vcp_capability,
+            max_cmd_transfer: read_u32(control, base + sbrm::MAX_CMD_TRANSFER)?,
+            max_ack_transfer: read_u32(control, base + sbrm::MAX_ACK_TRANSFER)?,
+            num_stream_channels: read_u32(control, base + sbrm::NUM_STREAM_CHANNELS)?,
+            sirm_address: optional_u64(control, sbrm::SIRM_ADDRESS)?,
+            sirm_length: optional_u32(control, sbrm::SIRM_LENGTH)?,
+            eirm_address: optional_u64(control, sbrm::EIRM_ADDRESS)?,
+            eirm_length: optional_u32(control, sbrm::EIRM_LENGTH)?,
         })
+    }
+}
+
+/// A register the device refuses to read is absent, read as 0; a transport
+/// failure is still a failure.
+fn or_absent<V: Default>(read: Result<V, U3vError>) -> Result<V, U3vError> {
+    match read {
+        Err(U3vError::Status { status }) => {
+            tracing::debug!(
+                ?status,
+                "optional bootstrap register refused; reading as absent"
+            );
+            Ok(V::default())
+        }
+        other => other,
     }
 }
 
@@ -160,148 +327,180 @@ impl Sbrm {
 // SIRM — Streaming Interface Register Map
 // ---------------------------------------------------------------------------
 
-/// SIRM register offsets relative to the SIRM base address.
-mod sirm_reg {
-    pub const SIRM_INFO: u64 = 0x0000;
-    pub const SIRM_CONTROL: u64 = 0x0004;
-    pub const REQ_PAYLOAD_SIZE: u64 = 0x0008;
-    pub const REQ_LEADER_SIZE: u64 = 0x0010;
-    pub const REQ_TRAILER_SIZE: u64 = 0x0014;
+/// SIRM register offsets from the SIRM base address.
+///
+/// The device fills in Info and the three *required* sizes; the host writes
+/// the transfer layout and Control.
+pub mod sirm {
+    /// `u32`: bits 24-31 are the log2 of the transfer alignment.
+    pub const INFO: u64 = 0x0000;
+    /// `u32`: bit 0 is StreamEnable.
+    pub const CONTROL: u64 = 0x0004;
+    /// `u64`, read-only: bytes of payload in one block.
+    pub const REQUIRED_PAYLOAD_SIZE: u64 = 0x0008;
+    /// `u32`, read-only: bytes the leader needs.
+    pub const REQUIRED_LEADER_SIZE: u64 = 0x0010;
+    /// `u32`, read-only: bytes the trailer needs.
+    pub const REQUIRED_TRAILER_SIZE: u64 = 0x0014;
+    /// `u32`, written by the host: the leader transfer's size.
     pub const MAX_LEADER_SIZE: u64 = 0x0018;
-    pub const MAX_TRAILER_SIZE: u64 = 0x001C;
-    pub const PAYLOAD_SIZE: u64 = 0x0020;
-    pub const PAYLOAD_COUNT: u64 = 0x0028;
-    pub const TRANSFER1_SIZE: u64 = 0x002C;
-    pub const TRANSFER2_SIZE: u64 = 0x0030;
-    pub const MAX_PAYLOAD_TRANSFER: u64 = 0x0034;
+    /// `u32`, written by the host: each payload transfer's size.
+    pub const PAYLOAD_TRANSFER_SIZE: u64 = 0x001C;
+    /// `u32`, written by the host: how many payload transfers of that size.
+    pub const PAYLOAD_TRANSFER_COUNT: u64 = 0x0020;
+    /// `u32`, written by the host: the first final transfer's size.
+    pub const FINAL_TRANSFER1_SIZE: u64 = 0x0024;
+    /// `u32`, written by the host: the second final transfer's size.
+    pub const FINAL_TRANSFER2_SIZE: u64 = 0x0028;
+    /// `u32`, written by the host: the trailer transfer's size.
+    pub const MAX_TRAILER_SIZE: u64 = 0x002C;
+    /// Bytes in the SIRM.
+    pub const LEN: u64 = 0x0030;
+    /// Control's StreamEnable bit.
+    pub const STREAM_ENABLE: u32 = 1 << 0;
 }
 
-/// Streaming Interface Register Map — per-stream-channel configuration.
+/// What the device says about one stream channel.
 #[derive(Debug, Clone)]
 pub struct Sirm {
     pub base: u64,
     pub info: u32,
     pub control: u32,
-    pub req_payload_size: u64,
-    pub req_leader_size: u32,
-    pub req_trailer_size: u32,
-    pub max_leader_size: u32,
-    pub max_trailer_size: u32,
-    pub payload_size: u64,
-    pub payload_count: u32,
-    pub transfer1_size: u32,
-    pub transfer2_size: u32,
-    pub max_payload_transfer: u32,
+    pub required_payload_size: u64,
+    pub required_leader_size: u32,
+    pub required_trailer_size: u32,
 }
 
 impl Sirm {
-    /// Read the SIRM from the device at the given base address (from SBRM).
+    /// Read the device's half of the SIRM at the given base address (from
+    /// SBRM).
     pub fn read_from<T: UsbTransfer>(
         control: &mut ControlChannel<T>,
         base: u64,
     ) -> Result<Self, U3vError> {
-        let read_u32 = |ctrl: &mut ControlChannel<T>, off: u64| -> Result<u32, U3vError> {
-            let bytes = ctrl.read_mem(base + off, 4)?;
-            Ok(read_u32_be(&bytes))
-        };
-        let read_u64 = |ctrl: &mut ControlChannel<T>, off: u64| -> Result<u64, U3vError> {
-            let bytes = ctrl.read_mem(base + off, 8)?;
-            Ok(read_u64_be(&bytes))
-        };
-
         Ok(Self {
             base,
-            info: read_u32(control, sirm_reg::SIRM_INFO)?,
-            control: read_u32(control, sirm_reg::SIRM_CONTROL)?,
-            req_payload_size: read_u64(control, sirm_reg::REQ_PAYLOAD_SIZE)?,
-            req_leader_size: read_u32(control, sirm_reg::REQ_LEADER_SIZE)?,
-            req_trailer_size: read_u32(control, sirm_reg::REQ_TRAILER_SIZE)?,
-            max_leader_size: read_u32(control, sirm_reg::MAX_LEADER_SIZE)?,
-            max_trailer_size: read_u32(control, sirm_reg::MAX_TRAILER_SIZE)?,
-            payload_size: read_u64(control, sirm_reg::PAYLOAD_SIZE)?,
-            payload_count: read_u32(control, sirm_reg::PAYLOAD_COUNT)?,
-            transfer1_size: read_u32(control, sirm_reg::TRANSFER1_SIZE)?,
-            transfer2_size: read_u32(control, sirm_reg::TRANSFER2_SIZE)?,
-            max_payload_transfer: read_u32(control, sirm_reg::MAX_PAYLOAD_TRANSFER)?,
+            info: read_u32(control, base + sirm::INFO)?,
+            control: read_u32(control, base + sirm::CONTROL)?,
+            required_payload_size: read_u64(control, base + sirm::REQUIRED_PAYLOAD_SIZE)?,
+            required_leader_size: read_u32(control, base + sirm::REQUIRED_LEADER_SIZE)?,
+            required_trailer_size: read_u32(control, base + sirm::REQUIRED_TRAILER_SIZE)?,
         })
     }
-}
 
-impl Sirm {
-    /// Enable streaming by setting bit 0 of the SIRM control register.
-    pub fn enable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
-        let val = self.control | 0x0000_0001;
-        control.write_mem(self.base + sirm_reg::SIRM_CONTROL, &val.to_be_bytes())
+    /// The alignment every transfer size must keep, from Info bits 24-31.
+    pub fn alignment(&self) -> Result<u32, U3vError> {
+        let exponent = self.info >> 24;
+        1u32.checked_shl(exponent).ok_or_else(|| {
+            U3vError::Protocol(format!(
+                "SIRM Info {:#010x} asks for a 2^{exponent}-byte alignment",
+                self.info
+            ))
+        })
     }
 
-    /// Disable streaming by clearing bit 0 of the SIRM control register.
-    pub fn disable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
-        let val = self.control & !0x0000_0001;
-        control.write_mem(self.base + sirm_reg::SIRM_CONTROL, &val.to_be_bytes())
-    }
-
-    /// Write the requested payload, leader, and trailer sizes to the SIRM.
+    /// Write the transfer layout the host will read with. The required sizes
+    /// are the device's and are never written: they are read-only, and a
+    /// device refuses the write (Codex review of #181).
     pub fn configure<T: UsbTransfer>(
         &self,
         control: &mut ControlChannel<T>,
-        payload_size: u64,
-        leader_size: u32,
-        trailer_size: u32,
+        layout: &StreamLayout,
     ) -> Result<(), U3vError> {
-        control.write_mem(
-            self.base + sirm_reg::REQ_PAYLOAD_SIZE,
-            &payload_size.to_be_bytes(),
-        )?;
-        control.write_mem(
-            self.base + sirm_reg::REQ_LEADER_SIZE,
-            &leader_size.to_be_bytes(),
-        )?;
-        control.write_mem(
-            self.base + sirm_reg::REQ_TRAILER_SIZE,
-            &trailer_size.to_be_bytes(),
-        )?;
+        for (offset, value) in [
+            (sirm::MAX_LEADER_SIZE, layout.leader_size),
+            (sirm::MAX_TRAILER_SIZE, layout.trailer_size),
+            (sirm::PAYLOAD_TRANSFER_SIZE, layout.payload_transfer_size),
+            (sirm::PAYLOAD_TRANSFER_COUNT, layout.payload_transfer_count),
+            (sirm::FINAL_TRANSFER1_SIZE, layout.final_transfer1_size),
+            (sirm::FINAL_TRANSFER2_SIZE, layout.final_transfer2_size),
+        ] {
+            control.write_mem(self.base + offset, &value.to_le_bytes())?;
+        }
         Ok(())
+    }
+
+    /// Set StreamEnable.
+    pub fn enable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
+        control.write_mem(
+            self.base + sirm::CONTROL,
+            &sirm::STREAM_ENABLE.to_le_bytes(),
+        )
+    }
+
+    /// Clear StreamEnable.
+    pub fn disable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
+        control.write_mem(self.base + sirm::CONTROL, &0u32.to_le_bytes())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Manifest table entry (for locating GenICam XML)
+// Manifest (for locating GenICam XML)
 // ---------------------------------------------------------------------------
 
-/// A single entry in the ABRM ManifestTable.
+/// Manifest layout (GenCP 1.2, Tables 29-30).
+mod manifest {
+    /// The table starts with a `u64` entry count.
+    pub const ENTRIES: u64 = 8;
+    /// Each entry is 64 bytes.
+    pub const ENTRY_LEN: u64 = 64;
+    /// Entries looked at before giving up on finding a device XML.
+    pub const MAX_ENTRIES: u64 = 16;
+}
+
+/// How a manifest file is stored (Schema / Filetype / Fileformat bits 10-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFormat {
+    /// An uncompressed GenICam XML file.
+    Uncompressed,
+    /// A ZIP archive holding a single GenICam XML file.
+    Zip,
+    /// A value GenCP 1.2 reserves.
+    Reserved(u8),
+}
+
+/// One entry of the device's Manifest Table: a GenICam file in its memory.
 #[derive(Debug, Clone)]
 pub struct ManifestEntry {
     pub file_address: u64,
     pub file_size: u64,
+    pub format: FileFormat,
 }
 
 impl ManifestEntry {
-    /// Read the first manifest entry from the manifest table at the given
-    /// address (from ABRM). Only the first entry is read; multi-entry
-    /// tables are uncommon in practice.
-    pub fn read_first<T: UsbTransfer>(
+    /// The first entry describing a device XML (file type 0) in the
+    /// Manifest Table at `table_address` (from ABRM). A buffer XML (file
+    /// type 1) describes chunk data only and is skipped.
+    pub fn read_device_xml<T: UsbTransfer>(
         control: &mut ControlChannel<T>,
         table_address: u64,
     ) -> Result<Self, U3vError> {
-        // Manifest table header: entry count (u32) at offset 0, then entries.
-        // Each entry: 8-byte file info + 8-byte address + 8-byte size.
-        let header = control.read_mem(table_address, 4)?;
-        let count = read_u32_be(&header);
+        let count = read_u64(control, table_address)?;
         if count == 0 {
             return Err(U3vError::Protocol("manifest table is empty".into()));
         }
-
-        // First entry starts at offset 8 (after 4-byte count + 4 reserved).
-        let entry_offset = table_address + 8;
-        let entry_data = control.read_mem(entry_offset, 24)?;
-        // Entry layout: [8 bytes file info] [8 bytes address] [8 bytes size]
-        let file_address = read_u64_be(&entry_data[8..16]);
-        let file_size = read_u64_be(&entry_data[16..24]);
-
-        Ok(Self {
-            file_address,
-            file_size,
-        })
+        for index in 0..count.min(manifest::MAX_ENTRIES) {
+            let entry_address = table_address + manifest::ENTRIES + index * manifest::ENTRY_LEN;
+            let entry = control.read_mem(entry_address, 24)?;
+            let schema = u32::from_le_bytes(entry[4..8].try_into().unwrap());
+            let file_type = schema & 0x7;
+            if file_type != 0 {
+                continue;
+            }
+            let format = match ((schema >> 10) & 0x3F) as u8 {
+                0 => FileFormat::Uncompressed,
+                1 => FileFormat::Zip,
+                other => FileFormat::Reserved(other),
+            };
+            return Ok(Self {
+                file_address: u64::from_le_bytes(entry[8..16].try_into().unwrap()),
+                file_size: u64::from_le_bytes(entry[16..24].try_into().unwrap()),
+                format,
+            });
+        }
+        Err(U3vError::Protocol(format!(
+            "none of the manifest's {count} entries is a device XML"
+        )))
     }
 }
 
@@ -309,14 +508,14 @@ impl ManifestEntry {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn read_u32_be(data: &[u8]) -> u32 {
-    let mut buf = &data[..4];
-    buf.get_u32()
+fn read_u32<T: UsbTransfer>(control: &mut ControlChannel<T>, addr: u64) -> Result<u32, U3vError> {
+    let bytes = control.read_mem(addr, 4)?;
+    Ok(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
 }
 
-fn read_u64_be(data: &[u8]) -> u64 {
-    let mut buf = &data[..8];
-    buf.get_u64()
+fn read_u64<T: UsbTransfer>(control: &mut ControlChannel<T>, addr: u64) -> Result<u64, U3vError> {
+    let bytes = control.read_mem(addr, 8)?;
+    Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
 }
 
 fn parse_nul_string(data: &[u8]) -> String {
@@ -331,42 +530,6 @@ fn parse_nul_string(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usb::MockUsbTransfer;
-    use bytes::{BufMut, BytesMut};
-    use std::sync::Arc;
-
-    const EP_OUT: u8 = 0x01;
-    const EP_IN: u8 = 0x81;
-    const ACK_PREFIX_LE: u32 = 0x4356_3341;
-    const PREFIX_SIZE: usize = 12;
-
-    /// Build a successful ack carrying `payload`.
-    fn success_ack(request_id: u16, payload: &[u8]) -> Vec<u8> {
-        let mut buf = BytesMut::with_capacity(PREFIX_SIZE + payload.len());
-        buf.put_u32_le(ACK_PREFIX_LE);
-        buf.put_u16_le(0x0000); // Success
-        buf.put_u16_le(0x0085); // ReadMem ack opcode
-        buf.put_u16_le(payload.len() as u16);
-        buf.put_u16_le(request_id);
-        buf.extend_from_slice(payload);
-        buf.to_vec()
-    }
-
-    /// Helper: enqueue a sequence of ack responses for sequential read_mem calls.
-    /// Returns the next request_id after all enqueued acks.
-    fn enqueue_read_responses(
-        mock: &MockUsbTransfer,
-        ep_in: u8,
-        start_req_id: u16,
-        payloads: &[Vec<u8>],
-    ) -> u16 {
-        let mut req_id = start_req_id;
-        for payload in payloads {
-            mock.enqueue_read(ep_in, success_ack(req_id, payload));
-            req_id = req_id.wrapping_add(1);
-        }
-        req_id
-    }
 
     #[test]
     fn parse_nul_terminated_string() {
@@ -382,57 +545,35 @@ mod tests {
         assert_eq!(parse_nul_string(data), "FullBuffer64Chars");
     }
 
+    /// Device Capability bits 4-7 name the strings' encoding; UTF-16 code
+    /// units are little-endian, as every bootstrap field is.
     #[test]
-    fn sbrm_read_from_mock() {
-        let mock = Arc::new(MockUsbTransfer::new());
-        let mut ch = ControlChannel::new(Arc::clone(&mock), EP_IN, EP_OUT, 1024, 1024);
+    fn strings_follow_the_capability_encoding() {
+        let utf16 = StringEncoding::from_capability(2 << capability::STRING_ENCODING_SHIFT);
+        assert_eq!(utf16, StringEncoding::Utf16);
+        let mut raw = [0u8; 64];
+        for (i, unit) in "Ünï".encode_utf16().enumerate() {
+            raw[2 * i..2 * i + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(utf16.decode(&raw), "Ünï");
 
-        let sbrm_base: u64 = 0x1_0000;
-        let mut req_id: u16 = 0;
-
-        // SBRM fields in read order: u3v_version, max_cmd, max_ack,
-        // num_streams, sirm_addr, sirm_len, eirm_addr, eirm_len
-        let payloads: Vec<Vec<u8>> = vec![
-            0x0001_0000u32.to_be_bytes().to_vec(), // u3v_version
-            1024u32.to_be_bytes().to_vec(),        // max_cmd_transfer
-            1024u32.to_be_bytes().to_vec(),        // max_ack_transfer
-            1u32.to_be_bytes().to_vec(),           // num_stream_channels
-            0x0002_0000u64.to_be_bytes().to_vec(), // sirm_address
-            256u32.to_be_bytes().to_vec(),         // sirm_length
-            0x0003_0000u64.to_be_bytes().to_vec(), // eirm_address
-            64u32.to_be_bytes().to_vec(),          // eirm_length
-        ];
-        req_id = enqueue_read_responses(&mock, EP_IN, req_id, &payloads);
-        let _ = req_id;
-
-        let sbrm = Sbrm::read_from(&mut ch, sbrm_base).unwrap();
-        assert_eq!(sbrm.u3v_version, 0x0001_0000);
-        assert_eq!(sbrm.max_cmd_transfer, 1024);
-        assert_eq!(sbrm.max_ack_transfer, 1024);
-        assert_eq!(sbrm.num_stream_channels, 1);
-        assert_eq!(sbrm.sirm_address, 0x0002_0000);
-        assert_eq!(sbrm.sirm_length, 256);
-        assert_eq!(sbrm.eirm_address, 0x0003_0000);
-        assert_eq!(sbrm.eirm_length, 64);
+        let utf8 = StringEncoding::from_capability(1 << capability::STRING_ENCODING_SHIFT);
+        assert_eq!(utf8.decode("Ünï\0".as_bytes()), "Ünï");
+        assert_eq!(StringEncoding::from_capability(0), StringEncoding::Ascii);
     }
 
     #[test]
-    fn manifest_entry_read_first() {
-        let mock = Arc::new(MockUsbTransfer::new());
-        let mut ch = ControlChannel::new(Arc::clone(&mock), EP_IN, EP_OUT, 1024, 1024);
-
-        let table_addr: u64 = 0x5000;
-        // Header: count = 1
-        mock.enqueue_read(EP_IN, success_ack(0, &1u32.to_be_bytes()));
-        // Entry: [8 bytes info][8 bytes address][8 bytes size]
-        let mut entry = BytesMut::with_capacity(24);
-        entry.put_u64(0); // file info (version, schema, etc.)
-        entry.put_u64(0x0010_0000); // file_address
-        entry.put_u64(4096); // file_size
-        mock.enqueue_read(EP_IN, success_ack(1, &entry));
-
-        let manifest = ManifestEntry::read_first(&mut ch, table_addr).unwrap();
-        assert_eq!(manifest.file_address, 0x0010_0000);
-        assert_eq!(manifest.file_size, 4096);
+    fn alignment_comes_from_info_bits_24_to_31() {
+        let sirm = |info| Sirm {
+            base: 0,
+            info,
+            control: 0,
+            required_payload_size: 0,
+            required_leader_size: 0,
+            required_trailer_size: 0,
+        };
+        assert_eq!(sirm(0).alignment().unwrap(), 1);
+        assert_eq!(sirm(10 << 24).alignment().unwrap(), 1024);
+        assert!(sirm(40 << 24).alignment().is_err());
     }
 }

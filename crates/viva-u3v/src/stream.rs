@@ -5,13 +5,19 @@
 //! reliable and ordered — no packet reassembly, bitmap tracking, or resend
 //! logic is needed.
 //!
-//! Frame structure:
+//! Each block arrives in transfers whose sizes the host wrote to the SIRM
+//! ([`StreamLayout`]):
+//!
 //! ```text
-//! ┌─────────┐   ┌─────────────┐   ┌──────────┐
-//! │ Leader  │ → │ Payload(s)  │ → │ Trailer  │
-//! │ (meta)  │   │ (image data)│   │ (status) │
-//! └─────────┘   └─────────────┘   └──────────┘
+//! ┌─────────┐   ┌──────────────────────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
+//! │ Leader  │ → │ count × payload transfer │ → │ final 1 │ → │ final 2 │ → │ Trailer │
+//! └─────────┘   └──────────────────────────┘   └─────────┘   └─────────┘   └─────────┘
 //! ```
+//!
+//! The leader and trailer layouts are the ones aravis (`ArvUvspLeader`,
+//! `ArvUvspTrailer`) and Wireshark (`dissect_u3v_stream_leader`,
+//! `dissect_u3v_stream_trailer`) agree on; the USB3 Vision standard itself is
+//! not freely available. Every field is little-endian.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,22 +32,133 @@ const LEADER_PREFIX: u32 = 0x4C56_3355;
 /// U3V stream trailer prefix: "U3VT" in little-endian.
 const TRAILER_PREFIX: u32 = 0x5456_3355;
 
-/// Minimum leader size (prefix + fixed fields).
-const MIN_LEADER_SIZE: usize = 36;
-/// Minimum trailer size (prefix + fixed fields).
-const MIN_TRAILER_SIZE: usize = 16;
+/// Prefix, reserved, size, block id, reserved, payload type: what every
+/// leader carries.
+const GENERIC_LEADER_SIZE: usize = 20;
+/// An image leader, up to and including the x padding.
+const IMAGE_LEADER_SIZE: usize = 50;
+/// Prefix, reserved, size, block id, status, reserved, valid payload size.
+const MIN_TRAILER_SIZE: usize = 28;
+
+/// Payload type of an image (`ARV_UVSP_PAYLOAD_TYPE_IMAGE`).
+pub const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
+/// Payload type of an image followed by chunk data.
+pub const PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK: u16 = 0x4001;
+/// Payload type of chunk data alone.
+pub const PAYLOAD_TYPE_CHUNK: u16 = 0x4000;
 
 /// Default USB bulk read timeout for streaming.
 const STREAM_TIMEOUT: Duration = Duration::from_millis(5000);
 
-/// Parsed U3V stream leader (image metadata).
+/// Largest single payload transfer the host asks for: aravis's default
+/// (`ARV_UV_STREAM_MAXIMUM_TRANSFER_SIZE_DEFAULT`, 1 MiB).
+pub const DEFAULT_MAX_TRANSFER_SIZE: u32 = 1 << 20;
+
+/// How the host reads one block: the sizes it writes to the SIRM, and reads
+/// with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLayout {
+    /// Bytes of payload the device sends in one block.
+    pub payload_size: u64,
+    pub leader_size: u32,
+    pub trailer_size: u32,
+    pub payload_transfer_size: u32,
+    pub payload_transfer_count: u32,
+    pub final_transfer1_size: u32,
+    pub final_transfer2_size: u32,
+}
+
+impl StreamLayout {
+    /// The layout for a block of `payload_size` bytes, every transfer a
+    /// multiple of `alignment` and none larger than `max_transfer`.
+    ///
+    /// The USB3 Vision standard's own rules are not freely available, so
+    /// this follows aravis (`arv_uv_stream_start_acquisition`): leader and
+    /// trailer are the required sizes aligned up, the payload goes in
+    /// transfers of up to `max_transfer` bytes, and the remainder in one
+    /// final transfer aligned up. Unlike aravis, the payload transfer size is
+    /// aligned *down* when the block is smaller than `max_transfer`, so no
+    /// transfer breaks the alignment the device asked for; the remainder
+    /// goes to the final transfer.
+    pub fn new(
+        payload_size: u64,
+        required_leader_size: u32,
+        required_trailer_size: u32,
+        alignment: u32,
+        max_transfer: u32,
+    ) -> Result<Self, U3vError> {
+        if alignment == 0 || alignment > max_transfer {
+            return Err(U3vError::Protocol(format!(
+                "a {alignment}-byte transfer alignment does not fit {max_transfer}-byte transfers"
+            )));
+        }
+        if payload_size == 0 {
+            return Err(U3vError::Protocol(
+                "the device requires a zero-byte payload".into(),
+            ));
+        }
+        let aligned_max = max_transfer / alignment * alignment;
+        // A device that requires no leader or trailer size gets a whole
+        // transfer, as aravis gives it.
+        let framing = |required: u32| {
+            if required == 0 {
+                Ok(aligned_max)
+            } else {
+                align_up(required, alignment)
+            }
+        };
+
+        let payload_transfer_size = if payload_size >= u64::from(aligned_max) {
+            aligned_max
+        } else {
+            match (payload_size as u32) / alignment * alignment {
+                0 => align_up(payload_size as u32, alignment)?,
+                aligned => aligned,
+            }
+        };
+        let count = payload_size / u64::from(payload_transfer_size);
+        let payload_transfer_count = u32::try_from(count).map_err(|_| {
+            U3vError::Protocol(format!("{payload_size} bytes need {count} transfers"))
+        })?;
+        let remainder = payload_size.saturating_sub(count * u64::from(payload_transfer_size));
+        let final_transfer1_size = align_up(remainder as u32, alignment)?;
+
+        Ok(Self {
+            payload_size,
+            leader_size: framing(required_leader_size)?,
+            trailer_size: framing(required_trailer_size)?,
+            payload_transfer_size,
+            payload_transfer_count,
+            final_transfer1_size,
+            final_transfer2_size: 0,
+        })
+    }
+
+    /// Bytes the payload transfers can hold.
+    pub fn payload_capacity(&self) -> u64 {
+        u64::from(self.payload_transfer_size) * u64::from(self.payload_transfer_count)
+            + u64::from(self.final_transfer1_size)
+            + u64::from(self.final_transfer2_size)
+    }
+}
+
+fn align_up(value: u32, alignment: u32) -> Result<u32, U3vError> {
+    value
+        .div_ceil(alignment)
+        .checked_mul(alignment)
+        .ok_or_else(|| U3vError::Protocol(format!("{value} bytes aligned to {alignment} overflow")))
+}
+
+/// Parsed U3V stream leader.
 #[derive(Debug, Clone)]
 pub struct Leader {
-    /// Payload type (0x0001 = image, 0x0002 = image extended, 0x4001 = chunk).
+    /// The block this leader opens; its trailer carries the same id.
+    pub block_id: u64,
+    /// Payload type ([`PAYLOAD_TYPE_IMAGE`], [`PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK`], …).
     pub payload_type: u16,
     /// Device timestamp in ticks.
     pub timestamp: u64,
-    /// PFNC pixel format code.
+    /// PFNC pixel format code; 0 for a payload that is not an image.
     pub pixel_format: u32,
     /// Image width in pixels.
     pub width: u32,
@@ -58,50 +175,43 @@ pub struct Leader {
 /// Parsed U3V stream trailer.
 #[derive(Debug, Clone)]
 pub struct Trailer {
-    /// Status of the acquired frame (0 = success).
-    pub status: u32,
-    /// Block ID for this frame.
+    /// The block this trailer closes.
     pub block_id: u64,
-    /// Actual number of valid payload bytes.
+    /// Status of the block (0 = success).
+    pub status: u16,
+    /// Bytes of payload the device actually sent.
     pub valid_payload_size: u64,
 }
 
-/// U3V stream receiver that reads frames from a USB bulk endpoint.
+/// U3V stream receiver that reads blocks from a USB bulk endpoint.
 pub struct U3vStream<T: UsbTransfer> {
     transport: Arc<T>,
     ep_in: u8,
     timeout: Duration,
+    layout: StreamLayout,
     leader_buf: Vec<u8>,
     trailer_buf: Vec<u8>,
     payload_buf: Vec<u8>,
-    /// Configured payload size per frame (from SIRM). The device sends
-    /// exactly this many bytes of payload data, potentially across
-    /// multiple USB bulk transfers.
-    payload_size: usize,
 }
 
 impl<T: UsbTransfer> U3vStream<T> {
-    /// Create a new stream receiver.
-    ///
-    /// `max_leader_size`, `max_trailer_size` and `payload_size` come
-    /// from the SIRM registers. `payload_size` is the exact number of
-    /// payload bytes per frame (configured in the SIRM).
-    pub fn new(
-        transport: Arc<T>,
-        ep_in: u8,
-        max_leader_size: usize,
-        max_trailer_size: usize,
-        payload_size: usize,
-    ) -> Self {
+    /// A receiver reading with `layout`, the transfer sizes written to the
+    /// device's SIRM: it reads each transfer at exactly that size.
+    pub fn new(transport: Arc<T>, ep_in: u8, layout: StreamLayout) -> Self {
         Self {
             transport,
             ep_in,
             timeout: STREAM_TIMEOUT,
-            leader_buf: vec![0u8; max_leader_size],
-            trailer_buf: vec![0u8; max_trailer_size],
-            payload_buf: vec![0u8; payload_size],
-            payload_size,
+            layout,
+            leader_buf: vec![0u8; layout.leader_size as usize],
+            trailer_buf: vec![0u8; layout.trailer_size as usize],
+            payload_buf: vec![0u8; layout.payload_capacity() as usize],
         }
+    }
+
+    /// The transfer layout this stream reads with.
+    pub fn layout(&self) -> &StreamLayout {
+        &self.layout
     }
 
     /// Override the default bulk read timeout.
@@ -109,74 +219,78 @@ impl<T: UsbTransfer> U3vStream<T> {
         self.timeout = timeout;
     }
 
-    /// Receive the next complete frame.
-    ///
-    /// Blocks until a full leader + payload + trailer sequence is read
-    /// from the stream endpoint. Returns the parsed leader, raw payload,
-    /// and trailer.
+    /// Receive the next complete block, waiting up to the stream timeout for
+    /// it to start.
     pub fn next_frame(&mut self) -> Result<RawFrame, U3vError> {
-        let leader = self.read_leader()?;
-        let payload = self.read_payload()?;
-        let trailer = self.read_trailer()?;
-
-        Ok(RawFrame {
-            leader,
-            payload,
-            trailer,
-        })
+        self.next_frame_within(self.timeout)?
+            .ok_or(U3vError::Timeout)
     }
 
-    /// Like [`next_frame`](Self::next_frame), but `Ok(None)` when no frame
+    /// Like [`next_frame`](Self::next_frame), but `Ok(None)` when no block
     /// starts within `idle`: the stream is waiting — in trigger mode, say —
-    /// not broken. Once a leader arrives the rest of the frame gets the full
-    /// timeout. A reader polling with this can stop between frames.
+    /// not broken. Once a leader arrives the rest of the block gets the full
+    /// timeout. A reader polling with this can stop between blocks.
+    ///
+    /// A transfer that is not a leader where a leader is due — the tail of
+    /// a block whose start was missed — is skipped.
     pub fn next_frame_within(&mut self, idle: Duration) -> Result<Option<RawFrame>, U3vError> {
-        let n = match self
-            .transport
-            .bulk_read(self.ep_in, &mut self.leader_buf, idle)
-        {
-            Ok(n) => n,
-            Err(U3vError::Timeout) => return Ok(None),
-            Err(e) => return Err(e),
+        let leader = loop {
+            let n = match self
+                .transport
+                .bulk_read(self.ep_in, &mut self.leader_buf, idle)
+            {
+                Ok(n) => n,
+                Err(U3vError::Timeout) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let transfer = &self.leader_buf[..n];
+            if transfer.len() >= 4 && transfer[..4] == LEADER_PREFIX.to_le_bytes() {
+                break parse_leader(transfer)?;
+            }
+            tracing::debug!(bytes = n, "skipping a transfer that is not a leader");
         };
-        let leader = parse_leader(&self.leader_buf[..n])?;
-        let payload = self.read_payload()?;
+        let received = self.read_payload()?;
         let trailer = self.read_trailer()?;
+        if trailer.block_id != leader.block_id {
+            return Err(U3vError::Protocol(format!(
+                "block {} closed by the trailer of block {}",
+                leader.block_id, trailer.block_id
+            )));
+        }
+        let valid = (trailer.valid_payload_size as usize).min(received);
         Ok(Some(RawFrame {
+            payload: Bytes::copy_from_slice(&self.payload_buf[..valid]),
             leader,
-            payload,
             trailer,
         }))
     }
 
-    fn read_leader(&mut self) -> Result<Leader, U3vError> {
-        let n = self
-            .transport
-            .bulk_read(self.ep_in, &mut self.leader_buf, self.timeout)?;
-        parse_leader(&self.leader_buf[..n])
-    }
+    /// Read the payload's transfers at the sizes in the layout. A short
+    /// transfer is the device ending the payload early; the trailer follows
+    /// and says how much of it is valid.
+    fn read_payload(&mut self) -> Result<usize, U3vError> {
+        let layout = self.layout;
+        let transfers = std::iter::repeat_n(
+            layout.payload_transfer_size,
+            layout.payload_transfer_count as usize,
+        )
+        .chain([layout.final_transfer1_size, layout.final_transfer2_size])
+        .filter(|&size| size > 0);
 
-    /// Read the full payload, looping over multiple USB bulk transfers
-    /// if the payload is larger than a single transfer.
-    fn read_payload(&mut self) -> Result<Bytes, U3vError> {
-        let mut offset = 0;
-        while offset < self.payload_size {
+        let mut offset = 0usize;
+        for size in transfers {
+            let end = offset + size as usize;
             let n = self.transport.bulk_read(
                 self.ep_in,
-                &mut self.payload_buf[offset..self.payload_size],
+                &mut self.payload_buf[offset..end],
                 self.timeout,
             )?;
-            if n == 0 {
-                return Err(U3vError::Protocol(format!(
-                    "zero-length bulk read at payload offset {offset}/{}",
-                    self.payload_size
-                )));
-            }
             offset += n;
+            if n < size as usize {
+                break;
+            }
         }
-        Ok(Bytes::copy_from_slice(
-            &self.payload_buf[..self.payload_size],
-        ))
+        Ok(offset)
     }
 
     fn read_trailer(&mut self) -> Result<Trailer, U3vError> {
@@ -193,7 +307,7 @@ impl<T: UsbTransfer> U3vStream<T> {
 pub struct RawFrame {
     /// Leader containing image metadata.
     pub leader: Leader,
-    /// Raw pixel payload.
+    /// The valid payload bytes.
     pub payload: Bytes,
     /// Trailer with status and block ID.
     pub trailer: Trailer,
@@ -207,23 +321,26 @@ pub struct RawFrame {
 ///
 /// Leader layout (little-endian):
 /// ```text
-/// [0..4]   prefix        0x4C563355 ("U3VL")
+/// [0..4]   prefix        "U3VL"
 /// [4..6]   reserved
-/// [6..8]   leader_size   (total size in bytes)
-/// [8..10]  reserved
-/// [10..12] payload_type
-/// [12..20] timestamp     (device ticks)
-/// [20..24] pixel_format  (PFNC code)
-/// [24..28] width
-/// [28..32] height
-/// [32..36] x_offset
-/// [36..40] y_offset      (may be absent if leader is short)
-/// [40..42] x_padding
+/// [6..8]   leader_size
+/// [8..16]  block_id
+/// [16..18] reserved
+/// [18..20] payload_type
+///          — image and image-extended-chunk payloads: —
+/// [20..28] timestamp     (device ticks)
+/// [28..32] pixel_format  (PFNC code)
+/// [32..36] size_x
+/// [36..40] size_y
+/// [40..44] offset_x
+/// [44..48] offset_y
+/// [48..50] padding_x
+/// [50..52] reserved
 /// ```
 pub fn parse_leader(buf: &[u8]) -> Result<Leader, U3vError> {
-    if buf.len() < MIN_LEADER_SIZE {
+    if buf.len() < GENERIC_LEADER_SIZE {
         return Err(U3vError::Protocol(format!(
-            "leader too short: {} bytes, need at least {MIN_LEADER_SIZE}",
+            "leader too short: {} bytes, need at least {GENERIC_LEADER_SIZE}",
             buf.len()
         )));
     }
@@ -235,47 +352,59 @@ pub fn parse_leader(buf: &[u8]) -> Result<Leader, U3vError> {
         )));
     }
 
-    let payload_type = u16::from_le_bytes([buf[10], buf[11]]);
-    let timestamp = u64::from_le_bytes(buf[12..20].try_into().unwrap());
-    let pixel_format = u32::from_le_bytes(buf[20..24].try_into().unwrap());
-    let width = u32::from_le_bytes(buf[24..28].try_into().unwrap());
-    let height = u32::from_le_bytes(buf[28..32].try_into().unwrap());
-    let x_offset = u32::from_le_bytes(buf[32..36].try_into().unwrap());
-
-    // Optional fields (may be absent in minimal leaders).
-    let y_offset = if buf.len() >= 40 {
-        u32::from_le_bytes(buf[36..40].try_into().unwrap())
-    } else {
-        0
-    };
-    let x_padding = if buf.len() >= 42 {
-        u16::from_le_bytes([buf[40], buf[41]])
-    } else {
-        0
-    };
-
-    Ok(Leader {
+    let le32 = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+    let le64 = |at: usize| u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
+    let block_id = le64(8);
+    let payload_type = u16::from_le_bytes([buf[18], buf[19]]);
+    let mut leader = Leader {
+        block_id,
         payload_type,
-        timestamp,
-        pixel_format,
-        width,
-        height,
-        x_offset,
-        y_offset,
-        x_padding,
-    })
+        timestamp: 0,
+        pixel_format: 0,
+        width: 0,
+        height: 0,
+        x_offset: 0,
+        y_offset: 0,
+        x_padding: 0,
+    };
+
+    if matches!(
+        payload_type,
+        PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK
+    ) {
+        if buf.len() < IMAGE_LEADER_SIZE {
+            return Err(U3vError::Protocol(format!(
+                "image leader too short: {} bytes, need {IMAGE_LEADER_SIZE}",
+                buf.len()
+            )));
+        }
+        leader.timestamp = le64(20);
+        leader.pixel_format = le32(28);
+        leader.width = le32(32);
+        leader.height = le32(36);
+        leader.x_offset = le32(40);
+        leader.y_offset = le32(44);
+        leader.x_padding = u16::from_le_bytes([buf[48], buf[49]]);
+    } else if buf.len() >= 28 {
+        // A chunk payload's leader carries its timestamp at the same place.
+        leader.timestamp = le64(20);
+    }
+
+    Ok(leader)
 }
 
 /// Parse a U3V stream trailer from raw bytes.
 ///
 /// Trailer layout (little-endian):
 /// ```text
-/// [0..4]   prefix              0x54563355 ("U3VT")
+/// [0..4]   prefix              "U3VT"
 /// [4..6]   reserved
 /// [6..8]   trailer_size
-/// [8..12]  status
-/// [12..20] block_id            (u64)
-/// [20..28] valid_payload_size  (u64, may be absent)
+/// [8..16]  block_id
+/// [16..18] status
+/// [18..20] reserved
+/// [20..28] valid_payload_size
+/// [28..32] size_y              (image payloads)
 /// ```
 pub fn parse_trailer(buf: &[u8]) -> Result<Trailer, U3vError> {
     if buf.len() < MIN_TRAILER_SIZE {
@@ -292,22 +421,10 @@ pub fn parse_trailer(buf: &[u8]) -> Result<Trailer, U3vError> {
         )));
     }
 
-    let status = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-    let block_id = if buf.len() >= 20 {
-        u64::from_le_bytes(buf[12..20].try_into().unwrap())
-    } else {
-        0
-    };
-    let valid_payload_size = if buf.len() >= 28 {
-        u64::from_le_bytes(buf[20..28].try_into().unwrap())
-    } else {
-        0
-    };
-
     Ok(Trailer {
-        status,
-        block_id,
-        valid_payload_size,
+        block_id: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+        status: u16::from_le_bytes([buf[16], buf[17]]),
+        valid_payload_size: u64::from_le_bytes(buf[20..28].try_into().unwrap()),
     })
 }
 
@@ -333,81 +450,54 @@ mod tests {
         }
     }
 
+    fn layout(payload_size: u64, transfer: u32) -> StreamLayout {
+        StreamLayout::new(payload_size, 52, 32, 4, transfer).unwrap()
+    }
+
     /// An idle stream is waiting, not broken, so a reader can poll it and
-    /// stop between frames. The reader took the timeout for a failure and
-    /// ended the stream after five seconds without a frame (Codex review of
-    /// #179).
+    /// stop between frames (Codex review of #179).
     #[test]
     fn an_idle_stream_is_waiting_not_broken() {
-        let mut stream = U3vStream::new(Arc::new(Idle), 0x82, 64, 64, 4096);
+        let mut stream = U3vStream::new(Arc::new(Idle), 0x82, layout(4096, 4096));
         let idle = stream.next_frame_within(Duration::from_millis(10));
         assert!(matches!(idle, Ok(None)), "{idle:?}");
     }
 
-    fn build_leader(width: u32, height: u32, pixel_format: u32, timestamp: u64) -> Vec<u8> {
-        let mut buf = vec![0u8; 42];
-        // Prefix
+    fn build_leader(block_id: u64, width: u32, height: u32, pixel_format: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; 52];
         buf[0..4].copy_from_slice(&LEADER_PREFIX.to_le_bytes());
-        // leader_size
-        buf[6..8].copy_from_slice(&42u16.to_le_bytes());
-        // payload_type = image
-        buf[10..12].copy_from_slice(&0x0001u16.to_le_bytes());
-        // timestamp
-        buf[12..20].copy_from_slice(&timestamp.to_le_bytes());
-        // pixel_format
-        buf[20..24].copy_from_slice(&pixel_format.to_le_bytes());
-        // width
-        buf[24..28].copy_from_slice(&width.to_le_bytes());
-        // height
-        buf[28..32].copy_from_slice(&height.to_le_bytes());
-        // x_offset = 0, y_offset = 0, x_padding = 0
+        buf[6..8].copy_from_slice(&52u16.to_le_bytes());
+        buf[8..16].copy_from_slice(&block_id.to_le_bytes());
+        buf[18..20].copy_from_slice(&PAYLOAD_TYPE_IMAGE.to_le_bytes());
+        buf[20..28].copy_from_slice(&(block_id * 1000).to_le_bytes());
+        buf[28..32].copy_from_slice(&pixel_format.to_le_bytes());
+        buf[32..36].copy_from_slice(&width.to_le_bytes());
+        buf[36..40].copy_from_slice(&height.to_le_bytes());
         buf
     }
 
-    fn build_trailer(status: u32, block_id: u64, valid_payload_size: u64) -> Vec<u8> {
-        let mut buf = vec![0u8; 28];
+    fn build_trailer(block_id: u64, status: u16, valid_payload_size: u64) -> Vec<u8> {
+        let mut buf = vec![0u8; 32];
         buf[0..4].copy_from_slice(&TRAILER_PREFIX.to_le_bytes());
-        buf[6..8].copy_from_slice(&28u16.to_le_bytes());
-        buf[8..12].copy_from_slice(&status.to_le_bytes());
-        buf[12..20].copy_from_slice(&block_id.to_le_bytes());
+        buf[6..8].copy_from_slice(&32u16.to_le_bytes());
+        buf[8..16].copy_from_slice(&block_id.to_le_bytes());
+        buf[16..18].copy_from_slice(&status.to_le_bytes());
         buf[20..28].copy_from_slice(&valid_payload_size.to_le_bytes());
         buf
     }
 
     #[test]
-    fn parse_leader_valid() {
-        let data = build_leader(640, 480, 0x0108_0001, 12345);
-        let leader = parse_leader(&data).unwrap();
-        assert_eq!(leader.width, 640);
-        assert_eq!(leader.height, 480);
-        assert_eq!(leader.pixel_format, 0x0108_0001); // Mono8
-        assert_eq!(leader.timestamp, 12345);
-        assert_eq!(leader.payload_type, 0x0001);
-        assert_eq!(leader.x_offset, 0);
-        assert_eq!(leader.y_offset, 0);
-        assert_eq!(leader.x_padding, 0);
-    }
-
-    #[test]
     fn parse_leader_bad_prefix() {
-        let mut data = build_leader(640, 480, 0, 0);
+        let mut data = build_leader(1, 640, 480, 0);
         data[0] = 0xFF;
         assert!(parse_leader(&data).is_err());
     }
 
     #[test]
     fn parse_leader_too_short() {
-        let data = vec![0u8; 10];
-        assert!(parse_leader(&data).is_err());
-    }
-
-    #[test]
-    fn parse_trailer_valid() {
-        let data = build_trailer(0, 42, 307200);
-        let trailer = parse_trailer(&data).unwrap();
-        assert_eq!(trailer.status, 0);
-        assert_eq!(trailer.block_id, 42);
-        assert_eq!(trailer.valid_payload_size, 307200);
+        assert!(parse_leader(&[0u8; 10]).is_err());
+        // A leader that says "image" must carry the image fields.
+        assert!(parse_leader(&build_leader(1, 8, 8, 0)[..40]).is_err());
     }
 
     #[test]
@@ -419,87 +509,131 @@ mod tests {
 
     #[test]
     fn parse_trailer_too_short() {
-        let data = vec![0u8; 8];
-        assert!(parse_trailer(&data).is_err());
+        assert!(parse_trailer(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn a_layout_covers_the_payload_in_aligned_transfers() {
+        // Smaller than one transfer: one transfer, aligned down, and the rest
+        // in the final transfer, aligned up.
+        let small = StreamLayout::new(10_001, 52, 32, 8, 1 << 20).unwrap();
+        assert_eq!(small.leader_size, 56);
+        assert_eq!(small.trailer_size, 32);
+        assert_eq!(
+            (small.payload_transfer_size, small.payload_transfer_count),
+            (10_000, 1)
+        );
+        assert_eq!(small.final_transfer1_size, 8);
+        assert_eq!(small.final_transfer2_size, 0);
+
+        // Larger: whole transfers of the maximum, then the remainder.
+        let large = StreamLayout::new(3_000_000, 52, 32, 1024, 1 << 20).unwrap();
+        assert_eq!(
+            (large.payload_transfer_size, large.payload_transfer_count),
+            (1 << 20, 2)
+        );
+        assert_eq!(large.final_transfer1_size, 903_168); // 902 848 aligned up
+        assert!(large.payload_capacity() >= 3_000_000);
+
+        // A payload below the alignment still gets one transfer.
+        let tiny = StreamLayout::new(3, 52, 32, 8, 1 << 20).unwrap();
+        assert_eq!(
+            (tiny.payload_transfer_size, tiny.payload_transfer_count),
+            (8, 0)
+        );
+        assert_eq!(tiny.final_transfer1_size, 8);
+
+        assert!(StreamLayout::new(0, 52, 32, 8, 1 << 20).is_err());
+        assert!(StreamLayout::new(100, 52, 32, 0, 1 << 20).is_err());
     }
 
     #[test]
     fn stream_next_frame() {
         let mock = Arc::new(MockUsbTransfer::new());
         let ep_in = 0x82;
+        let payload_size = 320 * 240;
 
-        let width = 320u32;
-        let height = 240u32;
-        let pixel_format = 0x0108_0001u32; // Mono8
-        let payload_size = (width * height) as usize;
-
-        // Enqueue leader
-        mock.enqueue_read(ep_in, build_leader(width, height, pixel_format, 99));
-        // Enqueue payload
+        mock.enqueue_read(ep_in, build_leader(7, 320, 240, 0x0108_0001));
         mock.enqueue_read(ep_in, vec![0x80; payload_size]);
-        // Enqueue trailer
-        mock.enqueue_read(ep_in, build_trailer(0, 1, payload_size as u64));
+        mock.enqueue_read(ep_in, build_trailer(7, 0, payload_size as u64));
 
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, 64, 64, payload_size);
+        let mut stream = U3vStream::new(
+            Arc::clone(&mock),
+            ep_in,
+            layout(payload_size as u64, 1 << 20),
+        );
         let frame = stream.next_frame().unwrap();
 
-        assert_eq!(frame.leader.width, width);
-        assert_eq!(frame.leader.height, height);
-        assert_eq!(frame.leader.pixel_format, pixel_format);
-        assert_eq!(frame.leader.timestamp, 99);
+        assert_eq!(frame.leader.block_id, 7);
+        assert_eq!((frame.leader.width, frame.leader.height), (320, 240));
+        assert_eq!(frame.leader.timestamp, 7000);
         assert_eq!(frame.payload.len(), payload_size);
         assert_eq!(frame.trailer.status, 0);
-        assert_eq!(frame.trailer.block_id, 1);
-        assert_eq!(frame.trailer.valid_payload_size, payload_size as u64);
     }
 
+    /// Each transfer is read at the size the layout gives it.
     #[test]
-    fn stream_multiple_frames() {
+    fn the_payload_is_read_in_the_layouts_transfers() {
         let mock = Arc::new(MockUsbTransfer::new());
         let ep_in = 0x82;
+        let stream_layout = layout(1000, 256); // 3 × 256, final 232
+        assert_eq!(stream_layout.payload_transfer_count, 3);
+        assert_eq!(stream_layout.final_transfer1_size, 232);
 
-        for i in 0..3u64 {
-            mock.enqueue_read(ep_in, build_leader(64, 64, 0x0108_0001, i * 1000));
-            mock.enqueue_read(ep_in, vec![0xAA; 64 * 64]);
-            mock.enqueue_read(ep_in, build_trailer(0, i, 64 * 64));
+        mock.enqueue_read(ep_in, build_leader(1, 25, 40, 0x0108_0001));
+        for fill in 0..3u8 {
+            mock.enqueue_read(ep_in, vec![fill; 256]);
         }
+        mock.enqueue_read(ep_in, vec![3; 232]);
+        mock.enqueue_read(ep_in, build_trailer(1, 0, 1000));
 
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, 64, 64, 64 * 64);
-
-        for i in 0..3u64 {
-            let frame = stream.next_frame().unwrap();
-            assert_eq!(frame.trailer.block_id, i);
-            assert_eq!(frame.leader.timestamp, i * 1000);
-        }
-    }
-
-    /// Payload split across multiple USB bulk transfers should be reassembled.
-    #[test]
-    fn stream_multi_transfer_payload() {
-        let mock = Arc::new(MockUsbTransfer::new());
-        let ep_in = 0x82;
-        let payload_size = 1024usize;
-
-        mock.enqueue_read(ep_in, build_leader(32, 32, 0x0108_0001, 42));
-        // Split payload into 4 chunks of 256 bytes each.
-        for chunk in 0..4u8 {
-            mock.enqueue_read(ep_in, vec![chunk; 256]);
-        }
-        mock.enqueue_read(ep_in, build_trailer(0, 1, payload_size as u64));
-
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, 64, 64, payload_size);
+        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, stream_layout);
         let frame = stream.next_frame().unwrap();
+        assert_eq!(frame.payload.len(), 1000);
+        assert!(frame.payload[..256].iter().all(|&b| b == 0));
+        assert!(frame.payload[768..].iter().all(|&b| b == 3));
+    }
 
-        assert_eq!(frame.payload.len(), payload_size);
-        // Verify each 256-byte chunk has the correct fill byte.
-        for chunk in 0..4u8 {
-            let start = chunk as usize * 256;
-            assert!(
-                frame.payload[start..start + 256]
-                    .iter()
-                    .all(|&b| b == chunk),
-                "chunk {chunk} has wrong data"
-            );
-        }
+    /// A short transfer ends the payload; the trailer says how much is valid.
+    #[test]
+    fn a_short_payload_ends_at_the_trailer() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        let ep_in = 0x82;
+        mock.enqueue_read(ep_in, build_leader(2, 25, 40, 0x0108_0001));
+        mock.enqueue_read(ep_in, vec![9; 100]);
+        mock.enqueue_read(ep_in, build_trailer(2, 0xA100, 100));
+
+        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(1000, 256));
+        let frame = stream.next_frame().unwrap();
+        assert_eq!(frame.payload.len(), 100);
+        assert_eq!(frame.trailer.status, 0xA100);
+    }
+
+    #[test]
+    fn a_stray_transfer_before_the_leader_is_skipped() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        let ep_in = 0x82;
+        mock.enqueue_read(ep_in, vec![0xEE; 64]);
+        mock.enqueue_read(ep_in, build_leader(3, 8, 8, 0x0108_0001));
+        mock.enqueue_read(ep_in, vec![1; 64]);
+        mock.enqueue_read(ep_in, build_trailer(3, 0, 64));
+
+        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(64, 256));
+        assert_eq!(stream.next_frame().unwrap().leader.block_id, 3);
+    }
+
+    #[test]
+    fn a_trailer_for_another_block_is_an_error() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        let ep_in = 0x82;
+        mock.enqueue_read(ep_in, build_leader(4, 8, 8, 0x0108_0001));
+        mock.enqueue_read(ep_in, vec![1; 64]);
+        mock.enqueue_read(ep_in, build_trailer(5, 0, 64));
+
+        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(64, 256));
+        assert!(matches!(
+            stream.next_frame(),
+            Err(U3vError::Protocol(ref m)) if m.contains("block 4")
+        ));
     }
 }

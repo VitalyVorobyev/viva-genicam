@@ -137,7 +137,7 @@ async fn spawn_service_tasks<T: UsbTransfer + 'static>(
         format!("viva-service-u3v {}", env!("CARGO_PKG_VERSION")),
         viva_genicam::report::ReportTarget::Open(viva_genicam::report::OpenCamera {
             transport: "USB3 Vision".to_string(),
-            identity: vec![
+            identity: [
                 ("name".to_string(), announce.name.clone()),
                 ("model".to_string(), announce.model.clone()),
                 ("serial".to_string(), announce.serial.clone()),
@@ -148,7 +148,10 @@ async fn spawn_service_tasks<T: UsbTransfer + 'static>(
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(handle.bootstrap().await)
+            .collect(),
             xml: handle.raw_xml().to_string(),
         }),
         shutdown.clone(),

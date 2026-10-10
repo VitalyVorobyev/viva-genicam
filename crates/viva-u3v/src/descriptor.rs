@@ -4,20 +4,43 @@
 //! (IAD) class codes and interface class/subclass values. This module extracts
 //! endpoint addresses and interface numbers from USB descriptors.
 
-/// USB3 Vision interface class code.
+/// USB3 Vision interface class code: Miscellaneous.
 pub const U3V_INTERFACE_CLASS: u8 = 0xEF;
-/// USB3 Vision interface subclass for IAD.
+/// USB3 Vision interface subclass, the same on all three of its interfaces.
 pub const U3V_INTERFACE_SUBCLASS: u8 = 0x05;
 
-/// U3V control interface subclass.
-pub const U3V_CONTROL_SUBCLASS: u8 = 0x00;
-/// U3V event interface subclass.
-pub const U3V_EVENT_SUBCLASS: u8 = 0x01;
-/// U3V streaming interface subclass.
-pub const U3V_STREAM_SUBCLASS: u8 = 0x02;
+/// Interface protocol of the control interface.
+pub const U3V_CONTROL_PROTOCOL: u8 = 0x00;
+/// Interface protocol of the event interface.
+pub const U3V_EVENT_PROTOCOL: u8 = 0x01;
+/// Interface protocol of the streaming interface.
+pub const U3V_STREAM_PROTOCOL: u8 = 0x02;
 
-/// U3V interface protocol code.
-pub const U3V_INTERFACE_PROTOCOL: u8 = 0x00;
+/// What a USB3 Vision interface carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum U3vInterfaceKind {
+    Control,
+    Event,
+    Stream,
+}
+
+/// Which USB3 Vision interface, if any, an interface descriptor describes.
+///
+/// All three are class `0xEF`, subclass `0x05`; the protocol tells them apart
+/// (aravis `ARV_UV_INTERFACE_*_PROTOCOL`, Wireshark `IF_SUBCLASS_MISC_U3V`).
+/// Until backlog TC-27 discovery matched the *subclass* against 0, 1 and 2,
+/// so it found no interface on a conformant camera.
+pub fn classify_interface(class: u8, subclass: u8, protocol: u8) -> Option<U3vInterfaceKind> {
+    if class != U3V_INTERFACE_CLASS || subclass != U3V_INTERFACE_SUBCLASS {
+        return None;
+    }
+    match protocol {
+        U3V_CONTROL_PROTOCOL => Some(U3vInterfaceKind::Control),
+        U3V_EVENT_PROTOCOL => Some(U3vInterfaceKind::Event),
+        U3V_STREAM_PROTOCOL => Some(U3vInterfaceKind::Stream),
+        _ => None,
+    }
+}
 
 /// Information about a USB3 Vision device's interfaces and endpoints,
 /// extracted from USB descriptors.
@@ -55,12 +78,13 @@ pub fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterf
 
     for interface in config.interfaces() {
         for desc in interface.descriptors() {
-            if desc.class_code() != U3V_INTERFACE_CLASS {
-                continue;
-            }
-
-            match desc.sub_class_code() {
-                U3V_CONTROL_SUBCLASS => {
+            let kind = classify_interface(
+                desc.class_code(),
+                desc.sub_class_code(),
+                desc.protocol_code(),
+            );
+            match kind {
+                Some(U3vInterfaceKind::Control) => {
                     control_iface = Some(desc.interface_number());
                     for ep in desc.endpoint_descriptors() {
                         if ep.transfer_type() != rusb::TransferType::Bulk {
@@ -72,7 +96,7 @@ pub fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterf
                         }
                     }
                 }
-                U3V_EVENT_SUBCLASS => {
+                Some(U3vInterfaceKind::Event) => {
                     event_iface = Some(desc.interface_number());
                     for ep in desc.endpoint_descriptors() {
                         if ep.transfer_type() == rusb::TransferType::Bulk
@@ -82,7 +106,7 @@ pub fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterf
                         }
                     }
                 }
-                U3V_STREAM_SUBCLASS => {
+                Some(U3vInterfaceKind::Stream) => {
                     stream_iface = Some(desc.interface_number());
                     for ep in desc.endpoint_descriptors() {
                         if ep.transfer_type() == rusb::TransferType::Bulk
@@ -92,7 +116,7 @@ pub fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterf
                         }
                     }
                 }
-                _ => {}
+                None => {}
             }
         }
     }
@@ -133,12 +157,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn u3v_class_constants_are_correct() {
-        assert_eq!(U3V_INTERFACE_CLASS, 0xEF);
-        assert_eq!(U3V_CONTROL_SUBCLASS, 0x00);
-        assert_eq!(U3V_EVENT_SUBCLASS, 0x01);
-        assert_eq!(U3V_STREAM_SUBCLASS, 0x02);
-        assert_eq!(U3V_INTERFACE_PROTOCOL, 0x00);
-        assert_eq!(U3V_INTERFACE_SUBCLASS, 0x05);
+    fn interfaces_are_told_apart_by_protocol() {
+        assert_eq!(
+            classify_interface(0xEF, 0x05, 0x00),
+            Some(U3vInterfaceKind::Control)
+        );
+        assert_eq!(
+            classify_interface(0xEF, 0x05, 0x01),
+            Some(U3vInterfaceKind::Event)
+        );
+        assert_eq!(
+            classify_interface(0xEF, 0x05, 0x02),
+            Some(U3vInterfaceKind::Stream)
+        );
+        // What discovery used to look for: subclass 0, 1, 2.
+        assert_eq!(classify_interface(0xEF, 0x00, 0x00), None);
+        assert_eq!(classify_interface(0xEF, 0x02, 0x00), None);
+        assert_eq!(classify_interface(0xFF, 0x05, 0x00), None);
     }
 }

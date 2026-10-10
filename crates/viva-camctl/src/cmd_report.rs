@@ -70,28 +70,39 @@ pub async fn run(args: ReportArgs) -> Result<()> {
 /// Open the `index`th USB3 Vision camera and read what the report needs. The
 /// report cannot open it itself: a USB device admits one owner, so whoever
 /// holds it hands over its identity and XML (DX-06).
+///
+/// The bootstrap registers go in raw as well as decoded: no USB3 Vision
+/// camera has been checked against this library (backlog TC-27), so the
+/// first report is what settles how its registers really read. A camera whose
+/// XML cannot be read is still described.
 fn open_usb(index: usize) -> Result<OpenCamera> {
     let devices = viva_u3v::discovery::discover().context("USB3 Vision discovery")?;
     let info = devices
         .get(index)
         .with_context(|| format!("no USB3 Vision camera [{index}]; {} found", devices.len()))?;
-    let (_camera, xml) =
-        viva_genicam::connect_u3v_with_xml(info).context("open the USB3 Vision camera")?;
     let opt = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_string());
+    let mut identity = vec![
+        (
+            "usb".to_string(),
+            format!(
+                "{:04x}:{:04x} on bus {} address {}",
+                info.vendor_id, info.product_id, info.bus, info.address
+            ),
+        ),
+        ("manufacturer".to_string(), opt(&info.manufacturer)),
+        ("model".to_string(), opt(&info.model)),
+        ("serial".to_string(), opt(&info.serial)),
+    ];
+    let mut device =
+        viva_u3v::device::U3vDevice::open_device(info).context("open the USB3 Vision camera")?;
+    identity.extend(device.describe());
+    let xml = device.fetch_xml().unwrap_or_else(|err| {
+        identity.push(("XML".to_string(), format!("FAILED to read: {err}")));
+        String::new()
+    });
     Ok(OpenCamera {
         transport: "USB3 Vision".to_string(),
-        identity: vec![
-            (
-                "usb".to_string(),
-                format!(
-                    "{:04x}:{:04x} on bus {} address {}",
-                    info.vendor_id, info.product_id, info.bus, info.address
-                ),
-            ),
-            ("manufacturer".to_string(), opt(&info.manufacturer)),
-            ("model".to_string(), opt(&info.model)),
-            ("serial".to_string(), opt(&info.serial)),
-        ],
+        identity,
         xml,
     })
 }

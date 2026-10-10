@@ -197,12 +197,22 @@ impl EmbeddedBackend {
             .model
             .clone()
             .unwrap_or_else(|| "USB3 Vision camera".to_string());
-        let identity = u3v_identity(&info);
-        let (camera, xml) =
-            tauri::async_runtime::spawn_blocking(move || viva_genicam::connect_u3v_with_xml(&info))
-                .await
-                .map_err(|e| format!("Camera task failed: {e}"))?
-                .map_err(|e| format!("Failed to open USB3 Vision camera {device_id}: {e}"))?;
+        let mut identity = u3v_identity(&info);
+        let (camera, xml, bootstrap) = tauri::async_runtime::spawn_blocking(move || {
+            let (camera, xml) = viva_genicam::connect_u3v_with_xml(&info)?;
+            // The bootstrap registers, decoded and raw, for the report:
+            // nothing about USB3 Vision has met a camera yet (backlog TC-27).
+            let bootstrap = camera
+                .transport()
+                .lock_device()
+                .map(|mut device| device.describe())
+                .unwrap_or_default();
+            Ok::<_, viva_genicam::GenicamError>((camera, xml, bootstrap))
+        })
+        .await
+        .map_err(|e| format!("Camera task failed: {e}"))?
+        .map_err(|e| format!("Failed to open USB3 Vision camera {device_id}: {e}"))?;
+        identity.extend(bootstrap);
         let report = viva_genicam::report::OpenCamera {
             transport: "USB3 Vision".to_string(),
             identity,

@@ -439,8 +439,9 @@ impl<T: RegisterIo> Camera<T> {
         Ok(())
     }
 
-    /// Map device tick counters to host time using the fitted model.
-    pub fn map_dev_ts(&self, dev_ticks: u64) -> SystemTime {
+    /// Map device tick counters to host time using the fitted model; `None`
+    /// before [`time_calibrate`](Self::time_calibrate) has fitted one.
+    pub fn map_dev_ts(&self, dev_ticks: u64) -> Option<SystemTime> {
         self.time_sync.to_host_time(dev_ticks)
     }
 

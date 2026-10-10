@@ -10,7 +10,9 @@ use tracing_subscriber::EnvFilter;
 use viva_genicam::gige::nic::IfaceSelector;
 use viva_service::config::Cli;
 use viva_service::device::DeviceHandle;
-use viva_service::serve::{derive_device_id, publish_announce, serve_device};
+use viva_service::serve::{
+    Announces, announce_loop, derive_device_id, device_announce, publish_announce, serve_device,
+};
 use viva_service::status;
 
 #[tokio::main]
@@ -18,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
-    info!("Starting genicam-service");
+    info!("Starting viva-service");
 
     let zenoh_config = load_zenoh_config(cli.zenoh_config.as_deref())?;
     let session = Arc::new(zenoh::open(zenoh_config).await?);
@@ -33,6 +35,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let active_devices: Arc<tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
+    // Every served camera, re-announced on its own cadence (SVC-01).
+    let announces = Announces::default();
+    let announce_handle = tokio::spawn(announce_loop(
+        session.clone(),
+        announces.clone(),
+        viva_zenoh_api::ANNOUNCE_INTERVAL,
+        shutdown_rx.clone(),
+    ));
+
     let session_ref = session.clone();
     let shutdown_rx_ref = shutdown_rx.clone();
     let active_ref = active_devices.clone();
@@ -46,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             iface,
             shutdown_rx_ref,
             active_ref,
+            announces,
         )
         .await;
     });
@@ -57,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Wait for discovery loop to finish.
     let _ = discovery_handle.await;
+    let _ = announce_handle.await;
 
     // Wait for all device tasks.
     let mut active = active_devices.lock().await;
@@ -68,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     session.close().await?;
-    info!("genicam-service shut down");
+    info!("viva-service shut down");
     Ok(())
 }
 
@@ -79,6 +92,7 @@ async fn run_discovery_loop(
     iface: Option<IfaceSelector>,
     mut shutdown: watch::Receiver<bool>,
     active_devices: Arc<tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
+    announces: Announces,
 ) {
     use viva_genicam::gige;
 
@@ -120,7 +134,12 @@ async fn run_discovery_loop(
                     let mut active = active_devices.lock().await;
                     if active.contains_key(&device_id) {
                         drop(active);
-                        publish_announce(&session, &dev_info).await;
+                        // A camera's address or name can change between
+                        // passes; the announce loop sends what was found last.
+                        announces
+                            .lock()
+                            .await
+                            .insert(device_id, device_announce(&dev_info));
                         continue;
                     }
 
@@ -134,7 +153,12 @@ async fn run_discovery_loop(
                             let tasks = serve_device(session.clone(), handle, shutdown_rx).await;
                             active.insert(device_id.clone(), tasks);
 
+                            // Announced at once, then by the announce loop.
                             publish_announce(&session, &dev_info).await;
+                            announces
+                                .lock()
+                                .await
+                                .insert(device_id.clone(), device_announce(&dev_info));
                         }
                         Err(e) => {
                             error!(device_id, error = %e, "failed to connect");
@@ -157,6 +181,7 @@ async fn run_discovery_loop(
                 .collect();
             for device_id in lost {
                 warn!(device_id, "device lost, cleaning up");
+                announces.lock().await.remove(&device_id);
                 if let Some(tasks) = active.remove(&device_id) {
                     for task in tasks {
                         task.abort();

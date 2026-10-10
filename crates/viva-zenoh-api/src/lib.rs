@@ -570,6 +570,20 @@ pub struct ImageMeta {
     pub payload_size: u64,
 }
 
+// ── Announce cadence ─────────────────────────────────────────────────────────
+
+/// How often a service re-announces each camera it serves.
+///
+/// Independent of how often the service *discovers* cameras: the GigE service
+/// announced from inside its discovery loop, every discovery timeout plus
+/// discovery interval (2 s + 5 s), which outlived [`ANNOUNCE_EXPIRY`] and made
+/// cameras flicker in Viva Studio (backlog SVC-01).
+pub const ANNOUNCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a client keeps a camera whose announces have stopped: three
+/// missed [`ANNOUNCE_INTERVAL`]s.
+pub const ANNOUNCE_EXPIRY: std::time::Duration = std::time::Duration::from_secs(6);
+
 // ── Key Expressions ──────────────────────────────────────────────────────────
 
 /// Key expression constants and helpers for the GenICam Zenoh API.

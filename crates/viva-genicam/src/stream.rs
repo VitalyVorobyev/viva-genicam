@@ -1516,7 +1516,7 @@ impl FrameStream {
                         let ts_host = self
                             .time_sync
                             .as_ref()
-                            .map(|time_sync| time_sync.to_host_time(timestamp));
+                            .and_then(|time_sync| time_sync.to_host_time(timestamp));
                         block.set_host_time(ts_host);
                     }
                     Ok(Some(block))
@@ -1658,7 +1658,7 @@ impl FrameStream {
                         let ts_host = self
                             .time_sync
                             .as_ref()
-                            .map(|ts| ts.to_host_time(active.timestamp));
+                            .and_then(|ts| ts.to_host_time(active.timestamp));
 
                         let chunks = if chunk_data.is_empty() {
                             None

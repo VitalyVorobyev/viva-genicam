@@ -1345,6 +1345,82 @@ async fn test_stream_receives_frames() {
     .unwrap();
 }
 
+/// A stream whose time sync has no samples has no device-to-host mapping, so
+/// a frame's host time is unknown — not the wall clock. Python handed every
+/// GigE stream such a sync, and `frame.ts_host` was `SystemTime::now()`
+/// passed off as a device-mapped time (backlog DOC-11).
+#[tokio::test]
+async fn an_uncalibrated_stream_reports_no_host_time() {
+    let _cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    frame_stream.set_time_sync(viva_genicam::TimeSync::new());
+
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || cam.lock().unwrap().acquisition_start().unwrap())
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+        .await
+        .expect("timeout waiting for frame")
+        .expect("frame error")
+        .expect("stream ended without a frame");
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || cam.lock().unwrap().acquisition_stop().unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame.ts_host, None,
+        "an unmapped device time became {:?}",
+        frame.ts_host
+    );
+}
+
+/// Once calibrated, a frame's host time is its device time mapped through the
+/// fit: close to now, since the frame has just been taken.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_calibrated_stream_maps_device_time_to_host_time() {
+    let _cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+
+    let cam = camera.clone();
+    let sync = tokio::task::spawn_blocking(move || {
+        let mut cam = cam.lock().unwrap();
+        tokio::runtime::Handle::current()
+            .block_on(cam.time_calibrate(4, 10))
+            .expect("calibrate");
+        cam.acquisition_start().unwrap();
+        cam.time_sync().clone()
+    })
+    .await
+    .unwrap();
+    frame_stream.set_time_sync(sync);
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+        .await
+        .expect("timeout waiting for frame")
+        .expect("frame error")
+        .expect("stream ended without a frame");
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || cam.lock().unwrap().acquisition_stop().unwrap())
+        .await
+        .unwrap();
+
+    let host = frame
+        .ts_host
+        .expect("a calibrated stream maps the frame's time");
+    let skew = match std::time::SystemTime::now().duration_since(host) {
+        Ok(behind) => behind,
+        Err(ahead) => ahead.duration(),
+    };
+    assert!(
+        skew < Duration::from_secs(5),
+        "host time {host:?} is {skew:?} from now"
+    );
+}
+
 /// EVT data uses an IMAGE leader on the TRT009S-E, but its Size X/Size Y
 /// fields do not describe a fixed-size image. Exercise the complete receiver
 /// path with a deliberately short payload relative to EVT 3.0's 16-bit unit:

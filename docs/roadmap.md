@@ -76,8 +76,7 @@ API-09, API-10, API-11, API-13.
 Windows wheel, fuzzed parsers, semver checks — and documentation that is right,
 not merely present.
 
-**Open**: CI-01, CI-03, CI-04, CI-05, CI-07, CI-08, CI-09, CI-10, CI-17, CI-18, DOC-06,
-DOC-11; a book production-tuning chapter (rmem, udev, usbfs) is not yet a row.
+**Open**: CI-01, CI-03, CI-04, CI-05, CI-07, CI-08, CI-09, CI-10, CI-17, CI-18, DOC-06; a book production-tuning chapter (rmem, udev, usbfs) is not yet a row.
 
 ## Services & Studio
 
@@ -86,7 +85,7 @@ reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)) — the
 fastest way for someone with a camera to exercise the library and report what
 they saw.
 
-- **Services**: SVC-01, SVC-04, SVC-05.
+- **Services**: SVC-04.
 - **Studio foundations**: ST-45, ST-46. Done: one
   feature-state implementation (ST-26), one backend trait with a real remote
   implementation (ST-27), generated IPC types (ST-28), one UI data layer and

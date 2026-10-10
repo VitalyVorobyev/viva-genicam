@@ -19,9 +19,15 @@ frame.height             # int
 frame.pixel_format       # "Mono8", "Mono16", "BayerRG8", "RGB8Packed", ...
 frame.pixel_format_code  # raw PFNC integer
 frame.ts_dev             # device tick count, Optional[int]
-frame.ts_host            # POSIX seconds, Optional[float] (only if time-synced)
+frame.ts_host            # POSIX seconds, Optional[float]: None until cam.time_calibrate()
 frame.payload()          # raw bytes, one copy
 ```
+
+`ts_host` is the frame's device timestamp mapped onto the host clock, which
+needs a fit of the two clocks first. On a GigE camera, call
+`cam.time_calibrate()` before opening the stream; without it `ts_host` is
+`None`. Before 0.8 it was the wall-clock time the frame was handed over,
+whatever the device said.
 
 ### `to_numpy()` — natural shape
 

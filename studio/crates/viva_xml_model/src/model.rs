@@ -7,6 +7,35 @@ pub struct UiGraph {
     pub nodes_by_name: HashMap<String, UiNode>,
     pub categories: HashMap<String, UiCategory>,
     pub root_category: String,
+    /// Declarations in the XML that could not become features, so a viewer
+    /// can say a feature was dropped rather than absent (backlog DX-05).
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<UiSkippedNode>,
+}
+
+/// A declaration the library could not turn into a feature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(optional_fields))]
+pub struct UiSkippedNode {
+    /// The XML element, such as `Register`.
+    pub tag: String,
+    /// The node's `Name`, if it had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Why it could not be built.
+    pub error: String,
+}
+
+impl From<&viva_genapi_xml::SkippedNode> for UiSkippedNode {
+    fn from(node: &viva_genapi_xml::SkippedNode) -> Self {
+        Self {
+            tag: node.tag.clone(),
+            name: node.name.clone(),
+            error: node.error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

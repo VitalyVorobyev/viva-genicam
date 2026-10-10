@@ -25,6 +25,16 @@ pub struct BackendStatus {
     pub zenoh_config_error: Option<String>,
 }
 
+/// The diagnostic report `viva-camctl report` writes, for the user to attach
+/// to an issue (backlog ST-41).
+#[tauri::command]
+pub async fn generate_report(
+    include_xml: bool,
+    backend: State<'_, BackendState>,
+) -> Result<String, String> {
+    backend.report(include_xml).await
+}
+
 /// Return the current backend mode plus any startup diagnostic explaining it.
 #[tauri::command]
 pub async fn backend_status(

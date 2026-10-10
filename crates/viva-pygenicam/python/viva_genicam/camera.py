@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from . import _native
 from .discovery import DeviceInfo, GigeDeviceInfo, U3vDeviceInfo
-from .node import NodeInfo
+from .node import NodeInfo, SkippedNode
 from .stream import FrameStream
 
 
@@ -83,6 +83,15 @@ class Camera:
     def categories(self) -> dict[str, list[str]]:
         """Category → feature-name children."""
         return dict(self._native.categories())
+
+    def skipped(self) -> list[SkippedNode]:
+        """Declarations in the camera's XML that could not become features.
+
+        Empty for a document the library fully understands. A feature you
+        expected but cannot find may be here rather than absent from the
+        camera — and worth an issue with the camera's XML attached.
+        """
+        return [SkippedNode.from_dict(d) for d in self._native.skipped()]
 
     # ── control ──────────────────────────────────────────────────────────
 

@@ -94,7 +94,7 @@ pub async fn parse_xml(
 ) -> Result<ParseXmlResponse, CommandError> {
     println!("parse_xml (native)");
     let graph = parse_genicam_xml(&xml)?;
-    let diags = Vec::new();
+    let diags = Diag::for_graph(&graph);
     let response_xml = xml.clone();
     let response_graph = graph.clone();
     let response_diags = diags.clone();
@@ -120,7 +120,7 @@ pub async fn load_fixture(
     println!("load_fixture (native): {}", fixture.name);
     let xml = fixture.xml.to_string();
     let graph = parse_genicam_xml(&xml)?;
-    let diags = Vec::new();
+    let diags = Diag::for_graph(&graph);
     let response_xml = xml.clone();
     let response_graph = graph.clone();
     let response_diags = diags.clone();

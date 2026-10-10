@@ -81,6 +81,7 @@ pub mod chunks;
 pub mod events;
 pub mod evs;
 pub mod frame;
+pub mod report;
 pub mod stream;
 pub mod time;
 

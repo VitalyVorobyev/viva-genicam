@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one camera, and `publish_announce` announces it. The binary and the tests
   share them; the service's own end-to-end test used to carry a copy that
   lacked the two feature-state queryables.
+- `viva_genicam::report` writes the plain-text diagnostic report
+  (`build_report`, `ReportRequest`, `ReportTarget`) that `viva-camctl report`
+  writes, so other tools can produce the same file; the CLI is now a thin
+  wrapper over it. GigE only, as before (DX-06).
+- `viva-service` answers `genicam/devices/{id}/report` (`keys::report`,
+  `DeviceReportRequest`, `DeviceReportResponse`) with that report on its
+  camera, written on the host the camera is attached to (backlog ST-41).
+- Python: `Camera.skipped()` lists the declarations in the camera's XML that
+  could not become features, as `SkippedNode`s with the element, name and
+  reason, so a missing feature can be told apart from one the camera lacks
+  (backlog DX-05).
 
 ### Changed
 
@@ -166,14 +177,27 @@ section changes the library.
   otherwise; `viva-camctl stream --packet-size` could. The acquisition section
   now offers Auto or a fixed size, kept per camera and used from the next
   start, in both modes.
-- **One frame encoder, used only when someone is watching** (ST-31, ST-32).
+- **One frame encoder, drawing only what can be seen** (ST-31, ST-32).
   Embedded and remote mode each turned frames into BMPs their own way, and
   the embedded one could not draw Mono10/12/14 or 16-bit Bayer. Both now use
   `viva_streamer::frame::FrameEncoder`, which reuses its buffers between
   frames and passes BGR through without swapping it twice. Embedded mode
-  encodes at most 30 frames a second and none while no viewer is connected,
-  and warns once about a format it cannot draw rather than on every frame.
+  encodes at most 30 frames a second, and both modes only one a second while
+  no viewer is connected — still keeping it, because the viewer connects after
+  the acquisition starts and in SingleFrame mode that frame is the only one
+  (Codex review of #173). Embedded mode warns once about a format it cannot
+  draw rather than on every frame.
   When a frame's size or format changes mid-stream the viewer is told (ST-17).
+- **"Generate report" in the Diagnostics tab** (ST-41). Studio writes the
+  report `viva-camctl report` writes — the same library code — and saves it
+  to a file or copies it, with or without the camera's GenApi XML. In remote
+  mode the service writes it, since the camera may not be reachable from the
+  app. Every Studio user with a camera we cannot open can now send us what we
+  ask for without installing the CLI.
+- **Features the library dropped are named** (DX-05). Declarations in the XML
+  that could not become features appear as warnings in the Feature Browser's
+  Diagnostics tab, and the toolbar counts them ("· 2 not shown"), so a missing
+  feature reads as dropped rather than absent.
 - **Camera I/O no longer occupies the async runtime** (ST-31). Every embedded
   camera operation ran inside `block_in_place` under a `std::sync::Mutex`, so
   a command waiting for the camera held a runtime worker; the camera is now

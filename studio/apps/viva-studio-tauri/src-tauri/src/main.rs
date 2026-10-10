@@ -184,6 +184,8 @@ fn main() {
             // Acquisition
             commands::acquisition::start_acquisition,
             commands::acquisition::stop_acquisition,
+            // Evidence
+            commands::backend::generate_report,
             // SFNC groups config
             commands::sfnc_groups::get_sfnc_groups,
             // IP configuration (embedded mode only)
@@ -309,6 +311,9 @@ mod tests {
         }
         async fn shutdown(&self) {
             std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+        async fn report(&self, _: bool) -> Result<String, String> {
+            Err("stuck".into())
         }
     }
 

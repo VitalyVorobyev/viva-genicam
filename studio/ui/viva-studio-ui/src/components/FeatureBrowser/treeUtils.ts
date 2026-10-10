@@ -1,4 +1,16 @@
 import type { JsonValue } from "../../device/types";
+import type { UiGraph } from "../../xml_model/uigraph";
+
+/**
+ * The toolbar's one-line description of a model. Declarations the library
+ * could not turn into features are counted, so a missing feature reads as
+ * dropped rather than absent (backlog DX-05); the Diagnostics tab lists them.
+ */
+export function graphSummary(graph: UiGraph, nodeCount: number, categoryCount: number): string {
+  const summary = `${nodeCount} nodes · ${categoryCount} cat`;
+  const skipped = graph.skipped?.length ?? 0;
+  return skipped > 0 ? `${summary} · ${skipped} not shown` : summary;
+}
 
 /**
  * Format a live node value for compact inline display in the category tree.

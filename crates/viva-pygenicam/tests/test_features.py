@@ -95,6 +95,13 @@ def test_categories_non_empty(camera):
     assert len(cats) > 0
 
 
+def test_skipped_is_empty_for_the_fake_cameras_xml(camera):
+    # The fake's XML is one the library fully understands (DX-05).
+    skipped = camera.skipped()
+    assert isinstance(skipped, list)
+    assert skipped == []
+
+
 def test_unknown_feature_raises(camera):
     with pytest.raises(vg.GenApiError):
         camera.get("NonExistent_Feature_XYZ")

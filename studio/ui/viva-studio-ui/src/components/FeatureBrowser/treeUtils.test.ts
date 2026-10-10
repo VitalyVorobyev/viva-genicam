@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { formatLiveValue } from "./treeUtils";
+import { formatLiveValue, graphSummary } from "./treeUtils";
+import type { UiGraph } from "../../xml_model/uigraph";
 function entry(value: number | string | boolean) {
   return { value };
 }
@@ -50,5 +51,28 @@ describe("formatLiveValue", () => {
 
   it("shows a register by its size", () => {
     expect(formatLiveValue({ value: { kind: "register", length: 4096 } })).toBe("4096 B");
+  });
+});
+
+describe("graphSummary", () => {
+  const graph = (skipped?: UiGraph["skipped"]): UiGraph => ({
+    nodes_by_name: {},
+    categories: {},
+    root_category: "Root",
+    skipped,
+  });
+
+  it("counts nodes and categories", () => {
+    expect(graphSummary(graph(), 12, 3)).toBe("12 nodes · 3 cat");
+  });
+
+  // A feature the library dropped is called out rather than silently absent
+  // (backlog DX-05).
+  it("says how many declarations could not be shown", () => {
+    const skipped = [
+      { tag: "Register", name: "LUTValueAll", error: "missing <Length>" },
+      { tag: "Integer", error: "no Name" },
+    ];
+    expect(graphSummary(graph(skipped), 12, 3)).toBe("12 nodes · 3 cat · 2 not shown");
   });
 });

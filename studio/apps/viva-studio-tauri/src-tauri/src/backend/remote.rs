@@ -19,8 +19,8 @@ use viva_streamer::meta;
 use viva_xml_model::parse_genicam_xml;
 use viva_zenoh_api::{
     AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, BulkReadRequest,
-    DeviceAnnounce, DeviceStatus, DeviceXmlResponse, FeatureState, ImageMeta, NodeOpResponse,
-    NodeSetRequest, keys,
+    DeviceAnnounce, DeviceReportRequest, DeviceReportResponse, DeviceStatus, DeviceXmlResponse,
+    FeatureState, ImageMeta, NodeOpResponse, NodeSetRequest, keys,
 };
 use zenoh::Session;
 
@@ -662,6 +662,35 @@ impl DeviceBackend for RemoteBackend {
             tracing::debug!("disconnect at exit: {e}");
         }
     }
+
+    /// The camera may be out of this host's reach, so the service writes the
+    /// report where it runs; with no device connected, Studio reports on its
+    /// own host.
+    async fn report(&self, include_xml: bool) -> Result<String, String> {
+        let header = format!(
+            "Viva Studio {} in remote mode; the service wrote the report below.\n\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        match self.device_id().await {
+            Ok(device_id) => {
+                let session = self.session()?;
+                let payload = serde_json::to_vec(&DeviceReportRequest { include_xml })
+                    .map_err(|e| e.to_string())?;
+                let response: DeviceReportResponse =
+                    query(&session, &keys::report(&device_id), Some(payload)).await?;
+                Ok(header + &response.report)
+            }
+            Err(_) => {
+                use viva_genicam::report::{ReportRequest, ReportTarget, build_report};
+                let request = ReportRequest {
+                    notes: vec!["mode:        remote, no device connected".to_string()],
+                    include_xml,
+                    ..ReportRequest::new(super::embedded::studio_tool(), ReportTarget::None)
+                };
+                Ok(build_report(&request).await)
+            }
+        }
+    }
 }
 
 impl RemoteBackend {
@@ -828,6 +857,12 @@ mod tests {
             assert_eq!(scps, 1000);
             fake_camera::first_frame(&streamer.ws_url).await;
             backend.stop_acquisition().await.expect("stop");
+
+            // The report comes from the service, which can reach the camera.
+            let report = backend.report(false).await.expect("report");
+            assert!(report.contains("in remote mode"), "{report}");
+            assert!(report.contains("tool:        viva-service"), "{report}");
+            assert!(report.contains("selected: 127.0.0.1"), "{report}");
 
             backend.disconnect().await.expect("disconnect");
             assert!(backend.get_feature_state("Width").await.is_err());

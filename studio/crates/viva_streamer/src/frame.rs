@@ -6,6 +6,8 @@
 //! own encoder, and the embedded one could not show Mono10/12, Bayer above 8
 //! bits or RGBa8.
 
+use std::time::{Duration, Instant};
+
 use bytes::Bytes;
 use viva_zenoh_api::PixelFormat as WirePixelFormat;
 
@@ -148,10 +150,71 @@ impl FrameEncoder {
     }
 }
 
+/// When to draw the next frame for the viewer; both modes ask it.
+///
+/// With a viewer connected, a frame is drawn at most once per `interval`.
+/// With none, still once per [`Self::UNWATCHED_INTERVAL`]: the stored frame is
+/// the first thing a viewer that connects later is sent, and in SingleFrame
+/// mode it is the only frame there will be — the viewer connects after the
+/// acquisition starts (Codex review of #173).
+#[derive(Debug)]
+pub struct FramePacer {
+    interval: Duration,
+    last: Option<Instant>,
+}
+
+impl FramePacer {
+    /// How often the stored frame is refreshed while nobody watches.
+    pub const UNWATCHED_INTERVAL: Duration = Duration::from_secs(1);
+
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: None,
+        }
+    }
+
+    /// Whether a frame arriving at `now` should be drawn.
+    pub fn is_due(&self, watched: bool, now: Instant) -> bool {
+        let interval = if watched {
+            self.interval
+        } else {
+            self.interval.max(Self::UNWATCHED_INTERVAL)
+        };
+        self.last
+            .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+    }
+
+    /// A frame was drawn at `now`.
+    pub fn sent(&mut self, now: Instant) {
+        self.last = Some(now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FrameEncoder, PixelLayout};
+    use std::time::{Duration, Instant};
+
+    use super::{FrameEncoder, FramePacer, PixelLayout};
     use crate::bmp::BayerPattern;
+
+    #[test]
+    fn the_pacer_draws_the_first_frame_even_with_no_viewer() {
+        let pacer = FramePacer::new(Duration::from_millis(33));
+        assert!(pacer.is_due(false, Instant::now()));
+        assert!(pacer.is_due(true, Instant::now()));
+    }
+
+    #[test]
+    fn the_pacer_slows_to_once_a_second_while_nobody_watches() {
+        let mut pacer = FramePacer::new(Duration::from_millis(33));
+        let t0 = Instant::now();
+        pacer.sent(t0);
+        let later = t0 + Duration::from_millis(100);
+        assert!(pacer.is_due(true, later), "a viewer gets the display rate");
+        assert!(!pacer.is_due(false, later), "nobody watching: not yet");
+        assert!(pacer.is_due(false, t0 + FramePacer::UNWATCHED_INTERVAL));
+    }
 
     /// Pixel data offset and first pixel's bytes of a BMP.
     fn first_pixel(bmp: &[u8], bytes: usize) -> Vec<u8> {

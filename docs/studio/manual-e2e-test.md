@@ -88,6 +88,8 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] FPS counter shows non-zero value
 - [ ] Status bar shows resolution and pixel format
 - [ ] Image updates with each frame
+- [ ] On a real camera: set AcquisitionMode to SingleFrame and click Start ->
+      the one frame is shown (the fake streams continuously whatever the mode)
 
 ### 5. Stream tools
 - [ ] Zoom/pan with scroll wheel and drag
@@ -118,6 +120,16 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 - [ ] Set SensorType to Color -> PixelFormat offers only RGB8
 - [ ] Export State -> the JSON holds every feature with a value, registers
       left out
+
+### 6b. Report
+- [ ] Diagnostics tab -> Save report… -> the file holds
+      "# viva-genicam diagnostic report" and a "## Camera" section on the
+      connected camera; with "Include the camera's GenApi XML" ticked its
+      "## GenApi XML" section holds the XML, unticked it says it was omitted
+- [ ] Copy -> the clipboard holds the same text
+- [ ] Remote mode: the report says the service wrote it
+- [ ] The Feature Browser's toolbar reads "N nodes · M cat" with no
+      "not shown" for the fake camera's XML
 
 ### 7. Stop & disconnect
 - [ ] Click Stop -> frames stop, FPS goes to 0

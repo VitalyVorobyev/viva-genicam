@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::device::DeviceHandle;
-use crate::{acquisition, nodes, status, xml};
+use crate::{acquisition, nodes, report, status, xml};
 
 /// Start everything the service runs for one connected camera: publish its
 /// status and initial feature states, then answer its XML, feature, command
@@ -55,6 +55,11 @@ pub async fn serve_device(
             shutdown.clone(),
         )),
         tokio::spawn(nodes::run_bulk_state_queryable(
+            session.clone(),
+            device.clone(),
+            shutdown.clone(),
+        )),
+        tokio::spawn(report::run(
             session.clone(),
             device.clone(),
             shutdown.clone(),

@@ -63,6 +63,26 @@ opaque string without `/`).
 - **Semantics:** Full GenICam XML string. The app parses this into the UiGraph model on
   connect. Response should be stable during a session.
 
+### `genicam/devices/{device_id}/report`
+
+- **Direction:** App → Service (queryable GET)
+- **Mechanism:** Zenoh queryable; the payload is optional
+- **Request (JSON):**
+  ```json
+  { "include_xml": false }
+  ```
+  `include_xml` defaults to `true`, as does an empty payload.
+- **Response (JSON):**
+  ```json
+  { "report": "# viva-genicam diagnostic report\n..." }
+  ```
+- **Rust types:** `DeviceReportRequest`, `DeviceReportResponse` in `viva-zenoh-api`
+- **Semantics:** The plain-text diagnostic report `viva-camctl report` writes
+  (`viva_genicam::report`), written by the service on the host the camera is
+  attached to: the app may not reach the camera itself. Viva Studio's
+  "Generate report" asks for it in remote mode. Served by `viva-service` (GigE)
+  only; the report has no USB3 Vision form yet (backlog DX-06).
+
 ### `genicam/devices/{device_id}/status`
 
 - **Direction:** Service → App
@@ -439,6 +459,7 @@ remote (`DeviceBackend`, ADR-0024).
 | `execute_command(node_name)` | → `CommandResult` | Execute a Command node |
 | `start_acquisition(packet_size?)` | → `StreamerInfo` | Start acquisition and the viewer's WebSocket; `packet_size` is the user's GVSP packet size for the link, absent to negotiate |
 | `stop_acquisition()` | → `()` | Stop both |
+| `generate_report(include_xml)` | → `string` | The diagnostic report on the connected camera: built in-process in embedded mode, asked of the service's `report` key in remote mode |
 
 ## Tauri Events (Backend → Frontend)
 

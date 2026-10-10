@@ -1315,6 +1315,20 @@ input[type="checkbox"] {
 
 .diagnostics-tab { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 
+/* "Generate report" (backlog ST-41) */
+.report-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3) var(--sp-6);
+  padding: var(--sp-4) var(--sp-6);
+  border-bottom: 1px solid var(--border);
+}
+.report-panel__text { flex: 1 1 260px; min-width: 0; }
+.report-panel__hint { margin: var(--sp-1) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
+.report-panel__option { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--text-xs); color: var(--text-secondary); }
+.report-panel__actions { display: flex; gap: var(--sp-2); }
+
 .diagnostics-tab__toolbar {
   display: flex;
   align-items: center;

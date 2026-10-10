@@ -79,4 +79,24 @@ class NodeInfo:
         return self.access in {"RO", "RW"}
 
 
+@dataclass(frozen=True)
+class SkippedNode:
+    """A declaration the camera's XML has that the library could not expose.
+
+    A feature missing from :meth:`Camera.nodes` may be one the camera does not
+    have, or one listed here; the ``error`` says why. Worth reporting.
+    """
+
+    #: The XML element, such as ``"Register"``.
+    tag: str
+    #: The node's ``Name``, if the declaration had one.
+    name: Optional[str]
+    #: Why it could not be built.
+    error: str
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SkippedNode":
+        return cls(tag=d["tag"], name=d.get("name"), error=d["error"])
+
+
 __all__ = ["NodeKind", "NodeInfo"]

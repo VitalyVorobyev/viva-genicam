@@ -24,7 +24,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{debug, info, warn};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
 use viva_streamer::bmp::BayerPattern;
-use viva_streamer::frame::{FrameEncoder, PixelLayout};
+use viva_streamer::frame::{FrameEncoder, FramePacer, PixelLayout};
 use viva_zenoh_api::{DeviceAnnounce, FeatureState};
 
 use crate::state::device_state::{DeviceInfo, StreamerInfo};
@@ -465,6 +465,37 @@ impl DeviceBackend for EmbeddedBackend {
         self.release_camera().await;
     }
 
+    async fn report(&self, include_xml: bool) -> Result<String, String> {
+        use viva_genicam::report::{ReportRequest, ReportTarget, build_report};
+
+        let connected = self
+            .with_camera(|connected| {
+                let ip = connected
+                    .camera
+                    .transport()
+                    .lock_device()
+                    .map(|device| device.remote_addr().ip())
+                    .map_err(|e| e.to_string())?;
+                Ok((connected.device_id.clone(), ip))
+            })
+            .await
+            .ok();
+        let mut notes = vec!["mode:        embedded".to_string()];
+        let target = match connected {
+            Some((device_id, std::net::IpAddr::V4(ip))) => {
+                notes.push(format!("connected:   {device_id}"));
+                ReportTarget::Ip(ip)
+            }
+            _ => ReportTarget::None,
+        };
+        let request = ReportRequest {
+            notes,
+            include_xml,
+            ..ReportRequest::new(studio_tool(), target)
+        };
+        Ok(build_report(&request).await)
+    }
+
     async fn force_ip(
         &self,
         mac: [u8; 6],
@@ -550,8 +581,9 @@ impl DeviceBackend for EmbeddedBackend {
 
 // ── Streaming ───────────────────────────────────────────────────────────────
 
-/// Read frames until shutdown, sending the viewer a BMP of each — at most
-/// [`DISPLAY_FPS`] a second, and none while no viewer is connected.
+/// Read frames until shutdown, sending the viewer a BMP of each as often as
+/// [`FramePacer`] allows: at most [`DISPLAY_FPS`] a second, and once a second
+/// while no viewer is connected, so one that connects later has a frame.
 async fn run_frame_reader(
     mut frame_stream: FrameStream,
     frame_tx: watch::Sender<Bytes>,
@@ -559,9 +591,8 @@ async fn run_frame_reader(
     mut shutdown_rx: watch::Receiver<bool>,
     mut info: StreamInfoTracker,
 ) {
-    let min_interval = Duration::from_secs(1) / DISPLAY_FPS;
+    let mut pacer = FramePacer::new(Duration::from_secs(1) / DISPLAY_FPS);
     let mut encoder = FrameEncoder::new();
-    let mut last_sent: Option<Instant> = None;
     let mut unsupported = None;
     let mut logged_first = false;
 
@@ -599,11 +630,7 @@ async fn run_frame_reader(
         {
             let _ = info_tx.send(changed);
         }
-        // Nobody is watching, or the viewer has a frame younger than it can
-        // show: encoding this one would be wasted.
-        if frame_tx.receiver_count() == 0
-            || last_sent.is_some_and(|sent| sent.elapsed() < min_interval)
-        {
+        if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
             continue;
         }
         let Some(layout) = camera_pixel_layout(frame.pixel_format) else {
@@ -615,8 +642,9 @@ async fn run_frame_reader(
         };
         match encoder.encode(layout, frame.width, frame.height, frame.payload.as_ref()) {
             Ok(bmp) => {
-                let _ = frame_tx.send(bmp);
-                last_sent = Some(Instant::now());
+                // Stored even with no viewer: the next one to connect is sent it.
+                frame_tx.send_replace(bmp);
+                pacer.sent(Instant::now());
             }
             Err(e) => warn!("BMP encode error: {e}"),
         }
@@ -725,6 +753,11 @@ fn json_value_to_string(value: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         other => other.to_string(),
     }
+}
+
+/// The tool line of a report Studio writes.
+pub(crate) fn studio_tool() -> String {
+    format!("Viva Studio {}", env!("CARGO_PKG_VERSION"))
 }
 
 fn camera_stream_info(
@@ -936,6 +969,37 @@ mod tests {
         });
     }
 
+    /// A viewer that connects after the camera has stopped sending still gets
+    /// its last frame. In SingleFrame mode the one frame arrives before the
+    /// UI opens the WebSocket, and the reader skipped every frame while no
+    /// viewer was connected (Codex review of #173).
+    #[test]
+    fn a_viewer_that_connects_late_gets_the_last_frame() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let _fake = fake_camera::start().await;
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+            let streamer = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+
+            // Frames arrive with nobody watching; then the camera stops.
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            backend
+                .exec_command("AcquisitionStop")
+                .await
+                .expect("AcquisitionStop");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            fake_camera::first_frame(&streamer.ws_url).await;
+
+            backend.stop_acquisition().await.expect("stop");
+            backend.disconnect().await.expect("disconnect");
+        });
+    }
+
     /// The camera's `GevSCPSPacketSize`, low 16 bits.
     async fn packet_size_on(fake: &viva_fake_gige::FakeCamera) -> u32 {
         use viva_fake_gige::registers::{SCP_PACKET_SIZE, STREAM_CHANNEL_BASE};
@@ -967,6 +1031,33 @@ mod tests {
                 .expect("start");
             assert_ne!(packet_size_on(&fake).await, 1000);
             backend.disconnect().await.expect("disconnect");
+        });
+    }
+
+    /// "Generate report" writes the report `viva-camctl report` would, on the
+    /// connected camera (ST-41).
+    #[test]
+    fn a_report_describes_the_connected_camera() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let _fake = fake_camera::start().await;
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+            let report = backend.report(true).await.expect("report");
+            for expected in [
+                "tool:        Viva Studio",
+                "mode:        embedded",
+                "connected:   127.0.0.1",
+                "selected: 127.0.0.1",
+                "<RegisterDescription",
+            ] {
+                assert!(report.contains(expected), "missing {expected:?}:\n{report}");
+            }
+            backend.disconnect().await.expect("disconnect");
+
+            // With nothing connected, the report still covers the host.
+            let report = backend.report(false).await.expect("report");
+            assert!(report.contains("No camera selected"), "{report}");
         });
     }
 

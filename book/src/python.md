@@ -60,10 +60,6 @@ no Python equivalent today:
   *`<Command>` features* — `UserSetLoad`, `TriggerSoftware` — are a different
   thing and **are** exposed, via `cam.execute(name)`; see
   [Control](python/control.md#executing-commands).)
-- **Skipped nodes.** `NodeMap::skipped()` — the list of features we could not
-  build from this camera's XML — is reachable from `viva-camctl report` but not
-  from Python. A missing feature is therefore indistinguishable from one the
-  camera does not have.
 
 If you need one of these, `viva-camctl` covers most of them from the command
 line, and the [Rust crates](crates/README.md) cover all of them.

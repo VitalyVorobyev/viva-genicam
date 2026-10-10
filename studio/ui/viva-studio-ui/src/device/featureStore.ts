@@ -14,12 +14,15 @@ export type FeatureFetcher = (names: string[]) => Promise<Record<string, Feature
  *
  * Requests made in the same tick go out as one bulk read. A state that
  * arrives after {@link FeatureStore.clear} belongs to the previous
- * connection and is dropped.
+ * connection and is dropped, and so is a read of a feature that a newer read
+ * or a newer state has already superseded: reads can answer out of order.
  */
 export class FeatureStore {
   private readonly states = new Map<string, FeatureState>();
   private readonly listeners = new Map<string, Set<() => void>>();
   private readonly queued = new Set<string>();
+  /** Per feature: bumped by each read sent and each state stored. */
+  private readonly versions = new Map<string, number>();
   private flushScheduled = false;
   private generation = 0;
   private enabled = false;
@@ -71,10 +74,13 @@ export class FeatureStore {
     if (enabled) this.refresh();
   }
 
-  /** Store states that arrived some other way: a write's reply, an event. */
+  /**
+   * Store states that arrived some other way: a write's reply, an event.
+   * A read already in flight for the feature is older, and is dropped.
+   */
   set(name: string, state: FeatureState): void {
-    this.states.set(name, state);
-    this.notify(name);
+    this.bump(name);
+    this.install(name, state);
   }
 
   setMany(states: Record<string, FeatureState>): void {
@@ -137,12 +143,28 @@ export class FeatureStore {
     this.queued.clear();
     if (names.length === 0) return;
     const generation = this.generation;
+    const tickets = new Map(names.map((name) => [name, this.bump(name)]));
     try {
       const states = await this.fetch(names);
-      if (generation === this.generation) this.setMany(states);
+      if (generation !== this.generation) return;
+      for (const [name, state] of Object.entries(states)) {
+        // Only the newest read of a feature, with nothing stored since, lands.
+        if (tickets.get(name) === this.versions.get(name)) this.install(name, state);
+      }
     } catch (error) {
       if (generation === this.generation) this.onError(error);
     }
+  }
+
+  private bump(name: string): number {
+    const version = (this.versions.get(name) ?? 0) + 1;
+    this.versions.set(name, version);
+    return version;
+  }
+
+  private install(name: string, state: FeatureState): void {
+    this.states.set(name, state);
+    this.notify(name);
   }
 
   private notify(name: string): void {

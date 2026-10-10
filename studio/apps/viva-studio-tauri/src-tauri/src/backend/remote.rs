@@ -32,7 +32,7 @@ use crate::state::events::{
     DeviceLost, DeviceReconnected, Events, StudioEvent, ZenohSessionLost, ZenohSessionRestored,
 };
 
-use super::{BackendMode, ConnectResult, DeviceBackend};
+use super::{BackendMode, ConnectResult, DeviceBackend, StartOptions};
 
 /// How long a query to the service may take.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -450,11 +450,10 @@ impl RemoteBackend {
         (dim("Width", 640), dim("Height", 480))
     }
 
-    async fn send_acquisition(&self, command: AcquisitionCommand) -> Result<(), String> {
+    async fn send_acquisition(&self, request: AcquisitionControlRequest) -> Result<(), String> {
         let session = self.session()?;
         let device_id = self.device_id().await?;
-        let payload = serde_json::to_vec(&AcquisitionControlRequest { command })
-            .map_err(|e| e.to_string())?;
+        let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
         let resp: NodeOpResponse = query(
             &session,
             &keys::acquisition_control(&device_id),
@@ -493,7 +492,10 @@ impl DeviceBackend for RemoteBackend {
         // Stop what this app started: a camera left streaming would go on
         // sending frames nobody watches.
         if self.streamer.lock().await.is_some() {
-            if let Err(e) = self.send_acquisition(AcquisitionCommand::Stop).await {
+            if let Err(e) = self
+                .send_acquisition(AcquisitionControlRequest::new(AcquisitionCommand::Stop))
+                .await
+            {
                 tracing::debug!("AcquisitionStop on disconnect: {e}");
             }
             self.stop_streamer().await;
@@ -555,7 +557,7 @@ impl DeviceBackend for RemoteBackend {
         }
     }
 
-    async fn start_acquisition(&self) -> Result<StreamerInfo, String> {
+    async fn start_acquisition(&self, options: StartOptions) -> Result<StreamerInfo, String> {
         let session = self.session()?;
         let device_id = self.device_id().await?;
         let (width, height) = self.image_size().await;
@@ -631,7 +633,11 @@ impl DeviceBackend for RemoteBackend {
 
         // Let the subscription's interest reach the service's peer first.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Err(e) = self.send_acquisition(AcquisitionCommand::Start).await {
+        let start = AcquisitionControlRequest {
+            packet_size: options.packet_size,
+            ..AcquisitionControlRequest::new(AcquisitionCommand::Start)
+        };
+        if let Err(e) = self.send_acquisition(start).await {
             self.stop_streamer().await;
             return Err(e);
         }
@@ -644,7 +650,9 @@ impl DeviceBackend for RemoteBackend {
 
     async fn stop_acquisition(&self) -> Result<(), String> {
         // Best-effort: the local streamer goes either way.
-        let result = self.send_acquisition(AcquisitionCommand::Stop).await;
+        let result = self
+            .send_acquisition(AcquisitionControlRequest::new(AcquisitionCommand::Stop))
+            .await;
         self.stop_streamer().await;
         result
     }
@@ -724,7 +732,7 @@ mod tests {
     fn remote_mode_drives_the_camera_through_the_service() {
         let _port = fake_camera::lock();
         tauri::async_runtime::block_on(async {
-            let _fake = fake_camera::start().await;
+            let fake = fake_camera::start().await;
             let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
 
             // The service, as its binary runs it.
@@ -806,7 +814,18 @@ mod tests {
                 .await
                 .expect("the published state of ExposureAuto reaches the UI");
 
-            let streamer = backend.start_acquisition().await.expect("start");
+            // A packet size the user set reaches the camera through the
+            // service (ST-22).
+            let options = crate::backend::StartOptions {
+                packet_size: Some(1000),
+            };
+            let streamer = backend.start_acquisition(options).await.expect("start");
+            let scps = {
+                use viva_fake_gige::registers::{SCP_PACKET_SIZE, STREAM_CHANNEL_BASE};
+                let bytes = fake.peek(STREAM_CHANNEL_BASE + SCP_PACKET_SIZE, 4).await;
+                u32::from_be_bytes(bytes.try_into().unwrap()) & 0xFFFF
+            };
+            assert_eq!(scps, 1000);
             fake_camera::first_frame(&streamer.ws_url).await;
             backend.stop_acquisition().await.expect("stop");
 

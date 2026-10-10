@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receives (`FeatureState`, `NumericRange`, `CommandResult`,
   `AcquisitionStatus`, `ImageMeta`, `PixelFormat`), so a TypeScript client can
   generate its types from them. Off by default.
+- `AcquisitionControlRequest` carries an optional `packet_size` for `Start`,
+  which `viva-service` uses as the GVSP packet size ceiling instead of
+  negotiating one; `AcquisitionControlRequest::new` builds a request without
+  it. `DeviceHandle::build_stream` takes the same option.
 - `keys::node_state_wildcard` subscribes to every `nodes/{name}/state`
   publication of a device.
 - `viva_service::serve::serve_device` starts the task set the service runs for
@@ -156,12 +160,32 @@ section changes the library.
 - **Studio writes features that are converters** (see Fixed above for the
   library side): the UI model and the write pre-flight took a converter's
   access mode as a fixed `RO` and refused the write before it was sent.
+- **The packet size can be set per camera** (ST-22, seen on hardware in
+  #112). Studio negotiated the GVSP packet size from the host's MTU, and on a
+  link whose real ceiling was lower it streamed nothing, with no way to say
+  otherwise; `viva-camctl stream --packet-size` could. The acquisition section
+  now offers Auto or a fixed size, kept per camera and used from the next
+  start, in both modes.
+- **One frame encoder, used only when someone is watching** (ST-31, ST-32).
+  Embedded and remote mode each turned frames into BMPs their own way, and
+  the embedded one could not draw Mono10/12/14 or 16-bit Bayer. Both now use
+  `viva_streamer::frame::FrameEncoder`, which reuses its buffers between
+  frames and passes BGR through without swapping it twice. Embedded mode
+  encodes at most 30 frames a second and none while no viewer is connected,
+  and warns once about a format it cannot draw rather than on every frame.
+  When a frame's size or format changes mid-stream the viewer is told (ST-17).
+- **Camera I/O no longer occupies the async runtime** (ST-31). Every embedded
+  camera operation ran inside `block_in_place` under a `std::sync::Mutex`, so
+  a command waiting for the camera held a runtime worker; the camera is now
+  behind an async mutex and its I/O runs on the blocking pool.
 - **One cache of live state, read only for what is on screen** (ST-29). The UI
   kept two half-migrated caches and read every feature of the camera at
   connect — hundreds, each several register reads — before showing anything.
   A single `FeatureStore` now reads a feature when a control first shows it,
   batched per tick, and keeps it current from the backend's events.
-  "Export State" reads every feature when asked.
+  "Export State" reads every feature when asked. Reads of one feature that
+  answer out of order no longer let the older one land last (Codex review of
+  #172).
 - **Writes refresh what they change** (ST-30). After a write or command the
   features it invalidated are read again if they are on screen, so changing
   a selector updates the features it selects, and a lock shows as soon as it

@@ -55,6 +55,7 @@ pub async fn run(
                                                 &device_id,
                                                 &stop_tx,
                                                 &mut frame_task,
+                                                req.packet_size,
                                             )
                                             .await
                                         }
@@ -109,6 +110,7 @@ async fn handle_start(
     device_id: &str,
     stop_tx: &watch::Sender<bool>,
     frame_task: &mut Option<tokio::task::JoinHandle<()>>,
+    packet_size: Option<u32>,
 ) -> NodeOpResponse {
     // Best-effort refresh before stream setup. On macOS loopback the fake
     // Aravis camera can sit discovered/idle for a while and then fail to
@@ -136,7 +138,7 @@ async fn handle_start(
     // 2. Configure stream registers (SCDA/SCPH/SCPS) and bind socket using
     //    the CCP-holding device. This must happen BEFORE AcquisitionStart so
     //    the camera knows where to send GVSP packets.
-    let mut frame_stream = match device.build_stream(iface).await {
+    let mut frame_stream = match device.build_stream(iface, packet_size).await {
         Ok(fs) => fs,
         Err(e) => {
             return NodeOpResponse::err(format!("stream build failed: {e}"));

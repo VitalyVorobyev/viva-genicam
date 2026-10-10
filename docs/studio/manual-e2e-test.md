@@ -105,6 +105,8 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
       "Read-only now"; back to Off -> editable again
 - [ ] Turn Acquisition Frame Rate Enable off -> Acquisition Frame Rate greys
       out as not available
+- [ ] Set Packet size to Fixed, 1400, then Stop and Start -> Transport Layer
+      shows GevSCPSPacketSize 1400; back to Auto -> the negotiated size
 - [ ] Edit a feature in the Feature Browser without applying, switch to the
       Image tab, press Ctrl+Enter -> nothing is written
 

@@ -16,6 +16,7 @@ interface ControlSidebarProps {
   frameCount: number;
   externalModel: ParseXmlResponse | null;
   cameraModel: string | null;
+  deviceId: string | null;
 }
 
 const NO_NODES = {};
@@ -28,6 +29,7 @@ export function ControlSidebar({
   frameCount,
   externalModel,
   cameraModel,
+  deviceId,
 }: ControlSidebarProps) {
   const groups = useSfncGroups();
   const sectionPersistence = useSectionPersistence(cameraModel);
@@ -42,6 +44,7 @@ export function ControlSidebar({
           isAcquiring={isAcquiring}
           frameCount={frameCount}
           nodes={nodesById}
+          deviceId={deviceId}
         />
       );
     }

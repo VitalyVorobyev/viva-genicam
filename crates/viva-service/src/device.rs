@@ -117,7 +117,14 @@ impl DeviceHandle {
     /// This configures the stream channel registers (SCDA, SCPH, SCPS) on the
     /// device that owns Control Channel Privilege and binds the receiving UDP
     /// socket. The returned [`FrameStream`] is ready for frame reception.
-    pub async fn build_stream(&self, iface: Iface) -> Result<FrameStream, GenicamError> {
+    ///
+    /// `packet_size` is a ceiling for the path probe; `None` negotiates one
+    /// from the NIC's MTU.
+    pub async fn build_stream(
+        &self,
+        iface: Iface,
+        packet_size: Option<u32>,
+    ) -> Result<FrameStream, GenicamError> {
         let cam = self.camera.clone();
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
@@ -126,11 +133,12 @@ impl DeviceHandle {
                 .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
             let mut device = cam.transport().lock_device()?;
             handle.block_on(async {
-                let stream = StreamBuilder::new(&mut device)
-                    .iface(iface)
-                    .auto_packet_size()
-                    .build()
-                    .await?;
+                let builder = StreamBuilder::new(&mut device).iface(iface);
+                let builder = match packet_size {
+                    Some(size) => builder.packet_size(size),
+                    None => builder.auto_packet_size(),
+                };
+                let stream = builder.build().await?;
                 Ok(FrameStream::new(stream, None))
             })
         })

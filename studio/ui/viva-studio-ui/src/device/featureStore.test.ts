@@ -85,6 +85,36 @@ describe("FeatureStore", () => {
     expect(store.get("Width")).toBeUndefined();
   });
 
+  // Codex on #172: two reads of one feature in flight, answered out of order.
+  it("keeps the newest read when an older one answers last", async () => {
+    const answers: Array<(states: Record<string, FeatureState>) => void> = [];
+    const store = new FeatureStore(
+      () => new Promise((resolve) => answers.push(resolve)),
+    );
+    store.setEnabled(true);
+    store.subscribe("Width", () => {});
+    await settle(); // read 1 is out
+    store.invalidate(["Width"]);
+    await settle(); // read 2 is out
+    answers[1]!({ Width: state(320) }); // the newer read answers first
+    await settle();
+    answers[0]!({ Width: state(640) }); // then the older one
+    await settle();
+    expect(store.get("Width")?.value).toBe(320);
+  });
+
+  it("keeps a state the backend announced over a read already in flight", async () => {
+    let answer: (states: Record<string, FeatureState>) => void = () => {};
+    const store = new FeatureStore(() => new Promise((resolve) => (answer = resolve)));
+    store.setEnabled(true);
+    store.subscribe("Gain", () => {});
+    await settle();
+    store.set("Gain", state(6)); // e.g. the reply to a write
+    answer({ Gain: state(0) });
+    await settle();
+    expect(store.get("Gain")?.value).toBe(6);
+  });
+
   it("asks nothing while no device is connected, and reads on connect", async () => {
     const { fetch, calls } = fetcher({ Width: 640 });
     const store = new FeatureStore(fetch);

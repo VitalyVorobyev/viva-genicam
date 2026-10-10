@@ -214,13 +214,14 @@ opaque string without `/`).
 - **Request (JSON):**
   ```json
   { "command": "start" }
+  { "command": "start", "packet_size": 1400 }
   { "command": "stop" }
   ```
 - **Response (JSON):**
   ```json
   { "ok": true, "error": null }
   ```
-- **Rust type:** request: `AcquisitionControlRequest { command: AcquisitionCommand }`; response: `NodeOpResponse` — both in `viva-zenoh-api`. `AcquisitionCommand` serializes as `"start"` or `"stop"` (`#[serde(rename_all = "lowercase")]`).
+- **Rust type:** request: `AcquisitionControlRequest { command: AcquisitionCommand, packet_size: Option<u32> }`; response: `NodeOpResponse` — both in `viva-zenoh-api`. `packet_size`, for `start`, is the GVSP packet size to use as a ceiling the service's path probe stays under; absent, the service negotiates one from its NIC's MTU. `AcquisitionCommand` serializes as `"start"` or `"stop"` (`#[serde(rename_all = "lowercase")]`).
 - **Semantics:** Start/stop hardware acquisition. On success the service begins/stops
   publishing to `image` — or to `evs`, for an event-vision camera.
 
@@ -405,7 +406,7 @@ sequenceDiagram
     participant Z as Zenoh
     participant Svc as Camera Service
 
-    UI->>App: start_acquisition()
+    UI->>App: start_acquisition(packetSize?)
     App->>Z: get(acquisition/control) {command:"start"}
     Svc-->>Z: reply {ok:true}
     Svc->>Z: put(acquisition/status) {active:true}
@@ -436,7 +437,7 @@ remote (`DeviceBackend`, ADR-0024).
 | `query_feature_states_bulk(names)` | → `Map<string, FeatureState>` | Live state of the features the UI shows |
 | `write_node(node_name, value)` | → `FeatureState` | Write, then read back |
 | `execute_command(node_name)` | → `CommandResult` | Execute a Command node |
-| `start_acquisition()` | → `StreamerInfo` | Start acquisition and the viewer's WebSocket |
+| `start_acquisition(packet_size?)` | → `StreamerInfo` | Start acquisition and the viewer's WebSocket; `packet_size` is the user's GVSP packet size for the link, absent to negotiate |
 | `stop_acquisition()` | → `()` | Stop both |
 
 ## Tauri Events (Backend → Frontend)

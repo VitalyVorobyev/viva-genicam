@@ -2001,10 +2001,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Allows acquisition start/stop/status commands.",
+          "description": "Allows acquisition start/stop commands.",
           "type": "string",
           "const": "acquisition",
-          "markdownDescription": "Allows acquisition start/stop/status commands."
+          "markdownDescription": "Allows acquisition start/stop commands."
         },
         {
           "description": "Allows device discovery and connection commands.",
@@ -2013,10 +2013,10 @@
           "markdownDescription": "Allows device discovery and connection commands."
         },
         {
-          "description": "Allows node read/write/execute commands.",
+          "description": "Allows feature state, write and execute commands.",
           "type": "string",
           "const": "nodes",
-          "markdownDescription": "Allows node read/write/execute commands."
+          "markdownDescription": "Allows feature state, write and execute commands."
         },
         {
           "description": "Allows invoking the app ping() command.",

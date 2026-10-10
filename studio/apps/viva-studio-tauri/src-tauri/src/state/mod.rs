@@ -1,5 +1,6 @@
+pub mod connection;
 pub mod device_state;
+pub mod events;
 mod model_state;
 
-pub use device_state::ZenohState;
 pub use model_state::{Diag, ModelState};

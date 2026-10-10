@@ -52,31 +52,19 @@ pub async fn run<T: UsbTransfer + 'static>(
                                                 &stop_tx, &mut frame_task,
                                             ).await
                                         }
-                                        AcquisitionCommand::Start => NodeOpResponse {
-                                            ok: false,
-                                            error: Some("acquisition already active".to_string()),
-                                        },
+                                        AcquisitionCommand::Start => NodeOpResponse::err("acquisition already active"),
                                         AcquisitionCommand::Stop if frame_task.is_some() => {
                                             handle_stop(
                                                 &session, &device, &device_id,
                                                 &stop_tx, &mut frame_task,
                                             ).await
                                         }
-                                        AcquisitionCommand::Stop => NodeOpResponse {
-                                            ok: false,
-                                            error: Some("acquisition not active".to_string()),
-                                        },
+                                        AcquisitionCommand::Stop => NodeOpResponse::err("acquisition not active"),
                                     },
-                                    Err(e) => NodeOpResponse {
-                                        ok: false,
-                                        error: Some(format!("invalid payload: {e}")),
-                                    },
+                                    Err(e) => NodeOpResponse::err(format!("invalid payload: {e}")),
                                 }
                             }
-                            None => NodeOpResponse {
-                                ok: false,
-                                error: Some("missing payload".to_string()),
-                            },
+                            None => NodeOpResponse::err("missing payload"),
                         };
                         let Ok(payload) = serde_json::to_vec(&response) else {
                             error!("failed to serialize acquisition response");
@@ -132,10 +120,7 @@ async fn handle_start<T: UsbTransfer + 'static>(
     let mut stream = match device.open_stream(payload_size) {
         Some(s) => s,
         None => {
-            return NodeOpResponse {
-                ok: false,
-                error: Some("device has no streaming endpoint".to_string()),
-            };
+            return NodeOpResponse::err("device has no streaming endpoint");
         }
     };
 
@@ -240,20 +225,14 @@ async fn handle_start<T: UsbTransfer + 'static>(
     if let Err(e) = device.exec_command("AcquisitionStart").await {
         handle.abort();
         let _ = handle.await;
-        return NodeOpResponse {
-            ok: false,
-            error: Some(format!("AcquisitionStart failed: {e}")),
-        };
+        return NodeOpResponse::err(format!("AcquisitionStart failed: {e}"));
     }
 
     publish_status(session, device_id, true).await;
     info!(device_id, "U3V acquisition started");
 
     *frame_task = Some(handle);
-    NodeOpResponse {
-        ok: true,
-        error: None,
-    }
+    NodeOpResponse::ok()
 }
 
 async fn handle_stop<T: UsbTransfer + 'static>(
@@ -276,10 +255,7 @@ async fn handle_stop<T: UsbTransfer + 'static>(
     publish_status(session, device_id, false).await;
     info!(device_id, "U3V acquisition stopped");
 
-    NodeOpResponse {
-        ok: true,
-        error: None,
-    }
+    NodeOpResponse::ok()
 }
 
 /// Intermediate frame data passed from the blocking reader to the async publisher.

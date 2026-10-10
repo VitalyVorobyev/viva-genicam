@@ -59,10 +59,7 @@ pub async fn run(
                                             .await
                                         }
                                         AcquisitionCommand::Start => {
-                                            NodeOpResponse {
-                                                ok: false,
-                                                error: Some("acquisition already active".to_string()),
-                                            }
+                                            NodeOpResponse::err("acquisition already active")
                                         }
                                         AcquisitionCommand::Stop if frame_task.is_some() => {
                                             handle_stop(
@@ -75,22 +72,13 @@ pub async fn run(
                                             .await
                                         }
                                         AcquisitionCommand::Stop => {
-                                            NodeOpResponse {
-                                                ok: false,
-                                                error: Some("acquisition not active".to_string()),
-                                            }
+                                            NodeOpResponse::err("acquisition not active")
                                         }
                                     },
-                                    Err(e) => NodeOpResponse {
-                                        ok: false,
-                                        error: Some(format!("invalid payload: {e}")),
-                                    },
+                                    Err(e) => NodeOpResponse::err(format!("invalid payload: {e}")),
                                 }
                             }
-                            None => NodeOpResponse {
-                                ok: false,
-                                error: Some("missing payload".to_string()),
-                            },
+                            None => NodeOpResponse::err("missing payload"),
                         };
 
                         let Ok(payload) = serde_json::to_vec(&response) else {
@@ -141,10 +129,7 @@ async fn handle_start(
     let iface = match resolve_iface(device) {
         Ok(i) => i,
         Err(e) => {
-            return NodeOpResponse {
-                ok: false,
-                error: Some(format!("interface resolution failed: {e}")),
-            };
+            return NodeOpResponse::err(format!("interface resolution failed: {e}"));
         }
     };
 
@@ -154,10 +139,7 @@ async fn handle_start(
     let mut frame_stream = match device.build_stream(iface).await {
         Ok(fs) => fs,
         Err(e) => {
-            return NodeOpResponse {
-                ok: false,
-                error: Some(format!("stream build failed: {e}")),
-            };
+            return NodeOpResponse::err(format!("stream build failed: {e}"));
         }
     };
 
@@ -194,10 +176,7 @@ async fn handle_start(
     if let Err(e) = device.exec_command("AcquisitionStart").await {
         handle.abort();
         let _ = handle.await;
-        return NodeOpResponse {
-            ok: false,
-            error: Some(format!("AcquisitionStart failed: {e}")),
-        };
+        return NodeOpResponse::err(format!("AcquisitionStart failed: {e}"));
     }
 
     // 5. Publish active status now that the device is streaming.
@@ -207,10 +186,7 @@ async fn handle_start(
 
     *frame_task = Some(handle);
 
-    NodeOpResponse {
-        ok: true,
-        error: None,
-    }
+    NodeOpResponse::ok()
 }
 
 async fn handle_stop(
@@ -236,10 +212,7 @@ async fn handle_stop(
     publish_status(session, device_id, false).await;
     info!(device_id, "acquisition stopped");
 
-    NodeOpResponse {
-        ok: true,
-        error: None,
-    }
+    NodeOpResponse::ok()
 }
 
 /// Main frame reading loop: reads blocks from the GigE stream and publishes

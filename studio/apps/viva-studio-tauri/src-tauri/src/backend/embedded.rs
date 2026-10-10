@@ -18,13 +18,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tauri::Emitter;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{debug, info, warn};
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo};
 use viva_zenoh_api::{DeviceAnnounce, FeatureState};
 
-use crate::state::device_state::{DeviceInfo, NodeValueEntry, StreamerInfo};
+use crate::state::device_state::{DeviceInfo, StreamerInfo};
+use crate::state::events::Events;
 
 use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig};
 
@@ -42,11 +42,8 @@ use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig};
 /// for a genuinely non-`Send` field added later.
 struct ConnectedCamera {
     camera: Camera<GigeRegisterIo>,
-    /// Kept for logging and disconnect matching.
-    #[allow(dead_code)]
+    /// The id discovery reported, to find the camera's MAC again.
     device_id: String,
-    #[allow(dead_code)]
-    xml: String,
 }
 
 impl ConnectedCamera {
@@ -87,20 +84,22 @@ pub struct EmbeddedBackend {
     discovered: RwLock<Vec<DeviceInfo>>,
     /// Active acquisition state, if streaming.
     acquisition: AsyncMutex<Option<AcquisitionState>>,
+    events: Arc<Events>,
 }
 
 impl EmbeddedBackend {
     /// Create a new embedded backend with no connected camera.
-    pub fn new() -> Self {
+    pub fn new(events: Arc<Events>) -> Self {
         Self {
             camera: Arc::new(std::sync::Mutex::new(None)),
             discovered: RwLock::new(Vec::new()),
             acquisition: AsyncMutex::new(None),
+            events,
         }
     }
 
     /// Start a background task that periodically discovers GigE cameras.
-    pub fn start_discovery_task(self: &Arc<Self>, app: tauri::AppHandle, interval: Duration) {
+    pub fn start_discovery_task(self: &Arc<Self>, interval: Duration) {
         let backend = self.clone();
         tauri::async_runtime::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -109,7 +108,7 @@ impl EmbeddedBackend {
                 let devices = discover_gige_devices().await;
                 *backend.discovered.write().await = devices.clone();
                 for d in &devices {
-                    let _ = app.emit("device-discovered", d);
+                    backend.events.emit("device-discovered", d);
                 }
             }
         });
@@ -165,12 +164,6 @@ impl EmbeddedBackend {
         });
         info!("Camera released (embedded mode)");
     }
-
-    /// Release the camera before the app exits; see `on_run_event` in
-    /// `main.rs`.
-    pub async fn shutdown(&self) {
-        self.release_camera().await;
-    }
 }
 
 #[async_trait]
@@ -185,7 +178,7 @@ impl DeviceBackend for EmbeddedBackend {
 
     async fn connect(&self, device_id: &str) -> Result<ConnectResult, String> {
         // Disconnect any existing camera first.
-        self.disconnect(device_id).await.ok();
+        self.release_camera().await;
 
         // Look up device info from discovery cache. The id is MAC-derived, so
         // the address comes from the cache; a bare IPv4 id is still accepted
@@ -230,7 +223,7 @@ impl DeviceBackend for EmbeddedBackend {
         );
 
         let result = ConnectResult {
-            xml: xml.clone(),
+            xml,
             device_name: name,
             model,
         };
@@ -243,23 +236,15 @@ impl DeviceBackend for EmbeddedBackend {
             *guard = Some(ConnectedCamera {
                 camera,
                 device_id: device_id.to_string(),
-                xml,
             });
         }
 
         Ok(result)
     }
 
-    async fn disconnect(&self, _device_id: &str) -> Result<(), String> {
+    async fn disconnect(&self) -> Result<(), String> {
         self.release_camera().await;
         Ok(())
-    }
-
-    async fn get_feature(&self, name: &str) -> Result<NodeValueEntry, String> {
-        // Project the rich state into the legacy entry so existing callers
-        // (Tauri commands, cache updaters) keep working during migration.
-        let state = self.get_feature_state(name).await?;
-        Ok(feature_state_to_entry(&state))
     }
 
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
@@ -275,37 +260,31 @@ impl DeviceBackend for EmbeddedBackend {
         tokio::task::block_in_place(|| connected.feature_state(&name))
     }
 
-    async fn set_feature(&self, name: &str, value: &serde_json::Value) -> Result<(), String> {
+    async fn set_feature(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<String>, String> {
         let value_str = json_value_to_string(value);
-        let name = name.to_string();
-
         let mut guard = self
             .camera
             .lock()
             .map_err(|_| "Camera mutex poisoned".to_string())?;
         let connected = guard.as_mut().ok_or("No camera connected".to_string())?;
-        tokio::task::block_in_place(|| connected.camera.set(&name, &value_str))
-            .map_err(|e| format!("Failed to write feature '{name}': {e}"))
+        tokio::task::block_in_place(|| connected.camera.set(name, &value_str))
+            .map_err(|e| format!("Failed to write feature '{name}': {e}"))?;
+        Ok(connected.camera.nodemap().invalidated_by(name))
     }
 
-    async fn exec_command(&self, name: &str) -> Result<(), String> {
-        let name = name.to_string();
-
+    async fn exec_command(&self, name: &str) -> Result<Vec<String>, String> {
         let mut guard = self
             .camera
             .lock()
             .map_err(|_| "Camera mutex poisoned".to_string())?;
         let connected = guard.as_mut().ok_or("No camera connected".to_string())?;
-        tokio::task::block_in_place(|| connected.camera.set(&name, ""))
-            .map_err(|e| format!("Failed to execute command '{name}': {e}"))
-    }
-
-    async fn bulk_read(&self, names: &[String]) -> Result<HashMap<String, NodeValueEntry>, String> {
-        let states = self.bulk_feature_state(names).await?;
-        Ok(states
-            .into_iter()
-            .map(|(k, s)| (k, feature_state_to_entry(&s)))
-            .collect())
+        tokio::task::block_in_place(|| connected.camera.set(name, ""))
+            .map_err(|e| format!("Failed to execute command '{name}': {e}"))?;
+        Ok(connected.camera.nodemap().invalidated_by(name))
     }
 
     async fn bulk_feature_state(
@@ -579,15 +558,22 @@ impl DeviceBackend for EmbeddedBackend {
         Ok(())
     }
 
-    async fn get_xml(&self) -> Result<String, String> {
-        let guard = self
-            .camera
-            .lock()
-            .map_err(|_| "Camera mutex poisoned".to_string())?;
-        guard
-            .as_ref()
-            .map(|c| c.xml.clone())
-            .ok_or_else(|| "No camera connected".to_string())
+    async fn shutdown(&self) {
+        self.release_camera().await;
+    }
+
+    async fn force_ip(
+        &self,
+        mac: [u8; 6],
+        ip: Ipv4Addr,
+        subnet: Ipv4Addr,
+        gateway: Ipv4Addr,
+    ) -> Result<(), String> {
+        viva_genicam::gige::force_ip(mac, ip, subnet, gateway, None)
+            .await
+            .map_err(|e| format!("ForceIP failed: {e}"))?;
+        info!(%ip, %subnet, %gateway, "ForceIP command sent");
+        Ok(())
     }
 
     async fn get_network_config(&self) -> Result<NetworkConfig, String> {
@@ -713,20 +699,6 @@ async fn discover_gige_devices() -> Vec<DeviceInfo> {
             warn!("GigE discovery failed: {e}");
             Vec::new()
         }
-    }
-}
-
-// ── Feature state projection ────────────────────────────────────────────────
-
-/// Project a rich [`FeatureState`] into the legacy [`NodeValueEntry`] shape.
-fn feature_state_to_entry(state: &FeatureState) -> NodeValueEntry {
-    let update = state.to_node_value_update();
-    NodeValueEntry {
-        value: update.value,
-        access_mode: update.access_mode,
-        min: update.min,
-        max: update.max,
-        inc: update.inc,
     }
 }
 
@@ -880,7 +852,7 @@ pub(crate) mod fake_camera {
     /// Connect to `fake`, start streaming, and check the camera is held:
     /// without that the release assertions would pass vacuously.
     pub(crate) async fn connect_and_acquire(fake: &FakeCamera) -> EmbeddedBackend {
-        let backend = EmbeddedBackend::new();
+        let backend = EmbeddedBackend::new(Default::default());
         backend.connect("127.0.0.1").await.expect("connect");
         backend
             .start_acquisition()
@@ -893,6 +865,30 @@ pub(crate) mod fake_camera {
         );
         fake.commands().reset();
         backend
+    }
+
+    /// The first image the viewer's WebSocket delivers: a BMP file, since
+    /// that is what both backends encode frames into.
+    pub(crate) async fn first_frame(ws_url: &str) -> Vec<u8> {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (mut socket, _) = tokio_tungstenite::connect_async(ws_url)
+            .await
+            .expect("connect to the image WebSocket");
+        let wait = async {
+            while let Some(message) = socket.next().await {
+                if let Ok(Message::Binary(bytes)) = message {
+                    return bytes.to_vec();
+                }
+            }
+            panic!("the image WebSocket closed before a frame arrived");
+        };
+        let frame = tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .expect("no frame within 10 s");
+        assert_eq!(&frame[..2], b"BM", "a frame is a BMP file");
+        frame
     }
 
     /// The camera was told to stop acquiring and no longer has a controller.
@@ -923,7 +919,7 @@ mod tests {
             let fake = fake_camera::start().await;
             let backend = fake_camera::connect_and_acquire(&fake).await;
 
-            backend.disconnect("127.0.0.1").await.expect("disconnect");
+            backend.disconnect().await.expect("disconnect");
 
             fake_camera::assert_released(&fake).await;
         });
@@ -939,7 +935,7 @@ mod tests {
         let _port = fake_camera::lock();
         tauri::async_runtime::block_on(async {
             let _fake = fake_camera::start().await;
-            let backend = super::EmbeddedBackend::new();
+            let backend = super::EmbeddedBackend::new(Default::default());
             backend.connect("127.0.0.1").await.expect("connect");
 
             // A monochrome sensor implements only the mono formats.
@@ -964,17 +960,41 @@ mod tests {
                 .unwrap();
             assert!(!frame_rate.is_available);
 
-            // `ExposureAuto` locks `ExposureTime` while it is not `Off`.
+            // `ExposureAuto` locks `ExposureTime` while it is not `Off`, and
+            // the write says so: `ExposureTime` is among what it invalidated.
             let exposure = backend.get_feature_state("ExposureTime").await.unwrap();
             assert_eq!(exposure.access_mode, "RW");
-            backend
+            let invalidated = backend
                 .set_feature("ExposureAuto", &serde_json::json!("Continuous"))
                 .await
                 .expect("ExposureAuto");
+            assert!(
+                invalidated.iter().any(|n| n == "ExposureTime"),
+                "{invalidated:?}"
+            );
             let exposure = backend.get_feature_state("ExposureTime").await.unwrap();
             assert_eq!(exposure.access_mode, "RO");
 
-            backend.disconnect("127.0.0.1").await.expect("disconnect");
+            backend.disconnect().await.expect("disconnect");
+        });
+    }
+
+    /// Frames reach the viewer: acquisition starts on the camera and BMP
+    /// images arrive on the WebSocket the backend hands the UI.
+    #[test]
+    fn frames_reach_the_image_websocket() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let _fake = fake_camera::start().await;
+            let backend = super::EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+            let streamer = backend.start_acquisition().await.expect("start");
+            assert_eq!((streamer.width, streamer.height), (64, 48));
+
+            fake_camera::first_frame(&streamer.ws_url).await;
+
+            backend.stop_acquisition().await.expect("stop");
+            backend.disconnect().await.expect("disconnect");
         });
     }
 

@@ -50,6 +50,14 @@ pub trait DeviceOps: Send + Sync + 'static {
             unit: None,
         })
     }
+
+    /// The features a write to `name` may change, which a client should
+    /// re-read: `viva_genapi::NodeMap::invalidated_by`. The default knows
+    /// none; every handle that holds a [`Camera`] overrides it with
+    /// [`camera_invalidated_by`].
+    async fn invalidated_by(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// GigE Vision device handle wrapping `Camera<GigeRegisterIo>`.
@@ -278,6 +286,10 @@ impl DeviceOps for DeviceHandle {
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         camera_feature_state(&self.camera, name).await
     }
+
+    async fn invalidated_by(&self, name: &str) -> Vec<String> {
+        camera_invalidated_by(&self.camera, name).await
+    }
 }
 
 /// [`Camera::feature_state`] for a camera shared behind a mutex, on the
@@ -308,6 +320,24 @@ where
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// [`viva_genicam::genapi::NodeMap::invalidated_by`] for a camera shared
+/// behind a mutex, on the blocking pool, since another task may hold the
+/// mutex through device I/O. Empty if the mutex is poisoned.
+pub async fn camera_invalidated_by<T>(camera: &Arc<Mutex<Camera<T>>>, name: &str) -> Vec<String>
+where
+    T: RegisterIo + Send + 'static,
+{
+    let cam = camera.clone();
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || {
+        cam.lock()
+            .map(|cam| cam.nodemap().invalidated_by(&name))
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[cfg(test)]

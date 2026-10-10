@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use viva_genicam::{Camera, GenicamError, U3vRegisterIo};
-use viva_service::device::{DeviceOps, camera_feature_state};
+use viva_service::device::{DeviceOps, camera_feature_state, camera_invalidated_by};
 use viva_u3v::stream::U3vStream;
 use viva_u3v::usb::UsbTransfer;
 use viva_zenoh_api::FeatureState;
@@ -95,6 +95,10 @@ impl<T: UsbTransfer + 'static> DeviceOps for U3vDeviceHandle<T> {
     /// command's register (backlog `SVC-02`).
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         camera_feature_state(&self.camera, name).await
+    }
+
+    async fn invalidated_by(&self, name: &str) -> Vec<String> {
+        camera_invalidated_by(&self.camera, name).await
     }
 }
 

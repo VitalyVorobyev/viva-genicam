@@ -27,8 +27,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zenoh = "1"
 
 [dev-dependencies]
+futures-util = "0.3"
+# The image WebSocket's client side, for the frame-delivery tests.
+tokio-tungstenite = "0.30"
 viva-fake-gige = { path = "../../../../crates/viva-fake-gige" }
-viva-genapi-xml = { path = "../../../../crates/viva-genapi-xml" }
+# The service, run in-process for the remote-mode tests.
+viva-service = { path = "../../../../crates/viva-service" }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -40,10 +40,7 @@ pub async fn run_set_queryable<D: DeviceOps>(
                             .to_string();
 
                         let response = if node_name.is_empty() {
-                            NodeOpResponse {
-                                ok: false,
-                                error: Some("missing node name".to_string()),
-                            }
+                            NodeOpResponse::err("missing node name")
                         } else {
                             match query.payload() {
                                 Some(payload) => {
@@ -73,26 +70,19 @@ pub async fn run_set_queryable<D: DeviceOps>(
                                                         .await;
                                                     }
                                                     NodeOpResponse {
-                                                        ok: true,
-                                                        error: None,
+                                                        invalidated: device
+                                                            .invalidated_by(&node_name)
+                                                            .await,
+                                                        ..NodeOpResponse::ok()
                                                     }
                                                 }
-                                                Err(e) => NodeOpResponse {
-                                                    ok: false,
-                                                    error: Some(e.to_string()),
-                                                },
+                                                Err(e) => NodeOpResponse::err(e.to_string()),
                                             }
                                         }
-                                        Err(e) => NodeOpResponse {
-                                            ok: false,
-                                            error: Some(format!("invalid payload: {e}")),
-                                        },
+                                        Err(e) => NodeOpResponse::err(format!("invalid payload: {e}")),
                                     }
                                 }
-                                None => NodeOpResponse {
-                                    ok: false,
-                                    error: Some("missing payload".to_string()),
-                                },
+                                None => NodeOpResponse::err("missing payload"),
                             }
                         };
 
@@ -143,12 +133,12 @@ pub async fn run_execute_queryable<D: DeviceOps>(
                         let response = match device.exec_command(&node_name).await {
                             Ok(()) => {
                                 debug!(device_id, node_name, "command executed");
-                                NodeOpResponse { ok: true, error: None }
+                                NodeOpResponse {
+                                    invalidated: device.invalidated_by(&node_name).await,
+                                    ..NodeOpResponse::ok()
+                                }
                             }
-                            Err(e) => NodeOpResponse {
-                                ok: false,
-                                error: Some(e.to_string()),
-                            },
+                            Err(e) => NodeOpResponse::err(e.to_string()),
                         };
 
                         let reply_key = keys::node_execute(&device_id, &node_name);

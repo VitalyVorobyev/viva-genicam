@@ -2,7 +2,7 @@
  * Histogram computation and rendering utilities for the Image Viewer.
  *
  * Reads pixel data directly from BMP-encoded frame bytes (as delivered by
- * genicam-ws-streamer). The BMP header is parsed to determine image dimensions
+ * the app's streamer). The BMP header is parsed to determine image dimensions
  * and bit depth, so no external metadata is required.
  *
  * Supported BMP formats:

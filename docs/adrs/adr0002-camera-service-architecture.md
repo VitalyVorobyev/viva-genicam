@@ -32,6 +32,8 @@ GenICam Studio (this repo) owns:
 - The **Zenoh API contract** (`viva-zenoh-api` crate, `docs/studio/zenoh-api.md`) that the service must implement
 - The **Tauri desktop app** that consumes the service over Zenoh
 - A **mock camera service** (`apps/genicam-mock-service`) for development and testing
+  *(Retired 2026-10-10, backlog ST-02: `viva-service` in front of the in-repo
+  `viva-fake-gige` does this job with the real contract.)*
 
 The external camera service owns:
 - GenTL interaction, camera SDK calls

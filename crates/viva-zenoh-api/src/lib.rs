@@ -380,6 +380,34 @@ pub struct NodeSetRequest {
 pub struct NodeOpResponse {
     pub ok: bool,
     pub error: Option<String>,
+    /// After a successful write or execute: the features whose value or
+    /// state the operation may have changed, from
+    /// `viva_genapi::NodeMap::invalidated_by`. A client re-reads the ones it
+    /// shows. It can be hundreds of names, so the service names them rather
+    /// than publishing their state. Empty for acquisition control, and from a
+    /// service that predates the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalidated: Vec<String>,
+}
+
+impl NodeOpResponse {
+    /// Success, with nothing invalidated.
+    pub fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+            invalidated: Vec::new(),
+        }
+    }
+
+    /// Failure, with its reason.
+    pub fn err(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(error.into()),
+            invalidated: Vec::new(),
+        }
+    }
 }
 
 // ── Bulk Node Read ────────────────────────────────────────────────────────────
@@ -538,6 +566,12 @@ pub mod keys {
     /// [`super::FeatureState`] JSON object.
     pub fn node_introspect(device_id: &str, node_name: &str) -> String {
         format!("genicam/devices/{device_id}/nodes/{node_name}/state")
+    }
+
+    /// Wildcard subscription for every node's [`super::FeatureState`]
+    /// publication. Direction: Service -> App.
+    pub fn node_state_wildcard(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/nodes/*/state")
     }
 
     /// Key expression for the bulk node read queryable.

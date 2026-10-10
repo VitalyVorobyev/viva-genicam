@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 
 use tauri::State;
 
-use crate::backend::{BackendMode, BackendState, NetworkConfig};
+use crate::backend::{BackendState, NetworkConfig};
 
 /// Force a temporary IP address on a GigE camera identified by MAC address.
 ///
@@ -21,23 +21,15 @@ pub async fn force_ip(
     gateway: String,
     backend: State<'_, BackendState>,
 ) -> Result<(), String> {
-    if !matches!(backend.mode(), BackendMode::Embedded) {
-        return Err("ForceIP requires embedded mode (direct network access)".to_string());
-    }
-
     let mac_bytes = parse_mac(&mac)?;
     let ip_addr: Ipv4Addr = ip.parse().map_err(|e| format!("Invalid IP: {e}"))?;
     let subnet_addr: Ipv4Addr = subnet.parse().map_err(|e| format!("Invalid subnet: {e}"))?;
     let gateway_addr: Ipv4Addr = gateway
         .parse()
         .map_err(|e| format!("Invalid gateway: {e}"))?;
-
-    viva_genicam::gige::force_ip(mac_bytes, ip_addr, subnet_addr, gateway_addr, None)
+    backend
+        .force_ip(mac_bytes, ip_addr, subnet_addr, gateway_addr)
         .await
-        .map_err(|e| format!("ForceIP failed: {e}"))?;
-
-    tracing::info!(%ip, %subnet, %gateway, "ForceIP command sent successfully");
-    Ok(())
 }
 
 /// Read the network configuration of the connected GigE camera.

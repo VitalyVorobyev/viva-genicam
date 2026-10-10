@@ -8,5 +8,6 @@ pub mod config;
 pub mod device;
 pub mod nodes;
 pub mod pixel_format;
+pub mod serve;
 pub mod status;
 pub mod xml;

@@ -51,8 +51,9 @@ pub struct FeatureState {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FeatureValue {
-    /// Nothing to read: a category, a command, a write-only feature, or a
-    /// node a command writes through.
+    /// Nothing to read: a category, a command, a write-only feature, a node a
+    /// command writes through, or a feature not implemented or not available
+    /// now.
     None,
     /// An Integer, IntConverter or integer SwissKnife.
     Integer(i64),
@@ -97,8 +98,13 @@ impl NodeMap {
     /// command writes through holds a trigger, not a value; some devices even
     /// treat reading one as significant (issues #112, #135). Both are reported
     /// with [`FeatureValue::None`] and their access mode, so a viewer still
-    /// offers the write or the execute. The declarations decide, not the live
-    /// mode: an unavailable node reports `RO` but stays unreadable.
+    /// offers the write or the execute.
+    ///
+    /// A feature that is not implemented, or not available now, is not read
+    /// either — not its value, its `<pMin>`/`<pMax>` or its entries'
+    /// predicates. GenApi forbids value access on such a node, and cameras
+    /// commonly refuse to read the register behind it. It is reported with
+    /// [`FeatureValue::None`], its static range and its declared entries.
     ///
     /// A predicate that fails to evaluate is logged and treated as satisfied,
     /// so one bad `pIsAvailable` does not hide a feature; a failed value read
@@ -131,7 +137,9 @@ impl NodeMap {
             }
         };
 
-        let has_value = !self.is_write_only(name) && !self.command_targets().contains(name);
+        let usable = is_implemented && is_available;
+        let has_value =
+            usable && !self.is_write_only(name) && !self.command_targets().contains(name);
         let value = if has_value {
             self.read_value(node, io)?
         } else {
@@ -141,10 +149,12 @@ impl NodeMap {
         let (range, unit) = match node {
             Node::Integer(n) => {
                 // `<pMin>`/`<pMax>` defer the bounds to the device, and the
-                // static `min`/`max` are then `i64` sentinels. A failed read
-                // falls back to the static bound.
+                // static `min`/`max` are then `i64` sentinels. A failed read,
+                // or a feature that cannot be used now, falls back to the
+                // static bound.
                 let resolve = |p: Option<&str>, fallback: i64| {
-                    p.and_then(|p| self.get_integer(p, io).ok())
+                    p.filter(|_| usable)
+                        .and_then(|p| self.get_integer(p, io).ok())
                         .unwrap_or(fallback)
                 };
                 let range = ValueRange {
@@ -166,6 +176,7 @@ impl NodeMap {
         };
 
         let enum_entries = match node {
+            Node::Enum(_) if !usable => self.enum_entries(name).ok(),
             Node::Enum(_) => self
                 .available_enum_entries(name, io)
                 .or_else(|e| {
@@ -218,24 +229,39 @@ mod tests {
     use super::{FeatureValue, ValueRange};
     use crate::{AccessMode, GenApiError, NodeMap, RegisterIo};
 
-    /// Register memory; a write lands where a later read finds it.
+    /// Register memory; a write lands where a later read finds it. Reads of
+    /// a `denied` address fail, as a camera refuses to read a register its
+    /// feature has gated off.
     #[derive(Default)]
-    struct MemIo(RefCell<HashMap<u64, Vec<u8>>>);
+    struct MemIo {
+        regs: RefCell<HashMap<u64, Vec<u8>>>,
+        denied: Vec<u64>,
+    }
 
     impl MemIo {
         fn with(regs: &[(u64, u32)]) -> Self {
             let io = Self::default();
             for &(addr, value) in regs {
-                io.0.borrow_mut().insert(addr, value.to_be_bytes().to_vec());
+                io.regs
+                    .borrow_mut()
+                    .insert(addr, value.to_be_bytes().to_vec());
             }
             io
+        }
+
+        fn denying(mut self, addrs: &[u64]) -> Self {
+            self.denied = addrs.to_vec();
+            self
         }
     }
 
     impl RegisterIo for MemIo {
         fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+            if self.denied.contains(&addr) {
+                return Err(GenApiError::Io(format!("read of {addr:#x} denied")));
+            }
             Ok(self
-                .0
+                .regs
                 .borrow()
                 .get(&addr)
                 .cloned()
@@ -243,7 +269,7 @@ mod tests {
         }
 
         fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
-            self.0.borrow_mut().insert(addr, data.to_vec());
+            self.regs.borrow_mut().insert(addr, data.to_vec());
             Ok(())
         }
     }
@@ -318,6 +344,28 @@ mod tests {
                 <Address>0x600</Address>
                 <Length>4</Length>
                 <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="Gain">
+                <pIsAvailable>GainAvailable</pIsAvailable>
+                <Address>0x800</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Min>0</Min>
+                <pMax>GainMax</pMax>
+            </Integer>
+            <IntReg Name="GainMax">
+                <Address>0x804</Address>
+                <Length>4</Length>
+                <AccessMode>RO</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntReg Name="GainAvailable">
+                <Address>0x700</Address>
+                <Length>4</Length>
+                <AccessMode>RO</AccessMode>
                 <Sign>Unsigned</Sign>
                 <Endianess>BigEndian</Endianess>
             </IntReg>
@@ -414,6 +462,28 @@ mod tests {
             state.enum_entries,
             Some(vec!["Mono16".to_string(), "Mono8".to_string()])
         );
+    }
+
+    /// A feature its `pIsAvailable` gates off is reported, not read: cameras
+    /// commonly refuse to read such a register, and a failed read used to fail
+    /// the whole snapshot, so the feature went missing from a bulk read
+    /// instead of showing as unavailable (Codex review of #169).
+    #[test]
+    fn an_unavailable_feature_is_reported_but_not_read() {
+        let gated_off = io().denying(&[0x800, 0x804]);
+        let state = nodemap()
+            .feature_state("Gain", &gated_off)
+            .expect("an unavailable feature still has a state");
+        assert!(!state.is_available);
+        assert_eq!(state.value, FeatureValue::None);
+        assert_eq!(state.access, Some(AccessMode::RO));
+
+        // Negative control: with the gate open the value and `<pMax>` are read.
+        let open = MemIo::with(&[(0x700, 1), (0x800, 6), (0x804, 24)]);
+        let state = nodemap().feature_state("Gain", &open).expect("state");
+        assert!(state.is_available);
+        assert_eq!(state.value, FeatureValue::Integer(6));
+        assert_eq!(state.range.map(|r| r.max), Some(24.0));
     }
 
     #[test]

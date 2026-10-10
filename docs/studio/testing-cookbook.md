@@ -1,8 +1,8 @@
 # Testing Cookbook: Studio against the in-repo fake camera
 
 How to exercise Viva Studio without hardware, using the in-repo fake GigE
-camera (`viva-fake-gige`) behind the real camera service (`viva-service`), or
-the mock service. Nothing outside this repository is needed.
+camera (`viva-fake-gige`) behind the real camera service (`viva-service`).
+Nothing outside this repository is needed.
 
 ## Two modes, and which one a fake can reach
 
@@ -21,34 +21,7 @@ Studio runs in one of two modes, shown by the chip in its header:
 └──────────────────┘                └──────────────────┘                └──────────────────┘
 ```
 
-The **mock service** (`studio/apps/viva-mock-service`) stands in for
-`viva-service` and the camera together. It is a third copy of the Zenoh
-contract and already behind it (backlog ST-02), so prefer the real service.
-
-## Quick Start: Mock Service (no camera needed)
-
-This is the fastest way to develop and test the UI:
-
-```bash
-# Terminal 1: start mock service (from studio/)
-cd studio
-cargo run -p viva-mock-service -- --zenoh-config config/zenoh-local.json5
-
-# Terminal 2: start studio (from the repository root)
-export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-cd studio/apps/viva-studio-tauri
-cargo tauri dev
-```
-
-Both configs are required. The mock service defaults to `zenoh::Config::default()`
-— peer mode with multicast scouting — and Studio without `ZENOH_CONFIG` is not a
-Zenoh client at all, it is in embedded mode talking to real hardware. Pointing
-both at the fixed loopback endpoint is the same topology the real-service recipe
-below uses, and the one `tests/e2e` exercises.
-
-The mock service generates synthetic test patterns (Mono8 gradient, RGB8 color bars) — no real camera required.
-
-## Quick Start: Real Service + Fake Camera
+## Quick Start: Service + Fake Camera
 
 ```bash
 # Terminal 1: start the fake GigE camera (from the repo root)
@@ -121,20 +94,6 @@ All keys prefixed with `genicam/devices/{device_id}/`:
 
 Full specification: [`docs/studio/zenoh-api.md`](zenoh-api.md)
 
-## Differences: Mock Service vs Real Service
-
-| Aspect | Mock Service | Real Service (viva-service) |
-|--------|-------------|-------------------------------|
-| Camera source | Synthetic patterns | `viva-fake-gige` or a real GigE Vision device |
-| Node values | Simulated in-memory | Read from the camera's registers |
-| Frame data | Generated gradients/bars | GVSP frames, reassembled |
-| Node interdependencies | Simulated (MS-12) | The camera's own register dependencies |
-| Pixel formats | Mono8, Mono16, BayerRG8, RGB8 | Whatever the camera supports |
-| Error behavior | Always succeeds | May return transport errors |
-| XML source | Built-in fixture | Fetched from the camera over GVCP |
-| `FeatureState` topics | Not implemented | `nodes/{name}/state`, `nodes/bulk/state` |
-| Device lost | Never | Detected when the device stops announcing |
-
 ## Automated tests
 
 What runs today, and where:
@@ -143,14 +102,23 @@ What runs today, and where:
 |-------|-------|------------|
 | Library integration suites (`fake_camera`, `predicates`, `heartbeat`, …) | repo root, see `CLAUDE.md` → Commands | yes (`ci.yml`) |
 | `viva-service --test fake_camera_e2e` | repo root | yes (`ci.yml`) |
-| Studio workspace unit tests (`viva_xml_model`, `viva_streamer`, mock service) | `studio/`: `cargo test --workspace` | yes (`studio-ci.yml`) |
-| `streamer_e2e`: synthetic frames over Zenoh, BMP over WebSocket | `studio/`: `cargo test -p e2e-tests --test streamer_e2e` | yes (`studio-ci.yml`) |
-| Tauri backend tests, two of them against `viva-fake-gige` | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, on macOS, Ubuntu and Windows (`studio-ci.yml`) |
+| Studio workspace unit tests (`viva_xml_model`, `viva_streamer`) | `studio/`: `cargo test --workspace` | yes (`studio-ci.yml`) |
+| Tauri backend tests, both modes end to end against `viva-fake-gige`: embedded in-process, and remote through `viva-service` run in-process on a shared Zenoh session (`backend/embedded.rs`, `backend/remote.rs`, `main.rs`) | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, on macOS, Ubuntu and Windows (`studio-ci.yml`) |
 | UI tests (vitest): pure functions in node, components on jsdom | `studio/ui/viva-studio-ui`: `bun run test -- --run` | yes (`studio-ci.yml`) |
-| `e2e` and `feature_state` | `studio/tests/e2e` | **no** — `#[ignore]`d, and the harness still targets aravis's `arv-fake-gv-camera-0.8` and a pre-rename service path. Backlog ST-03 replaces them with backend tests on `viva-fake-gige` |
 
 Every fake-camera suite binds UDP 3956, so two of them running at once — for
-example in two worktrees — cross-talk and fail spuriously.
+example in two worktrees — cross-talk and fail spuriously. Within the Tauri
+crate the tests take `backend::embedded::fake_camera::lock()` first.
+
+### Backend tests
+
+`backend::embedded::fake_camera` starts a fake on loopback and checks what the
+camera itself saw (`fake.commands()`, `fake.peek(...)`); `first_frame` reads the
+first BMP from the viewer's WebSocket. A remote-mode test runs the service the
+way its binary does, with `viva_service::serve::serve_device` on the test's own
+Zenoh session, and hands the same session to
+`RemoteBackend::start_with_session`. `state::events::Recorder` stands in for the
+webview and keeps every event the backend sends.
 
 ### UI component tests
 

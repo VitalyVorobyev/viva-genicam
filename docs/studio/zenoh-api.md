@@ -108,12 +108,16 @@ opaque string without `/`).
   ```
 - **Response (JSON):**
   ```json
-  { "ok": true, "error": null }
+  { "ok": true, "error": null, "invalidated": ["ExposureTime"] }
   { "ok": false, "error": "Value out of range" }
   ```
 - **Rust type:** request: `NodeSetRequest`; response: `NodeOpResponse` — both in `viva-zenoh-api`
 - **Semantics:** Synchronous write. On success the service publishes the new value to
-  `nodes/{name}/value`.
+  `nodes/{name}/value` and `nodes/{name}/state`. `invalidated` names the features the
+  write may have changed (`viva_genapi::NodeMap::invalidated_by`): a selector's selected
+  features, converters over the same register, features locked or gated by it. It is
+  omitted when empty. The service names them rather than publishing their state,
+  because there can be hundreds; a client re-reads the ones it shows.
 
 ### `genicam/devices/{device_id}/nodes/{node_name}/execute`
 
@@ -124,7 +128,9 @@ opaque string without `/`).
   { "ok": true, "error": null }
   ```
 - **Rust type:** `NodeOpResponse` in `viva-zenoh-api`
-- **Semantics:** Executes a GenICam Command node.
+- **Semantics:** Executes a GenICam Command node. Like a write, a successful execute
+  names what it invalidated — `UserSetLoad`, for instance, reaches every feature whose
+  register names it as a `<pInvalidator>`.
 
 ### `genicam/devices/{device_id}/nodes/bulk/read`
 
@@ -236,8 +242,9 @@ opaque string without `/`).
 - **Payload:** 16-byte binary [`FrameHeader`] immediately followed by raw pixel data (row-major,
   no further encoding). The header makes every frame self-describing — consumers do not need to
   rely on a prior `image/meta` subscription.
-- **Consumer:** `viva-ws-streamer` subscribes to this key and broadcasts BMP-encoded
-  frames over WebSocket. The Tauri app does **not** subscribe to this key directly.
+- **Consumer:** the Tauri app's remote backend runs `viva_streamer`'s Zenoh source
+  in-process while acquiring: it subscribes to this key and broadcasts BMP-encoded
+  frames to the viewer over a local WebSocket.
 
 #### Binary frame header layout (16 bytes, all fields little-endian)
 
@@ -293,10 +300,10 @@ Codes are **only appended** — never reordered. Unknown codes map to `PixelForm
 - **Mechanism:** `put` on acquisition start; re-published whenever Width, Height, or
   PixelFormat node values change while acquisition is active
 - **Consumers:**
-  - **viva-ws-streamer** (ST-01): subscribes to reconfigure its BMP encoder when
-    dimensions or format change.
-  - **Tauri app** (TB-01): subscribes and stores the latest value in
-    `AcquisitionInner.image_meta`; emits `image-meta-changed` event to the frontend.
+  - **The app's streamer** (`viva_streamer::zenoh_source`): subscribes to reconfigure
+    its BMP encoder when dimensions or format change.
+  - **Tauri app** (remote backend): forwards each update to the frontend as the
+    `image-meta-changed` event.
 - **Payload (JSON):**
   ```json
   { "pixel_format": "Mono8", "width": 1920, "height": 1080, "payload_size": 2073600 }
@@ -403,7 +410,7 @@ sequenceDiagram
     Svc-->>Z: reply {ok:true}
     Svc->>Z: put(acquisition/status) {active:true}
     Svc->>Z: put(image/meta) {pixel_format,width,height,payload_size}
-    App->>Str: spawn viva-ws-streamer
+    App->>Str: start the in-process streamer
     Str->>Z: subscribe(image)
     Str->>Z: subscribe(image/meta)
     Z-->>App: image-meta-changed → UI
@@ -417,18 +424,22 @@ sequenceDiagram
 
 ## Tauri IPC Commands (App Internal)
 
+The same commands in both modes; the backend behind them is embedded or
+remote (`DeviceBackend`, ADR-0024).
+
 | Command | Direction | Description |
 |---------|-----------|-------------|
 | `list_discovered_devices()` | → `Vec<DeviceInfo>` | Current discovered device list |
 | `connect_device(device_id)` | → `ParseXmlResponse` | Connect and fetch XML |
-| `disconnect_device()` | → `()` | Clean up subscriptions |
+| `disconnect_device()` | → `()` | Let go of the device and its subscriptions |
 | `get_connection_state()` | → `ConnectionState` | Current state enum |
-| `write_node(node_name, value)` | → `()` | Write node via Zenoh queryable |
-| `execute_command(node_name)` | → `()` | Execute Command node |
-| `get_node_value(node_name)` | → `NodeValueEntry` | Read from local cache |
-| `start_acquisition()` | → `StreamerInfo` | Start acq + launch streamer sidecar |
-| `stop_acquisition()` | → `()` | Stop acq + kill streamer |
-| `get_acquisition_status()` | → `AcquisitionStatus` | Current acquisition state |
+| `query_feature_state(node_name)` | → `FeatureState` | One feature's live state |
+| `query_feature_states_bulk(names)` | → `Map<string, FeatureState>` | Many features' live state |
+| `read_nodes_bulk(names)` | → `Map<string, NodeValueEntry>` | Legacy projection of the bulk state (ST-29) |
+| `write_node(node_name, value)` | → `FeatureState` | Write, then read back |
+| `execute_command(node_name)` | → `CommandResult` | Execute a Command node |
+| `start_acquisition()` | → `StreamerInfo` | Start acquisition and the viewer's WebSocket |
+| `stop_acquisition()` | → `()` | Stop both |
 
 ## Tauri Events (Backend → Frontend)
 
@@ -437,9 +448,9 @@ sequenceDiagram
 | `device-discovered` | `DeviceInfo` | New device seen on Zenoh |
 | `device-lost` | `{ device_id: string }` | Device announce timed out |
 | `api-version-mismatch` | `{ device_id: string, device_version: number \| null, app_version: number }` | Emitted once per device on first discovery when `api_version` is absent or differs from `API_VERSION`; device is still discovered |
-| `node-value-changed` | `{ node_name, value, access_mode, min?, max?, inc? }` | Live node update; `min`/`max`/`inc` present when service provides runtime constraints |
+| `node-value-changed` | `{ node_name, value, access_mode, state: FeatureState }` | Live feature update, the same shape in both modes; remote mode forwards the service's `nodes/{name}/state` publications |
+| `features-invalidated` | `{ cause: string, names: string[] }` | After a write or command: the features it may have changed (`NodeMap::invalidated_by`, or the service's `NodeOpResponse.invalidated`), for the UI to re-read the ones it shows |
 | `acquisition-status` | `AcquisitionStatus` | Acquisition state change |
 | `connection-state-changed` | `ConnectionState` | Connect/disconnect/error |
 | `image-meta-changed` | `ImageMeta` | Image format or dimension change; emitted by TB-01 on each image/meta Zenoh update |
-| `streamer-status` | `StreamerStatus` | Streamer process lifecycle event: started, crashed (with restart), stopped. Fields: `running: bool`, `error: string \| null`, `restart_count: number`. |
 | `disconnect-reason` | `DisconnectReason` | Emitted when service signals `{ connected: false }`. Fields: `message: string`, `device_id: string`. Used to display a reconnect prompt. |

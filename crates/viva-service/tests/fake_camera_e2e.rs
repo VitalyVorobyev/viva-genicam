@@ -10,11 +10,8 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use viva_service::acquisition;
 use viva_service::device::{DeviceHandle, DeviceOps};
-use viva_service::nodes;
-use viva_service::status;
-use viva_service::xml;
+use viva_service::serve::serve_device;
 
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use viva_fake_gige::{FakeCamera, FakeCameraBuilder, GvcpCommand};
@@ -91,47 +88,6 @@ fn loopback_iface() -> viva_genicam::gige::nic::Iface {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Spawn the same set of per-device tasks that viva-service normally runs.
-async fn spawn_service_tasks(
-    session: Arc<zenoh::Session>,
-    device: Arc<DeviceHandle>,
-    shutdown: watch::Receiver<bool>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    let device_id = device.device_id().to_string();
-
-    status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, device.as_ref()).await;
-
-    vec![
-        tokio::spawn(xml::run(
-            session.clone(),
-            device_id.clone(),
-            device.raw_xml().to_string(),
-            shutdown.clone(),
-        )),
-        tokio::spawn(nodes::run_set_queryable(
-            session.clone(),
-            device.clone(),
-            shutdown.clone(),
-        )),
-        tokio::spawn(nodes::run_execute_queryable(
-            session.clone(),
-            device.clone(),
-            shutdown.clone(),
-        )),
-        tokio::spawn(nodes::run_bulk_read_queryable(
-            session.clone(),
-            device.clone(),
-            shutdown.clone(),
-        )),
-        tokio::spawn(acquisition::run(
-            session.clone(),
-            device.clone(),
-            shutdown.clone(),
-        )),
-    ]
-}
-
 /// Send an acquisition control request and return the response.
 async fn send_acq_command(
     session: &zenoh::Session,
@@ -187,7 +143,7 @@ async fn e2e_acquisition_roundtrip() {
 
     // 4. Spawn service tasks (replicates main.rs logic).
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let tasks = spawn_service_tasks(session.clone(), handle.clone(), shutdown_rx).await;
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
 
     // Give queryables a moment to register.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -273,7 +229,7 @@ async fn e2e_double_start_rejected() {
     );
     let device_id = handle.device_id().to_string();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let tasks = spawn_service_tasks(session.clone(), handle.clone(), shutdown_rx).await;
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // First start should succeed.
@@ -316,7 +272,7 @@ async fn e2e_sustained_streaming() {
     );
     let device_id = handle.device_id().to_string();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let tasks = spawn_service_tasks(session.clone(), handle.clone(), shutdown_rx).await;
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let image_key = keys::image(&device_id);
@@ -487,6 +443,69 @@ async fn e2e_feature_state_reflects_predicates() {
     assert_eq!(entries, vec!["RGB8".to_string()]);
 }
 
+/// A write over Zenoh names the features it may have changed, so a client can
+/// re-read the ones it shows (ST-30). On the fake, `ExposureAuto` locks
+/// `ExposureTime` through `pIsLocked`, so writing it invalidates
+/// `ExposureTime`; writing `Width` does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_write_reply_names_what_it_invalidated() {
+    let _cam = TestCamera::start().await;
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let set = |name: &'static str, value: serde_json::Value| {
+        let session = session.clone();
+        let key = keys::node_set(&device_id, name);
+        async move {
+            let payload = serde_json::to_vec(&viva_zenoh_api::NodeSetRequest { value }).unwrap();
+            let replies = session
+                .get(&key)
+                .payload(payload)
+                .timeout(Duration::from_secs(5))
+                .await
+                .unwrap();
+            let reply = replies.recv_async().await.expect("no reply");
+            let sample = reply.result().expect("query error");
+            serde_json::from_slice::<NodeOpResponse>(&sample.payload().to_bytes()).unwrap()
+        }
+    };
+
+    let resp = set("ExposureAuto", serde_json::json!("Continuous")).await;
+    assert!(resp.ok, "{:?}", resp.error);
+    assert!(
+        resp.invalidated.iter().any(|n| n == "ExposureTime"),
+        "{:?}",
+        resp.invalidated
+    );
+    let resp = set("Width", serde_json::json!(320)).await;
+    assert!(resp.ok, "{:?}", resp.error);
+    assert!(
+        !resp.invalidated.iter().any(|n| n == "ExposureTime"),
+        "{:?}",
+        resp.invalidated
+    );
+
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+}
+
 /// A feature snapshot of every node the fake declares succeeds, write-only and
 /// command nodes included, and none of them is read on the wire (SVC-08,
 /// ST-21).
@@ -596,7 +615,7 @@ async fn e2e_event_blocks_are_published_on_their_own_topic() {
     );
     let device_id = handle.device_id().to_string();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let tasks = spawn_service_tasks(session.clone(), handle.clone(), shutdown_rx).await;
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let image_sub = session

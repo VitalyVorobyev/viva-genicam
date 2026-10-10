@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, ImageMeta};
+use viva_zenoh_api::DeviceAnnounce;
 
 /// Payload for the `disconnect-reason` Tauri event emitted on unexpected loss of device.
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +111,19 @@ pub struct NodeValueEntry {
     pub inc: Option<f64>,
 }
 
+impl From<&viva_zenoh_api::FeatureState> for NodeValueEntry {
+    fn from(state: &viva_zenoh_api::FeatureState) -> Self {
+        let update = state.to_node_value_update();
+        Self {
+            value: update.value,
+            access_mode: update.access_mode,
+            min: update.min,
+            max: update.max,
+            inc: update.inc,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamerInfo {
     pub ws_url: String,
@@ -174,78 +186,20 @@ impl DeviceRegistry {
     }
 }
 
-// ── Acquisition inner state ──────────────────────────────────────────────────
-
-pub struct AcquisitionInner {
-    /// Channel sender used to signal embedded streamer tasks to shut down.
-    pub shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
-    /// Handles to the embedded streamer tokio tasks (Zenoh source + WS server).
-    pub task_handles: Vec<tauri::async_runtime::JoinHandle<()>>,
-    pub ws_url: Option<String>,
-    pub status: AcquisitionStatus,
-    pub width: u32,
-    pub height: u32,
-    pub image_meta: Option<ImageMeta>,
-}
-
-impl AcquisitionInner {
-    pub fn new() -> Self {
-        Self {
-            shutdown_tx: None,
-            task_handles: Vec::new(),
-            ws_url: None,
-            status: AcquisitionStatus {
-                active: false,
-                fps: None,
-                dropped: 0,
-            },
-            width: 640,
-            height: 480,
-            image_meta: None,
-        }
-    }
-}
-
-// ── Shared Zenoh application state ──────────────────────────────────────────
-
-/// All Zenoh-related state for the Tauri backend.
-///
-/// Wrapped in `Arc` so it can be cloned into async background tasks while
-/// Tauri holds the canonical reference via `.manage()`.
-pub struct ZenohState {
-    pub session: tokio::sync::Mutex<Option<Arc<zenoh::Session>>>,
-    pub registry: tokio::sync::Mutex<DeviceRegistry>,
-    pub connection: tokio::sync::Mutex<ConnectionState>,
-    pub node_cache: tokio::sync::RwLock<HashMap<String, NodeValueEntry>>,
-    pub acquisition: tokio::sync::Mutex<AcquisitionInner>,
-    /// Handles for per-connection subscriber tasks; aborted on disconnect.
-    pub sub_tasks: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
-}
-
-impl ZenohState {
-    pub fn new() -> Self {
-        Self {
-            session: tokio::sync::Mutex::new(None),
-            registry: tokio::sync::Mutex::new(DeviceRegistry::default()),
-            connection: tokio::sync::Mutex::new(ConnectionState::Disconnected),
-            node_cache: tokio::sync::RwLock::new(HashMap::new()),
-            acquisition: tokio::sync::Mutex::new(AcquisitionInner::new()),
-            sub_tasks: tokio::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    pub async fn get_session(&self) -> Result<Arc<zenoh::Session>, String> {
-        self.session
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| "Zenoh session not initialized".to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnect_reason_serializes_fields() {
+        let r = DisconnectReason {
+            message: "USB link lost".to_string(),
+            device_id: "cam0".to_string(),
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["message"], "USB link lost");
+        assert_eq!(json["device_id"], "cam0");
+    }
 
     #[test]
     fn from_announce_carries_the_identity_fields_to_the_ui() {

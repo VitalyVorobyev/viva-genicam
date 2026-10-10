@@ -1,7 +1,7 @@
 /**
  * Pixel sampling utilities for the Image Viewer crosshair inspector.
  *
- * After ST-02 the genicam-ws-streamer delivers proper multi-format BMP frames:
+ * The app's streamer delivers multi-format BMP frames:
  *
  * - Mono8, Mono10, Mono12, Mono16 → 8bpp grayscale BMP (Mono10-16 downscaled)
  * - BayerRG/GR/BG/GB 8/10/12/16 → 24bpp RGB BMP (bilinear debayered)
@@ -22,7 +22,7 @@ export type PixelSample =
 /**
  * Sample a single pixel from a BMP-encoded frame buffer at image-space coordinates.
  *
- * The buffer must be a complete BMP file as received from genicam-ws-streamer:
+ * The buffer must be a complete BMP file as received from the app's streamer:
  * - 8bpp BMP: returns `{ kind: "mono", value: 0–255 }`
  * - 24bpp BMP: returns `{ kind: "rgb", r, g, b }` (channels decoded from BGR)
  *

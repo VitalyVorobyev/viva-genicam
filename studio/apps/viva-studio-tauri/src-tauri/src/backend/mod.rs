@@ -2,20 +2,21 @@
 //!
 //! The app supports two operating modes:
 //! - **Embedded** (default): direct GigE/USB3 camera access via `viva-genicam`.
-//! - **Remote**: camera access through a separate service process via Zenoh.
+//! - **Remote**: camera access through `viva-service` over Zenoh.
 //!
-//! The [`DeviceBackend`] trait defines the interface that both modes implement,
-//! allowing Tauri commands to delegate without knowing the transport.
+//! Both implement [`DeviceBackend`], and the Tauri commands call only the
+//! trait: no command asks which mode it is in (ADR-0024, backlog ST-27).
 
 pub mod embedded;
 pub mod remote;
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 
 use async_trait::async_trait;
 use viva_zenoh_api::FeatureState;
 
-use crate::state::device_state::{DeviceInfo, NodeValueEntry, StreamerInfo};
+use crate::state::device_state::{DeviceInfo, StreamerInfo};
 
 /// Which backend mode the application is currently using.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -46,82 +47,44 @@ pub struct NetworkConfig {
     pub mac: String,
 }
 
-/// Trait abstracting device communication for both embedded and remote modes.
+/// Device communication, implemented by both modes.
 #[async_trait]
 pub trait DeviceBackend: Send + Sync + 'static {
     /// Return the current backend mode.
     fn mode(&self) -> BackendMode;
 
-    /// Discover available cameras on the network / USB bus.
+    /// The cameras found so far.
     async fn discover(&self) -> Vec<DeviceInfo>;
 
     /// Connect to a device by the `id` its discovery reported — for GigE the
     /// MAC-derived `viva_zenoh_api::gige_device_id`, in both modes.
     async fn connect(&self, device_id: &str) -> Result<ConnectResult, String>;
 
-    /// Disconnect from the currently connected device.
-    async fn disconnect(&self, device_id: &str) -> Result<(), String>;
+    /// Let go of the connected device, if any.
+    async fn disconnect(&self) -> Result<(), String>;
 
-    /// Read a single feature value from the connected camera.
-    ///
-    /// Legacy projection of [`get_feature_state`] into the older shape kept
-    /// for compatibility during the [`FeatureState`] migration. New callers
-    /// should prefer `get_feature_state`.
-    async fn get_feature(&self, name: &str) -> Result<NodeValueEntry, String>;
+    /// The live state of a feature: value, access mode, kind, range,
+    /// accepted enum entries, unit, and implementation/availability flags —
+    /// computed by `viva-genapi` in both modes (ST-26).
+    async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String>;
 
-    /// Read the full live state of a feature: value, access mode, kind, range,
-    /// available enum entries, unit, and implementation/availability flags.
-    ///
-    /// This is the authoritative snapshot the UI consumes as its single source
-    /// of truth. The default implementation projects from [`get_feature`] with
-    /// `kind: "Unknown"` and no range / enum data — good enough for remote
-    /// mode stubs during migration. Embedded backends override this to perform
-    /// typed reads and return full introspection.
-    async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
-        let entry = self.get_feature(name).await?;
-        let numeric = match (entry.min, entry.max) {
-            (Some(min), Some(max)) => Some(viva_zenoh_api::NumericRange {
-                min,
-                max,
-                inc: entry.inc,
-            }),
-            _ => None,
-        };
-        Ok(FeatureState {
-            value: entry.value,
-            access_mode: entry.access_mode,
-            kind: "Unknown".to_string(),
-            is_implemented: true,
-            is_available: true,
-            numeric,
-            enum_available: None,
-            unit: None,
-        })
-    }
-
-    /// Write a feature value on the connected camera.
-    async fn set_feature(&self, name: &str, value: &serde_json::Value) -> Result<(), String>;
-
-    /// Execute a command feature on the connected camera.
-    async fn exec_command(&self, name: &str) -> Result<(), String>;
-
-    /// Read multiple feature values in a single round-trip.
-    async fn bulk_read(&self, names: &[String]) -> Result<HashMap<String, NodeValueEntry>, String>;
-
-    /// Bulk variant of [`get_feature_state`]. Default implementation loops; an
-    /// embedded backend can override for a single camera-lock acquisition.
+    /// [`DeviceBackend::get_feature_state`] for many features in one
+    /// round-trip. A feature whose state cannot be read is left out.
     async fn bulk_feature_state(
         &self,
         names: &[String],
-    ) -> Result<HashMap<String, FeatureState>, String> {
-        let mut out = HashMap::with_capacity(names.len());
-        for name in names {
-            if let Ok(state) = self.get_feature_state(name).await {
-                out.insert(name.clone(), state);
-            }
-        }
-        Ok(out)
-    }
+    ) -> Result<HashMap<String, FeatureState>, String>;
+
+    /// Write a feature, and return the features the write may have changed
+    /// (`NodeMap::invalidated_by`).
+    async fn set_feature(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<String>, String>;
+
+    /// Execute a command, and return the features it may have changed.
+    async fn exec_command(&self, name: &str) -> Result<Vec<String>, String>;
 
     /// Start image acquisition and return the WebSocket URL for the stream.
     async fn start_acquisition(&self) -> Result<StreamerInfo, String>;
@@ -129,11 +92,22 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// Stop image acquisition.
     async fn stop_acquisition(&self) -> Result<(), String>;
 
-    /// Return the raw GenICam XML of the connected device.
-    #[allow(dead_code)]
-    async fn get_xml(&self) -> Result<String, String>;
+    /// Leave the camera free before the app exits; see `on_run_event` in
+    /// `main.rs`.
+    async fn shutdown(&self) {}
 
-    // ── IP Configuration (GigE only) ────────────────────────────────────────
+    // ── IP configuration (GigE, embedded mode) ──────────────────────────────
+
+    /// Broadcast FORCEIP: give the camera with `mac` a temporary address.
+    async fn force_ip(
+        &self,
+        _mac: [u8; 6],
+        _ip: Ipv4Addr,
+        _subnet: Ipv4Addr,
+        _gateway: Ipv4Addr,
+    ) -> Result<(), String> {
+        Err("ForceIP requires embedded mode (direct network access)".to_string())
+    }
 
     /// Read the network configuration of the connected camera.
     async fn get_network_config(&self) -> Result<NetworkConfig, String> {
@@ -143,9 +117,9 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// Set persistent IP configuration on the connected camera.
     async fn set_persistent_ip(
         &self,
-        _ip: std::net::Ipv4Addr,
-        _subnet: std::net::Ipv4Addr,
-        _gateway: std::net::Ipv4Addr,
+        _ip: Ipv4Addr,
+        _subnet: Ipv4Addr,
+        _gateway: Ipv4Addr,
     ) -> Result<(), String> {
         Err("Persistent IP not supported in this mode".to_string())
     }

@@ -56,12 +56,13 @@ studio/
     viva_streamer/    Frame -> BMP encoding + WebSocket serving
   apps/
     viva-studio-tauri/  The desktop app (Tauri v2 shell + Rust backend)
-    viva-ws-streamer/   Standalone Zenoh -> BMP -> WebSocket bridge
-    viva-mock-service/  Fake service for UI work without cameras
   ui/
     viva-studio-ui/   React 19 + Vite front end
-  tests/e2e/          End-to-end tests
 ```
+
+Without a camera, run the app against `viva-fake-gige` through `viva-service`
+(`docs/studio/testing-cookbook.md`). The backend's end-to-end tests drive both
+modes against the same fake, in-process.
 
 `apps/viva-studio-tauri/src-tauri` is **excluded** from the studio Cargo
 workspace — it is built with `cargo tauri`, not `cargo build --workspace`. It
@@ -174,24 +175,6 @@ println!("root category: {}", graph.root_category);
 This crate is Studio's own lightweight view of a GenApi document. For a full
 NodeMap with evaluation, addressing and access predicates, use `viva-genapi`
 from the main workspace — `NullIo` makes it work offline too.
-
-## WebSocket streamer
-
-`viva-ws-streamer` is a standalone process that subscribes to a Zenoh key
-carrying tightly packed **Mono8** frames (`width * height` bytes), encodes each
-as an 8-bit BMP, and broadcasts the latest one to every WebSocket client
-(latest-only, bounded memory).
-
-```sh
-cargo run -p viva-ws-streamer -- \
-  --image-key quiss/sensors/svcA/devices/cam0/image \
-  --width 640 --height 480
-```
-
-Options: `--bind` (default `127.0.0.1:8081`) and `--path` (default `/ws`).
-
-The Tauri app does not use this binary — it embeds `viva_streamer` directly,
-which handles the camera's actual pixel format rather than assuming Mono8.
 
 ---
 

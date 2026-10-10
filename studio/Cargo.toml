@@ -4,9 +4,6 @@ resolver = "3"
 members = [
   "crates/viva_xml_model",
   "crates/viva_streamer",
-  "apps/viva-ws-streamer",
-  "apps/viva-mock-service",
-  "tests/e2e",
 ]
 
 # Keep Tauri app(s) out of the Rust workspace. They are built via `cargo tauri`.

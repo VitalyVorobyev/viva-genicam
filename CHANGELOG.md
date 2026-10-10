@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PixelFormat` up to 539, so a viewer should re-read the ones it shows rather
   than all of them (backlog ST-30).
 
+- `NodeOpResponse` carries `invalidated`: after a successful write or execute,
+  `viva-service` and `viva-service-u3v` name the features it may have changed
+  (`DeviceOps::invalidated_by`, from `NodeMap::invalidated_by`), so a client
+  can re-read the ones it shows. `NodeOpResponse::ok()`/`err()` construct it.
+- `keys::node_state_wildcard` subscribes to every `nodes/{name}/state`
+  publication of a device.
+- `viva_service::serve::serve_device` starts the task set the service runs for
+  one camera, and `publish_announce` announces it. The binary and the tests
+  share them; the service's own end-to-end test used to carry a copy that
+  lacked the two feature-state queryables.
+
 ### Changed
 
 - `NodeMap::command_targets` returns `&HashSet<String>`, computed once when
@@ -74,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `effective_access_mode`, `viva-service`'s `FeatureState`, Studio and
   Python's node `access` build on it. `Node::access_mode` cannot see the chain
   and still answers for the node alone.
+
+- `NodeMap::feature_state` no longer reads a feature that is not implemented
+  or not available now — neither its value, its `<pMin>`/`<pMax>` nor its
+  entries' predicates. GenApi forbids value access on such a node and cameras
+  commonly refuse the read, which failed the whole snapshot, so a bulk read
+  left the feature out instead of reporting it unavailable (Codex review of
+  #169).
 
 ### Viva Studio and documentation — not part of any published crate
 
@@ -127,6 +145,31 @@ section changes the library.
 - **Studio writes features that are converters** (see Fixed above for the
   library side): the UI model and the write pre-flight took a converter's
   access mode as a fixed `RO` and refused the write before it was sent.
+- **Remote mode works through the same backend as embedded mode.** The commands
+  used to branch on the mode, and remote mode lagged a contract version behind:
+  it answered feature queries from a cache the connect-time read never filled,
+  reporting every feature as `kind: "Unknown"` with no enumeration entries, and
+  after a write it slept 50 ms and read that cache again. `RemoteBackend` now
+  implements `DeviceBackend` like `EmbeddedBackend` does, and queries and
+  follows the service's `FeatureState` topics, so both modes show the same
+  `viva-genapi` state (ST-27). Disconnecting in remote mode now stops an
+  acquisition the app started.
+- **Writes and commands say what they invalidated.** After a write or command
+  both modes emit `features-invalidated` with the features it may have changed
+  (ST-30, backend half); the UI's re-read is the remaining half.
+- **Exit no longer waits on a stuck release.** The exit hook awaited the
+  camera's release in place, so a release blocked on the camera mutex or in
+  device I/O kept the app open past its 3-second limit (Codex review of #168).
+  The release now runs on its own task.
+- **Backend tests run both modes end to end** against `viva-fake-gige`:
+  embedded in-process, and remote through `viva-service` run in-process — the
+  task set its binary runs — on a shared Zenoh session. They cover discovery,
+  feature state, writes, invalidation, frames on the viewer's WebSocket,
+  disconnect and exit (ST-03).
+- **Gone:** `viva-mock-service` (a third copy of the Zenoh contract, behind it,
+  ST-02), `viva-ws-streamer` (unused; the app embeds `viva_streamer`), the
+  `studio/tests/e2e` crate that all but one test skipped, the `embedded_*` and
+  `get_node_value`/`get_acquisition_status` commands, which nothing called.
 - **Embedded mode reports what the camera permits now.** Its feature state was
   a copy of `viva-service`'s that had fallen behind: it reported every feature
   available and implemented, ignored `pIsLocked`, and offered every

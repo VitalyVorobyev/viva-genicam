@@ -1,20 +1,23 @@
+//! Feature commands, the same in both modes.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::State;
 use tokio::sync::RwLock;
 
+use crate::backend::BackendState;
 use crate::error::HumanizeExt;
 use crate::state::ModelState;
-use crate::state::device_state::{ConnectionState, NodeValueEntry, ZenohState};
+use crate::state::device_state::NodeValueEntry;
+use crate::state::events::Events;
 use viva_xml_model::{UiNode, UiNodeKind};
-use viva_zenoh_api::{
-    BulkReadRequest, BulkReadResponse, CommandResult, FeatureState, NodeOpResponse, NodeSetRequest,
-};
+use viva_zenoh_api::{CommandResult, FeatureState};
 
 /// Nodes whose state is likely to change as a side effect of executing the
-/// given command. Kept deliberately small — each entry means one extra read
-/// after a command succeeds.
+/// given command, beyond what the XML declares (`NodeMap::invalidated_by`).
+/// Kept deliberately small — each entry means one extra read after a command
+/// succeeds.
 fn nodes_affected_by_command(command: &str) -> &'static [&'static str] {
     match command {
         // Acquisition lifecycle commands flip the status / running flags and
@@ -26,129 +29,53 @@ fn nodes_affected_by_command(command: &str) -> &'static [&'static str] {
     }
 }
 
-/// Emit a `node-value-changed` event carrying the legacy flat fields plus a
-/// rich `state: FeatureState` member. Old consumers reading `value` /
-/// `access_mode` keep working; new consumers read `state`.
-fn emit_node_state(app: &AppHandle, node_name: &str, state: &FeatureState) {
-    let _ = app.emit(
-        "node-value-changed",
-        serde_json::json!({
-            "node_name": node_name,
-            "value": state.value,
-            "access_mode": state.access_mode,
-            "state": state,
-        }),
-    );
-}
-
-#[tauri::command]
-pub async fn get_node_value(
-    node_name: String,
-    zenoh: State<'_, Arc<ZenohState>>,
-    backend: State<'_, crate::backend::BackendState>,
-) -> Result<NodeValueEntry, String> {
-    if matches!(backend.mode(), crate::backend::BackendMode::Embedded) {
-        return backend.get_feature(&node_name).await;
-    }
-    zenoh
-        .node_cache
-        .read()
-        .await
-        .get(&node_name)
-        .cloned()
-        .ok_or_else(|| format!("Node '{node_name}' not in cache"))
-        .humanize()
-}
-
 /// Read the full live state of a node: value + access mode + kind + resolvable
 /// range + available enum entries + unit. This is the authoritative snapshot
 /// the Feature Browser UI consumes as its single source of truth.
-///
-/// In embedded mode the state is produced from a typed read against the
-/// connected camera. In remote mode the state is projected from the Zenoh
-/// `node_cache` until the service is upgraded to publish `FeatureState`
-/// directly (tracked by Step 4 of the migration plan).
 #[tauri::command]
 pub async fn query_feature_state(
     node_name: String,
-    zenoh: State<'_, Arc<ZenohState>>,
-    backend: State<'_, crate::backend::BackendState>,
+    backend: State<'_, BackendState>,
 ) -> Result<FeatureState, String> {
-    if matches!(backend.mode(), crate::backend::BackendMode::Embedded) {
-        return backend.get_feature_state(&node_name).await;
-    }
-    let entry = zenoh
-        .node_cache
-        .read()
-        .await
-        .get(&node_name)
-        .cloned()
-        .ok_or_else(|| format!("Node '{node_name}' not in cache"))
-        .humanize()?;
-    Ok(node_value_entry_to_feature_state(&entry))
+    backend.get_feature_state(&node_name).await.humanize()
 }
 
-/// Bulk variant of [`query_feature_state`]. Names not found in the cache /
-/// readable on the camera are silently omitted.
+/// Bulk variant of [`query_feature_state`]. Features whose state cannot be
+/// read are left out.
 #[tauri::command]
 pub async fn query_feature_states_bulk(
     names: Vec<String>,
-    zenoh: State<'_, Arc<ZenohState>>,
-    backend: State<'_, crate::backend::BackendState>,
+    backend: State<'_, BackendState>,
 ) -> Result<HashMap<String, FeatureState>, String> {
-    if matches!(backend.mode(), crate::backend::BackendMode::Embedded) {
-        return backend.bulk_feature_state(&names).await;
-    }
-    let cache = zenoh.node_cache.read().await;
-    let mut out = HashMap::with_capacity(names.len());
-    for name in &names {
-        if let Some(entry) = cache.get(name) {
-            out.insert(name.clone(), node_value_entry_to_feature_state(entry));
-        }
-    }
-    Ok(out)
+    backend.bulk_feature_state(&names).await.humanize()
 }
 
-/// Projection used when the remote service has not yet been upgraded to
-/// publish [`FeatureState`] directly. Carries the value, access mode, and any
-/// runtime range hints that did make it onto the wire (ZA-06), but leaves
-/// `kind` as `"Unknown"` and `enum_available` as `None` — the UI treats those
-/// as "fall through to static XML". Remove once Step 4 upgrades the wire.
-fn node_value_entry_to_feature_state(entry: &NodeValueEntry) -> FeatureState {
-    let numeric = match (entry.min, entry.max) {
-        (Some(min), Some(max)) => Some(viva_zenoh_api::NumericRange {
-            min,
-            max,
-            inc: entry.inc,
-        }),
-        _ => None,
-    };
-    FeatureState {
-        value: entry.value.clone(),
-        access_mode: entry.access_mode.clone(),
-        kind: "Unknown".to_string(),
-        is_implemented: true,
-        is_available: true,
-        numeric,
-        enum_available: None,
-        unit: None,
-    }
+/// The legacy value-and-range projection of [`query_feature_states_bulk`],
+/// which the UI's connect-time read still consumes (backlog ST-29).
+#[tauri::command]
+pub async fn read_nodes_bulk(
+    names: Vec<String>,
+    backend: State<'_, BackendState>,
+) -> Result<HashMap<String, NodeValueEntry>, String> {
+    let states = backend.bulk_feature_state(&names).await.humanize()?;
+    Ok(states
+        .into_iter()
+        .map(|(name, state)| (name, NodeValueEntry::from(&state)))
+        .collect())
 }
 
-/// Validate that `value` is a legal write for `node`, using runtime constraints from `live`
-/// (ZA-06) with fallback to static XML constraints.
+/// Validate that `value` is a legal write for `node`, against the XML's
+/// declarations: kind, access along the `<pValue>` chain, static range and
+/// enumeration entries.
+///
+/// What depends on the device's current state — locks, availability, a
+/// `<pMin>`/`<pMax>` read from a register — is checked where the write is
+/// carried out: by `viva-genapi` in embedded mode, by the service in remote
+/// mode. Both refuse with an error that names the cause.
 ///
 /// Returns `Ok(())` when the write is valid, or an `Err` with a human-readable message.
-fn validate_node_write(
-    node: &UiNode,
-    live: Option<&NodeValueEntry>,
-    value: &serde_json::Value,
-) -> Result<(), String> {
-    // Access-mode check: prefer live cache, fall back to static XML declaration.
-    let access_mode = live
-        .map(|e| e.access_mode.as_str())
-        .or(node.access_mode.as_deref())
-        .unwrap_or("RW");
+fn validate_node_write(node: &UiNode, value: &serde_json::Value) -> Result<(), String> {
+    let access_mode = node.access_mode.as_deref().unwrap_or("RW");
 
     if access_mode == "RO" || access_mode == "NA" {
         return Err(format!(
@@ -162,30 +89,24 @@ fn validate_node_write(
             let n = value
                 .as_f64()
                 .ok_or_else(|| format!("Node '{}' requires an integer value", node.name))?;
-            let min = live
-                .and_then(|e| e.min)
-                .or_else(|| node.constraints.as_ref().and_then(|c| c.min));
-            let max = live
-                .and_then(|e| e.max)
-                .or_else(|| node.constraints.as_ref().and_then(|c| c.max));
-            let inc = live
-                .and_then(|e| e.inc)
-                .or_else(|| node.constraints.as_ref().and_then(|c| c.inc));
+            let c = node.constraints.as_ref();
+            let (min, max, inc) = (
+                c.and_then(|c| c.min),
+                c.and_then(|c| c.max),
+                c.and_then(|c| c.inc),
+            );
             validate_numeric_constraints(min, max, inc, n, &node.name)?;
         }
         UiNodeKind::Float => {
             let n = value
                 .as_f64()
                 .ok_or_else(|| format!("Node '{}' requires a numeric value", node.name))?;
-            let min = live
-                .and_then(|e| e.min)
-                .or_else(|| node.constraints.as_ref().and_then(|c| c.min));
-            let max = live
-                .and_then(|e| e.max)
-                .or_else(|| node.constraints.as_ref().and_then(|c| c.max));
-            let inc = live
-                .and_then(|e| e.inc)
-                .or_else(|| node.constraints.as_ref().and_then(|c| c.inc));
+            let c = node.constraints.as_ref();
+            let (min, max, inc) = (
+                c.and_then(|c| c.min),
+                c.and_then(|c| c.max),
+                c.and_then(|c| c.inc),
+            );
             validate_numeric_constraints(min, max, inc, n, &node.name)?;
         }
         UiNodeKind::Boolean => {
@@ -268,242 +189,84 @@ fn validate_numeric_constraints(
 
 /// Write a value and return the authoritative post-write state.
 ///
-/// After a successful write, the backend re-reads the node to confirm what
-/// the device actually accepted (devices routinely clamp or round values) and
-/// returns the resulting [`FeatureState`]. The UI reconciles its draft to
-/// `result.value` so the form always mirrors device truth — this is what
-/// fixes the "enum form resets to (unset) after apply" bug.
+/// After a successful write the node is read back, because devices routinely
+/// clamp or round values, and the UI reconciles its draft to what the device
+/// accepted. The features the write may have changed are announced in a
+/// `features-invalidated` event, for the UI to re-read the ones it shows.
 #[tauri::command]
 pub async fn write_node(
     node_name: String,
     value: serde_json::Value,
-    zenoh: State<'_, Arc<ZenohState>>,
     model: State<'_, RwLock<ModelState>>,
-    backend: State<'_, crate::backend::BackendState>,
-    app: AppHandle,
+    backend: State<'_, BackendState>,
+    events: State<'_, Arc<Events>>,
 ) -> Result<FeatureState, String> {
-    // Pre-flight: validate against UiGraph constraints when a model is loaded.
-    // If no model is present (e.g., pure Zenoh mode without XML) we skip silently.
+    // Pre-flight against the XML, when a model is loaded.
     {
         let model_guard = model.read().await;
-        if let Some(graph) = &model_guard.graph
-            && let Some(node) = graph.nodes_by_name.get(&node_name)
+        if let Some(node) = model_guard
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.nodes_by_name.get(&node_name))
         {
-            let cache = zenoh.node_cache.read().await;
-            let live = cache.get(&node_name);
-            validate_node_write(node, live, &value)?;
+            validate_node_write(node, &value)?;
         }
     }
 
-    if matches!(backend.mode(), crate::backend::BackendMode::Embedded) {
-        backend.set_feature(&node_name, &value).await?;
-        // Re-read the full state from the camera and notify the UI.
-        let state = backend.get_feature_state(&node_name).await?;
-        emit_node_state(&app, &node_name, &state);
-        return Ok(state);
-    }
-
-    let session = zenoh.get_session().await.humanize()?;
-    let device_id = connected_device_id(&zenoh).await.humanize()?;
-
-    let key = viva_zenoh_api::keys::node_set(&device_id, &node_name);
-    let payload = serde_json::to_vec(&NodeSetRequest { value }).map_err(|e| e.to_string())?;
-
-    let replies = session
-        .get(&key)
-        .payload(payload)
-        .timeout(std::time::Duration::from_secs(5))
-        .await
-        .map_err(|e| format!("Zenoh error: {e}"))
-        .humanize()?;
-
-    match replies.recv_async().await {
-        Ok(reply) => match reply.result() {
-            Ok(sample) => {
-                let bytes = sample.payload().to_bytes();
-                let resp: NodeOpResponse =
-                    serde_json::from_slice(&bytes).map_err(|e| format!("Parse error: {e}"))?;
-                if !resp.ok {
-                    return Err(resp.error.unwrap_or_else(|| "Write failed".to_string()))
-                        .humanize();
-                }
-                // Remote service has not yet been upgraded to return
-                // FeatureState on write (Step 4). Project the refreshed
-                // node_cache entry — the `value/subscriber` task updates
-                // this after the set — with a short wait for propagation.
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let entry = zenoh
-                    .node_cache
-                    .read()
-                    .await
-                    .get(&node_name)
-                    .cloned()
-                    .ok_or_else(|| format!("Node '{node_name}' not in cache after write"))
-                    .humanize()?;
-                Ok(node_value_entry_to_feature_state(&entry))
-            }
-            Err(e) => Err(format!("Reply error: {e}")).humanize(),
-        },
-        Err(_) => Err(format!("No reply for write_node '{node_name}' (timeout)")).humanize(),
-    }
+    let invalidated = backend.set_feature(&node_name, &value).await.humanize()?;
+    let state = backend.get_feature_state(&node_name).await.humanize()?;
+    events.node_state(&node_name, &state);
+    events.invalidated(&node_name, &invalidated);
+    Ok(state)
 }
 
 /// Execute a Command node and return a [`CommandResult`] including the
 /// refreshed state of any nodes whose value is likely to have changed as a
 /// side effect (e.g. `AcquisitionStatus` after `AcquisitionStart`). The UI
 /// shows a toast based on `ok`/`error` and updates its live state cache from
-/// `affected_states` — this is what makes the AcquisitionStart button visibly
-/// "do something".
+/// `affected_states`.
 #[tauri::command]
 pub async fn execute_command(
     node_name: String,
-    zenoh: State<'_, Arc<ZenohState>>,
-    backend: State<'_, crate::backend::BackendState>,
-    app: AppHandle,
+    backend: State<'_, BackendState>,
+    events: State<'_, Arc<Events>>,
 ) -> Result<CommandResult, String> {
-    if matches!(backend.mode(), crate::backend::BackendMode::Embedded) {
-        match backend.exec_command(&node_name).await {
-            Ok(()) => {
-                // Re-read the known side-effect nodes and emit per-node events
-                // so the UI updates without a manual refresh.
-                let affected_names: Vec<String> = nodes_affected_by_command(&node_name)
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                let mut affected_states = HashMap::new();
-                if !affected_names.is_empty() {
-                    let map = backend
-                        .bulk_feature_state(&affected_names)
-                        .await
-                        .unwrap_or_default();
-                    for (name, state) in map {
-                        emit_node_state(&app, &name, &state);
-                        affected_states.insert(name, state);
-                    }
-                }
-                Ok(CommandResult {
-                    ok: true,
-                    error: None,
-                    affected_states,
-                })
-            }
-            Err(e) => Ok(CommandResult {
+    let invalidated = match backend.exec_command(&node_name).await {
+        Ok(invalidated) => invalidated,
+        Err(e) => {
+            return Ok(CommandResult {
                 ok: false,
-                error: Some(e),
+                error: Some(crate::error::humanize_error(&e)),
                 affected_states: HashMap::new(),
-            }),
+            });
         }
-    } else {
-        let session = zenoh.get_session().await.humanize()?;
-        let device_id = connected_device_id(&zenoh).await.humanize()?;
-        let key = viva_zenoh_api::keys::node_execute(&device_id, &node_name);
-
-        let replies = session
-            .get(&key)
-            .timeout(std::time::Duration::from_secs(5))
+    };
+    let affected: Vec<String> = nodes_affected_by_command(&node_name)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut affected_states = HashMap::new();
+    if !affected.is_empty() {
+        for (name, state) in backend
+            .bulk_feature_state(&affected)
             .await
-            .map_err(|e| format!("Zenoh error: {e}"))
-            .humanize()?;
-
-        match replies.recv_async().await {
-            Ok(reply) => match reply.result() {
-                Ok(sample) => {
-                    let bytes = sample.payload().to_bytes();
-                    let resp: NodeOpResponse =
-                        serde_json::from_slice(&bytes).map_err(|e| format!("Parse error: {e}"))?;
-                    Ok(CommandResult {
-                        ok: resp.ok,
-                        error: resp.error,
-                        // Remote services do not yet return affected states
-                        // (Step 4). Leave empty; the UI refreshes from the
-                        // subscriber stream.
-                        affected_states: HashMap::new(),
-                    })
-                }
-                Err(e) => Err(format!("Reply error: {e}")).humanize(),
-            },
-            Err(_) => Err(format!(
-                "No reply for execute_command '{node_name}' (timeout)"
-            ))
-            .humanize(),
+            .unwrap_or_default()
+        {
+            events.node_state(&name, &state);
+            affected_states.insert(name, state);
         }
     }
-}
-
-/// Parse raw bytes from a `nodes/bulk/read` reply into a `NodeValueEntry` map.
-///
-/// Extracted as a pure function so it can be unit-tested without a Zenoh session.
-fn parse_bulk_response(bytes: &[u8]) -> Result<HashMap<String, NodeValueEntry>, String> {
-    let resp = serde_json::from_slice::<BulkReadResponse>(bytes)
-        .map_err(|e| format!("Parse error: {e}"))?;
-    Ok(resp
-        .values
-        .into_iter()
-        .map(|(k, v)| {
-            (
-                k,
-                NodeValueEntry {
-                    value: v.value,
-                    access_mode: v.access_mode,
-                    min: v.min,
-                    max: v.max,
-                    inc: v.inc,
-                },
-            )
-        })
-        .collect())
-}
-
-#[tauri::command]
-pub async fn read_nodes_bulk(
-    names: Vec<String>,
-    zenoh: State<'_, Arc<ZenohState>>,
-    backend: State<'_, crate::backend::BackendState>,
-) -> Result<HashMap<String, NodeValueEntry>, String> {
-    if matches!(backend.mode(), crate::backend::BackendMode::Embedded) {
-        return backend.bulk_read(&names).await;
-    }
-    let session = zenoh.get_session().await.humanize()?;
-    let device_id = connected_device_id(&zenoh).await.humanize()?;
-
-    let key = viva_zenoh_api::keys::nodes_bulk_read(&device_id);
-    let payload = serde_json::to_vec(&BulkReadRequest { names }).map_err(|e| e.to_string())?;
-
-    let replies = session
-        .get(&key)
-        .payload(payload)
-        .timeout(std::time::Duration::from_secs(5))
-        .await
-        .map_err(|e| format!("Zenoh error: {e}"))
-        .humanize()?;
-
-    match replies.recv_async().await {
-        Ok(reply) => match reply.result() {
-            Ok(sample) => {
-                let bytes = sample.payload().to_bytes();
-                parse_bulk_response(&bytes)
-            }
-            Err(e) => Err(format!("Reply error: {e}")),
-        },
-        Err(_) => Err("No reply for read_nodes_bulk (timeout)".to_string()),
-    }
-    .humanize()
-}
-
-async fn connected_device_id(zenoh: &ZenohState) -> Result<String, String> {
-    match zenoh.connection.lock().await.clone() {
-        ConnectionState::Connected { device_id, .. } => Ok(device_id),
-        _ => Err("Not connected to a device".to_string()),
-    }
+    events.invalidated(&node_name, &invalidated);
+    Ok(CommandResult {
+        ok: true,
+        error: None,
+        affected_states,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        node_value_entry_to_feature_state, nodes_affected_by_command, parse_bulk_response,
-        validate_node_write, validate_numeric_constraints,
-    };
-    use crate::state::device_state::NodeValueEntry;
+    use super::{nodes_affected_by_command, validate_node_write, validate_numeric_constraints};
     use std::collections::HashMap;
     use viva_xml_model::{EnumEntry, NumericConstraints, RawNode, UiNode, UiNodeKind};
 
@@ -659,13 +422,13 @@ mod tests {
     #[test]
     fn test_validate_node_write_integer_valid() {
         let node = integer_node("Width", Some(1.0), Some(4096.0), Some(1.0));
-        assert!(validate_node_write(&node, None, &serde_json::json!(512)).is_ok());
+        assert!(validate_node_write(&node, &serde_json::json!(512)).is_ok());
     }
 
     #[test]
     fn test_validate_node_write_integer_above_max() {
         let node = integer_node("Width", Some(1.0), Some(4096.0), None);
-        let err = validate_node_write(&node, None, &serde_json::json!(5000))
+        let err = validate_node_write(&node, &serde_json::json!(5000))
             .expect_err("should reject value above max");
         assert!(err.contains("maximum"), "error: {err}");
     }
@@ -673,7 +436,7 @@ mod tests {
     #[test]
     fn test_validate_node_write_integer_below_min() {
         let node = integer_node("Width", Some(1.0), Some(4096.0), None);
-        let err = validate_node_write(&node, None, &serde_json::json!(0))
+        let err = validate_node_write(&node, &serde_json::json!(0))
             .expect_err("should reject value below min");
         assert!(err.contains("minimum"), "error: {err}");
     }
@@ -681,26 +444,20 @@ mod tests {
     #[test]
     fn test_validate_node_write_integer_wrong_type() {
         let node = integer_node("Width", None, None, None);
-        let err = validate_node_write(&node, None, &serde_json::json!("hello"))
+        let err = validate_node_write(&node, &serde_json::json!("hello"))
             .expect_err("should reject string for Integer");
         assert!(err.contains("integer"), "error: {err}");
     }
 
+    // ── validate_node_write — Float ─────────────────────────────────────────────
+
     #[test]
-    fn test_validate_node_write_float_valid_with_runtime_constraints() {
+    fn test_validate_node_write_float_static_range() {
         let node = float_node("ExposureTime");
-        // Runtime constraints (ZA-06) tighten the range to 100–500 µs.
-        let live = NodeValueEntry {
-            value: serde_json::json!(200.0),
-            access_mode: "RW".to_string(),
-            min: Some(100.0),
-            max: Some(500.0),
-            inc: None,
-        };
-        assert!(validate_node_write(&node, Some(&live), &serde_json::json!(300.0)).is_ok());
-        let err = validate_node_write(&node, Some(&live), &serde_json::json!(50.0))
-            .expect_err("runtime min should block 50.0");
-        assert!(err.contains("minimum"), "error: {err}");
+        assert!(validate_node_write(&node, &serde_json::json!(50.0)).is_ok());
+        let err = validate_node_write(&node, &serde_json::json!(150.0))
+            .expect_err("150 is above the declared maximum");
+        assert!(err.contains("exceeds maximum"), "{err}");
     }
 
     // ── validate_node_write — Boolean ───────────────────────────────────────────
@@ -708,7 +465,7 @@ mod tests {
     #[test]
     fn test_validate_node_write_boolean_wrong_type() {
         let node = bool_node("ReverseX");
-        let err = validate_node_write(&node, None, &serde_json::json!("true"))
+        let err = validate_node_write(&node, &serde_json::json!("true"))
             .expect_err("string is not a bool");
         assert!(err.contains("boolean"), "error: {err}");
     }
@@ -718,13 +475,13 @@ mod tests {
     #[test]
     fn test_validate_node_write_enumeration_valid() {
         let node = enum_node("PixelFormat", &["Mono8", "Mono16", "RGB8"]);
-        assert!(validate_node_write(&node, None, &serde_json::json!("Mono16")).is_ok());
+        assert!(validate_node_write(&node, &serde_json::json!("Mono16")).is_ok());
     }
 
     #[test]
     fn test_validate_node_write_enumeration_invalid_entry() {
         let node = enum_node("PixelFormat", &["Mono8", "Mono16", "RGB8"]);
-        let err = validate_node_write(&node, None, &serde_json::json!("JPEG"))
+        let err = validate_node_write(&node, &serde_json::json!("JPEG"))
             .expect_err("unknown entry should fail");
         assert!(err.contains("JPEG"), "error: {err}");
     }
@@ -735,7 +492,7 @@ mod tests {
     fn test_validate_node_write_readonly_access_mode() {
         let mut node = integer_node("TemperatureAbs", None, None, None);
         node.access_mode = Some("RO".to_string());
-        let err = validate_node_write(&node, None, &serde_json::json!(42))
+        let err = validate_node_write(&node, &serde_json::json!(42))
             .expect_err("RO node should be rejected");
         assert!(err.contains("not writable"), "error: {err}");
     }
@@ -760,7 +517,7 @@ mod tests {
         )
         .expect("parse");
         let node = &graph.nodes_by_name["AcquisitionFrameRateAbs"];
-        validate_node_write(node, None, &serde_json::json!(12.5))
+        validate_node_write(node, &serde_json::json!(12.5))
             .expect("a converter over a writable register is writable");
     }
 
@@ -789,7 +546,7 @@ mod tests {
             int_max: None,
             int_inc: None,
         };
-        let err = validate_node_write(&node, None, &serde_json::json!(null))
+        let err = validate_node_write(&node, &serde_json::json!(null))
             .expect_err("Command node should be rejected");
         assert!(
             err.contains("execute_command"),
@@ -797,74 +554,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_bulk_response_happy_path() {
-        let json = r#"{
-            "values": {
-                "Width": {"value": 1920, "access_mode": "RW"},
-                "Height": {"value": 1080, "access_mode": "RO"}
-            }
-        }"#;
-        let result = parse_bulk_response(json.as_bytes()).expect("should parse successfully");
-        assert_eq!(result.len(), 2);
-        let width = result.get("Width").expect("Width should be present");
-        assert_eq!(width.value, serde_json::json!(1920));
-        assert_eq!(width.access_mode, "RW");
-        let height = result.get("Height").expect("Height should be present");
-        assert_eq!(height.value, serde_json::json!(1080));
-        assert_eq!(height.access_mode, "RO");
-    }
-
-    #[test]
-    fn test_parse_bulk_response_empty() {
-        let json = r#"{"values": {}}"#;
-        let result =
-            parse_bulk_response(json.as_bytes()).expect("empty map should parse without error");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_bulk_response_invalid_json() {
-        let err = parse_bulk_response(b"not json").expect_err("invalid JSON should return Err");
-        assert!(
-            err.contains("Parse error"),
-            "error message should contain 'Parse error', got: {err}"
-        );
-    }
-
-    // ── FeatureState projection / affected-nodes tables ─────────────────────
-
-    #[test]
-    fn test_node_value_entry_to_feature_state_without_range() {
-        let entry = NodeValueEntry {
-            value: serde_json::json!("Once"),
-            access_mode: "RW".to_string(),
-            min: None,
-            max: None,
-            inc: None,
-        };
-        let state = node_value_entry_to_feature_state(&entry);
-        assert_eq!(state.kind, "Unknown");
-        assert!(state.numeric.is_none());
-        assert!(state.enum_available.is_none());
-        assert_eq!(state.value, serde_json::json!("Once"));
-    }
-
-    #[test]
-    fn test_node_value_entry_to_feature_state_with_range() {
-        let entry = NodeValueEntry {
-            value: serde_json::json!(1920),
-            access_mode: "RW".to_string(),
-            min: Some(16.0),
-            max: Some(4096.0),
-            inc: Some(8.0),
-        };
-        let state = node_value_entry_to_feature_state(&entry);
-        let numeric = state.numeric.expect("numeric should be populated");
-        assert_eq!(numeric.min, 16.0);
-        assert_eq!(numeric.max, 4096.0);
-        assert_eq!(numeric.inc, Some(8.0));
-    }
+    // ── affected-nodes table ────────────────────────────────────────────────
 
     #[test]
     fn test_nodes_affected_by_command_acquisition_start() {

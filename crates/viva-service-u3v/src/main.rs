@@ -200,7 +200,7 @@ async fn spawn_service_tasks<T: UsbTransfer + 'static>(
         loop {
             let _ = announce_session.put(&key, payload.clone()).await;
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(viva_zenoh_api::ANNOUNCE_INTERVAL) => {}
                 _ = announce_shutdown.changed() => {
                     if *announce_shutdown.borrow() { break; }
                 }

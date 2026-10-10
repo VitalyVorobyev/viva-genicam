@@ -73,3 +73,24 @@ def test_auto_and_packet_size_conflict(camera):
     with pytest.raises(Exception, match="at most one"):
         with camera.stream(auto_packet_size=True, packet_size=1500):
             pass
+
+
+def test_ts_host_is_none_until_calibrated(camera):
+    """Without a clock fit there is no host time to give (backlog DOC-11).
+
+    Every GigE frame used to carry the wall-clock time it was handed over,
+    passed off as its device time mapped to the host.
+    """
+    with camera.stream(packet_size=1500) as frames:
+        frame = frames.next_frame(timeout_ms=5000)
+        assert frame.ts_host is None
+
+
+def test_ts_host_follows_time_calibrate(camera):
+    import time
+
+    camera.time_calibrate(samples=4, interval_ms=10)
+    with camera.stream(packet_size=1500) as frames:
+        frame = frames.next_frame(timeout_ms=5000)
+        assert frame.ts_host is not None
+        assert abs(frame.ts_host - time.time()) < 5

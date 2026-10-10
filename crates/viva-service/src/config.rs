@@ -4,8 +4,9 @@ use viva_genicam::gige::nic::IfaceSelector;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "genicam-service",
-    about = "GenICam camera service with Zenoh API"
+    name = "viva-service",
+    about = "GigE Vision camera service with a Zenoh API",
+    version
 )]
 pub struct Cli {
     /// Host interface for camera discovery, named either by one of its IPv4

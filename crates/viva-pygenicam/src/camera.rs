@@ -269,6 +269,26 @@ impl PyCamera {
         })
     }
 
+    /// Fit the device-to-host clock mapping from `samples` timestamp latches
+    /// `interval_ms` apart. A GigE stream opened afterwards gives each frame a
+    /// `ts_host`; before, it has none (backlog DOC-11).
+    #[pyo3(signature = (samples=8, interval_ms=20))]
+    fn time_calibrate(&self, py: Python<'_>, samples: usize, interval_ms: u64) -> PyResult<()> {
+        py.detach(|| match &self.inner {
+            CameraInner::Gige { camera, .. } => {
+                let mut g = camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?;
+                runtime()
+                    .block_on(g.time_calibrate(samples, interval_ms))
+                    .into_py_err()
+            }
+            CameraInner::U3v { .. } => Err(parse_error(
+                "time_calibrate maps GigE stream timestamps; USB3 Vision frames carry none yet",
+            )),
+        })
+    }
+
     fn enum_entries(&self, name: &str) -> PyResult<Vec<String>> {
         match &self.inner {
             CameraInner::Gige { camera, .. } => {

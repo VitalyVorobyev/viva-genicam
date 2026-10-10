@@ -377,7 +377,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             pixel_format: active.pixel_format,
                             chunks: None,
                             ts_dev: Some(active.timestamp),
-                            ts_host: Some(camera.map_dev_ts(active.timestamp)),
+                            ts_host: camera.map_dev_ts(active.timestamp),
                         };
                         let latency = frame
                             .host_time()

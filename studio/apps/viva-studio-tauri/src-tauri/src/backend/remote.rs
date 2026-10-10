@@ -43,8 +43,9 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// of #174).
 const REPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// A device not announced for this long is dropped from the list.
-const ANNOUNCE_EXPIRY_SECS: u64 = 6;
+/// A device not announced for this long is dropped from the list: the
+/// expiry the services announce against (SVC-01).
+const ANNOUNCE_EXPIRY_SECS: u64 = viva_zenoh_api::ANNOUNCE_EXPIRY.as_secs();
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 

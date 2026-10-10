@@ -126,6 +126,21 @@ class Camera:
     def acquisition_stop(self) -> None:
         self._native.acquisition_stop()
 
+    def time_calibrate(self, samples: int = 8, interval_ms: int = 20) -> None:
+        """Fit the camera-to-host clock mapping (GigE Vision only).
+
+        Latches the camera's timestamp ``samples`` times, ``interval_ms``
+        apart, and fits device ticks to host time. A stream opened afterwards
+        sets each frame's ``ts_host``; without calibration ``ts_host`` is
+        ``None``.
+
+        >>> cam.time_calibrate()
+        >>> with cam.stream() as frames:
+        ...     frame = next(iter(frames))
+        ...     frame.ts_host  # POSIX seconds
+        """
+        self._native.time_calibrate(samples, interval_ms)
+
     # ── streaming ────────────────────────────────────────────────────────
 
     def stream(

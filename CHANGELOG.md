@@ -75,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `TimeSync::to_host_time` and `Camera::map_dev_ts` return
+  `Option<SystemTime>`: `None` before a mapping exists (DOC-11).
 - The Python package needs Python 3.10 or later (`abi3-py310`); 3.9 has been
   past end of life since October 2025, and GitHub's Ubuntu 26.04 runners no
   longer offer it, so it could not stay tested. Wheels are tested on 3.10 and
@@ -132,6 +134,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `viva-service-u3v` add the camera's bootstrap registers, decoded and raw, to
   the report, and `report --usb` still describes a camera whose XML cannot be
   read.
+- A frame's host time is a device time mapped to the host, or nothing
+  (backlog DOC-11). `TimeSync::to_host_time` returned `SystemTime::now()`
+  until two samples gave it a mapping, and the Python bindings never
+  calibrated, so every Python GigE frame's `ts_host` was the wall-clock time it
+  was handed over, passed off as its device time; `viva-camctl stream` did the
+  same. It now returns `None` until calibrated, `Camera::map_dev_ts` likewise,
+  and Python gains `Camera.time_calibrate()`.
+- Viva Studio no longer drops cameras the GigE service is serving (backlog
+  SVC-01). The service announced a camera only from its discovery loop, every
+  discovery timeout plus discovery interval (about 7 s), while Studio forgets a
+  camera unannounced for 6 s. A task of its own now re-announces each served
+  camera every 2 s; `viva_zenoh_api::ANNOUNCE_INTERVAL` and `ANNOUNCE_EXPIRY`
+  hold the contract, which `viva-service-u3v` (5 s until now) and Studio share.
+- `viva-service --help` and its logs say `viva-service`, not
+  `genicam-service` (backlog SVC-05), and it has a `--version`.
 - `viva-service-u3v` streams as the library does (backlog SVC-03, SVC-06). It
   built its own `U3vStream`, which skipped the SIRM — the streaming registers
   — and sized a packed format's frames at one byte a pixel, and read in a

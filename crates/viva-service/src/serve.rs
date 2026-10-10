@@ -1,9 +1,12 @@
 //! The service's per-camera task set, shared by the binary and by tests that
 //! run the service in-process.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::watch;
+use viva_zenoh_api::DeviceAnnounce;
 
 use crate::device::DeviceHandle;
 use crate::{acquisition, nodes, report, status, xml};
@@ -72,15 +75,50 @@ pub async fn serve_device(
     ]
 }
 
-/// Announce a discovered camera on `keys::announce`.
-pub async fn publish_announce(session: &zenoh::Session, info: &viva_genicam::gige::DeviceInfo) {
-    use viva_zenoh_api::keys;
+/// The announces a service keeps repeating, by device id.
+pub type Announces = Arc<tokio::sync::Mutex<HashMap<String, DeviceAnnounce>>>;
 
-    let announce = device_announce(info);
-    let key = keys::announce(&announce.id);
-    if let Ok(payload) = serde_json::to_vec(&announce) {
+/// Re-announce every camera in `announces` each `interval` until `shutdown`
+/// turns true.
+///
+/// On a cadence of its own, not the discovery loop's: announcing from inside
+/// discovery repeated each camera every discovery timeout plus discovery
+/// interval, about 7 s, while Viva Studio drops a camera unannounced for 6 s,
+/// so cameras flickered in and out of its list (backlog SVC-01). The main
+/// loop adds a camera once it is served and removes it once it is lost.
+pub async fn announce_loop(
+    session: Arc<zenoh::Session>,
+    announces: Announces,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        let current: Vec<DeviceAnnounce> = announces.lock().await.values().cloned().collect();
+        for announce in &current {
+            put_announce(&session, announce).await;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Publish one announce on `keys::announce`.
+pub async fn put_announce(session: &zenoh::Session, announce: &DeviceAnnounce) {
+    let key = viva_zenoh_api::keys::announce(&announce.id);
+    if let Ok(payload) = serde_json::to_vec(announce) {
         let _ = session.put(&key, payload).await;
     }
+}
+
+/// Announce a discovered camera on `keys::announce`.
+pub async fn publish_announce(session: &zenoh::Session, info: &viva_genicam::gige::DeviceInfo) {
+    put_announce(session, &device_announce(info)).await;
 }
 
 /// Build the announce for a discovered camera from its Discovery ACK.
@@ -110,6 +148,71 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use viva_genicam::gige::DeviceInfo;
+
+    /// A served camera is announced every interval, whatever discovery is
+    /// doing, and no longer once it is lost (backlog SVC-01).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_served_camera_is_announced_every_interval_until_it_is_lost() {
+        let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+        let id = format!("announce-test-{}", std::process::id());
+        let subscriber = session
+            .declare_subscriber(viva_zenoh_api::keys::announce(&id))
+            .await
+            .unwrap();
+        let announces = Announces::default();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(announce_loop(
+            session.clone(),
+            announces.clone(),
+            Duration::from_millis(100),
+            shutdown_rx,
+        ));
+
+        let count_for = |window: Duration| {
+            let subscriber = &subscriber;
+            async move {
+                let deadline = tokio::time::Instant::now() + window;
+                let mut count = 0;
+                while let Ok(Ok(_)) =
+                    tokio::time::timeout_at(deadline, subscriber.recv_async()).await
+                {
+                    count += 1;
+                }
+                count
+            }
+        };
+
+        announces.lock().await.insert(
+            id.clone(),
+            DeviceAnnounce::new(id.clone(), "cam", "Model", "SN"),
+        );
+        let served = count_for(Duration::from_millis(650)).await;
+        assert!(
+            served >= 4,
+            "{served} announces in 650 ms at a 100 ms interval"
+        );
+
+        announces.lock().await.remove(&id);
+        // Drain one that may have been on its way.
+        let _ = count_for(Duration::from_millis(150)).await;
+        assert_eq!(
+            count_for(Duration::from_millis(400)).await,
+            0,
+            "a lost camera is still announced"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = task.await;
+    }
+
+    /// Three announces fit in the expiry a client applies.
+    #[test]
+    fn a_client_waits_out_three_missed_announces() {
+        assert_eq!(
+            viva_zenoh_api::ANNOUNCE_EXPIRY,
+            3 * viva_zenoh_api::ANNOUNCE_INTERVAL
+        );
+    }
 
     fn discovered(serial: Option<&str>, user_name: Option<&str>) -> DeviceInfo {
         DeviceInfo {

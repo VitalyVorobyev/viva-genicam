@@ -188,7 +188,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                                 // host timestamp here enriches frame metadata only and
                                 // must not trigger another record_frame() call.
                                 if let Some(timestamp) = frame.ts_dev {
-                                    frame.ts_host = Some(camera.map_dev_ts(timestamp));
+                                    frame.ts_host = camera.map_dev_ts(timestamp);
                                 }
                                 frame_index += 1;
 
@@ -202,7 +202,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                             }
                             StreamBlock::Evs(mut block) => {
                                 if let Some(timestamp) = block.ts_dev {
-                                    block.ts_host = Some(camera.map_dev_ts(timestamp));
+                                    block.ts_host = camera.map_dev_ts(timestamp);
                                 }
                                 frame_index += 1;
 

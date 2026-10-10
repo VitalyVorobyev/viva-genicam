@@ -310,20 +310,25 @@ impl TimeSync {
         );
     }
 
-    /// Convert a device timestamp into a host `SystemTime`.
-    pub fn to_host_time(&self, dev_ts: u64) -> SystemTime {
-        let origin = match self.origin_system {
-            Some(o) => o,
-            None => return SystemTime::now(),
-        };
+    /// Convert a device timestamp into a host `SystemTime`, or `None` before
+    /// two samples give a mapping.
+    ///
+    /// Without a mapping this returned `SystemTime::now()`, which looks like a
+    /// device time mapped to the host but is only when it was asked; every
+    /// frame of a Python GigE stream carried one (backlog DOC-11).
+    pub fn to_host_time(&self, dev_ts: u64) -> Option<SystemTime> {
+        if self.window.len() < 2 {
+            return None;
+        }
+        let origin = self.origin_system?;
         let seconds = self.a * dev_ts as f64 + self.b;
         if seconds.is_finite() && seconds >= 0.0 {
             match Duration::try_from_secs_f64(seconds) {
-                Ok(duration) => origin + duration,
-                Err(_) => origin,
+                Ok(duration) => Some(origin + duration),
+                Err(_) => Some(origin),
             }
         } else {
-            origin
+            Some(origin)
         }
     }
 }
@@ -387,6 +392,18 @@ impl ControlChannel for tokio::sync::Mutex<crate::gvcp::GigeDevice> {
 mod tests {
     use super::*;
 
+    /// No mapping without two samples: an answer then would be the time it
+    /// was asked, not the device's time (backlog DOC-11).
+    #[test]
+    fn nothing_maps_before_two_samples() {
+        let mut sync = TimeSync::new();
+        assert_eq!(sync.to_host_time(1_000), None);
+        sync.update(1_000, Instant::now());
+        assert_eq!(sync.to_host_time(1_000), None);
+        sync.update(2_000, Instant::now() + Duration::from_millis(1));
+        assert!(sync.to_host_time(1_500).is_some());
+    }
+
     #[test]
     fn regression_tracks_linear_relation() {
         let mut sync = TimeSync::new();
@@ -396,7 +413,7 @@ mod tests {
             let host = start + Duration::from_millis(i * 16);
             sync.update(dev, host);
         }
-        let mapped = sync.to_host_time(64_000);
+        let mapped = sync.to_host_time(64_000).expect("16 samples map");
         let origin = sync.origin_system().unwrap();
         let mapped_secs = mapped.duration_since(origin).unwrap().as_secs_f64();
         let expected_secs = Duration::from_millis(1024).as_secs_f64();

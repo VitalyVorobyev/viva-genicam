@@ -110,9 +110,7 @@ count from this table.
 
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
-| SVC-01 | Announce cadence exceeds Studio's expiry window | P1 | S | planned | GigE re-announces every `discovery_timeout_ms` (2 s) + `discovery_interval_s` (5 s) ≈ 7 s (`crates/viva-service/src/config.rs`); Studio expires at 6 s (`expire_old(6)` in `studio/apps/viva-studio-tauri/src-tauri/src/commands/device.rs`) and `docs/studio/zenoh-api.md` documents 2 s. Devices can flicker |
 | SVC-04 | U3V service is single-device with no lifecycle | P2 | M | planned | Takes `devices[0]` once, never re-scans, never publishes disconnect (`crates/viva-service-u3v/src/main.rs`); GigE has a full discovery loop |
-| SVC-05 | GigE service clap name is still `genicam-service` | P2 | S | planned | `crates/viva-service/src/config.rs`, pre-rebrand |
 
 ## DC — Device classes beyond area-scan
 
@@ -149,7 +147,6 @@ which is why they are not all P2.
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
 | DOC-06 | Book: fill the three crate pages; add the missing ones; write the stubs | P2 | L | planned | No page exists for viva-u3v, viva-genapi-xml, viva-pfnc, viva-sfnc, viva-zenoh-api, the services, viva-camctl or the fakes. USB3 Vision has no tutorial anywhere. `book/src/errors-logging.md` and `book/src/contributing.md` are 24-line stubs |
-| DOC-11 | Python `frame.ts_host` is silently wrong for GigE | P1 | S | planned | `build_gige_stream` (`crates/viva-pygenicam/src/stream.rs`) always passes `Some(time_sync)`, but `time_calibrate` is not exposed and `TimeSync::to_host_time` with no origin returns `SystemTime::now()` (`crates/viva-gige/src/time.rs`). Always wall-clock, never device-mapped — worse than `None`, because it looks like data. Fix the behaviour or the docs, not neither |
 
 ## ST — Studio
 

@@ -289,7 +289,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     warn!(block_id, status, "trailer reported non-zero status");
                 }
                 let ts_dev = Some(active.timestamp);
-                let ts_host = ts_dev.map(|ticks| camera.map_dev_ts(ticks));
+                let ts_host = ts_dev.and_then(|ticks| camera.map_dev_ts(ticks));
                 let frame = Frame {
                     payload: active.payload.freeze(),
                     width: active.width,

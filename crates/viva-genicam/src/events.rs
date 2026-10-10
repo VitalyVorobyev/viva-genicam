@@ -60,7 +60,9 @@ impl EventStream {
 
     fn map_packet(packet: EventPacket, sync: Option<Arc<TimeSync>>) -> Event {
         let ts_host = match sync {
-            Some(sync) if sync.len() > 1 => sync.to_host_time(packet.timestamp_dev),
+            Some(sync) if sync.len() > 1 => sync
+                .to_host_time(packet.timestamp_dev)
+                .unwrap_or_else(SystemTime::now),
             Some(sync) => {
                 warn!("insufficient time sync samples; using current system time");
                 let _ = sync; // keep `sync` alive for future samples

@@ -45,7 +45,11 @@ class Frame:
 
     @property
     def ts_host(self) -> Optional[float]:
-        """Host-mapped timestamp as POSIX seconds, if available."""
+        """The device timestamp mapped to host time, as POSIX seconds.
+
+        ``None`` unless the camera was calibrated with
+        :meth:`Camera.time_calibrate` before the stream opened.
+        """
         return self._native.ts_host
 
     def payload(self) -> bytes:

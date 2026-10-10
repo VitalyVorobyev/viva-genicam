@@ -388,7 +388,9 @@ Codes are **only appended** — never reordered. Unknown codes map to `PixelForm
 | `evs` | Per event block, while an event-vision camera acquires |
 | `image/meta` | On acquisition start; on Width, Height, or PixelFormat change during active acquisition |
 
-Device is considered lost if `announce` is not received for 6 seconds.
+Device is considered lost if `announce` is not received for 6 seconds. Both
+figures are constants in `viva-zenoh-api` — `ANNOUNCE_INTERVAL` and
+`ANNOUNCE_EXPIRY` — which both services and Viva Studio use.
 
 ---
 

@@ -86,12 +86,14 @@ fastest way for someone with a camera to exercise the library and report what
 they saw.
 
 - **Services**: SVC-01, SVC-03, SVC-04, SVC-05.
-- **Studio foundations**: one UI data layer — ST-29 and ST-30, then ST-31,
-  ST-32, ST-33, ST-34, ST-43, ST-44, ST-45. Done: one feature-state
-  implementation (ST-26), one backend trait with a real remote implementation
-  (ST-27), generated IPC types (ST-28), backend tests in both modes (ST-03),
-  the mock service retired (ST-02).
-- **Studio viewer parity**: ST-22 (seen on hardware), ST-41, ST-35, ST-36,
-  then ST-37, ST-38, ST-39, ST-40, ST-14, ST-17, DX-05.
+- **Studio foundations**: ST-31, ST-32, ST-33, ST-34, ST-44, ST-45. Done:
+  one feature-state implementation (ST-26), one backend trait with a real
+  remote implementation (ST-27), generated IPC types (ST-28), one UI data
+  layer and `<FeatureControl>` (ST-29), re-reading what a write invalidates
+  (ST-30), the React Compiler lint rules (ST-43), backend tests in both modes
+  (ST-03), the mock service retired (ST-02).
+- **Studio viewer parity**: ST-22 (seen on hardware), ST-41, then ST-36,
+  ST-37, ST-38, ST-39, ST-40, ST-14, ST-17, DX-05. Done: greying out what
+  the camera refuses (ST-35).
 - **Studio distribution**, alongside parity: ST-06, then ST-07.
 - **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-42.

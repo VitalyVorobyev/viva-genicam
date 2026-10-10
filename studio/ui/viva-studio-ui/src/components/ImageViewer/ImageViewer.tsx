@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import type { StreamerInfo, NodeValueEntry, ImageMeta } from "../../device/types";
-import type { ParseXmlResponse, EnumEntry } from "../../xml_model/uigraph";
+import type { StreamerInfo, ImageMeta } from "../../device/types";
+import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { ZoomPanState } from "./useZoomPan";
 import { ViewerToolbar } from "./ViewerToolbar";
 import { ViewerCanvas } from "./ViewerCanvas";
@@ -13,16 +13,13 @@ import { snapshotImageData, encodeImageDataToPng, suggestFilename } from "./snap
 import { saveSnapshot } from "./snapshotSave";
 import type { ImageRect } from "./roiUtils";
 import type { LineSegment } from "./lineProfileUtils";
-import { useNodeWriter } from "../../device/useNodeWriter";
+import { useFeatureWriter } from "../../device/FeatureStoreContext";
 
 interface ImageViewerProps {
   streamerInfo: StreamerInfo | null;
   isConnected: boolean;
   isAcquiring: boolean;
-  onStartAcq: () => Promise<void>;
-  onStopAcq: () => Promise<void>;
   externalModel: ParseXmlResponse | null;
-  liveValues: Map<string, NodeValueEntry>;
   deviceName?: string;
   cameraModel?: string;
   imageMeta: ImageMeta | null;
@@ -32,15 +29,12 @@ export function ImageViewer({
   streamerInfo,
   isConnected,
   isAcquiring,
-  onStartAcq,
-  onStopAcq,
   externalModel,
-  liveValues,
   deviceName,
   cameraModel,
   imageMeta,
 }: ImageViewerProps) {
-  const writeNode = useNodeWriter();
+  const writeNode = useFeatureWriter();
   const [fps, setFps] = useState<number>(0);
   const [frameCount, setFrameCount] = useState<number>(0);
   const [zoomLabel, setZoomLabel] = useState<string>("Fit");
@@ -56,47 +50,43 @@ export function ImageViewer({
     width: number;
     height: number;
   } | null>(null);
-  const prevAcquiring = useRef<boolean>(false);
   const snapshotRef = useRef<Uint8Array | null>(null);
   const { sidebarCollapsed, toggleSidebar } = useViewerLayout();
   const resetZoomRef = useRef<(() => void) | null>(null);
   const zoomTo100Ref = useRef<(() => void) | null>(null);
 
-  // Reset frame counter each time acquisition transitions false → true
-  useEffect(() => {
-    if (isAcquiring && !prevAcquiring.current) {
+  // Follow the acquisition and the stream while rendering, not in effects
+  // that would render twice: a new acquisition counts from zero, a stopped
+  // one shows no rate and no hovered pixel, and a closed stream forgets its
+  // format.
+  const [prevAcquiring, setPrevAcquiring] = useState(isAcquiring);
+  if (isAcquiring !== prevAcquiring) {
+    setPrevAcquiring(isAcquiring);
+    if (isAcquiring) {
       setFrameCount(0);
-    }
-    prevAcquiring.current = isAcquiring;
-  }, [isAcquiring]);
-
-  useEffect(() => {
-    if (!isAcquiring) {
+    } else {
       setFps(0);
       setPixelHover(null);
     }
-  }, [isAcquiring]);
-
+  }
+  const [prevStreamerInfo, setPrevStreamerInfo] = useState(streamerInfo);
+  if (streamerInfo !== prevStreamerInfo) {
+    setPrevStreamerInfo(streamerInfo);
+    if (!streamerInfo) setWsStreamInfo(null);
+  }
   useEffect(() => {
-    if (!streamerInfo) {
-      setWsStreamInfo(null);
-      snapshotRef.current = null;
-    }
+    if (!streamerInfo) snapshotRef.current = null;
   }, [streamerInfo]);
 
-  // Clear ROI when tool is turned off
-  useEffect(() => {
-    if (!showRoiTool) {
-      setRoiRect(null);
-    }
-  }, [showRoiTool]);
-
-  // Clear line segment when line tool is turned off
-  useEffect(() => {
-    if (!showLineTool) {
-      setLineSegment(null);
-    }
-  }, [showLineTool]);
+  // Turning a tool off clears what it drew.
+  const setRoiTool = (on: boolean) => {
+    setShowRoiTool(on);
+    if (!on) setRoiRect(null);
+  };
+  const setLineTool = (on: boolean) => {
+    setShowLineTool(on);
+    if (!on) setLineSegment(null);
+  };
 
   const handleZoomPanChange = useCallback((s: ZoomPanState) => {
     setZoomLabel(s.zoomLabel);
@@ -166,9 +156,6 @@ export function ImageViewer({
     setShowRoiTool(false);
   }, [roiRect, writeNode]);
 
-  const acquisitionModeEntries: EnumEntry[] =
-    externalModel?.graph.nodes_by_name["AcquisitionMode"]?.enum_entries ?? [];
-
   if (!streamerInfo) {
     return (
       <div className="image-viewer-v2">
@@ -184,10 +171,6 @@ export function ImageViewer({
           isConnected={isConnected}
           isAcquiring={isAcquiring}
           frameCount={frameCount}
-          onStartAcq={onStartAcq}
-          onStopAcq={onStopAcq}
-          acquisitionModeEntries={acquisitionModeEntries}
-          liveValues={liveValues}
           externalModel={externalModel}
           cameraModel={cameraModel ?? null}
         />
@@ -208,15 +191,15 @@ export function ImageViewer({
           onToggleHistogram={() => setShowHistogram((v) => !v)}
           showRoiTool={showRoiTool}
           onToggleRoiTool={() => {
-            setShowRoiTool((v) => !v);
-            setShowLineTool(false);
+            setRoiTool(!showRoiTool);
+            setLineTool(false);
           }}
           roiRect={roiRect}
           onApplyRoi={isConnected ? handleApplyRoi : undefined}
           showLineTool={showLineTool}
           onToggleLineTool={() => {
-            setShowLineTool((v) => !v);
-            setShowRoiTool(false);
+            setLineTool(!showLineTool);
+            setRoiTool(false);
           }}
         />
         <ViewerCanvas
@@ -260,10 +243,6 @@ export function ImageViewer({
         isConnected={isConnected}
         isAcquiring={isAcquiring}
         frameCount={frameCount}
-        onStartAcq={onStartAcq}
-        onStopAcq={onStopAcq}
-        acquisitionModeEntries={acquisitionModeEntries}
-        liveValues={liveValues}
         externalModel={externalModel}
         cameraModel={cameraModel ?? null}
       />

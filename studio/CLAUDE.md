@@ -57,6 +57,11 @@ skips loopback — so the fake camera never appears. See `#132`.
   `cargo test` there fails while the file is stale. Emit events through
   `Events::send` with a `StudioEvent` type, and listen with `listenTo`
   (`ui/.../device/events.ts`).
+- The UI has one cache of live feature state, `FeatureStore`
+  (`ui/.../device/featureStore.ts`). Read a feature with `useFeature(name)`,
+  write with `useFeatureWriter`, and draw one with `<FeatureControl>`; never
+  keep a second copy. The store reads only what is subscribed — what is on
+  screen — and re-reads it when a write invalidates it.
 - Package manager is bun, never npm (`bun.lock` is authoritative).
 - `apps/` stays thin glue (windowing, dialogs, command wiring) — no
   parsing or business logic.

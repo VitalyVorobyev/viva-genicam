@@ -792,10 +792,10 @@ mod tests {
             // in the shape embedded mode sends.
             let published = async {
                 loop {
-                    let states = recorder.of("node-value-changed");
+                    let states = recorder.of("feature-state-changed");
                     if states
                         .iter()
-                        .any(|e| e["node_name"] == "ExposureAuto" && e["state"].is_object())
+                        .any(|e| e["name"] == "ExposureAuto" && e["state"].is_object())
                     {
                         return;
                     }

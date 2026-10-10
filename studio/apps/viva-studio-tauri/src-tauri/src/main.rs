@@ -178,9 +178,7 @@ fn main() {
             commands::device::connect_device,
             commands::device::disconnect_device,
             // Features (FeatureState contract — authoritative for the UI)
-            commands::nodes::query_feature_state,
             commands::nodes::query_feature_states_bulk,
-            commands::nodes::read_nodes_bulk,
             commands::nodes::write_node,
             commands::nodes::execute_command,
             // Acquisition

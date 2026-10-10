@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "../../tauri";
 import { useDevice } from "../../device/useDevice";
 import { useBackendStatus } from "../../device/useBackendStatus";
 import { formatBackendChip } from "../../device/backendStatus";
-import { useNodeBulkRead } from "../../device/useNodeBulkRead";
-import { useNodeValues } from "../../device/useNodeValues";
+import { FeatureStoreProvider } from "../../device/FeatureStoreContext";
 import { useAcquisition } from "../../device/useAcquisition";
 import { useImageMeta } from "../../device/useImageMeta";
 import { AppLogProvider, useAppLog } from "../../context/AppLogContext";
@@ -42,9 +41,8 @@ function AppLayoutInner() {
       try { return localStorage.getItem("viva-studio:last-device"); } catch { return null; }
     }
   );
-  const [autoReconnectOffered, setAutoReconnectOffered] = useState(false);
-  const { liveValues, liveStates, seedValues, mergeState } = useNodeValues();
-  const { readBulk } = useNodeBulkRead();
+  // Offered at most once per session; read only by the effect that offers it.
+  const autoReconnectOffered = useRef(false);
   const { status: acqStatus, streamerInfo, start: startAcq, stop: stopAcq } = useAcquisition();
   const { imageMeta } = useImageMeta();
   const backendStatus = useBackendStatus();
@@ -74,33 +72,36 @@ function AppLayoutInner() {
     log("error", error);
   }, [backendStatus, addToast, log]);
 
-  // Track the last successfully connected device ID for the reconnect prompt.
+  // Track the last successfully connected device ID for the reconnect prompt:
+  // the state follows the connection while rendering, and storage is written
+  // after.
+  if (connectionState.kind === "connected" && connectionState.device_id !== lastConnectedDeviceId) {
+    setLastConnectedDeviceId(connectionState.device_id);
+  }
   useEffect(() => {
-    if (connectionState.kind === "connected") {
-      setLastConnectedDeviceId(connectionState.device_id);
-      try { localStorage.setItem("viva-studio:last-device", connectionState.device_id); } catch { /* */ }
-    }
+    if (connectionState.kind !== "connected") return;
+    try { localStorage.setItem("viva-studio:last-device", connectionState.device_id); } catch { /* */ }
   }, [connectionState]);
 
   // PH-07: Offer auto-reconnect when last-connected device reappears after app restart.
   useEffect(() => {
-    if (autoReconnectOffered) return;
+    if (autoReconnectOffered.current) return;
     if (connectionState.kind !== "disconnected") return;
     if (!lastConnectedDeviceId) return;
     const lastDevice = devices.find((d) => d.id === lastConnectedDeviceId);
     if (!lastDevice) return;
 
-    setAutoReconnectOffered(true);
+    autoReconnectOffered.current = true;
     const name = lastDevice.name || lastDevice.id;
     addToast("info", `Previously connected device "${name}" detected`);
-  }, [devices, connectionState, lastConnectedDeviceId, autoReconnectOffered, addToast]);
+  }, [devices, connectionState, lastConnectedDeviceId, addToast]);
 
-  // Clear stale model when an unexpected disconnect is detected.
-  useEffect(() => {
-    if (disconnectReason !== null) {
-      setExternalModel(null);
-    }
-  }, [disconnectReason]);
+  // Drop the stale model when an unexpected disconnect is reported.
+  const [prevDisconnectReason, setPrevDisconnectReason] = useState(disconnectReason);
+  if (disconnectReason !== prevDisconnectReason) {
+    setPrevDisconnectReason(disconnectReason);
+    if (disconnectReason !== null) setExternalModel(null);
+  }
 
   const handleConnect = useCallback(
     async (deviceId: string) => {
@@ -111,11 +112,6 @@ function AppLayoutInner() {
         setActiveTab("features");
         log("success", `Connected`, deviceId);
         addToast("success", "Connected to device");
-        // Pre-populate live value cache with a single bulk read so controls
-        // render with real values from the first render rather than waiting
-        // for individual node-value-changed events.
-        const bulk = await readBulk(Object.keys(response.graph.nodes_by_name));
-        seedValues(bulk);
       } catch (e) {
         const msg =
           typeof e === "object" && e !== null && "message" in e
@@ -125,7 +121,7 @@ function AppLayoutInner() {
         addToast("error", `Connection failed: ${msg}`);
       }
     },
-    [connect, log, addToast, readBulk, seedValues]
+    [connect, log, addToast]
   );
 
   const handleDisconnect = useCallback(async () => {
@@ -144,13 +140,6 @@ function AppLayoutInner() {
     log("info", "Starting acquisition\u2026");
     try {
       setActiveTab("image");
-      const streamValues = await readBulk([
-        "AcquisitionMode",
-        "PixelFormat",
-        "Width",
-        "Height",
-      ]);
-      seedValues(streamValues);
       await startAcq();
       log("success", "Acquisition started");
       addToast("success", "Acquisition started");
@@ -158,7 +147,7 @@ function AppLayoutInner() {
       log("error", `Acquisition start failed: ${String(e)}`);
       addToast("error", `Acquisition start failed: ${String(e)}`);
     }
-  }, [startAcq, readBulk, seedValues, log, addToast]);
+  }, [startAcq, log, addToast]);
 
   const handleStopAcquisition = useCallback(async () => {
     log("info", "Stopping acquisition\u2026");
@@ -172,18 +161,8 @@ function AppLayoutInner() {
     }
   }, [stopAcq, log, addToast]);
 
-  const handleRefreshAll = useCallback(async () => {
-    if (!externalModel) return;
-    try {
-      const bulk = await readBulk(Object.keys(externalModel.graph.nodes_by_name));
-      seedValues(bulk);
-      addToast("success", "Values refreshed");
-    } catch (e) {
-      addToast("error", `Refresh failed: ${String(e)}`);
-    }
-  }, [externalModel, readBulk, seedValues, addToast]);
-
   return (
+    <FeatureStoreProvider connected={isConnected}>
     <div className="app-layout">
       <header className="app-header">
         {/* Left: brand wordmark + backend mode (reference info, not an action) */}
@@ -282,11 +261,7 @@ function AppLayoutInner() {
             <div style={{ display: activeTab === "features" ? "contents" : "none" }}>
               <FeatureBrowserPage
                 externalModel={externalModel}
-                liveValues={liveValues}
-                liveStates={liveStates}
-                onMergeState={mergeState}
                 isConnected={isConnected}
-                onRefreshAll={handleRefreshAll}
                 isActive={activeTab === "features"}
               />
             </div>
@@ -295,10 +270,7 @@ function AppLayoutInner() {
                 streamerInfo={streamerInfo}
                 isConnected={isConnected}
                 isAcquiring={acqStatus.active}
-                onStartAcq={handleStartAcquisition}
-                onStopAcq={handleStopAcquisition}
                 externalModel={externalModel}
-                liveValues={liveValues}
                 deviceName={connectedDeviceName ?? undefined}
                 cameraModel={connectedModel ?? undefined}
                 imageMeta={imageMeta}
@@ -309,5 +281,6 @@ function AppLayoutInner() {
         </main>
       </div>
     </div>
+    </FeatureStoreProvider>
   );
 }

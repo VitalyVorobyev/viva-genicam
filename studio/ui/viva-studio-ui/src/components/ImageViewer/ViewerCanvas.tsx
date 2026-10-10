@@ -62,7 +62,9 @@ export function ViewerCanvas({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const lastFrameRef = useRef<Uint8Array | null>(null);
-  const hasRenderedFrameRef = useRef(false);
+  // Whether a frame has been drawn; shown as "Acquisition stopped" once the
+  // stream ends.
+  const [hasRenderedFrame, setHasRenderedFrame] = useState(false);
 
   const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
@@ -74,23 +76,24 @@ export function ViewerCanvas({
   const roiDragRef = useRef({ active: false, startX: 0, startY: 0 });
   const [roiOverlayRect, setRoiOverlayRect] = useState<ScreenRect | null>(null);
 
-  // Clear overlay when ROI mode is turned off
-  useEffect(() => {
-    if (!roiMode) {
-      setRoiOverlayRect(null);
-    }
-  }, [roiMode]);
+  // Clear the overlay when ROI mode is turned off, while rendering rather
+  // than in an effect that would render twice.
+  const [prevRoiMode, setPrevRoiMode] = useState(roiMode);
+  if (roiMode !== prevRoiMode) {
+    setPrevRoiMode(roiMode);
+    if (!roiMode) setRoiOverlayRect(null);
+  }
 
   // ── Line drag state ──────────────────────────────────────────────────────────
   const lineDragRef = useRef({ active: false, startX: 0, startY: 0 });
   const [lineOverlay, setLineOverlay] = useState<ScreenLine | null>(null);
 
-  // Clear overlay when line mode is turned off
-  useEffect(() => {
-    if (!lineMode) {
-      setLineOverlay(null);
-    }
-  }, [lineMode]);
+  // Clear the overlay when line mode is turned off.
+  const [prevLineMode, setPrevLineMode] = useState(lineMode);
+  if (lineMode !== prevLineMode) {
+    setPrevLineMode(lineMode);
+    if (!lineMode) setLineOverlay(null);
+  }
 
   // Track box size via ResizeObserver
   useEffect(() => {
@@ -112,10 +115,6 @@ export function ViewerCanvas({
   }, []);
 
   const zoomPan = useZoomPan(imgSize.w, imgSize.h, boxSize.w, boxSize.h);
-
-  // Refs for stale-closure-safe wheel handler registration
-  const zoomPanRef = useRef(zoomPan);
-  zoomPanRef.current = zoomPan;
 
   // Attach native wheel listener (passive: false so we can preventDefault)
   useEffect(() => {
@@ -267,7 +266,7 @@ export function ViewerCanvas({
             ctx.drawImage(bitmap, 0, 0, fit.width, fit.height);
           }
           bitmap.close();
-          hasRenderedFrameRef.current = true;
+          setHasRenderedFrame(true);
 
           // Update imgSize state only when dimensions actually change
           setImgSize((prev) => {
@@ -538,7 +537,7 @@ export function ViewerCanvas({
       />
       <RoiOverlay rect={roiMode ? roiOverlayRect : null} />
       <LineOverlay line={lineMode ? lineOverlay : null} />
-      {!isStreaming && hasRenderedFrameRef.current && (
+      {!isStreaming && hasRenderedFrame && (
         <div className="iv-canvas-overlay">Acquisition stopped</div>
       )}
       {/* Histogram and line profile moved to AnalysisPanel dock */}

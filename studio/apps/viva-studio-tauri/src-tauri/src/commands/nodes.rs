@@ -9,7 +9,6 @@ use tokio::sync::RwLock;
 use crate::backend::BackendState;
 use crate::error::HumanizeExt;
 use crate::state::ModelState;
-use crate::state::device_state::NodeValueEntry;
 use crate::state::events::Events;
 use viva_xml_model::{UiNode, UiNodeKind};
 use viva_zenoh_api::{CommandResult, FeatureState};
@@ -29,39 +28,15 @@ fn nodes_affected_by_command(command: &str) -> &'static [&'static str] {
     }
 }
 
-/// Read the full live state of a node: value + access mode + kind + resolvable
-/// range + available enum entries + unit. This is the authoritative snapshot
-/// the Feature Browser UI consumes as its single source of truth.
-#[tauri::command]
-pub async fn query_feature_state(
-    node_name: String,
-    backend: State<'_, BackendState>,
-) -> Result<FeatureState, String> {
-    backend.get_feature_state(&node_name).await.humanize()
-}
-
-/// Bulk variant of [`query_feature_state`]. Features whose state cannot be
-/// read are left out.
+/// The live state of many features: value, access mode, kind, range,
+/// accepted enumeration entries and unit — the UI's single source of truth
+/// (ADR-0010). Features whose state cannot be read are left out.
 #[tauri::command]
 pub async fn query_feature_states_bulk(
     names: Vec<String>,
     backend: State<'_, BackendState>,
 ) -> Result<HashMap<String, FeatureState>, String> {
     backend.bulk_feature_state(&names).await.humanize()
-}
-
-/// The legacy value-and-range projection of [`query_feature_states_bulk`],
-/// which the UI's connect-time read still consumes (backlog ST-29).
-#[tauri::command]
-pub async fn read_nodes_bulk(
-    names: Vec<String>,
-    backend: State<'_, BackendState>,
-) -> Result<HashMap<String, NodeValueEntry>, String> {
-    let states = backend.bulk_feature_state(&names).await.humanize()?;
-    Ok(states
-        .into_iter()
-        .map(|(name, state)| (name, NodeValueEntry::from(&state)))
-        .collect())
 }
 
 /// Validate that `value` is a legal write for `node`, against the XML's

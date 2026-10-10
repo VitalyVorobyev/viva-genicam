@@ -156,6 +156,31 @@ section changes the library.
 - **Studio writes features that are converters** (see Fixed above for the
   library side): the UI model and the write pre-flight took a converter's
   access mode as a fixed `RO` and refused the write before it was sent.
+- **One cache of live state, read only for what is on screen** (ST-29). The UI
+  kept two half-migrated caches and read every feature of the camera at
+  connect — hundreds, each several register reads — before showing anything.
+  A single `FeatureStore` now reads a feature when a control first shows it,
+  batched per tick, and keeps it current from the backend's events.
+  "Export State" reads every feature when asked.
+- **Writes refresh what they change** (ST-30). After a write or command the
+  features it invalidated are read again if they are on screen, so changing
+  a selector updates the features it selects, and a lock shows as soon as it
+  takes hold.
+- **The Image tab's controls are drawn from the camera's state** (ST-29,
+  ST-35). Six hand-written sections, with ranges and defaults made up in the
+  UI (exposure 100–100000, gain 0–24, ROI 4096×3072), are replaced by one
+  `<FeatureControl>` per feature in `sfnc-groups.json`, which takes its
+  range, entries and access from the live state. A feature that is locked or
+  unavailable is greyed out with the reason, here and in the Feature Browser;
+  one the camera does not implement is not shown. The sidebar gains the
+  frame-rate control, `TriggerSelector` and a `TriggerSoftware` button.
+- **A field that only has focus no longer freezes** (Codex review of #167). The
+  Image tab's fields stopped following the camera as soon as they had focus,
+  and on blur wrote the stale value back; they now hold a value only once it
+  is edited.
+- **The UI follows the React Compiler's lint rules** (ST-43): ESLint runs the
+  whole `react-hooks` preset. State that effects used to reset is now adjusted
+  while rendering, and refs are no longer read or written during render.
 - **The UI's IPC types are generated from the Rust ones** (ST-28). A test in
   the Tauri crate writes `ui/viva-studio-ui/src/generated/ipc.ts` with ts-rs —
   the `FeatureState` contract, the UiGraph, every command result and event
@@ -189,7 +214,9 @@ section changes the library.
 - **Gone:** `viva-mock-service` (a third copy of the Zenoh contract, behind it,
   ST-02), `viva-ws-streamer` (unused; the app embeds `viva_streamer`), the
   `studio/tests/e2e` crate that all but one test skipped, the `embedded_*` and
-  `get_node_value`/`get_acquisition_status` commands, which nothing called.
+  `get_node_value`/`get_acquisition_status` commands, which nothing called,
+  and — with the UI's single cache — `read_nodes_bulk`, `query_feature_state`
+  and the legacy `NodeValueEntry` projection.
 - **Embedded mode reports what the camera permits now.** Its feature state was
   a copy of `viva-service`'s that had fallen behind: it reported every feature
   available and implemented, ignored `pIsLocked`, and offered every

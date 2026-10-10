@@ -1,9 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { formatLiveValue } from "./treeUtils";
-import type { NodeValueEntry } from "../../device/types";
-
-function entry(value: number | string | boolean): NodeValueEntry {
-  return { value, access_mode: "RW" };
+function entry(value: number | string | boolean) {
+  return { value };
 }
 
 describe("formatLiveValue", () => {
@@ -47,6 +45,10 @@ describe("formatLiveValue", () => {
 
   it("test_formatLiveValue_null_is_no_value", () => {
     // A write-only or command node: nothing to show, not the text "null".
-    expect(formatLiveValue({ value: null, access_mode: "WO" })).toBeNull();
+    expect(formatLiveValue({ value: null })).toBeNull();
+  });
+
+  it("shows a register by its size", () => {
+    expect(formatLiveValue({ value: { kind: "register", length: 4096 } })).toBe("4096 B");
   });
 });

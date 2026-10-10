@@ -99,8 +99,23 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
       or striped), for Mono8 and for RGB8
 - [ ] Type an exposure value but do not leave the box -> it stays while frames
       and other features update
+- [ ] Click into the exposure box without typing, then change Exposure Auto ->
+      the box follows the camera, and clicking away writes nothing
+- [ ] Set Exposure Auto to Continuous -> Exposure Time greys out and reads
+      "Read-only now"; back to Off -> editable again
+- [ ] Turn Acquisition Frame Rate Enable off -> Acquisition Frame Rate greys
+      out as not available
 - [ ] Edit a feature in the Feature Browser without applying, switch to the
       Image tab, press Ctrl+Enter -> nothing is written
+
+### 6a. Live state in the Feature Browser
+- [ ] Open a category -> its rows fill in with values (only that category's
+      features are read)
+- [ ] With Exposure Time selected, change Exposure Auto in the sidebar ->
+      the panel shows RO and disables the editor without pressing refresh
+- [ ] Set SensorType to Color -> PixelFormat offers only RGB8
+- [ ] Export State -> the JSON holds every feature with a value, registers
+      left out
 
 ### 7. Stop & disconnect
 - [ ] Click Stop -> frames stop, FPS goes to 0

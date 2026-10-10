@@ -101,36 +101,6 @@ pub enum ConnectionState {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(optional_fields))]
-pub struct NodeValueEntry {
-    pub value: serde_json::Value,
-    pub access_mode: String,
-    /// Runtime minimum constraint forwarded from the camera service, if available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min: Option<f64>,
-    /// Runtime maximum constraint forwarded from the camera service, if available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max: Option<f64>,
-    /// Runtime increment (step) forwarded from the camera service, if available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inc: Option<f64>,
-}
-
-impl From<&viva_zenoh_api::FeatureState> for NodeValueEntry {
-    fn from(state: &viva_zenoh_api::FeatureState) -> Self {
-        let update = state.to_node_value_update();
-        Self {
-            value: update.value,
-            access_mode: update.access_mode,
-            min: update.min,
-            max: update.max,
-            inc: update.inc,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct StreamerInfo {

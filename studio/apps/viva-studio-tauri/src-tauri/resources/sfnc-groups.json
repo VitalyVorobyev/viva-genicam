@@ -46,10 +46,12 @@
       "icon": "⚡",
       "default_open": false,
       "features": [
+        { "node": "TriggerSelector", "widget": "enum_select" },
         { "node": "TriggerMode", "widget": "enum_select" },
         { "node": "TriggerSource", "widget": "enum_select" },
         { "node": "TriggerActivation", "widget": "enum_select" },
-        { "node": "TriggerDelay", "widget": "float_slider" }
+        { "node": "TriggerDelay", "widget": "float_slider" },
+        { "node": "TriggerSoftware", "widget": "command_button" }
       ]
     },
     {

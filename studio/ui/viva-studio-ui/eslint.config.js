@@ -18,10 +18,11 @@ export default tseslint.config(
     },
     plugins: { "react-hooks": reactHooks },
     rules: {
-      // Only the two classic rules. The plugin's v7 `recommended` preset adds
-      // the React Compiler rules, which this code base does not yet follow.
-      "react-hooks/rules-of-hooks": "error",
-      "react-hooks/exhaustive-deps": "error",
+      // The plugin's whole `recommended` preset, React Compiler rules
+      // included (backlog ST-43), with every rule an error.
+      ...Object.fromEntries(
+        Object.keys(reactHooks.configs.recommended.rules).map((rule) => [rule, "error"]),
+      ),
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },

@@ -8,10 +8,9 @@ import React, {
 import type { ChangeEvent, KeyboardEvent } from "react";
 import type { Diag, ParseXmlResponse, UiGraph, UiNode } from "../../xml_model/uigraph";
 import type { NodeValue } from "../../xml_model/values";
-import type { FeatureState, NodeValueEntry } from "../../device/types";
 import { useToast } from "../../context/ToastContext";
 import { formatErrorMessage } from "../../device/errorMessage";
-import { entryToFeatureState } from "../../device/useNodeValues";
+import { useFeature, useFeatureStore } from "../../device/FeatureStoreContext";
 import { TauriProvider, type XmlModelProvider } from "../../xml_model/provider";
 import { isUnknownKind, nodeDisplayName, nodeKindCssKey, nodeKindIcon } from "../../xml_model/helpers";
 import { useDraftValues } from "../../state/useDraftValues";
@@ -51,19 +50,7 @@ type ParseStatus =
 
 interface FeatureBrowserPageProps {
   externalModel?: ParseXmlResponse | null;
-  liveValues?: Map<string, NodeValueEntry>;
-  /**
-   * Authoritative live state map keyed by node name. Preferred over
-   * `liveValues` for everything except legacy call-sites that only need the
-   * value/access_mode pair. When a node is in this map, the Feature Browser
-   * uses its `numeric` range, `enum_available`, and `access_mode` to drive the
-   * editor controls — no fallback to static XML.
-   */
-  liveStates?: Map<string, FeatureState>;
-  /** Merge a single `FeatureState` back into the live cache (post-apply/execute). */
-  onMergeState?: (name: string, state: FeatureState) => void;
   isConnected?: boolean;
-  onRefreshAll?: () => Promise<void>;
   /**
    * Whether the Feature Browser is the visible tab. The page stays mounted
    * while hidden, so it must not act on keyboard shortcuts then.
@@ -73,14 +60,13 @@ interface FeatureBrowserPageProps {
 
 export function FeatureBrowserPage({
   externalModel,
-  liveValues = new Map(),
-  liveStates = new Map(),
-  onMergeState,
   isConnected = false,
-  onRefreshAll,
   isActive = true,
 }: FeatureBrowserPageProps = {}) {
   const toast = useToast();
+  // Live state comes from the store; each control and row reads only what it
+  // shows (backlog ST-29).
+  const store = useFeatureStore();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const presetInputRef = useRef<HTMLInputElement | null>(null);
@@ -189,11 +175,13 @@ export function FeatureBrowserPage({
     return () => { isMounted = false; };
   }, [applyResponse, provider]);
 
-  useEffect(() => {
-    if (externalModel) {
-      applyResponse(externalModel, externalModel.summary.root_category || "Device");
-    }
-  }, [externalModel, applyResponse]);
+  // A newly connected camera's model replaces the page's, while rendering
+  // rather than in an effect that would render twice.
+  const [appliedModel, setAppliedModel] = useState<ParseXmlResponse | null>(null);
+  if (externalModel && externalModel !== appliedModel) {
+    setAppliedModel(externalModel);
+    applyResponse(externalModel, externalModel.summary.root_category || "Device");
+  }
 
   // T7.6 — keyboard shortcuts, only while this tab is the one shown
   useEffect(() => {
@@ -273,10 +261,20 @@ export function FeatureBrowserPage({
     URL.revokeObjectURL(url);
   }, [graph, drafts]);
 
-  // FB-05 — Export live state: download all current live values as JSON
-  const onExportLiveState = useCallback(() => {
-    if (!graph || !liveValues || liveValues.size === 0) return;
-    const preset = buildLiveValuePreset(liveValues);
+  // FB-05 — Export live state: read every feature and download it as JSON
+  const onExportLiveState = useCallback(async () => {
+    if (!graph || !isConnected) return;
+    const names = Object.values(graph.nodes_by_name)
+      .filter((node) => node.kind !== "Category")
+      .map((node) => node.name);
+    let states;
+    try {
+      states = await store.load(names);
+    } catch (e) {
+      toast.addToast("error", `Export failed: ${formatErrorMessage(e)}`);
+      return;
+    }
+    const preset = buildLiveValuePreset(states);
     const data = JSON.stringify(preset, null, 2);
     const blob = new Blob([data], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -285,7 +283,7 @@ export function FeatureBrowserPage({
     a.download = "genicam-state.json";
     a.click();
     URL.revokeObjectURL(url);
-  }, [graph, liveValues]);
+  }, [graph, isConnected, store, toast]);
 
   // T7.3 — Import preset: load JSON and restore drafts
   const onImportPreset = useCallback(() => {
@@ -350,17 +348,11 @@ export function FeatureBrowserPage({
     ? Object.prototype.hasOwnProperty.call(drafts, selectedNode.name)
     : false;
 
-  const selectedLiveValue = selectedNode ? liveValues.get(selectedNode.name) : undefined;
   // The editors show the camera's value until the user edits it; only an edit
   // makes a draft, so selecting a feature never queues a write.
-  const selectedLiveState = useMemo<FeatureState | undefined>(() => {
-    if (!selectedNode) return undefined;
-    const state = liveStates.get(selectedNode.name);
-    if (state) return state;
-    if (!selectedLiveValue) return undefined;
-    const kind = typeof selectedNode.kind === "string" ? selectedNode.kind : "Unknown";
-    return entryToFeatureState(selectedLiveValue, kind);
-  }, [liveStates, selectedLiveValue, selectedNode]);
+  const selectedLiveState = useFeature(
+    selectedNode && selectedNode.kind !== "Category" ? selectedNode.name : null,
+  );
 
   const onSelectNode = useCallback((name: string) => {
     setSelectedNodeName(name);
@@ -398,13 +390,10 @@ export function FeatureBrowserPage({
     if (value === undefined) return;
     try {
       const result = await provider.applyNodeValue(selectedNode.name, value);
-      // Merge the refreshed state into the cache so the form mirrors what
-      // the device actually accepted (clamping/rounding applies). Then clear
-      // the draft — the editor falls back to `liveState.value`, which is now
-      // correct, rather than rendering "(unset)".
-      if (onMergeState) {
-        onMergeState(selectedNode.name, result);
-      }
+      // Store the refreshed state so the form mirrors what the device
+      // actually accepted (clamping/rounding applies). Then clear the draft —
+      // the editor falls back to `liveState.value`, which is now correct.
+      store.set(selectedNode.name, result);
       resetDraft(selectedNode.name);
     } catch (e) {
       toast.addToast("error", `Apply failed: ${formatErrorMessage(e)}`);
@@ -416,7 +405,7 @@ export function FeatureBrowserPage({
     selectedHasDraft,
     selectedNode,
     resetDraft,
-    onMergeState,
+    store,
     toast,
   ]);
 
@@ -435,15 +424,11 @@ export function FeatureBrowserPage({
       // Fold in any side-effect states (e.g. AcquisitionStatus.active after
       // AcquisitionStart) so the UI reflects the post-execute world without
       // a manual refresh.
-      if (onMergeState && result.affected_states) {
-        for (const [name, state] of Object.entries(result.affected_states)) {
-          onMergeState(name, state);
-        }
-      }
+      store.setMany(result.affected_states ?? {});
     } catch (e) {
       toast.addToast("error", `${selectedNode.name} failed: ${formatErrorMessage(e)}`);
     }
-  }, [provider, selectedNode, onMergeState, toast]);
+  }, [provider, selectedNode, store, toast]);
 
   const applicableDraftCount = useMemo(
     () => countApplicableDrafts(drafts, errors),
@@ -470,7 +455,7 @@ export function FeatureBrowserPage({
       if (!item) continue;
       try {
         const result = await provider.applyNodeValue(item.name, item.value);
-        if (onMergeState) onMergeState(item.name, result);
+        store.set(item.name, result);
         resetDraft(item.name);
       } catch {
         // Keep failed drafts in state so the user can inspect and retry.
@@ -486,7 +471,7 @@ export function FeatureBrowserPage({
         `${failed.length} of ${applicable.length} writes failed (${failed.join(", ")}); their drafts are kept`,
       );
     }
-  }, [provider, graph, drafts, errors, resetDraft, onMergeState, toast]);
+  }, [provider, graph, drafts, errors, resetDraft, store, toast]);
 
   // T7.1+T7.2 — filtered search results
   const searchResults = useMemo(() => {
@@ -602,12 +587,12 @@ export function FeatureBrowserPage({
         )}
 
         {/* Refresh */}
-        {onRefreshAll && isConnected && (
+        {isConnected && (
           <button
             type="button"
             className="browser-toolbar__icon-btn"
-            onClick={onRefreshAll}
-            title="Refresh all node values"
+            onClick={() => store.refresh()}
+            title="Read the features on screen again"
           >
             {"\u21BB"}
           </button>
@@ -645,8 +630,8 @@ export function FeatureBrowserPage({
               </button>
               <button
                 type="button"
-                disabled={!graph || !liveValues || liveValues.size === 0}
-                onClick={() => { onExportLiveState(); setMenuOpen(false); }}
+                disabled={!graph || !isConnected}
+                onClick={() => { void onExportLiveState(); setMenuOpen(false); }}
               >
                 Export State
               </button>
@@ -691,7 +676,6 @@ export function FeatureBrowserPage({
                   selectedNodeName={selectedNodeName}
                   focusIndex={searchFocusIndex}
                   onSelectNode={onSelectNode}
-                  liveValues={liveValues}
                 />
               </div>
             </aside>
@@ -715,7 +699,6 @@ export function FeatureBrowserPage({
                 selectedNodeName={selectedNodeName}
                 onSelectNode={onSelectNode}
                 onSelectCategory={setSelectedCategory}
-                liveValues={liveValues}
               />
             </aside>
             <div {...featureListSplitterProps} />
@@ -739,7 +722,6 @@ export function FeatureBrowserPage({
             canExecute={canExecute}
             executeDisabledReason={executeDisabledReason}
             onExecute={onExecute}
-            liveValue={selectedLiveValue}
             liveState={selectedLiveState}
             onSelectNode={onSelectNode}
           />
@@ -782,7 +764,6 @@ interface SearchResultsProps {
   selectedNodeName: string | null;
   focusIndex: number;
   onSelectNode: (name: string) => void;
-  liveValues?: Map<string, NodeValueEntry>;
 }
 
 function SearchResults({
@@ -791,7 +772,6 @@ function SearchResults({
   selectedNodeName,
   focusIndex,
   onSelectNode,
-  liveValues,
 }: SearchResultsProps) {
   return (
     <div className="search-results">
@@ -804,50 +784,59 @@ function SearchResults({
         <div className="search-results__empty">No features match "{query}"</div>
       ) : (
         <ul>
-          {results.map((node, idx) => {
-            const displayName = nodeDisplayName(node);
-            const isActive = node.name === selectedNodeName;
-            const isKeyboardFocused = idx === focusIndex;
-            const classes = [
-              "tree-item",
-              isActive ? "tree-item--active" : "",
-              isKeyboardFocused ? "tree-item--keyboard-focus" : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
-
-            const kindKey = nodeKindCssKey(node.kind);
-            const icon = nodeKindIcon(node.kind);
-            const liveEntry = liveValues?.get(node.name);
-            const liveText = liveEntry !== undefined ? formatLiveValue(liveEntry) : null;
-
-            return (
-              <li key={node.name}>
-                <button
-                  type="button"
-                  className={classes}
-                  onClick={() => onSelectNode(node.name)}
-                >
-                  <span className={`tree-item__icon tree-item__icon--${kindKey}`}>
-                    {icon}
-                  </span>
-                  <span className="tree-item__label">
-                    {highlightMatch(displayName, query)}
-                  </span>
-                  {liveText !== null ? (
-                    <span className="tree-item__live">{liveText}</span>
-                  ) : (
-                    <span className="tree-item__meta">
-                      {highlightMatch(node.name, query)}
-                    </span>
-                  )}
-                </button>
-              </li>
-            );
-          })}
+          {results.map((node, idx) => (
+            <SearchResultItem
+              key={node.name}
+              node={node}
+              query={query}
+              isActive={node.name === selectedNodeName}
+              isKeyboardFocused={idx === focusIndex}
+              onSelect={() => onSelectNode(node.name)}
+            />
+          ))}
         </ul>
       )}
     </div>
+  );
+}
+
+/** One search result, following its feature's live value like a list row. */
+function SearchResultItem({
+  node,
+  query,
+  isActive,
+  isKeyboardFocused,
+  onSelect,
+}: {
+  node: UiNode;
+  query: string;
+  isActive: boolean;
+  isKeyboardFocused: boolean;
+  onSelect: () => void;
+}) {
+  const state = useFeature(node.kind === "Category" ? null : node.name);
+  const liveText = state ? formatLiveValue(state) : null;
+  const classes = [
+    "tree-item",
+    isActive ? "tree-item--active" : "",
+    isKeyboardFocused ? "tree-item--keyboard-focus" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <li>
+      <button type="button" className={classes} onClick={onSelect}>
+        <span className={`tree-item__icon tree-item__icon--${nodeKindCssKey(node.kind)}`}>
+          {nodeKindIcon(node.kind)}
+        </span>
+        <span className="tree-item__label">{highlightMatch(nodeDisplayName(node), query)}</span>
+        {liveText !== null ? (
+          <span className="tree-item__live">{liveText}</span>
+        ) : (
+          <span className="tree-item__meta">{highlightMatch(node.name, query)}</span>
+        )}
+      </button>
+    </li>
   );
 }
 

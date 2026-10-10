@@ -2,7 +2,9 @@ import { useMemo, useState } from "react";
 import { useSplitter } from "../Layout/useSplitter";
 import type { Diag, UiGraph, UiNode, UiNodeKind } from "../../xml_model/uigraph";
 import type { NodeValue, ValueError } from "../../xml_model/values";
-import type { FeatureState, NodeValueEntry } from "../../device/types";
+import type { FeatureState } from "../../device/types";
+import { blockedReason } from "../controls/FeatureControl";
+import { formatLiveValue } from "./treeUtils";
 import { isUnknownKind, nodeDisplayName, nodeKindLabel } from "../../xml_model/helpers";
 import { BoolEditor } from "./editors/BoolEditor";
 import { CommandView } from "./editors/CommandView";
@@ -28,7 +30,6 @@ interface FeaturePanelProps {
   canExecute: boolean;
   executeDisabledReason: string;
   onExecute: () => void;
-  liveValue?: NodeValueEntry;
   /**
    * Authoritative live state of the selected node. When present, the editors
    * use it to drive enum options, numeric ranges, access-mode gating, and to
@@ -54,7 +55,6 @@ export function FeaturePanel({
   canExecute,
   executeDisabledReason,
   onExecute,
-  liveValue,
   liveState,
   onSelectNode,
 }: FeaturePanelProps) {
@@ -92,10 +92,17 @@ export function FeaturePanel({
     );
   }
 
-  const applyDisabled = !canApply || !hasDraft || draftErrors.length > 0;
-  const applyTitle = applyDisabled
-    ? applyDisabledReason || "Draft not ready."
-    : "Apply draft to device  (Ctrl+Enter)";
+  // The camera's state can forbid the write: greyed out, with the reason
+  // (backlog ST-35).
+  const blocked = editable && liveState ? blockedReason(liveState, "text") : null;
+  const applyDisabled = !canApply || !hasDraft || draftErrors.length > 0 || blocked !== null;
+  const applyTitle = blocked
+    ? blocked
+    : applyDisabled
+      ? applyDisabledReason || "Draft not ready."
+      : "Apply draft to device  (Ctrl+Enter)";
+  const liveText = liveState ? formatLiveValue(liveState) : null;
+  const accessMode = liveState?.access_mode ?? selectedNode.access_mode;
 
   const kindLabel = nodeKindLabel(selectedNode.kind);
   const kindClass = kindBadgeClass(selectedNode.kind);
@@ -116,17 +123,13 @@ export function FeaturePanel({
             <span className="feature-panel__raw-name">{selectedNode.name}</span>
             {/* A command or write-only node has no value: show its access
                 mode alone, not the text "null". */}
-            {liveValue !== undefined && liveValue.value !== null && (
+            {liveText !== null && (
               <span className="live-badge">
                 <span className="live-badge__dot" />
-                <span className="live-badge__value">{String(liveValue.value)}</span>
+                <span className="live-badge__value">{liveText}</span>
               </span>
             )}
-            {(liveValue?.access_mode ?? selectedNode.access_mode) && (
-              <span className="feature-panel__access">
-                {liveValue?.access_mode ?? selectedNode.access_mode}
-              </span>
-            )}
+            {accessMode && <span className="feature-panel__access">{accessMode}</span>}
             {selectedNode.visibility && (
               <span className="feature-panel__visibility">{selectedNode.visibility}</span>
             )}
@@ -154,6 +157,8 @@ export function FeaturePanel({
         )}
 
         <section className="feature-panel__body">
+          {blocked && <p className="feature-control__note">{blocked}</p>}
+          <fieldset className="feature-panel__fieldset" disabled={blocked !== null}>
           {renderEditor(
             selectedNode,
             draftValue,
@@ -164,6 +169,7 @@ export function FeaturePanel({
             onExecute,
             liveState
           )}
+          </fieldset>
         </section>
 
         {editable && (

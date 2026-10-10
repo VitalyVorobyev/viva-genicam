@@ -1,12 +1,8 @@
-/** Which backend the Tauri process actually started with. */
-export type BackendMode = "Embedded" | "Remote";
+import type { BackendStatus } from "../generated/ipc";
 
-/** Payload of the `backend_status` command. */
-export interface BackendStatus {
-  mode: BackendMode;
-  /** Set when ZENOH_CONFIG was given but could not be loaded. */
-  zenoh_config_error: string | null;
-}
+// The `backend_status` payload is generated from the Rust type (ST-28); a
+// `zenoh_config_error` is set when ZENOH_CONFIG was given but did not load.
+export type { BackendMode, BackendStatus } from "../generated/ipc";
 
 export interface BackendChipData {
   label: string;

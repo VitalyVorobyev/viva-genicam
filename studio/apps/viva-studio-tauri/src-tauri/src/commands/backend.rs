@@ -17,6 +17,7 @@ pub struct StartupDiagnostics {
 
 /// What the frontend needs to show which backend the app is talking to.
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct BackendStatus {
     /// The mode the app actually started in.
     pub mode: BackendMode,

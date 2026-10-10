@@ -4,6 +4,7 @@ use viva_xml_model::UiGraph;
 // Diagnostics are intentionally minimal in the MVP so the UI can surface parser
 // warnings/errors without committing to a heavy schema.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[allow(dead_code)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagLevel {
@@ -12,6 +13,8 @@ pub enum DiagLevel {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(optional_fields))]
 pub struct Diag {
     pub level: DiagLevel,
     pub message: String,

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "../tauri";
+import { listenTo } from "./events";
 import type { ConnectionState, DeviceInfo, DisconnectReason } from "./types";
 import type { ParseXmlResponse } from "../xml_model/uigraph";
 
@@ -18,7 +19,6 @@ export function useDevice() {
 
     async function init() {
       const { invoke } = await import("@tauri-apps/api/core");
-      const { listen } = await import("@tauri-apps/api/event");
 
       if (cancelled) return;
 
@@ -41,24 +41,24 @@ export function useDevice() {
       // Subscribe to device-discovery events
       // Replace rather than ignore a known id: the id outlives an address
       // change, so a later announce can carry a new `ip`.
-      const u1 = await listen<DeviceInfo>("device-discovered", (e) => {
+      const u1 = await listenTo("device-discovered", (device) => {
         setDevices((prev) =>
-          prev.some((d) => d.id === e.payload.id)
-            ? prev.map((d) => (d.id === e.payload.id ? e.payload : d))
-            : [...prev, e.payload]
+          prev.some((d) => d.id === device.id)
+            ? prev.map((d) => (d.id === device.id ? device : d))
+            : [...prev, device]
         );
       });
 
-      const u2 = await listen<{ device_id: string }>("device-lost", (e) => {
-        setDevices((prev) => prev.filter((d) => d.id !== e.payload.device_id));
+      const u2 = await listenTo("device-lost", (lost) => {
+        setDevices((prev) => prev.filter((d) => d.id !== lost.device_id));
       });
 
-      const u3 = await listen<ConnectionState>("connection-state-changed", (e) => {
-        setConnectionState(e.payload);
+      const u3 = await listenTo("connection-state-changed", (state) => {
+        setConnectionState(state);
       });
 
-      const u4 = await listen<DisconnectReason>("disconnect-reason", (e) => {
-        setDisconnectReason(e.payload);
+      const u4 = await listenTo("disconnect-reason", (reason) => {
+        setDisconnectReason(reason);
       });
 
       unlisteners.push(u1, u2, u3, u4);

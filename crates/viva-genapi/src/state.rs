@@ -38,7 +38,9 @@ pub struct FeatureState {
     /// `pIsAvailable` and selector gating: whether the feature can be used in
     /// the device's current state.
     pub is_available: bool,
-    /// Current bounds of an Integer or Float feature.
+    /// Current bounds of an Integer or Float feature; `None` when either
+    /// bound is unknown — not declared, or declared through a `<pMin>` or
+    /// `<pMax>` that could not be read.
     pub range: Option<ValueRange>,
     /// The entries an Enumeration accepts now, after their own
     /// `pIsImplemented`/`pIsAvailable`.
@@ -146,31 +148,37 @@ impl NodeMap {
             FeatureValue::None
         };
 
+        // The parser stands in `i64::MIN`/`i64::MAX` and `f64::MIN`/`f64::MAX`
+        // for a bound the XML does not declare. A range built on one is no
+        // range, so none is reported, as the wire contract requires.
         let (range, unit) = match node {
             Node::Integer(n) => {
-                // `<pMin>`/`<pMax>` defer the bounds to the device, and the
-                // static `min`/`max` are then `i64` sentinels. A failed read,
-                // or a feature that cannot be used now, falls back to the
-                // static bound.
+                // `<pMin>`/`<pMax>` defer the bounds to the device. A failed
+                // read, or a feature that cannot be used now, leaves the
+                // static bound in place.
                 let resolve = |p: Option<&str>, fallback: i64| {
                     p.filter(|_| usable)
                         .and_then(|p| self.get_integer(p, io).ok())
                         .unwrap_or(fallback)
                 };
-                let range = ValueRange {
-                    min: resolve(n.p_min.as_deref(), n.min) as f64,
-                    max: resolve(n.p_max.as_deref(), n.max) as f64,
+                let (min, max) = (
+                    resolve(n.p_min.as_deref(), n.min),
+                    resolve(n.p_max.as_deref(), n.max),
+                );
+                let range = (min != i64::MIN && max != i64::MAX).then(|| ValueRange {
+                    min: min as f64,
+                    max: max as f64,
                     inc: n.inc.map(|i| i as f64),
-                };
-                (Some(range), n.unit.clone())
+                });
+                (range, n.unit.clone())
             }
             Node::Float(n) => {
-                let range = ValueRange {
+                let range = (n.min != f64::MIN && n.max != f64::MAX).then_some(ValueRange {
                     min: n.min,
                     max: n.max,
                     inc: None,
-                };
-                (Some(range), n.unit.clone())
+                });
+                (range, n.unit.clone())
             }
             _ => (None, None),
         };
@@ -347,6 +355,11 @@ mod tests {
                 <Sign>Unsigned</Sign>
                 <Endianess>BigEndian</Endianess>
             </IntReg>
+            <Float Name="FrameRate">
+                <Address>0x900</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+            </Float>
             <Integer Name="Gain">
                 <pIsAvailable>GainAvailable</pIsAvailable>
                 <Address>0x800</Address>
@@ -477,6 +490,10 @@ mod tests {
         assert!(!state.is_available);
         assert_eq!(state.value, FeatureValue::None);
         assert_eq!(state.access, Some(AccessMode::RO));
+        // `<pMax>` went unread, so there is no maximum to report, and a range
+        // made of the parser's `i64::MAX` placeholder would be a lie (Codex
+        // review of #170).
+        assert_eq!(state.range, None);
 
         // Negative control: with the gate open the value and `<pMax>` are read.
         let open = MemIo::with(&[(0x700, 1), (0x800, 6), (0x804, 24)]);
@@ -484,6 +501,15 @@ mod tests {
         assert!(state.is_available);
         assert_eq!(state.value, FeatureValue::Integer(6));
         assert_eq!(state.range.map(|r| r.max), Some(24.0));
+    }
+
+    /// A Float that declares no bounds has none to report: the parser's
+    /// `f64::MIN`/`f64::MAX` placeholders are not a range.
+    #[test]
+    fn a_feature_without_bounds_reports_no_range() {
+        let state = nodemap().feature_state("FrameRate", &io()).expect("state");
+        assert_eq!(state.value, FeatureValue::Float(0.0));
+        assert_eq!(state.range, None);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use viva_xml_model::{UiGraph, parse_genicam_xml};
 // Keep the response payload aligned with the WASM/TS UiGraph contract so the UI
 // can swap providers without changing how it renders.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ModelSummary {
     pub node_count: usize,
     pub category_count: usize,
@@ -14,6 +15,7 @@ pub struct ModelSummary {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ParseXmlResponse {
     pub graph: UiGraph,
     pub xml: String,

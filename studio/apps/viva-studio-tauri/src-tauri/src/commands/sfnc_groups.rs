@@ -3,12 +3,14 @@ use tauri::Manager;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SfncFeature {
     pub node: String,
     pub widget: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SfncGroup {
     pub id: String,
     pub title: String,

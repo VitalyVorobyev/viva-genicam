@@ -20,6 +20,7 @@ use crate::state::device_state::{DeviceInfo, StreamerInfo};
 
 /// Which backend mode the application is currently using.
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub enum BackendMode {
     /// Direct camera communication (GigE + USB3) embedded in the app process.
     Embedded,
@@ -39,6 +40,7 @@ pub struct ConnectResult {
 
 /// Network configuration of a GigE Vision camera.
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NetworkConfig {
     pub current_ip: String,
     pub persistent_ip: String,

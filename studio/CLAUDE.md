@@ -49,6 +49,14 @@ skips loopback — so the fake camera never appears. See `#132`.
   `RawNode` is meant to carry their XML but is empty today (backlog ST-34).
 - In the Tauri backend use `tauri::async_runtime::spawn`, never bare
   `tokio::spawn`.
+- The UI's IPC types — payloads, the UiGraph contract and the `StudioEvents`
+  map — are generated from the Rust types into
+  `ui/viva-studio-ui/src/generated/ipc.ts`; never edit that file. After
+  changing a type the UI receives, run `UPDATE_BINDINGS=1 cargo test bindings`
+  in `apps/viva-studio-tauri/src-tauri` and commit the result: a plain
+  `cargo test` there fails while the file is stale. Emit events through
+  `Events::send` with a `StudioEvent` type, and listen with `listenTo`
+  (`ui/.../device/events.ts`).
 - Package manager is bun, never npm (`bun.lock` is authoritative).
 - `apps/` stays thin glue (windowing, dialogs, command wiring) — no
   parsing or business logic.

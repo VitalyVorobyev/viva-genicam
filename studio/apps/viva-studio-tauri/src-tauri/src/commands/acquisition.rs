@@ -24,7 +24,7 @@ pub async fn start_acquisition(
     events: State<'_, Arc<Events>>,
 ) -> Result<StreamerInfo, String> {
     let info = backend.start_acquisition().await.humanize()?;
-    events.emit("acquisition-status", status(true));
+    events.send(&status(true));
     Ok(info)
 }
 
@@ -34,6 +34,6 @@ pub async fn stop_acquisition(
     events: State<'_, Arc<Events>>,
 ) -> Result<(), String> {
     let result = backend.stop_acquisition().await;
-    events.emit("acquisition-status", status(false));
+    events.send(&status(false));
     result.humanize()
 }

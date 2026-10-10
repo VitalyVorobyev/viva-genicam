@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "../tauri";
-import type { FeatureState, NodeValueEntry } from "./types";
+import { listenTo } from "./events";
+import type { FeatureState, JsonValue, NodeValueEntry } from "./types";
 
 /**
  * Project a rich [`FeatureState`] down to the legacy [`NodeValueEntry`] shape
@@ -47,14 +48,12 @@ export function entryToFeatureState(entry: NodeValueEntry, kind: string): Featur
  * be wrong (see the `viva-genapi` numeric-dispatch handoff). The goal here is
  * only to keep obviously broken payloads out of the UI cache.
  */
-function sanitizeValue(value: unknown): number | string | boolean | null {
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      return String(value); // "NaN" / "Infinity" render as text, not garbage
-    }
+function sanitizeValue(value: JsonValue): JsonValue {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    return String(value); // "NaN" / "Infinity" render as text, not garbage
   }
   // `null` passes through: a command or write-only node has no value.
-  return value as number | string | boolean | null;
+  return value;
 }
 
 export function useNodeValues() {
@@ -67,40 +66,28 @@ export function useNodeValues() {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
 
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      if (cancelled) return;
-      listen<{
-        node_name: string;
-        value: number | string | boolean | null;
-        access_mode: string;
-        /** `FeatureState` payload added in API v2. Missing on older backends. */
-        state?: FeatureState;
-      }>("node-value-changed", (event) => {
-        const { node_name, value, access_mode, state } = event.payload;
-        const cleanValue = sanitizeValue(value);
-        setLiveValues((prev) => {
-          const next = new Map(prev);
-          next.set(node_name, { value: cleanValue, access_mode });
-          return next;
-        });
-        if (state) {
-          const cleanState: FeatureState = {
-            ...state,
-            value: sanitizeValue(state.value),
-          };
-          setLiveStates((prev) => {
-            const next = new Map(prev);
-            next.set(node_name, cleanState);
-            return next;
-          });
-        }
-      }).then((fn) => {
-        if (cancelled) {
-          fn();
-        } else {
-          unlisten = fn;
-        }
+    listenTo("node-value-changed", ({ node_name, value, access_mode, state }) => {
+      const cleanValue = sanitizeValue(value);
+      setLiveValues((prev) => {
+        const next = new Map(prev);
+        next.set(node_name, { value: cleanValue, access_mode });
+        return next;
       });
+      const cleanState: FeatureState = {
+        ...state,
+        value: sanitizeValue(state.value),
+      };
+      setLiveStates((prev) => {
+        const next = new Map(prev);
+        next.set(node_name, cleanState);
+        return next;
+      });
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     });
 
     return () => {
@@ -114,16 +101,13 @@ export function useNodeValues() {
     if (!isTauri()) return;
 
     let unlisten: (() => void) | null = null;
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      listen("connection-state-changed", (e) => {
-        const state = e.payload as { kind: string };
-        if (state.kind === "disconnected" || state.kind === "error") {
-          setLiveValues(new Map());
-          setLiveStates(new Map());
-        }
-      }).then((fn) => {
-        unlisten = fn;
-      });
+    listenTo("connection-state-changed", (state) => {
+      if (state.kind === "disconnected" || state.kind === "error") {
+        setLiveValues(new Map());
+        setLiveStates(new Map());
+      }
+    }).then((fn) => {
+      unlisten = fn;
     });
 
     return () => {

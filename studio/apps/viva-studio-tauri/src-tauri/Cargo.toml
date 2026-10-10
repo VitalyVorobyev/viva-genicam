@@ -28,6 +28,11 @@ zenoh = "1"
 
 [dev-dependencies]
 futures-util = "0.3"
+# The UI's TypeScript types are generated from the Rust ones (`src/bindings.rs`,
+# backlog ST-28); test builds turn on the `ts` derives below.
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-json-impl"] }
+viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api", features = ["genapi", "ts"] }
+viva_xml_model = { path = "../../../crates/viva_xml_model", features = ["ts"] }
 # The image WebSocket's client side, for the frame-delivery tests.
 tokio-tungstenite = "0.30"
 viva-fake-gige = { path = "../../../../crates/viva-fake-gige" }

@@ -207,6 +207,8 @@ pub struct NodeValueUpdate {
 /// than invent defaults like `i64::MIN..=i64::MAX` (the UI renders "range
 /// unknown" in that case).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(optional_fields))]
 pub struct NumericRange {
     pub min: f64,
     pub max: f64,
@@ -236,6 +238,8 @@ pub struct NumericRange {
 ///   cannot filter by IsAvailable it SHOULD still populate this with the full
 ///   entry list so the UI stops falling back to static XML.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(optional_fields))]
 pub struct FeatureState {
     /// Current feature value, typed according to `kind`.
     ///
@@ -359,6 +363,8 @@ fn f64_to_json(v: f64) -> serde_json::Value {
 /// `AcquisitionStatus`, etc. The UI uses these to update badges / form inputs
 /// without a second round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(optional_fields))]
 pub struct CommandResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -366,6 +372,9 @@ pub struct CommandResult {
     /// Map of node name -> refreshed state for nodes affected by this command.
     /// Empty when the service cannot determine side effects.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    // Omitted when empty; `nullable` adds the `?` without unwrapping a type
+    // that is not an `Option`.
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub affected_states: std::collections::HashMap<String, FeatureState>,
 }
 
@@ -446,6 +455,7 @@ pub enum AcquisitionCommand {
 
 /// Acquisition status pushed by the service on change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AcquisitionStatus {
     pub active: bool,
     pub fps: Option<f32>,
@@ -456,6 +466,7 @@ pub struct AcquisitionStatus {
 
 /// SFNC pixel format identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum PixelFormat {
     Mono8,
     Mono10,
@@ -519,6 +530,7 @@ impl PixelFormat {
 
 /// Image stream metadata published at acquisition start and on format change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ImageMeta {
     pub pixel_format: PixelFormat,
     pub width: u32,

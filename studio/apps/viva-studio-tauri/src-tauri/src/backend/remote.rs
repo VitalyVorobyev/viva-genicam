@@ -28,7 +28,9 @@ use crate::state::connection::Connection;
 use crate::state::device_state::{
     ApiVersionMismatch, ConnectionState, DeviceInfo, DeviceRegistry, DisconnectReason, StreamerInfo,
 };
-use crate::state::events::Events;
+use crate::state::events::{
+    DeviceLost, DeviceReconnected, Events, StudioEvent, ZenohSessionLost, ZenohSessionRestored,
+};
 
 use super::{BackendMode, ConnectResult, DeviceBackend};
 
@@ -144,7 +146,7 @@ impl RemoteBackend {
                 _ = ticker.tick() => {
                     let expired = self.registry.lock().await.expire_old(ANNOUNCE_EXPIRY_SECS);
                     for id in expired {
-                        self.events.emit("device-lost", serde_json::json!({ "device_id": id }));
+                        self.events.send(&DeviceLost { device_id: id });
                     }
                 }
             }
@@ -165,16 +167,13 @@ impl RemoteBackend {
         }
         // Always emit, so a UI listener registered after the first announce
         // still sees the device; the UI deduplicates by id.
-        self.events.emit("device-discovered", &info);
+        self.events.send(&info);
         if is_new && api_version != Some(viva_zenoh_api::API_VERSION) {
-            self.events.emit(
-                "api-version-mismatch",
-                ApiVersionMismatch {
-                    device_id: info.id.clone(),
-                    device_version: api_version,
-                    app_version: viva_zenoh_api::API_VERSION,
-                },
-            );
+            self.events.send(&ApiVersionMismatch {
+                device_id: info.id.clone(),
+                device_version: api_version,
+                app_version: viva_zenoh_api::API_VERSION,
+            });
         }
     }
 
@@ -195,16 +194,14 @@ impl RemoteBackend {
                 .is_ok();
             if !healthy && was_healthy {
                 tracing::warn!("Zenoh session health check failed");
-                self.events.emit(
-                    "zenoh-session-lost",
-                    serde_json::json!({ "message": "Zenoh session lost" }),
-                );
+                self.events.send(&ZenohSessionLost {
+                    message: "Zenoh session lost".to_string(),
+                });
             } else if healthy && !was_healthy {
                 tracing::info!("Zenoh session recovered");
-                self.events.emit(
-                    "zenoh-session-restored",
-                    serde_json::json!({ "message": "Zenoh session restored" }),
-                );
+                self.events.send(&ZenohSessionRestored {
+                    message: "Zenoh session restored".to_string(),
+                });
             }
             was_healthy = healthy;
         }
@@ -219,16 +216,10 @@ impl RemoteBackend {
                 .follow_states(session.clone(), device_id.to_string()),
             self.clone()
                 .follow_status(session.clone(), device_id.to_string()),
-            self.clone().follow::<AcquisitionStatus>(
-                session.clone(),
-                keys::acquisition_status(device_id),
-                "acquisition-status",
-            ),
-            self.clone().follow::<ImageMeta>(
-                session.clone(),
-                keys::image_meta(device_id),
-                "image-meta-changed",
-            ),
+            self.clone()
+                .follow::<AcquisitionStatus>(session.clone(), keys::acquisition_status(device_id)),
+            self.clone()
+                .follow::<ImageMeta>(session.clone(), keys::image_meta(device_id)),
         ];
         self.subscriptions.lock().await.extend(tasks);
     }
@@ -268,24 +259,23 @@ impl RemoteBackend {
         })
     }
 
-    /// Forward a topic's payloads to the UI as `event`.
-    fn follow<T: DeserializeOwned + serde::Serialize + Send + 'static>(
+    /// Forward a topic's payloads to the UI as their event.
+    fn follow<T: StudioEvent + DeserializeOwned + Send + 'static>(
         self: Arc<Self>,
         session: Arc<Session>,
         key: String,
-        event: &'static str,
     ) -> tauri::async_runtime::JoinHandle<()> {
         tauri::async_runtime::spawn(async move {
             let sub = match session.declare_subscriber(&key).await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("{event} subscriber error: {e}");
+                    tracing::error!("{} subscriber error: {e}", T::NAME);
                     return;
                 }
             };
             while let Ok(sample) = sub.recv_async().await {
                 if let Ok(payload) = serde_json::from_slice::<T>(&sample.payload().to_bytes()) {
-                    self.events.emit(event, payload);
+                    self.events.send(&payload);
                 }
             }
         })
@@ -340,13 +330,10 @@ impl RemoteBackend {
                 reason: message.clone(),
             })
             .await;
-        self.events.emit(
-            "disconnect-reason",
-            DisconnectReason {
-                message,
-                device_id: device_id.clone(),
-            },
-        );
+        self.events.send(&DisconnectReason {
+            message,
+            device_id: device_id.clone(),
+        });
         self.reconnect(device_id).await;
     }
 
@@ -382,13 +369,10 @@ impl RemoteBackend {
                                 model: result.model,
                             })
                             .await;
-                        self.events.emit(
-                            "device-reconnected",
-                            serde_json::json!({
-                                "device_id": device_id,
-                                "node_count": node_count,
-                            }),
-                        );
+                        self.events.send(&DeviceReconnected {
+                            device_id: device_id.clone(),
+                            node_count,
+                        });
                         tracing::info!("Reconnected to {device_id}");
                         return;
                     }

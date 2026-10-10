@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `viva-service` and `viva-service-u3v` name the features it may have changed
   (`DeviceOps::invalidated_by`, from `NodeMap::invalidated_by`), so a client
   can re-read the ones it shows. `NodeOpResponse::ok()`/`err()` construct it.
+- `viva-zenoh-api`'s `ts` feature derives `ts_rs::TS` on the payloads a UI
+  receives (`FeatureState`, `NumericRange`, `CommandResult`,
+  `AcquisitionStatus`, `ImageMeta`, `PixelFormat`), so a TypeScript client can
+  generate its types from them. Off by default.
 - `keys::node_state_wildcard` subscribes to every `nodes/{name}/state`
   publication of a device.
 - `viva_service::serve::serve_device` starts the task set the service runs for
@@ -93,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left the feature out instead of reporting it unavailable (Codex review of
   #169).
 
+- `NodeMap::feature_state` reports no range for a feature with an unknown
+  bound. The parser stands in `i64::MIN`/`i64::MAX` (`f64::MIN`/`f64::MAX` for a
+  Float) for a bound the XML leaves out, and a `<pMin>`/`<pMax>` that is not
+  read leaves that placeholder in place; both reached the wire as a range of
+  about ±9.2e18 (Codex review of #170). The wire contract already said to omit
+  the range instead.
+
 ### Viva Studio and documentation — not part of any published crate
 
 Viva Studio lives in the `studio/` workspace, which is published nowhere: no
@@ -145,6 +156,15 @@ section changes the library.
 - **Studio writes features that are converters** (see Fixed above for the
   library side): the UI model and the write pre-flight took a converter's
   access mode as a fixed `RO` and refused the write before it was sent.
+- **The UI's IPC types are generated from the Rust ones** (ST-28). A test in
+  the Tauri crate writes `ui/viva-studio-ui/src/generated/ipc.ts` with ts-rs —
+  the `FeatureState` contract, the UiGraph, every command result and event
+  payload, and a `StudioEvents` map from each event name to its payload — and
+  fails while the committed file is stale; the hand-written copies are gone.
+  Every event is now sent as a typed `StudioEvent` and received with
+  `listenTo`, so a name cannot pair with the wrong shape. The honest types
+  found one defect: "Export State" wrote a register's size summary into the
+  preset as if it were a value.
 - **Remote mode works through the same backend as embedded mode.** The commands
   used to branch on the mode, and remote mode lagged a contract version behind:
   it answered feature queries from a cache the connect-time read never filled,

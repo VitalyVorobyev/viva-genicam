@@ -223,19 +223,12 @@ async fn run_fake_camera(
         pixel_format,
     ));
 
-    let device =
-        viva_u3v::device::U3vDevice::open(fake_transport.clone(), 0x81, 0x01, Some(0x82), None)?;
+    let device = viva_u3v::device::U3vDevice::open(fake_transport, 0x81, 0x01, Some(0x82), None)?;
 
     let (camera, xml) = open_u3v_device(device)?;
 
     let device_id = "cam-fake-u3v".to_string();
-    let handle = Arc::new(U3vDeviceHandle::new(
-        camera,
-        xml,
-        device_id.clone(),
-        fake_transport,
-        Some(0x82),
-    ));
+    let handle = Arc::new(U3vDeviceHandle::new(camera, xml, device_id.clone()));
 
     let announce = DeviceAnnounce::new(device_id, "FakeU3V", "FakeU3V", "FAKE-001");
     spawn_service_tasks(session, handle, announce, shutdown).await;
@@ -267,24 +260,12 @@ async fn run_real_camera(
 
     let (camera, xml) = connect_u3v_with_xml(device_info)?;
 
-    // To get the transport Arc and stream endpoint, we need to peek at the
-    // RegisterIo's inner device. Since `connect_u3v_with_xml` consumes
-    // the device, we reconstruct the transport from the RegisterIo.
-    let transport = camera.transport().lock_device()?.transport();
-    let stream_ep = camera.transport().lock_device()?.stream_ep();
-
     let device_id = format!(
         "cam-u3v-{:04x}{:04x}",
         device_info.vendor_id, device_info.product_id
     );
 
-    let handle = Arc::new(U3vDeviceHandle::new(
-        camera,
-        xml,
-        device_id.clone(),
-        transport,
-        stream_ep,
-    ));
+    let handle = Arc::new(U3vDeviceHandle::new(camera, xml, device_id.clone()));
 
     let name = device_info
         .model

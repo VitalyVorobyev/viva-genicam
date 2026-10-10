@@ -1,6 +1,6 @@
 [package]
 name = "viva_studio_tauri"
-version = "0.7.0"
+version = "0.8.0"
 description = "Viva Studio desktop app"
 edition = "2024"
 build = "build.rs"

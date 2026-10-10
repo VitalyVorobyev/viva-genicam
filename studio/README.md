@@ -2,47 +2,21 @@
   <img src="assets/viva-studio-logo-and-text_opt.svg" alt="viva genicam" width="360">
 </p>
 
-# Viva Studio
+# Viva Studio — developer notes
 
 Viva Studio is the desktop application for GenICam cameras: browse a camera's
-feature tree, change settings, and watch the live image. It is a React 19 + Tauri
-v2 app that lives in this repository as a **second Cargo workspace** under
-`studio/`, so the published library crates stay free of GUI and Node toolchain
-concerns.
+feature tree, change settings, watch the live image, and save a diagnostic
+report. **Using it?** Download a release and read the user guide's
+[Viva Studio](https://vitalyvorobyev.github.io/viva-genicam/studio.html)
+chapter. This page is for working on it.
 
-> **Experimental.** Studio works — it discovers cameras, reads and writes
-> features, and streams live frames. But it is the least-exercised part of this
-> repository: it has no hardware in CI, and its hardware reports come from a few
-> users and camera models. Treat what it displays as unconfirmed
-> until you have seen it agree with your camera. Bug reports are very welcome.
-
-The working agreement for contributors is in [`CLAUDE.md`](CLAUDE.md); the Zenoh
-wire contract is in [`../docs/studio/zenoh-api.md`](../docs/studio/zenoh-api.md).
-
----
-
-## What works today
-
-- **Live cameras.** Discovery, connect, feature read/write and streaming of
-  GigE Vision and USB3 Vision cameras, either through the embedded backend
-  (`viva-genicam` linked directly into the Tauri app) or over Zenoh from
-  `viva-service` / `viva-service-u3v`.
-- **Feature browser.** Category tree, search, typed editors, live values, and
-  access-mode handling — a read-only or locked feature is presented as such.
-- **Offline XML browsing.** Open a GenApi XML file with no camera attached and
-  explore the same tree.
-- **Unknown-node visibility.** Unrecognised XML tags become `Unknown` nodes
-  rather than disappearing, and declarations the library could not turn into
-  features are listed in the Diagnostics tab and counted in the toolbar.
-- **A diagnostic report.** The Diagnostics tab saves the report
-  `viva-camctl report` writes, for attaching to an issue.
-
-## What is not there yet
-
-- **Signed builds.** The release bundles are unsigned; see
-  [Install a release build](#install-a-release-build).
-- **Recording and playback**, **frame annotation**, **auto-update** — planned,
-  see `../docs/backlog.md`.
+It is a React 19 + Tauri v2 app that lives in this repository as a **second
+Cargo workspace** under `studio/`, so the published library crates stay free
+of GUI and Node toolchain concerns. The working agreement for contributors is
+in [`CLAUDE.md`](CLAUDE.md), the repository's in
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md); the Zenoh wire contract is in
+[`../docs/studio/zenoh-api.md`](../docs/studio/zenoh-api.md), and what is
+planned in the ST rows of [`../docs/backlog.md`](../docs/backlog.md).
 
 ---
 
@@ -94,36 +68,7 @@ while that file is stale.
 
 ---
 
-## Install a release build
-
-Releases after 0.7.0 attach Viva Studio to the
-[GitHub release](https://github.com/VitalyVorobyev/viva-genicam/releases),
-versioned with the library, as `viva-studio-<tag>-<target>.<ext>`:
-
-| OS | File | Install |
-|---|---|---|
-| macOS, Apple Silicon | `.dmg` | Open it and drag Viva Studio to Applications |
-| Linux x86_64 | `.deb` or `.AppImage` | `sudo apt install ./viva-studio-….deb`, or `chmod +x` the AppImage and run it |
-| Windows x86_64 | `.msi` | Run the installer |
-
-The Linux builds are made on Ubuntu 22.04 and need its glibc or newer, and
-WebKitGTK 4.1 (the `.deb` pulls it in). Running an AppImage needs FUSE 2
-(`libfuse2t64` on Ubuntu 24.04). `SHA256SUMS.txt` on the release lists every
-file's checksum.
-
-**The bundles are not signed** — that needs paid certificates from Apple and
-Microsoft — so the first launch asks for confirmation:
-
-- **macOS** refuses to open the app the first time. Open System Settings →
-  Privacy & Security and choose *Open Anyway* for Viva Studio, or clear the
-  download's quarantine flag:
-  `xattr -dr com.apple.quarantine "/Applications/Viva Studio.app"`.
-- **Windows** SmartScreen shows "Windows protected your PC": choose
-  *More info*, then *Run anyway*. If Windows Firewall then asks whether Viva
-  Studio may use the network, allow the network your camera is on: discovery
-  and streaming arrive as inbound UDP.
-
-## Quickstart (from source)
+## Build and run from source
 
 ### Prerequisites
 

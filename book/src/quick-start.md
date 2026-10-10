@@ -1,62 +1,75 @@
 # Quick Start
 
-This guide gets you from checkout to discovering cameras in minutes.
+From nothing to a list of the cameras on your network.
 
-## Prerequisites
-- **Rust**: 1.88 or newer (edition 2024).
-- **OS**: Windows, Linux, or macOS.
-- **Network** (GigE Vision):
-  - Allow **UDP broadcast** on the NIC you’ll use for discovery.
-  - Optional: enable **jumbo frames** on that NIC for high‑throughput streaming tests.
+## Install what you need
 
-## Build & Test
-```bash
-# From the repo root:
-cargo build --workspace
+- **A Rust application**: add the facade crate and an async runtime. Rust 1.88
+  or newer.
 
-# Run all tests
-cargo test --workspace
+  ```bash
+  cargo add viva-genicam
+  cargo add tokio --features full
+  ```
 
-# Generate local API docs (rustdoc)
-cargo doc --workspace --no-deps
-```
+- **The command line**: `viva-camctl` comes with the Python package
+  (`pip install viva-genicam`), and in the `viva-genicam-<version>-<platform>`
+  archives on each [GitHub release](https://github.com/VitalyVorobyev/viva-genicam/releases),
+  next to `viva-service`.
+- **Python**: `pip install viva-genicam` — see [Install & hello-camera](python/install.md).
+- **A desktop app**: [Viva Studio](studio.md).
 
-## First run: Discovery examples
+For a GigE Vision camera, the host must allow **UDP broadcast** on the network
+interface the camera is on; [Networking](networking.md) covers firewalls,
+addressing and jumbo frames.
 
-You can try discovery in two ways—either via the high‑level `viva-genicam` crate example or the `viva-camctl` CLI.
+## Find your cameras
 
-### Option A: Example (genicam crate)
-
-```bash
-# List cameras via GVCP broadcast
-cargo run -p viva-genicam --example list_cameras
-```
-
-### Option B: CLI (viva-camctl)
+From the command line:
 
 ```bash
-# Discover cameras on the selected interface (IPv4 of your NIC)
-cargo run -p viva-camctl -- list --iface 192.168.0.5
+viva-camctl list
+# Only on one network interface, named by its address or its OS name:
+viva-camctl list --iface 192.168.0.5
 ```
+
+From Rust, discovery is one call; the snippet comes from the
+[`list_cameras`](https://github.com/VitalyVorobyev/viva-genicam/blob/main/crates/viva-genicam/examples/list_cameras.rs)
+example:
+
+```rust,ignore
+{{#include ../../crates/viva-genicam/examples/list_cameras.rs:discover}}
+```
+
+Then connect to one and read or write a feature by name
+([`get_set_feature`](https://github.com/VitalyVorobyev/viva-genicam/blob/main/crates/viva-genicam/examples/get_set_feature.rs)):
+
+```rust,ignore
+{{#include ../../crates/viva-genicam/examples/get_set_feature.rs:get_set}}
+```
+
+From a clone of the repository the examples run as
+`cargo run -p viva-genicam --example list_cameras`, and the CLI as
+`cargo run -p viva-camctl -- list`.
 
 ## Control path: read / write & XML
 
 ```bash
 # Read a feature by name
-cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
+viva-camctl get --ip 192.168.0.10 --name ExposureTime
 
 # Set a feature value
-cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
+viva-camctl set --ip 192.168.0.10 --name ExposureTime --value 5000
 
 # Dump the camera's GenApi XML
-cargo run -p viva-camctl -- xml --ip 192.168.0.10 --out camera.xml
+viva-camctl xml --ip 192.168.0.10 --out camera.xml
 ```
 
 ## When something does not work
 
 ```bash
 # Collect everything a bug report needs, in one file
-cargo run -p viva-camctl -- report --ip 192.168.0.10 --out viva-report.txt
+viva-camctl report --ip 192.168.0.10 --out viva-report.txt
 ```
 
 The report lists the network interfaces the library can see, the camera's
@@ -72,7 +85,7 @@ still produce output when nothing else does. Attach the file to an
 # Receive a GVSP stream and save 2 frames to the current directory.
 # By default the camera's GevSCPSPacketSize is kept; --auto sizes packets from
 # the NIC MTU, --packet-size N sets an explicit ceiling.
-cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
+viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 ```
 
 See [Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-and-mtu).

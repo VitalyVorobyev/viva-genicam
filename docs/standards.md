@@ -31,14 +31,20 @@ Features can reference each other. A `SwissKnife` node computes values from form
 
 ### GenCP -- the control protocol
 
-GenCP defines how read/write commands are sent to a camera over any transport. It specifies a simple packet format with four operations:
+GenCP (the Generic Control Protocol, EMVA; free to download) defines how a
+host reads and writes a camera's register map: `READMEM` and `WRITEMEM`
+commands, a `PENDING_ACK` for a device that needs more time, events, request
+ids, status codes, and the Technology Agnostic Bootstrap Register Map (ABRM)
+every GenCP device has at address 0. A transport fills in the byte order and
+the framing.
 
-- `ReadRegister` / `WriteRegister` -- access 32-bit registers
-- `ReadMem` / `WriteMem` -- access arbitrary memory blocks
+USB3 Vision carries GenCP itself, little-endian. GigE Vision's GVCP is a
+protocol of its own that GenCP generalised: the same ideas, a shared core of
+status codes, but its own opcodes (`READREG`/`WRITEREG` among them), headers
+and big-endian fields. The two do not share bytes on the wire.
 
-Both GigE Vision and USB3 Vision use GenCP for their control channels.
-
-**In viva-genicam:** `viva-gencp` provides transport-agnostic encode/decode for GenCP packets.
+**In viva-genicam:** `viva-gencp` holds GenCP's command ids and flags, GVCP's
+opcodes and headers, and the status codes the two share.
 
 ### GVCP / GVSP -- GigE Vision protocols
 
@@ -51,9 +57,9 @@ GigE Vision adds two protocols on top of GenCP:
 
 ### USB3 Vision
 
-USB3 Vision cameras use USB bulk endpoints: one pair for GenCP control, another for image data. Device discovery uses standard USB enumeration with U3V class descriptors. Bootstrap registers (ABRM, SBRM, SIRM) configure the device.
+USB3 Vision cameras use USB bulk endpoints: one pair for GenCP control, another for image data. Device discovery uses standard USB enumeration: interface class `0xEF`, subclass `0x05`, with the protocol telling control, event and streaming interfaces apart. Bootstrap registers (ABRM, SBRM, SIRM) describe the device and configure its stream. The USB3 Vision standard is not freely available; what this implementation follows, and where that comes from, is in `crates/viva-u3v/src/bootstrap.rs`.
 
-**In viva-genicam:** `viva-u3v` implements the transport layer.
+**In viva-genicam:** `viva-u3v` implements the transport layer. It has not yet been run against a real camera (backlog TC-27).
 
 ### SFNC -- standard feature names
 

@@ -54,6 +54,6 @@ This chapter orients you in the standards and shows how they map to the crates i
 - Similar split between control and data paths, but with **USB3** transport (`viva-u3v`): GenCP over USB bulk endpoints for control, and a separate bulk endpoint for image data. Discovery is USB enumeration rather than a broadcast. The higher‑level GenApi and NodeMap concepts remain the same.
 
 ## 6) What to read next
-- [Architecture Overview](architecture.md) for a code‑level view of modules, traits, and async/concurrency.
+- [How the library fits together](architecture.md) for the layers, which one to use, and what blocks.
 - [Crates](crates/README.md) for deep dives (APIs, examples, edge cases).
 - [Tutorials](tutorials/README.md) to configure features and receive frames end‑to‑end.

@@ -76,7 +76,7 @@ API-09, API-10, API-11, API-13.
 Windows wheel, fuzzed parsers, semver checks — and documentation that is right,
 not merely present.
 
-**Open**: CI-01, CI-03, CI-04, CI-05, CI-07, CI-08, CI-09, CI-10, CI-17, CI-18, DOC-06; a book production-tuning chapter (rmem, udev, usbfs) is not yet a row.
+**Open**: CI-01, CI-03, CI-04, CI-05, CI-07, CI-08, CI-09, CI-10, CI-18, DOC-06; a book production-tuning chapter (rmem, udev, usbfs) is not yet a row.
 
 ## Services & Studio
 

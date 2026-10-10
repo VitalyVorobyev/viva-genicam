@@ -48,38 +48,28 @@
 - **Service bridge** -- expose cameras over [Zenoh](https://zenoh.io/) for Viva Studio (the desktop GUI in `studio/`)
 - **No hardware required** -- built-in fake cameras (`viva-fake-gige`, `viva-fake-u3v`) for testing and demos
 
-## Workspace layout
+## Which part do I need?
 
-```
-crates/
-  viva-gencp/          GenCP encode/decode (transport-agnostic)
-  viva-gige/           GigE Vision transport (GVCP/GVSP)
-  viva-u3v/            USB3 Vision transport
-  viva-genapi-xml/     GenICam XML parser
-  viva-genapi/         GenApi node map & evaluation engine
-  viva-genicam/        Public API facade (start here)
-  viva-pfnc/           Pixel Format Naming Convention tables
-  viva-sfnc/           Standard Feature Naming Convention constants
-  viva-zenoh-api/      Message payloads and topic names for the services
-  viva-service/        Zenoh bridge: GigE cameras -> Viva Studio
-  viva-service-u3v/    Zenoh bridge: U3V cameras -> Viva Studio
-  viva-camctl/         CLI binary
-  viva-pygenicam/      Python bindings (PyO3) -- own workspace, own Cargo.lock
-  viva-fake-gige/      Fake GigE camera for testing
-  viva-fake-u3v/       Fake U3V camera for testing
-```
+- **A Rust application** -- `cargo add viva-genicam`, the facade over the whole stack ([Quick start](#quick-start)).
+- **Python** -- `pip install viva-genicam` ([Python](#python)).
+- **A command line** -- `viva-camctl`, from the release archives or with the Python package ([viva-camctl CLI](#viva-camctl-cli)).
+- **A desktop app** -- [Viva Studio](#viva-studio), from the release downloads.
+- **Cameras over the network** -- `viva-service` / `viva-service-u3v` serve them over Zenoh ([viva-service](#viva-service-zenoh-bridge)).
 
-## Viva Studio (GUI)
+Every crate, and what it is for, is listed in the book's
+[Crates](https://vitalyvorobyev.github.io/viva-genicam/crates/) page.
 
-The desktop app for GenICam cameras lives in `studio/` as a separate Cargo
-workspace in this repository, so the published library crates stay decoupled
-from GUI and Node toolchain concerns. It is a React 19 + Tauri v2 application
-that drives a camera in-process through `viva-genicam` (embedded mode) or talks
-to `viva-service` / `viva-service-u3v` over Zenoh (remote mode). Releases after
-0.7.0 attach unsigned builds for macOS (Apple Silicon), Linux and Windows —
-[`studio/README.md`](studio/README.md#install-a-release-build) covers the
-first-launch prompts and building from source. `docs/studio/` holds the
-Zenoh API contract and the testing cookbook.
+## Viva Studio
+
+A desktop app for GenICam cameras: find a camera, browse and change its
+features, watch the live image, and save the diagnostic report we ask for. It
+runs the library itself, so it is the quickest way to try viva-genicam on your
+camera. Download it from the
+[releases](https://github.com/VitalyVorobyev/viva-genicam/releases) — macOS
+(Apple Silicon), Linux and Windows; the builds are unsigned, so the first
+launch asks for confirmation. The book's
+[Viva Studio](https://vitalyvorobyev.github.io/viva-genicam/studio.html) chapter
+covers installing and using it.
 
 ## Quick start
 
@@ -137,33 +127,23 @@ with cam.stream() as frames:
         break
 ```
 
-See [`book/src/python.md`](book/src/python.md) for the full Python API.
+The book's [Python chapter](https://vitalyvorobyev.github.io/viva-genicam/python.html) has the full Python API.
 
 ## Documentation
 
-- **[GenICam standards introduction](docs/standards.md)** -- what GenApi, GenCP, GVCP, SFNC, and PFNC are and how they map to crates
-- **[Book (mdBook)](https://vitalyvorobyev.github.io/viva-genicam/)** -- tutorials, architecture, networking cookbook
-- **[API reference (docs.rs)](https://docs.rs/viva-genicam)** -- generated Rust API docs
-- **[Examples](crates/viva-genicam/examples/)** -- runnable examples covering discovery, streaming, events, chunks, and more. The book's Rust snippets are pulled from these files, so what you read there is code that compiles in CI
-- **[System design](docs/design.md)** -- architecture, key abstractions, data flows, design tenets
-- **[Decision records](docs/adrs/)** -- why the big choices were made
-- **[Roadmap](docs/roadmap.md)** -- what's planned
+For users:
 
-## Prerequisites
+- **[User guide](https://vitalyvorobyev.github.io/viva-genicam/)** -- tutorials, networking, Python, Viva Studio, troubleshooting
+- **[API reference (docs.rs)](https://docs.rs/viva-genicam)** -- the Rust API
+- **[Examples](crates/viva-genicam/examples/)** -- runnable programs for discovery, streaming, events, chunks and more; the guide's Rust snippets come from them, so they compile in CI
+- **[Reporting a camera we can't open](https://vitalyvorobyev.github.io/viva-genicam/reporting.html)** -- what to send us
 
-- Rust 1.88+ (edition 2024)
-- Windows / Linux / macOS
-- Network: allow UDP broadcast on your capture NIC for discovery. Optional: jumbo frames for high throughput.
+For developers:
 
-## Build & test
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** -- building, checks, tests, pull requests
+- **[docs/](docs/README.md)** -- design, standards, decision records, roadmap and backlog
 
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo doc --workspace --all-features --no-deps
-```
-
-## Run examples
+## Examples (from a clone of this repository)
 
 ```bash
 # Discover cameras
@@ -248,18 +228,11 @@ The service discovers cameras, publishes device announcements, serves GenICam XM
 handles node read/write, and streams frames over Zenoh for Viva Studio
 (the desktop GUI in `studio/`).
 
-## Integration testing
+## Developing
 
-Integration tests use the built-in `viva-fake-gige` camera simulator -- no
-external tools or hardware required.
-
-```bash
-# All tests (unit + integration + service e2e)
-cargo test --workspace
-
-# Run a self-contained demo
-cargo run -p viva-genicam --example demo_fake_camera
-```
+Build, test and contribution instructions are in
+[CONTRIBUTING.md](CONTRIBUTING.md); everything runs without hardware, against
+cameras simulated in-process.
 
 ## Troubleshooting
 

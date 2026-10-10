@@ -36,6 +36,7 @@ cargo test -p viva-service --test fake_camera_e2e    # 8: acquisition, double st
                                                      #    predicates, write-only/command snapshot, EVS topic,
                                                      #    what a write invalidates, the report queryable
 cargo test -p viva-genicam --test book_includes      # 1: every mdBook {{#include}} resolves
+cargo test -p viva-genicam --test doc_links          # 2: every relative Markdown link resolves
 
 # Every fake-camera suite binds UDP 3956: two test processes running at once
 # (e.g. in two worktrees) cross-talk and fail spuriously.
@@ -252,8 +253,15 @@ appears.
 
 ## Documentation
 
-- **mdBook** (`book/`) — published user docs: tutorials, architecture,
-  networking cookbook.
+User and developer documentation are kept apart:
+
+- **mdBook** (`book/`) — the published **user guide**: getting started,
+  tutorials, networking, Python, Viva Studio, troubleshooting. Nothing about
+  working on the code goes here; the book's last page points developers to
+  the repository.
+- **`CONTRIBUTING.md`** and **`docs/`** (indexed by `docs/README.md`) — the
+  **developer** documentation: building, checks, test suites, design, ADRs,
+  roadmap, backlog. `studio/README.md` is Studio's developer notes.
 - **API docs** — `cargo doc`, published to GitHub Pages.
 - **Examples** — 18 in `crates/viva-genicam/examples/` (`demo_fake_camera` is
   the zero-hardware demo).

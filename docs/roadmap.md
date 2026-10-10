@@ -42,12 +42,12 @@ says, clean multicast teardown, an allocation-free receive path.
 ## Phase 4 — GenApi conformance, round 2
 
 **Goal**: the GenApi constructs ADR-0018 did not reach, ordered by corpus
-frequency — caching and polling, `pSelected` direction, dynamic limits, access
-ceilings, `<pLength>`, a chunk adapter — and a corpus test that can fail on a
+frequency — caching and polling, `pSelected` direction, dynamic limits,
+`<pLength>`, a chunk adapter — and a corpus test that can fail on a
 wrong *value*, not only on an error.
 
 **Open**: GA-03, GA-04, GA-05, GA-07, GA-09, GA-10, GA-11, GA-12, GA-13, GA-14,
-GA-15, GA-16, GA-17, GA-18, GA-23, GA-26, GA-30, GA-33.
+GA-15, GA-16, GA-17, GA-18, GA-30, GA-33.
 
 ## Not a phase — device classes beyond area-scan
 

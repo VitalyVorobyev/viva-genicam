@@ -189,6 +189,10 @@ pub struct NodeMeta {
     pub display_name: Option<String>,
     /// Recommended UI representation for numeric features.
     pub representation: Option<Representation>,
+    /// `<ImposedAccessMode>`: a ceiling on the node's access, whatever its
+    /// `<AccessMode>` or `<pValue>` allows. `RW` imposes nothing.
+    #[serde(default)]
+    pub imposed_access: Option<AccessMode>,
 }
 
 /// Access privileges for a GenICam node as described in the XML.
@@ -203,14 +207,25 @@ pub enum AccessMode {
 }
 
 impl AccessMode {
+    /// This access under the ceiling an `<ImposedAccessMode>` sets: `RO`
+    /// removes writing, `WO` reading, `RW` or no ceiling nothing. `None` when
+    /// nothing is left — an `RO` node imposed `WO`.
+    pub fn capped_by(self, ceiling: Option<AccessMode>) -> Option<AccessMode> {
+        match (self, ceiling) {
+            (access, None | Some(AccessMode::RW)) => Some(access),
+            (AccessMode::WO, Some(AccessMode::RO)) | (AccessMode::RO, Some(AccessMode::WO)) => None,
+            (_, Some(ceiling)) => Some(ceiling),
+        }
+    }
+
     /// Parse an `<AccessMode>` value.
     ///
     /// Beyond the three spellings the standard defines, the single-letter forms
     /// `R` / `W` are accepted: they appear in third-party GenICam documents
     /// (including the standard's own conformance fixtures). An unrecognized
-    /// value falls back to `RW` — the same default as an absent `<AccessMode>` —
-    /// so one odd register cannot make a whole camera unusable. The runtime
-    /// still surfaces the device's own error if the access is genuinely denied.
+    /// value is logged and read as `RO`: a register whose access we cannot
+    /// read is not written (backlog GA-26), and one odd register still does
+    /// not make a whole camera unusable.
     pub(crate) fn parse(value: &str) -> Result<Self, XmlError> {
         let trimmed = value.trim();
         match trimmed.to_ascii_uppercase().as_str() {
@@ -220,9 +235,9 @@ impl AccessMode {
             other => {
                 tracing::warn!(
                     access_mode = other,
-                    "unknown <AccessMode> value, assuming RW"
+                    "unknown <AccessMode> value, assuming RO"
                 );
-                Ok(AccessMode::RW)
+                Ok(AccessMode::RO)
             }
         }
     }
@@ -2284,7 +2299,19 @@ mod tests {
         assert_eq!(AccessMode::parse("W").unwrap(), AccessMode::WO);
         assert_eq!(AccessMode::parse("WR").unwrap(), AccessMode::RW);
         assert_eq!(AccessMode::parse(" ro ").unwrap(), AccessMode::RO);
-        assert_eq!(AccessMode::parse("Bogus").unwrap(), AccessMode::RW);
+        // A ceiling caps and never grants (backlog GA-23).
+        assert_eq!(
+            AccessMode::RW.capped_by(Some(AccessMode::RO)),
+            Some(AccessMode::RO)
+        );
+        assert_eq!(
+            AccessMode::RO.capped_by(Some(AccessMode::RW)),
+            Some(AccessMode::RO)
+        );
+        assert_eq!(AccessMode::RW.capped_by(None), Some(AccessMode::RW));
+        assert_eq!(AccessMode::RO.capped_by(Some(AccessMode::WO)), None);
+        // An access we cannot read is not one we write (backlog GA-26).
+        assert_eq!(AccessMode::parse("Bogus").unwrap(), AccessMode::RO);
     }
 
     /// A node we cannot parse costs that one feature, not the whole document —

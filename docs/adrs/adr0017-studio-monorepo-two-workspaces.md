@@ -1,6 +1,6 @@
 # ADR-0017: Studio Monorepo with Two Cargo Workspaces
 
-**Status:** Accepted
+**Status:** Accepted; its CI trigger is amended by [ADR-0024](adr0024-studio-reference-viewer.md)
 **Date:** 2026-07-25
 
 ## Context

@@ -28,13 +28,14 @@ of the record.
 | [0014](adr0014-sync-registerio-async-adapters.md) | Synchronous RegisterIo with Async Adapters | Accepted |
 | [0015](adr0015-vendored-libusb-lgpl-notices.md) | Vendored libusb in PyPI Wheels with LGPL Notices | Accepted |
 | [0016](adr0016-cargo-deny-single-gate.md) | cargo-deny as the Single Supply-Chain Gate | Accepted |
-| [0017](adr0017-studio-monorepo-two-workspaces.md) | Studio Monorepo with Two Cargo Workspaces | Accepted |
+| [0017](adr0017-studio-monorepo-two-workspaces.md) | Studio Monorepo with Two Cargo Workspaces | Accepted; CI trigger amended by 0024 |
 | [0018](adr0018-genapi-conformance-over-convenience.md) | GenApi Conformance over Convenient Approximations | Accepted |
 | [0019](adr0019-transport-conformance-and-spec-derived-fakes.md) | Transport Conformance and Spec-Derived Fakes | Accepted |
 | [0020](adr0020-per-transport-status-codes.md) | Per-Transport Status Codes over a Shared Table | Proposed |
 | [0021](adr0021-gvsp-packet-size-policy.md) | GVSP Packet-Size Policy (Preserve, `--auto`, Explicit) | Accepted |
 | [0022](adr0022-integer-register-decoding.md) | Reinterpret Full-Width Unsigned Registers Rather Than Refuse Them | Accepted |
 | [0023](adr0023-inflight-gvcp-heartbeats.md) | Heartbeats during GVCP acknowledgement waits | Proposed |
+| [0024](adr0024-studio-reference-viewer.md) | Viva Studio is the library's reference viewer | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

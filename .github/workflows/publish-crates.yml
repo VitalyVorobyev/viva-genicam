@@ -121,12 +121,14 @@ jobs:
           publish viva-pfnc
           publish viva-sfnc
           publish viva-genapi-xml
-          publish viva-zenoh-api
 
           # Level 1: single internal dependency
           publish viva-genapi
           publish viva-gige
           publish viva-u3v
+          # Its optional `genapi` feature names viva-genapi, and cargo resolves
+          # optional dependencies at publish time too.
+          publish viva-zenoh-api
 
           # Level 2: facade (depends on all above)
           publish viva-genicam

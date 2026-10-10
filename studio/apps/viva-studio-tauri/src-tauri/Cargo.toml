@@ -17,7 +17,7 @@ dirs = "7"
 viva-genicam = { path = "../../../../crates/viva-genicam", features = ["u3v-usb"] }
 viva_streamer = { path = "../../../crates/viva_streamer" }
 viva_xml_model = { path = "../../../crates/viva_xml_model" }
-viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api" }
+viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api", features = ["genapi"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time", "net", "rt-multi-thread"] }

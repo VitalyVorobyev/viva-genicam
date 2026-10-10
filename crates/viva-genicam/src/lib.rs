@@ -191,6 +191,17 @@ impl<T: RegisterIo> Camera<T> {
         self.nodemap.enum_entries(name).map_err(Into::into)
     }
 
+    /// Read everything a viewer needs about a feature at once: its typed
+    /// value, what it permits now, whether it is implemented and available,
+    /// its range, the enumeration entries it accepts, and its unit.
+    ///
+    /// See [`NodeMap::feature_state`](genapi::NodeMap::feature_state).
+    pub fn feature_state(&self, name: &str) -> Result<genapi::FeatureState, GenicamError> {
+        self.nodemap
+            .feature_state(name, &self.transport)
+            .map_err(Into::into)
+    }
+
     /// Retrieve a feature value as a string using the nodemap type to format it.
     pub fn get(&self, name: &str) -> Result<String, GenicamError> {
         match self.nodemap.node(name) {

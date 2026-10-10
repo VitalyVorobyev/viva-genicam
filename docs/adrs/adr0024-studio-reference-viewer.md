@@ -67,7 +67,10 @@ middle:
 3. **One feature-state implementation, owned by the library.** The embedded
    backend and `viva-service` compute `FeatureState` with the same code. Where
    that code lives is settled by the PR that moves it; the constraint is that
-   neither consumer keeps a copy.
+   neither consumer keeps a copy. *Settled:* `viva-genapi` computes a typed
+   snapshot (`NodeMap::feature_state`), and `viva-zenoh-api`'s `genapi`
+   feature converts it to the wire form — the snapshot is GenApi's business,
+   the JSON spelling the contract's.
 4. **One contract.** The TypeScript types for IPC payloads are generated from
    the Rust types, and CI fails when the generated file is stale.
 5. **Distribution.** Every release tag attaches **unsigned** desktop bundles —

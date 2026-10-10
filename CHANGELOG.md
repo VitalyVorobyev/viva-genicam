@@ -14,6 +14,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet resend — retaining the 500 ms default. Low-level users can opt into
   probes during ACK waits with `set_inflight_keepalive_period`; the high-level
   GigE transport configures them from the device heartbeat window.
+- `NodeMap::feature_state` and `Camera::feature_state` read everything a
+  viewer needs about a feature in one call: its typed value, what it permits
+  now, whether it is implemented and available, its range, the enumeration
+  entries the device accepts and its unit (`FeatureState`, `FeatureValue`,
+  `ValueRange`). `viva-service`, `viva-service-u3v` and Viva Studio each built
+  this snapshot themselves, and Studio's copy had fallen behind (backlog
+  ST-26). `viva-zenoh-api`'s new `genapi` feature converts it to the wire
+  `FeatureState`.
+- `NodeMap::invalidated_by` names the features a write can change: everything
+  that depends, directly or transitively, on the written node or a node it
+  writes through — selected features, converters over the same register,
+  `<pMin>`/`<pMax>`, predicates and `<pInvalidator>`s. In the vendor corpus the
+  median writable feature invalidates 3 others, the 90th percentile 72, and
+  `PixelFormat` up to 539, so a viewer should re-read the ones it shows rather
+  than all of them (backlog ST-30).
+
+### Changed
+
+- `NodeMap::command_targets` returns `&HashSet<String>`, computed once when
+  the map is built, instead of a fresh set on every call.
+- `viva_service::device::build_feature_state` is gone; use
+  `NodeMap::feature_state` with `viva_zenoh_api::FeatureState::from`.
+  `camera_feature_state` no longer takes the command targets.
 
 ### Fixed
 
@@ -34,15 +57,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A converter declares no `<AccessMode>`; it reads and writes through its
   `<pValue>`, but `effective_access_mode` reported it `RO` and `Camera::set`
   refused it with a type error, so `viva-camctl set` and Python's `set` could
-  not write it either. The new `NodeMap::declared_access_mode` gives a
-  converter the access mode of the first non-converter node down its
-  `<pValue>` chain (aravis does the same); `effective_access_mode`,
-  `viva-service`'s `FeatureState` and Python's node `access` build on it, and
-  `Camera::set` writes through the converter's `<FormulaTo>`. In the vendor
-  corpus this is AVT Manta and Prosilica's `AcquisitionFrameRateAbs`; a
-  `<Float>` that delegates to a converter, which is how most cameras model
-  `ExposureTime` and `Gain`, was never affected. `Node::access_mode` cannot
-  see the chain and still answers `RO` for a converter.
+  not write it either. `Camera::set` now writes through the converter's
+  `<FormulaTo>`, after checking the converter's own `pIsAvailable` and
+  `pIsLocked`. In the vendor corpus this is AVT Manta and Prosilica's
+  `AcquisitionFrameRateAbs`; a `<Float>` that delegates to a converter, which
+  is how most cameras model `ExposureTime` and `Gain`, was never affected.
+- A feature reports no more access than its `<pValue>` chain allows. The new
+  `NodeMap::declared_access_mode` combines the declared modes of every node
+  along the chain: an `RO` anywhere removes writing, a `WO` removes reading,
+  and a converter contributes nothing of its own. aravis takes the linked
+  feature's mode instead. Before, a node that declares no `<AccessMode>` —
+  and so defaults to `RW` — was reported `RW` over a read-only register:
+  2,191 features in 37 of the 38 corpus documents, among them `WidthMax`,
+  `GevCurrentIPAddress` and the `Chunk*` features, were offered as writable
+  and refused at the register (2,178 now report `RO`, 13 `WO`).
+  `effective_access_mode`, `viva-service`'s `FeatureState`, Studio and
+  Python's node `access` build on it. `Node::access_mode` cannot see the chain
+  and still answers for the node alone.
 
 ### Viva Studio and documentation — not part of any published crate
 
@@ -96,6 +127,13 @@ section changes the library.
 - **Studio writes features that are converters** (see Fixed above for the
   library side): the UI model and the write pre-flight took a converter's
   access mode as a fixed `RO` and refused the write before it was sent.
+- **Embedded mode reports what the camera permits now.** Its feature state was
+  a copy of `viva-service`'s that had fallen behind: it reported every feature
+  available and implemented, ignored `pIsLocked`, and offered every
+  enumeration entry the XML declares, including `PixelFormat` values the
+  camera refuses (ST-18). It now calls `Camera::feature_state`, the
+  computation the services use (ST-26). A test against `viva-fake-gige`,
+  whose gates are registers, failed on each of the three before the switch.
 - **Studio CI builds the Tauri app on Linux, Windows and macOS, and runs on
   library changes.** It used to compile the app on macOS only, which no known
   user runs, and to trigger only on `studio/` paths, so a library-only change

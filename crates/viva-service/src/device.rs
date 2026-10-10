@@ -1,16 +1,15 @@
 //! Per-device state wrapping `Camera<GigeRegisterIo>`.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::{debug, warn};
-use viva_genicam::genapi::{AccessMode, Node, NodeMap, RegisterIo, SkOutput};
+use viva_genicam::genapi::RegisterIo;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
     Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
 };
-use viva_zenoh_api::{FeatureState, NumericRange};
+use viva_zenoh_api::FeatureState;
 
 /// Transport-agnostic device operations used by shared Zenoh queryable handlers.
 ///
@@ -65,12 +64,6 @@ pub struct DeviceHandle {
     /// is what let the receive path drift into resolving it a second way, and
     /// wrongly (backlog `SVC-06`).
     iface: Option<Iface>,
-    /// Nodes a command executes through, from [`NodeMap::command_targets`].
-    ///
-    /// Computed once at connect: a snapshot consults it for every feature, and
-    /// a reconnect in [`DeviceHandle::refresh_connection`] reopens the same
-    /// device and therefore the same XML.
-    command_targets: Arc<HashSet<String>>,
 }
 
 impl DeviceHandle {
@@ -81,14 +74,12 @@ impl DeviceHandle {
     ) -> Result<Self, GenicamError> {
         let (camera, xml) = connect_gige_with_xml(info).await?;
         let device_id = Self::derive_device_id(info);
-        let command_targets = Arc::new(camera.nodemap().command_targets());
         Ok(Self {
             camera: Arc::new(Mutex::new(camera)),
             raw_xml: xml,
             device_id,
             info: info.clone(),
             iface,
-            command_targets,
         })
     }
 
@@ -285,219 +276,38 @@ impl DeviceOps for DeviceHandle {
     /// the actual device access mode rather than the hardcoded `"RW"` the
     /// default implementation returned.
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
-        camera_feature_state(&self.camera, &self.command_targets, name).await
+        camera_feature_state(&self.camera, name).await
     }
 }
 
-/// [`build_feature_state`] for a camera shared behind a mutex, on the blocking
-/// pool.
+/// [`Camera::feature_state`] for a camera shared behind a mutex, on the
+/// blocking pool, in its wire form.
 ///
 /// Generic over the transport so every [`DeviceOps`] implementation that holds
 /// a [`Camera`] answers [`DeviceOps::get_feature_state`] the same way: GigE's
-/// [`DeviceHandle`] and the USB3 Vision service's handle both call this, which
-/// is what keeps the write-only and command-register rules from drifting apart
-/// between transports (backlog `SVC-02`).
-///
-/// `command_targets` is [`NodeMap::command_targets`], computed once when the
-/// camera is opened.
+/// [`DeviceHandle`] and the USB3 Vision service's handle both call this. The
+/// state itself is computed by `viva-genapi`, which Viva Studio calls too, so
+/// the write-only and command-register rules cannot drift between them
+/// (backlog `SVC-02`, `ST-26`).
 pub async fn camera_feature_state<T>(
     camera: &Arc<Mutex<Camera<T>>>,
-    command_targets: &Arc<HashSet<String>>,
     name: &str,
 ) -> Result<FeatureState, String>
 where
     T: RegisterIo + Send + 'static,
 {
     let cam = camera.clone();
-    let command_targets = command_targets.clone();
     let name = name.to_string();
     tokio::task::spawn_blocking(move || {
         let cam = cam
             .lock()
             .map_err(|_| "camera mutex poisoned".to_string())?;
-        build_feature_state(cam.nodemap(), cam.transport(), &command_targets, &name)
+        cam.feature_state(&name)
+            .map(FeatureState::from)
+            .map_err(|e| format!("Failed to read '{name}': {e}"))
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// Build a [`FeatureState`] snapshot using typed NodeMap reads.
-///
-/// Takes the nodemap and transport rather than a [`Camera`], so any transport
-/// can use it. The service's Zenoh queryables call this to produce the
-/// authoritative snapshot the UI consumes.
-///
-/// `command_targets` is [`NodeMap::command_targets`]: the nodes a command
-/// writes through, which are reported but never read.
-pub fn build_feature_state(
-    nodemap: &NodeMap,
-    transport: &dyn RegisterIo,
-    command_targets: &HashSet<String>,
-    name: &str,
-) -> Result<FeatureState, String> {
-    let node = nodemap
-        .node(name)
-        .ok_or_else(|| format!("Node '{name}' not found"))?;
-
-    let kind = node.kind_name().to_string();
-
-    // Resolve the live implementation/availability/access state. Each call
-    // degrades to a permissive default on evaluation error so a single bad
-    // predicate doesn't break the whole feature snapshot for the UI.
-    let is_implemented = nodemap.is_implemented(name, transport).unwrap_or_else(|e| {
-        tracing::warn!(%name, error = %e, "is_implemented eval failed");
-        true
-    });
-    let is_available = nodemap.is_available(name, transport).unwrap_or_else(|e| {
-        tracing::warn!(%name, error = %e, "is_available eval failed");
-        true
-    });
-    // Read a value only from a node that has one to give. A write-only node
-    // refuses the read -- `viva-genapi` refuses it locally, a device answers
-    // ACCESS_DENIED -- and a command's backing register holds a trigger, not a
-    // value; some devices even treat reading one as significant. Both used to
-    // be read: the `?` below turned one `WO` node into a failed snapshot
-    // (SVC-08, #135), and a command register was read for a value it does not
-    // hold (ST-21, #112).
-    // They are reported with their access mode and a null value instead, so
-    // the UI still offers the write or the execute. Declarations decide, not
-    // the live mode: an unavailable node reports `RO` but stays unreadable.
-    let write_only = nodemap.is_write_only(name);
-    let has_value = !write_only && !command_targets.contains(name);
-
-    let effective = nodemap.effective_access_mode(name, transport).ok();
-    let access_mode = match effective.or_else(|| node.access_mode()) {
-        Some(AccessMode::RO) => "RO".to_string(),
-        // Declared `RW` but delegating to a `WO` register: say what it is.
-        Some(AccessMode::RW) if write_only => "WO".to_string(),
-        Some(AccessMode::RW) => "RW".to_string(),
-        Some(AccessMode::WO) => "WO".to_string(),
-        None => "NA".to_string(),
-    };
-
-    let value = match node {
-        _ if !has_value => serde_json::Value::Null,
-        Node::Integer(_) => nodemap
-            .get_integer(name, transport)
-            .map(|v| serde_json::Value::Number(v.into()))
-            .map_err(|e| format!("Failed to read integer '{name}': {e}"))?,
-        Node::Float(_) => nodemap
-            .get_float(name, transport)
-            .map(f64_to_json)
-            .map_err(|e| format!("Failed to read float '{name}': {e}"))?,
-        Node::Enum(_) => nodemap
-            .get_enum(name, transport)
-            .map(serde_json::Value::String)
-            .map_err(|e| format!("Failed to read enum '{name}': {e}"))?,
-        Node::Boolean(_) => nodemap
-            .get_bool(name, transport)
-            .map(serde_json::Value::Bool)
-            .map_err(|e| format!("Failed to read bool '{name}': {e}"))?,
-        Node::String(_) => nodemap
-            .get_string(name, transport)
-            .map(serde_json::Value::String)
-            .map_err(|e| format!("Failed to read string '{name}': {e}"))?,
-        // Report the size, not the bytes. A `<Register>` can be very large --
-        // the Micro-Epsilon scanCONTROL declares a 100 000-byte
-        // `FileAccessBuffer` -- and this state is polled by the UI, so
-        // base64-ing the payload into every refresh would be a poor trade for
-        // a value nothing renders.
-        Node::Register(reg) => serde_json::json!({
-            "kind": "register",
-            "length": reg.declared_len(),
-        }),
-        Node::SwissKnife(sk) => match sk.output {
-            SkOutput::Float => nodemap
-                .get_float(name, transport)
-                .map(f64_to_json)
-                .map_err(|e| format!("Failed to eval SwissKnife '{name}': {e}"))?,
-            SkOutput::Integer => nodemap
-                .get_integer(name, transport)
-                .map(|v| serde_json::Value::Number(v.into()))
-                .map_err(|e| format!("Failed to eval SwissKnife '{name}': {e}"))?,
-        },
-        Node::Converter(_) => nodemap
-            .get_converter(name, transport)
-            .map(f64_to_json)
-            .map_err(|e| format!("Failed to eval Converter '{name}': {e}"))?,
-        Node::IntConverter(_) => nodemap
-            .get_int_converter(name, transport)
-            .map(|v| serde_json::Value::Number(v.into()))
-            .map_err(|e| format!("Failed to eval IntConverter '{name}': {e}"))?,
-        Node::Command(_) | Node::Category(_) => serde_json::Value::Null,
-        // `Node` is `#[non_exhaustive]`, so a node type added in `viva-genapi`
-        // no longer breaks this build. Name the kind rather than emitting a
-        // bare null, so an unhandled type stays legible in the UI and the log.
-        other => serde_json::json!({ "kind": other.kind_name(), "unsupported": true }),
-    };
-
-    let (numeric, unit) = match node {
-        Node::Integer(n) => {
-            // When the XML defers bounds to runtime registers (`<pMin>` /
-            // `<pMax>`), `n.min` / `n.max` are `i64::MIN` / `i64::MAX`
-            // sentinels. Resolve the referenced nodes' current values so the
-            // UI can render a real range. A failed pMin/pMax read falls back
-            // to the static bound — the UI suppresses sentinel bleed-through.
-            let resolved_min = n
-                .p_min
-                .as_deref()
-                .and_then(|pm| nodemap.get_integer(pm, transport).ok())
-                .unwrap_or(n.min);
-            let resolved_max = n
-                .p_max
-                .as_deref()
-                .and_then(|pm| nodemap.get_integer(pm, transport).ok())
-                .unwrap_or(n.max);
-            (
-                Some(NumericRange {
-                    min: resolved_min as f64,
-                    max: resolved_max as f64,
-                    inc: n.inc.map(|i| i as f64),
-                }),
-                n.unit.clone(),
-            )
-        }
-        Node::Float(n) => (
-            Some(NumericRange {
-                min: n.min,
-                max: n.max,
-                inc: None,
-            }),
-            n.unit.clone(),
-        ),
-        _ => (None, None),
-    };
-
-    let enum_available = if matches!(node, Node::Enum(_)) {
-        // Prefer the live predicate-filtered list; fall back to the static
-        // entries if the predicates error out.
-        nodemap
-            .available_enum_entries(name, transport)
-            .or_else(|e| {
-                tracing::warn!(%name, error = %e, "available_enum_entries eval failed");
-                nodemap.enum_entries(name).map_err(|e| format!("{e}"))
-            })
-            .ok()
-    } else {
-        None
-    };
-
-    Ok(FeatureState {
-        value,
-        access_mode,
-        kind,
-        is_implemented,
-        is_available,
-        numeric,
-        enum_available,
-        unit,
-    })
-}
-
-fn f64_to_json(v: f64) -> serde_json::Value {
-    serde_json::Number::from_f64(v)
-        .map(serde_json::Value::Number)
-        .unwrap_or_else(|| serde_json::Value::String(v.to_string()))
 }
 
 #[cfg(test)]
@@ -506,8 +316,7 @@ mod tests {
     use std::collections::HashMap;
 
     use viva_genicam::genapi::{GenApiError, NodeMap, RegisterIo};
-
-    use super::build_feature_state;
+    use viva_zenoh_api::FeatureState;
 
     /// A write-only integer, an integer delegating to a write-only register
     /// (the `ActionDeviceKey` shape from #112), a command reaching an `RW`
@@ -577,12 +386,12 @@ mod tests {
 
     /// SVC-08 and ST-21: one snapshot over every node succeeds, the write-only
     /// node and the command register are reported without a value, and
-    /// neither address is read.
+    /// neither address is read. Checks the wire form the service publishes:
+    /// `viva-genapi`'s state through `viva-zenoh-api`'s conversion.
     #[test]
     fn a_snapshot_reports_unreadable_nodes_without_reading_them() {
         let model = viva_genapi_xml::parse(XML).expect("parse");
         let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
-        let targets = nodemap.command_targets();
         let io = RecordingIo::default();
 
         let names = [
@@ -596,7 +405,9 @@ mod tests {
         let states: HashMap<&str, _> = names
             .into_iter()
             .map(|name| {
-                let state = build_feature_state(&nodemap, &io, &targets, name)
+                let state = nodemap
+                    .feature_state(name, &io)
+                    .map(FeatureState::from)
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
                 (name, state)
             })

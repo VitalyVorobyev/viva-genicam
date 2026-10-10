@@ -1,6 +1,5 @@
 //! USB3 Vision device handle for the Zenoh service.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use viva_genicam::{Camera, GenicamError, U3vRegisterIo};
@@ -17,9 +16,6 @@ pub struct U3vDeviceHandle<T: UsbTransfer + 'static> {
     /// Shared transport for streaming (same Arc used by the control channel).
     transport: Arc<T>,
     stream_ep: Option<u8>,
-    /// Nodes a command executes through, from `NodeMap::command_targets`.
-    /// A feature-state snapshot reports them without reading them.
-    command_targets: Arc<HashSet<String>>,
 }
 
 impl<T: UsbTransfer + 'static> U3vDeviceHandle<T> {
@@ -31,14 +27,12 @@ impl<T: UsbTransfer + 'static> U3vDeviceHandle<T> {
         transport: Arc<T>,
         stream_ep: Option<u8>,
     ) -> Self {
-        let command_targets = Arc::new(camera.nodemap().command_targets());
         Self {
             camera: Arc::new(Mutex::new(camera)),
             raw_xml: xml,
             device_id,
             transport,
             stream_ep,
-            command_targets,
         }
     }
 
@@ -100,7 +94,7 @@ impl<T: UsbTransfer + 'static> DeviceOps for U3vDeviceHandle<T> {
     /// ranges and enum entries, and no read of a write-only node or of a
     /// command's register (backlog `SVC-02`).
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
-        camera_feature_state(&self.camera, &self.command_targets, name).await
+        camera_feature_state(&self.camera, name).await
     }
 }
 

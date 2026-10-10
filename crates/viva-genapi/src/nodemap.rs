@@ -32,6 +32,8 @@ pub struct NodeMap {
     version: String,
     nodes: HashMap<String, Node>,
     dependents: HashMap<String, Vec<String>>,
+    /// See [`NodeMap::command_targets`]; fixed once the map is built.
+    command_targets: HashSet<String>,
     skipped: Vec<SkippedNode>,
     generation: Cell<u64>,
 }
@@ -184,7 +186,14 @@ impl NodeMap {
     /// triggers an action; reading it is at best meaningless and on some
     /// devices significant, and many declare it `WO`. A feature snapshot
     /// should report them without reading them (backlog ST-21, issue #112).
-    pub fn command_targets(&self) -> HashSet<String> {
+    ///
+    /// Computed once, when the map is built: a feature snapshot consults it
+    /// for every node.
+    pub fn command_targets(&self) -> &HashSet<String> {
+        &self.command_targets
+    }
+
+    fn find_command_targets(&self) -> HashSet<String> {
         let mut targets = HashSet::new();
         for node in self.nodes.values() {
             let Node::Command(cmd) = node else {
@@ -195,6 +204,36 @@ impl NodeMap {
             }
         }
         targets
+    }
+
+    /// The nodes whose value or state may change when `name` is written.
+    ///
+    /// A write reaches the register at the end of `name`'s `<pValue>` chain,
+    /// and from there it can move anything that depends on a node along that
+    /// chain — directly or through other nodes: a converter reading the same
+    /// register, a node whose `<pMin>`/`<pMax>`, address, `pIsAvailable` or
+    /// `pIsLocked` refers to it, a node the selector `name` selects, a node
+    /// naming it as a `<pInvalidator>`. All of them are returned, sorted,
+    /// without `name` itself; a viewer re-reads the ones it shows, so that
+    /// writing `BalanceRatioSelector` refreshes `BalanceRatio` (backlog ST-30).
+    ///
+    /// Empty for an unknown name.
+    pub fn invalidated_by(&self, name: &str) -> Vec<String> {
+        if !self.nodes.contains_key(name) {
+            return Vec::new();
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut pending: Vec<&str> = self.value_chain(name);
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            pending.extend(self.dependents(current).iter().map(String::as_str));
+        }
+        seen.remove(name);
+        let mut out: Vec<String> = seen.into_iter().map(str::to_string).collect();
+        out.sort();
+        out
     }
 
     /// Whether reading `name` is refused because a node on its value path is
@@ -287,13 +326,16 @@ impl NodeMap {
             }
         }
 
-        Ok(NodeMap {
+        let mut map = NodeMap {
             version: model.version,
             nodes,
             dependents,
+            command_targets: HashSet::new(),
             skipped,
             generation: Cell::new(0),
-        })
+        };
+        map.command_targets = map.find_command_targets();
+        Ok(map)
     }
 
     /// Declarations this camera has that we do not expose.
@@ -742,27 +784,52 @@ impl NodeMap {
 
     /// The access mode `name` declares, before availability and locks.
     ///
-    /// A `<Converter>` or `<IntConverter>` declares none of its own: it reads
-    /// and writes through its `<pValue>`, so it takes the access mode of the
-    /// first node down that chain that is not itself a converter. aravis does
-    /// the same — a feature node's access mode is its linked feature's. A chain
-    /// that ends without such a node (a dangling `<pValue>`, or converters
-    /// naming each other) reports `RO`. Every other node reports
-    /// [`Node::access_mode`]. Returns `None` for an unknown name or a node with
-    /// no access mode, such as a category.
+    /// A node that takes its value through `<pValue>` can do no more than the
+    /// nodes along that chain allow: an `RW` integer over a read-only register
+    /// cannot be written, and one over a write-only register cannot be read.
+    /// So the declared modes along the whole chain are combined: any `RO` on
+    /// the way removes writing, any `WO` removes reading. aravis takes the
+    /// mode of the linked feature instead of the node's own; combining keeps
+    /// that and also honours a restriction the node declares itself.
+    ///
+    /// A `<Converter>` or `<IntConverter>` declares no mode of its own, so it
+    /// contributes nothing to the combination. A converter whose chain reaches
+    /// no node that declares a mode (a dangling `<pValue>`, or converters
+    /// naming each other) reports `RO`.
+    ///
+    /// Returns `None` for an unknown name, for a node with no access mode,
+    /// such as a category, and for a chain that allows neither reading nor
+    /// writing (an `RO` node over a `WO` register).
     pub fn declared_access_mode(&self, name: &str) -> Option<AccessMode> {
         let node = self.nodes.get(name)?;
-        if !matches!(node, Node::Converter(_) | Node::IntConverter(_)) {
-            return node.access_mode();
+        let is_converter = |n: &Node| matches!(n, Node::Converter(_) | Node::IntConverter(_));
+        if !is_converter(node) {
+            node.access_mode()?;
         }
-        for link in self.value_chain(name).into_iter().skip(1) {
-            match self.nodes.get(link) {
-                Some(Node::Converter(_) | Node::IntConverter(_)) => continue,
-                Some(target) => return target.access_mode(),
-                None => break,
+        let (mut readable, mut writable, mut declared) = (true, true, false);
+        for link in self.value_chain(name) {
+            let Some(mode) = self
+                .nodes
+                .get(link)
+                .filter(|n| !is_converter(n))
+                .and_then(Node::access_mode)
+            else {
+                continue;
+            };
+            declared = true;
+            match mode {
+                AccessMode::RO => writable = false,
+                AccessMode::WO => readable = false,
+                AccessMode::RW => {}
             }
         }
-        Some(AccessMode::RO)
+        match (declared, readable, writable) {
+            (false, _, _) => Some(AccessMode::RO),
+            (true, true, true) => Some(AccessMode::RW),
+            (true, true, false) => Some(AccessMode::RO),
+            (true, false, true) => Some(AccessMode::WO),
+            (true, false, false) => None,
+        }
     }
 
     /// Return the effective [`AccessMode`] for `name` given the current
@@ -1628,6 +1695,9 @@ impl NodeMap {
         value: f64,
         io: &dyn RegisterIo,
     ) -> Result<(), GenApiError> {
+        // A converter can carry its own `pIsAvailable` or `pIsLocked`; the
+        // node it writes through is checked again when the write reaches it.
+        self.ensure_writable_now(name, &AccessMode::RW, io)?;
         let node = self.get_converter_node(name)?;
         let (p_value, raw) = self.converter_raw_write(
             &node.name,
@@ -1650,6 +1720,9 @@ impl NodeMap {
         value: i64,
         io: &dyn RegisterIo,
     ) -> Result<(), GenApiError> {
+        // A converter can carry its own `pIsAvailable` or `pIsLocked`; the
+        // node it writes through is checked again when the write reaches it.
+        self.ensure_writable_now(name, &AccessMode::RW, io)?;
         let node = self.get_int_converter_node(name)?;
         let (p_value, raw) = self.converter_raw_write(
             &node.name,

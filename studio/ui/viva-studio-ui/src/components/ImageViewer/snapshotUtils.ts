@@ -83,6 +83,16 @@ export function frameToImageData(
 }
 
 /**
+ * The image a snapshot saves, from the frame the viewer last received.
+ */
+export function snapshotImageData(
+  frame: Uint8Array,
+  meta: { width: number; height: number; pixelFormat: string },
+): ImageData | null {
+  return frameToImageData(frame, meta.width, meta.height, meta.pixelFormat);
+}
+
+/**
  * Suggest a safe filename for a snapshot, e.g.:
  *   snapshot_640x480_Mono8_20260308T153042Z.png
  *

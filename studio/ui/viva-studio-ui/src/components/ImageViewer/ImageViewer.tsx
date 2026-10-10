@@ -9,7 +9,7 @@ import { ViewerStatusBar } from "./ViewerStatusBar";
 import { ControlSidebar } from "./ControlSidebar";
 import { AnalysisPanel } from "./AnalysisPanel";
 import { useViewerLayout } from "./useViewerLayout";
-import { frameToImageData, encodeImageDataToPng, suggestFilename } from "./snapshotUtils";
+import { snapshotImageData, encodeImageDataToPng, suggestFilename } from "./snapshotUtils";
 import { saveSnapshot } from "./snapshotSave";
 import { isTauri } from "../../tauri";
 import type { ImageRect } from "./roiUtils";
@@ -148,7 +148,7 @@ export function ImageViewer({
 
     const width = imageMeta?.width ?? wsStreamInfo?.width ?? streamerInfo?.width ?? 0;
     const height = imageMeta?.height ?? wsStreamInfo?.height ?? streamerInfo?.height ?? 0;
-    const imageData = frameToImageData(bytes, width, height, pixelFormat);
+    const imageData = snapshotImageData(bytes, { width, height, pixelFormat });
     if (!imageData) {
       // Unsupported format or truncated buffer — silent no-op
       return;

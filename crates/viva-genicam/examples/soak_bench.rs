@@ -1,9 +1,8 @@
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use bytes::BytesMut;
 use serde::Serialize;
 use tokio::signal;
 use tokio::sync::Mutex;
@@ -12,9 +11,8 @@ use tracing::{info, warn};
 use viva_genapi_xml::XmlError;
 use viva_genicam::genapi::NodeMap;
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::gige::gvsp::{self, GvspPacket};
 use viva_genicam::gige::nic::IfaceSelector;
-use viva_genicam::{Camera, Frame, GigeRegisterIo, StreamBuilder, StreamDest};
+use viva_genicam::{Camera, FrameStream, GigeRegisterIo, StreamBuilder, StreamDest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DestMode {
@@ -39,12 +37,13 @@ struct Args {
 #[derive(Debug, Serialize)]
 struct BenchReport {
     duration_s: u64,
-    frames: u64,
+    frames_complete: u64,
+    frames_incomplete: u64,
+    frames_missed: u64,
+    frames_backpressure: u64,
     bytes: u64,
     avg_fps: f64,
     avg_mbps: f64,
-    drops: u64,
-    resends: u64,
     mode: String,
 }
 
@@ -183,16 +182,6 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     })
 }
 
-#[derive(Debug)]
-struct BlockState {
-    block_id: u64,
-    width: u32,
-    height: u32,
-    pixel_format: viva_genicam::pfnc::PixelFormat,
-    timestamp: u64,
-    payload: BytesMut,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
@@ -297,11 +286,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let stream = builder.build().await?;
 
+    // The receive engine assembles the blocks and keeps the counters; the
+    // benchmark only reads them.
+    let mut frames = FrameStream::new(stream, Some(camera.time_sync().clone()));
     camera.acquisition_start()?;
-    let packet_budget = stream.params().packet_size as usize + 64;
-    let mut recv_buffer = vec![0u8; packet_budget.max(4096)];
-    let stats = stream.stats_handle();
-    let mut state: Option<BlockState> = None;
     let mut last_overlay = Instant::now();
 
     let duration_timer = time::sleep(args.duration);
@@ -322,81 +310,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 info!("received ctrl-c; stopping bench");
                 break;
             }
-            recv = stream.socket().expect("UDP socket").recv_from(&mut recv_buffer) => {
-                let (len, _) = match recv {
-                    Ok(res) => res,
+            block = frames.next_block() => {
+                match block {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
                     Err(err) => {
-                        warn!(error = %err, "socket receive failed");
-                        stats.record_drop();
-                        continue;
+                        warn!(error = %err, "stream failed");
+                        break;
                     }
-                };
-                let packet = match gvsp::parse_packet(&recv_buffer[..len]) {
-                    Ok(packet) => packet,
-                    Err(err) => {
-                        warn!(error = %err, "discarding malformed GVSP packet");
-                        continue;
-                    }
-                };
-                match packet {
-                    GvspPacket::Leader {
-                        block_id,
-                        width,
-                        height,
-                        pixel_format,
-                        timestamp,
-                        ..
-                    } => {
-                        state = Some(BlockState {
-                            block_id,
-                            width,
-                            height,
-                            pixel_format: viva_genicam::pfnc::PixelFormat::from_code(pixel_format),
-                            timestamp,
-                            payload: BytesMut::new(),
-                        });
-                    }
-                    GvspPacket::Payload { block_id, data, .. } => {
-                        if let Some(active) = state.as_mut()
-                            && active.block_id == block_id {
-                                active.payload.extend_from_slice(data.as_ref());
-                            }
-                    }
-                    GvspPacket::Trailer { block_id, status, .. } => {
-                        let Some(active) = state.take() else { continue };
-                        if active.block_id != block_id {
-                            continue;
-                        }
-                        if status != 0 {
-                            warn!(block_id, status, "trailer reported non-zero status");
-                        }
-                        let frame = Frame {
-                            payload: active.payload.freeze(),
-                            width: active.width,
-                            height: active.height,
-                            pixel_format: active.pixel_format,
-                            chunks: None,
-                            ts_dev: Some(active.timestamp),
-                            ts_host: camera.map_dev_ts(active.timestamp),
-                        };
-                        let latency = frame
-                            .host_time()
-                            .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                        stats.record_frame(frame.payload.len(), latency);
-
-                        if last_overlay.elapsed() >= Duration::from_secs(5) {
-                            let snapshot = stats.snapshot();
-                            println!(
-                                "[soak] fps={:.1} Mbps={:.2} frames={} drops={} resends={}",
-                                snapshot.avg_fps,
-                                snapshot.avg_mbps,
-                                snapshot.frames,
-                                snapshot.drops,
-                                snapshot.resends
-                            );
-                            last_overlay = Instant::now();
-                        }
-                    }
+                }
+                if last_overlay.elapsed() >= Duration::from_secs(5) {
+                    let snapshot = frames.stats();
+                    println!(
+                        "[soak] fps={:.1} Mbps={:.2} complete={} incomplete={} missed={} backpressure={}",
+                        snapshot.avg_fps,
+                        snapshot.avg_mbps,
+                        snapshot.frames_complete,
+                        snapshot.frames_incomplete,
+                        snapshot.frames_missed,
+                        snapshot.frames_backpressure,
+                    );
+                    last_overlay = Instant::now();
                 }
             }
         }
@@ -407,15 +341,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Run interrupted by user; partial results below.");
     }
 
-    let snapshot = stream.stats();
+    let snapshot = frames.stats();
     let report = BenchReport {
         duration_s: snapshot.elapsed.as_secs(),
-        frames: snapshot.frames,
+        frames_complete: snapshot.frames_complete,
+        frames_incomplete: snapshot.frames_incomplete,
+        frames_missed: snapshot.frames_missed,
+        frames_backpressure: snapshot.frames_backpressure,
         bytes: snapshot.bytes,
         avg_fps: snapshot.avg_fps,
         avg_mbps: snapshot.avg_mbps,
-        drops: snapshot.drops,
-        resends: snapshot.resends,
         mode: match args.mode {
             DestMode::Unicast => "unicast".to_string(),
             DestMode::Multicast => "multicast".to_string(),
@@ -423,8 +358,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     println!(
-        "Summary: frames={} bytes={} avg_fps={:.1} avg_mbps={:.2} drops={} resends={}",
-        report.frames, report.bytes, report.avg_fps, report.avg_mbps, report.drops, report.resends
+        "Summary: complete={} incomplete={} missed={} backpressure={} bytes={} avg_fps={:.1} avg_mbps={:.2}",
+        report.frames_complete,
+        report.frames_incomplete,
+        report.frames_missed,
+        report.frames_backpressure,
+        report.bytes,
+        report.avg_fps,
+        report.avg_mbps
     );
 
     if let Some(path) = args.json {

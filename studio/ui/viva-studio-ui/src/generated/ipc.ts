@@ -56,7 +56,14 @@ export type CommandResult = { ok: boolean, error?: string,
  */
 affected_states?: { [key in string]: FeatureState }, };
 
-export type AcquisitionStatus = { active: boolean, fps: number | null, dropped: number, };
+export type AcquisitionStatus = { active: boolean, fps: number | null,
+/**
+ * Frames the stream did not deliver complete since it started: closed
+ * with packets missing, never seen at all (block-id gaps), or discarded
+ * because the receiver fell behind. USB3 Vision: blocks the device marked
+ * failed.
+ */
+dropped: number, };
 
 export type ImageMeta = { pixel_format: PixelFormat, width: number, height: number, payload_size: number, };
 

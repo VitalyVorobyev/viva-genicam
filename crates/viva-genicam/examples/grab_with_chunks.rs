@@ -1,22 +1,18 @@
-use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use bytes::BytesMut;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 use viva_genicam::genapi::NodeMap;
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::gige::gvsp::{self, GvspPacket};
 use viva_genicam::gige::nic::IfaceSelector;
 use viva_genicam::sfnc;
 use viva_genicam::{
-    Camera, ChunkConfig, ChunkKind, ChunkValue, Frame, GenicamError, GigeRegisterIo, StreamBuilder,
-    parse_chunk_bytes,
+    Camera, ChunkConfig, ChunkKind, ChunkValue, Frame, GenicamError, GigeRegisterIo, StreamOptions,
 };
-use viva_genicam::{gige::stats::StreamStats, pfnc::PixelFormat};
+use viva_genicam::{StreamStats, pfnc::PixelFormat};
 
 #[derive(Debug, Default)]
 struct Args {
@@ -46,16 +42,6 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
         }
     }
     Ok(parsed)
-}
-
-#[derive(Debug)]
-struct BlockState {
-    block_id: u64,
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    timestamp: u64,
-    payload: BytesMut,
 }
 
 #[tokio::main]
@@ -155,126 +141,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("Chunk mode enabled for selectors: {:?}", enable_selectors);
 
-    let mut stream_device = viva_genicam::gige::GigeDevice::open(control_addr).await?;
-    let stream = StreamBuilder::new(&mut stream_device)
-        .iface(iface.clone())
-        .auto_packet_size()
-        .build()
-        .await?;
+    // The receive engine assembles each block and decodes the trailer's chunks.
+    let mut frames =
+        camera.open_stream(StreamOptions::new().iface(iface.clone()).auto_packet_size())?;
 
     camera.acquisition_start()?;
-    let packet_budget = stream.params().packet_size as usize + 64;
-    let mut recv_buffer = vec![0u8; packet_budget.max(4096)];
-    let mut frames_remaining = 5usize;
-    let mut state: Option<BlockState> = None;
     let mut frame_index = 0usize;
-    let stats = stream.stats_handle();
     let mut last_overlay = Instant::now();
     let mut last_pixel_format: Option<PixelFormat> = None;
 
-    while frames_remaining > 0 {
-        let (len, _) = stream
-            .socket()
-            .expect("UDP socket")
-            .recv_from(&mut recv_buffer)
-            .await?;
-        let packet = match gvsp::parse_packet(&recv_buffer[..len]) {
-            Ok(packet) => packet,
-            Err(err) => {
-                warn!(error = %err, "discarding malformed GVSP packet");
-                continue;
-            }
+    while frame_index < 5 {
+        let Some(frame) = frames.next_frame().await? else {
+            break;
         };
-        match packet {
-            GvspPacket::Leader {
-                block_id,
-                width,
-                height,
-                pixel_format,
-                timestamp,
-                ..
-            } => {
-                let pixel_format = PixelFormat::from_code(pixel_format);
-                if last_pixel_format != Some(pixel_format) {
-                    info!(
-                        block_id,
-                        width,
-                        height,
-                        pixel_format = %pixel_format,
-                        "detected pixel format"
-                    );
-                    last_pixel_format = Some(pixel_format);
-                }
-                state = Some(BlockState {
-                    block_id,
-                    width,
-                    height,
-                    pixel_format,
-                    timestamp,
-                    payload: BytesMut::new(),
-                });
-            }
-            GvspPacket::Payload { block_id, data, .. } => {
-                if let Some(active) = state.as_mut()
-                    && active.block_id == block_id
-                {
-                    active.payload.extend_from_slice(data.as_ref());
-                }
-            }
-            GvspPacket::Trailer {
-                block_id,
-                status,
-                chunk_data,
-                ..
-            } => {
-                let Some(active) = state.take() else { continue };
-                if active.block_id != block_id {
-                    continue;
-                }
-                if status != 0 {
-                    warn!(block_id, status, "trailer reported non-zero status");
-                }
-                let chunk_map = match parse_chunk_bytes(chunk_data.as_ref()) {
-                    Ok(map) => map,
-                    Err(err) => {
-                        warn!(block_id, error = %err, "failed to decode chunk payload");
-                        HashMap::new()
-                    }
-                };
-                let ts_dev = chunk_map
-                    .get(&ChunkKind::Timestamp)
-                    .and_then(|value| match value {
-                        ChunkValue::U64(ts) => Some(*ts),
-                        _ => None,
-                    })
-                    .or(Some(active.timestamp));
-                let ts_host = ts_dev.and_then(|ticks| camera.map_dev_ts(ticks));
-                let frame = Frame {
-                    payload: active.payload.freeze(),
-                    width: active.width,
-                    height: active.height,
-                    pixel_format: active.pixel_format,
-                    chunks: if chunk_map.is_empty() {
-                        None
-                    } else {
-                        Some(chunk_map)
-                    },
-                    ts_dev,
-                    ts_host,
-                };
-                let latency = frame
-                    .host_time()
-                    .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                stats.record_frame(frame.payload.len(), latency);
-                frame_index += 1;
-                print_frame_summary(frame_index, &frame);
-                frames_remaining -= 1;
-                if last_overlay.elapsed() >= Duration::from_secs(1) {
-                    let snapshot = stats.snapshot();
-                    print_overlay(&snapshot);
-                    last_overlay = Instant::now();
-                }
-            }
+        if last_pixel_format != Some(frame.pixel_format) {
+            info!(
+                block_id = frame.block_id,
+                width = frame.width,
+                height = frame.height,
+                pixel_format = %frame.pixel_format,
+                "detected pixel format"
+            );
+            last_pixel_format = Some(frame.pixel_format);
+        }
+        frame_index += 1;
+        print_frame_summary(frame_index, &frame);
+        if last_overlay.elapsed() >= Duration::from_secs(1) {
+            print_overlay(&frames.stats());
+            last_overlay = Instant::now();
         }
     }
 
@@ -332,7 +226,10 @@ fn print_overlay(stats: &StreamStats) {
         .map(|ms| format!("{ms:.2} ms"))
         .unwrap_or_else(|| "n/a".to_string());
     println!(
-        "[stats] fps={:.1} Mbps={:.2} drops={} resends={} latency={}",
-        stats.avg_fps, stats.avg_mbps, stats.drops, stats.resends, latency
+        "[stats] fps={:.1} Mbps={:.2} lost={} latency={}",
+        stats.avg_fps,
+        stats.avg_mbps,
+        stats.frames_lost(),
+        latency
     );
 }

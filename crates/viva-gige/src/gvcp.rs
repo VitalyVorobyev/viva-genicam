@@ -15,7 +15,7 @@ use tokio::time;
 use tracing::{debug, info, trace, warn};
 use viva_gencp::{AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode, decode_ack};
 
-use crate::nic::{self, Iface};
+use crate::nic::Iface;
 
 /// GVCP protocol constants grouped by semantic area.
 pub mod consts {
@@ -1548,42 +1548,6 @@ impl GigeDevice {
         self.write_u32(addr, packet_delay).await
     }
 
-    /// Negotiate GVSP parameters with the device given the host interface.
-    pub async fn negotiate_stream(
-        &mut self,
-        channel: u32,
-        iface: &Iface,
-        port: u16,
-        target_mtu: Option<u32>,
-    ) -> Result<StreamParams, GigeError> {
-        let host_ip = iface
-            .ipv4()
-            .ok_or_else(|| GigeError::Protocol("interface lacks IPv4 address".into()))?;
-        let iface_mtu = nic::mtu(iface)?;
-        let mtu = target_mtu.map_or(iface_mtu, |limit| limit.min(iface_mtu));
-        let packet_size = nic::best_packet_size(mtu);
-        let packet_delay = if mtu <= 1500 {
-            // When jumbo frames are unavailable we space out packets by 2 µs to
-            // prevent excessive buffering pressure on receivers. GVSP expresses
-            // `GevSCPD` in units of 80 ns.
-            const DELAY_NS: u32 = 2_000; // 2 µs.
-            DELAY_NS / 80
-        } else {
-            0
-        };
-
-        self.set_stream_destination(channel, host_ip, port).await?;
-        self.set_stream_packet_size(channel, packet_size).await?;
-        self.set_stream_packet_delay(channel, packet_delay).await?;
-
-        Ok(StreamParams {
-            packet_size,
-            packet_delay,
-            mtu,
-            host: host_ip,
-            port,
-        })
-    }
     /// Read the persistent IP configuration from the device.
     ///
     /// Returns `(ip, subnet, gateway)`.

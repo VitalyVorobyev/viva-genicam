@@ -1,58 +1,54 @@
-//! Streaming builder and configuration helpers bridging `tl-gige` with
-//! higher-level GenICam consumers.
+//! GVSP streaming: control-plane setup and the receive engine.
 //!
-//! The builder performs control-plane negotiation (packet size, delay) and
-//! prepares a UDP socket configured for reception. Applications can retrieve the
-//! socket handle to drive their own async pipelines while relying on the shared
-//! [`StreamStats`] accumulator for monitoring.
-//!
-//! # High-Level Streaming
-//!
-//! For most use cases, [`FrameStream`] provides an ergonomic async iterator over
-//! reassembled frames:
+//! [`StreamBuilder`] negotiates the stream with the camera (destination,
+//! packet size, delay) and binds the socket. [`FrameStream`] runs the receive
+//! engine on it (ADR-0025): one thread per stream reads the socket, assembles
+//! blocks — reordered, interleaved, with extended ids — and hands complete
+//! frames to the application through a small drop-oldest queue, counting
+//! everything it sees in [`StreamStats`].
 //!
 //! ```rust,ignore
-//! let stream = FrameStream::new(raw_stream, None);
-//! while let Some(frame) = stream.next_frame().await? {
-//!     println!("{}x{} frame", frame.width, frame.height);
+//! let mut frames = FrameStream::new(stream, None);
+//! while let Some(frame) = frames.next_frame().await? {
+//!     println!("{}x{} frame {}", frame.width, frame.height, frame.block_id);
 //! }
 //! ```
 
-#[cfg(any(not(windows), test))]
-use std::collections::HashSet;
-#[cfg(windows)]
-use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr};
-#[cfg(windows)]
-use std::sync::Arc;
-#[cfg(windows)]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(windows)]
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+mod assembly;
+#[cfg(fuzzing)]
+mod fuzzing;
+mod receiver;
+mod stats;
 
-use bytes::{Bytes, BytesMut};
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use fuzzing::fuzz_assemble;
+
+pub use stats::{StreamStats, StreamStatsAccumulator};
+
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime};
+
+use bytes::Bytes;
 use tokio::net::UdpSocket;
-// Used by the receive loop on non-Windows and by the packet-size probe
-// everywhere — the probe runs before the socket is handed to the Windows
-// reader thread, so it is a tokio socket on every platform.
+// Used by the packet-size probe, which runs on the tokio socket before the
+// receive thread takes it over.
 use tokio::time::timeout;
-#[cfg(not(windows))]
-use tracing::trace;
 use tracing::{debug, info, warn};
 use viva_pfnc::PixelFormat;
 
 use crate::GenicamError;
 use crate::chunks::ChunkMap;
 use crate::evs::EvsBlock;
-use crate::frame::Frame;
+use crate::frame::{Frame, FrameStatus};
 use crate::time::TimeSync;
+use assembly::AssembledBlock;
+use receiver::{Popped, Shared};
 use viva_gige::gvcp::{GigeDevice, StreamParams};
-#[cfg(any(not(windows), test))]
-use viva_gige::gvsp::PacketBitmap;
-use viva_gige::gvsp::{self, GvspPacket, StreamConfig};
+use viva_gige::gvsp::StreamConfig;
 use viva_gige::nic::{self, DEFAULT_RCVBUF_BYTES, Iface, McOptions};
-use viva_gige::stats::{StreamStats, StreamStatsAccumulator};
 
 pub use viva_gige::gvsp::StreamDest;
 
@@ -115,7 +111,23 @@ impl GenericStreamBlock {
         }
     }
 
-    #[cfg(windows)]
+    /// Block id from the transport.
+    pub fn block_id(&self) -> u64 {
+        match &self.inner {
+            StreamBlock::Image(frame) => frame.block_id,
+            StreamBlock::Evs(block) => block.block_id,
+        }
+    }
+
+    /// How the block ended. Only [`FrameStatus::Complete`] blocks are
+    /// delivered unless the stream was asked for incomplete ones.
+    pub fn status(&self) -> FrameStatus {
+        match &self.inner {
+            StreamBlock::Image(frame) => frame.status,
+            StreamBlock::Evs(block) => block.status,
+        }
+    }
+
     fn device_timestamp(&self) -> Option<u64> {
         match &self.inner {
             StreamBlock::Image(frame) => frame.ts_dev,
@@ -123,7 +135,6 @@ impl GenericStreamBlock {
         }
     }
 
-    #[cfg(windows)]
     fn set_host_time(&mut self, timestamp: Option<SystemTime>) {
         match &mut self.inner {
             StreamBlock::Image(frame) => frame.ts_host = timestamp,
@@ -134,94 +145,65 @@ impl GenericStreamBlock {
     fn into_legacy_frame(self) -> Frame {
         match self.inner {
             StreamBlock::Image(frame) => frame,
-            StreamBlock::Evs(block) => Frame {
-                payload: block.payload,
-                width: block.leader_size_x,
-                height: block.leader_size_y,
-                pixel_format: block.format.pixel_format(),
-                chunks: block.chunks,
-                ts_dev: block.ts_dev,
-                ts_host: block.ts_host,
-            },
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn classify_completed_block(
-    payload: Bytes,
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    chunks: Option<ChunkMap>,
-    timestamp: u64,
-    ts_host: Option<SystemTime>,
-    trailer_size_y: u32,
-) -> GenericStreamBlock {
-    let inner = match pixel_format {
-        PixelFormat::VendorLucidEvsEvt30 => StreamBlock::Evs(EvsBlock {
-            payload,
-            format: crate::evs::EvsFormat::Evt30,
-            ts_dev: Some(timestamp),
-            leader_size_x: width,
-            leader_size_y: height,
-            trailer_size_y,
-            chunks,
-            ts_host,
-        }),
-        PixelFormat::VendorLucidEvsEvt21 => StreamBlock::Evs(EvsBlock {
-            payload,
-            format: crate::evs::EvsFormat::Evt21,
-            ts_dev: Some(timestamp),
-            leader_size_x: width,
-            leader_size_y: height,
-            trailer_size_y,
-            chunks,
-            ts_host,
-        }),
-        _ => StreamBlock::Image(Frame {
-            payload,
-            width,
-            height,
-            pixel_format,
-            chunks,
-            ts_dev: Some(timestamp),
-            ts_host,
-        }),
-    };
-    GenericStreamBlock { inner }
-}
-
-/// Internal packet source abstraction.
-///
-/// Holds either a standard UDP socket or a custom transport backend.
-/// This avoids making `Stream`/`FrameStream` generic while supporting
-/// both paths.
-pub(crate) enum PacketSource {
-    Udp(UdpSocket),
-}
-
-impl PacketSource {
-    /// Receive raw packet bytes from the source.
-    #[cfg(not(windows))]
-    async fn recv(&self, buf: &mut [u8]) -> Result<Bytes, GenicamError> {
-        match self {
-            PacketSource::Udp(socket) => {
-                let (len, _) = socket
-                    .recv_from(buf)
-                    .await
-                    .map_err(|e| GenicamError::transport(format!("socket recv failed: {e}")))?;
-                Ok(Bytes::copy_from_slice(&buf[..len]))
+            StreamBlock::Evs(block) => {
+                let mut frame = Frame::new(
+                    block.payload,
+                    block.leader_size_x,
+                    block.leader_size_y,
+                    block.format.pixel_format(),
+                );
+                frame.chunks = block.chunks;
+                frame.ts_dev = block.ts_dev;
+                frame.ts_host = block.ts_host;
+                frame.block_id = block.block_id;
+                frame.status = block.status;
+                frame
             }
         }
     }
+}
 
-    /// Borrow the UDP socket, if this is the UDP path.
-    fn as_udp_socket(&self) -> Option<&UdpSocket> {
-        match self {
-            PacketSource::Udp(s) => Some(s),
+/// Turn an assembled block into the application's view of it: event data for
+/// the LUCID EVT formats, an image frame otherwise.
+fn classify_completed_block(block: AssembledBlock, chunks: Option<ChunkMap>) -> GenericStreamBlock {
+    let (width, height, pixel_format, ts_dev) = match block.leader {
+        Some(leader) => (
+            leader.width,
+            leader.height,
+            PixelFormat::from_code(leader.pixel_format),
+            Some(leader.timestamp),
+        ),
+        None => (0, 0, PixelFormat::Unknown(0), None),
+    };
+    let evs = match pixel_format {
+        PixelFormat::VendorLucidEvsEvt30 => Some(crate::evs::EvsFormat::Evt30),
+        PixelFormat::VendorLucidEvsEvt21 => Some(crate::evs::EvsFormat::Evt21),
+        _ => None,
+    };
+    let inner = match evs {
+        Some(format) => StreamBlock::Evs(EvsBlock {
+            payload: block.payload,
+            format,
+            ts_dev,
+            leader_size_x: width,
+            leader_size_y: height,
+            trailer_size_y: block.trailer_size_y,
+            chunks,
+            ts_host: None,
+            block_id: block.block_id,
+            status: block.status,
+        }),
+        None => {
+            let mut frame = Frame::new(block.payload, width, height, pixel_format);
+            frame.chunks = chunks;
+            frame.ts_dev = ts_dev;
+            frame.block_id = block.block_id;
+            frame.payload_type = block.payload_type;
+            frame.status = block.status;
+            StreamBlock::Image(frame)
         }
-    }
+    };
+    GenericStreamBlock { inner }
 }
 
 /// Smallest GVSP packet size we will configure: the IPv4 minimum reassembly
@@ -240,7 +222,7 @@ const MAX_PACKET_SIZE: u32 = viva_gige::gvcp::STREAM_PACKET_SIZE_MASK;
 /// A camera may clamp the requested size to what it supports, and the write
 /// succeeds when it does — nothing on the wire distinguishes "accepted" from
 /// "accepted and reduced". The receive path derives every reassembly offset
-/// from [`StreamParams::packet_size`] via `gvsp_payload_size`, so believing the
+/// from [`StreamParams::packet_size`] (the payload stride), so believing the
 /// request produces a stream that carries packets and completes no frame:
 /// [#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112), where a
 /// Vieworks FS3200T on a 16 114-byte link delivered zero frames on every Start
@@ -463,115 +445,6 @@ async fn test_packet_arrives(
     }
 }
 
-/// How long a stream may produce nothing before [`SilenceWatch`] speaks up.
-const SILENCE_GRACE: Duration = Duration::from_secs(3);
-
-/// How often the non-Windows receive loop wakes to re-check the watch.
-///
-/// The Windows reader thread gets the same effect free from its 100 ms socket
-/// read timeout.
-#[cfg(not(windows))]
-const SILENCE_POLL: Duration = Duration::from_millis(500);
-
-/// What a [`SilenceWatch`] has concluded so far.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Silence {
-    /// Nothing to say: still inside the grace period, or already spoken, or the
-    /// stream is delivering frames.
-    Quiet,
-    /// Not one datagram has arrived.
-    NoPacket,
-    /// Datagrams are arriving and no frame has completed.
-    NoFrame,
-}
-
-/// Warns once when a stream produces nothing, and names what to check.
-///
-/// Backlog DX-09. A silent stream reports `frames=0 drops=0 resends=0`, and
-/// that line is identical for a firewall block, a packet size the path cannot
-/// carry, a control privilege held by another application, and a camera that is
-/// simply not triggering. [#70](https://github.com/VitalyVorobyev/viva-genicam/issues/70)'s
-/// reporter worked the third of those out unaided;
-/// [#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112)'s needed a
-/// custom instrumented build to find the second.
-///
-/// The distinction the watch adds over "no frames" is whether *datagrams* are
-/// arriving, which the receiver already knows and never reported. Nothing
-/// arriving is a path or privilege problem; datagrams arriving with no frame
-/// completing is a packet-size disagreement, which is exactly SR-02.
-struct SilenceWatch {
-    since: Instant,
-    packet_size: u32,
-    saw_packet: bool,
-    saw_frame: bool,
-    warned: bool,
-}
-
-impl SilenceWatch {
-    fn new(packet_size: u32) -> Self {
-        Self {
-            since: Instant::now(),
-            packet_size,
-            saw_packet: false,
-            saw_frame: false,
-            warned: false,
-        }
-    }
-
-    /// A datagram arrived — parsed or not. Malformed still means the path works.
-    fn record_packet(&mut self) {
-        self.saw_packet = true;
-    }
-
-    /// A frame completed, so there is nothing left to diagnose.
-    fn record_frame(&mut self) {
-        self.saw_frame = true;
-    }
-
-    /// Decide what to say at `elapsed`, marking the verdict as spoken.
-    ///
-    /// Split from [`SilenceWatch::tick`] so the decision is testable without a
-    /// clock.
-    fn assess(&mut self, elapsed: Duration) -> Silence {
-        if self.warned || self.saw_frame || elapsed < SILENCE_GRACE {
-            return Silence::Quiet;
-        }
-        self.warned = true;
-        if self.saw_packet {
-            Silence::NoFrame
-        } else {
-            Silence::NoPacket
-        }
-    }
-
-    /// Emit the warning if one is due. Cheap enough to call on every timeout.
-    fn tick(&mut self) {
-        let seconds = SILENCE_GRACE.as_secs();
-        match self.assess(self.since.elapsed()) {
-            Silence::Quiet => {}
-            Silence::NoPacket => warn!(
-                packet_size = self.packet_size,
-                seconds,
-                "no GVSP packet has arrived since the stream opened. Check, roughly in order of \
-                 how often each is the cause: a host firewall blocking inbound UDP on the stream \
-                 port; another application holding control privilege, so AcquisitionStart never \
-                 reached the camera; a camera waiting for a trigger; or a network path that \
-                 cannot carry packets this large — retry with an explicit packet size of 1500 to \
-                 rule that out"
-            ),
-            Silence::NoFrame => warn!(
-                packet_size = self.packet_size,
-                payload_stride = gvsp_payload_size(self.packet_size),
-                seconds,
-                "GVSP packets are arriving but no frame has completed. Reassembly places each \
-                 packet at a stride derived from the negotiated packet size, so the usual cause \
-                 is the two ends disagreeing about it — retry with an explicit packet size of \
-                 1500"
-            ),
-        }
-    }
-}
-
 /// How [`StreamBuilder`] chooses `GevSCPSPacketSize` (ADR-0021 / SR-14).
 ///
 /// The variants differ only in where the *starting* size comes from. All three
@@ -750,7 +623,7 @@ impl<'a> StreamBuilder<'a> {
             .ipv4()
             .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
         let default_port = if self.dst_port == 0 {
-            0x5FFF
+            DEFAULT_STREAM_PORT
         } else {
             self.dst_port
         };
@@ -833,7 +706,7 @@ impl<'a> StreamBuilder<'a> {
 
         // Bind before configuring, so the socket is already listening when the
         // probe below asks the camera to send to it.
-        let source = PacketSource::Udp(Self::bind_socket(&dest, &iface, self.rcvbuf_bytes).await?);
+        let socket = Self::bind_socket(&dest, &iface, self.rcvbuf_bytes).await?;
 
         let packet_size = if write_camera {
             configure_packet_size(self.device, self.channel, requested).await?
@@ -848,10 +721,7 @@ impl<'a> StreamBuilder<'a> {
         // one mechanism that could rescue it turned off. `probe(false)` is the
         // escape for a literal preserve.
         let packet_size = if self.probe {
-            let socket = source
-                .as_udp_socket()
-                .expect("the UDP path always has a socket");
-            probe_packet_size(self.device, self.channel, socket, packet_size).await?
+            probe_packet_size(self.device, self.channel, &socket, packet_size).await?
         } else {
             packet_size
         };
@@ -898,12 +768,12 @@ impl<'a> StreamBuilder<'a> {
             resend_enabled,
         };
 
-        let stats = StreamStatsAccumulator::new();
         Ok(Stream {
-            source,
-            stats,
+            socket,
+            stats: StreamStatsAccumulator::new(),
             params,
             config,
+            rcvbuf_bytes: self.rcvbuf_bytes,
         })
     }
 
@@ -944,39 +814,168 @@ impl<'a> StreamBuilder<'a> {
     }
 }
 
-/// Handle returned by [`StreamBuilder`] providing access to the configured
-/// packet source and statistics.
+/// Stream port used when the caller names none.
+const DEFAULT_STREAM_PORT: u16 = 0x5FFF;
+
+/// How [`Camera::open_stream`](crate::Camera::open_stream) sets up a GigE
+/// stream. The defaults: the interface the operating system routes to the
+/// camera, unicast, the camera's own packet size (path-probed, ADR-0021), and
+/// a receive buffer the engine sizes from the frame.
+#[derive(Debug, Clone, Default)]
+pub struct StreamOptions {
+    iface: Option<Iface>,
+    packet_size: PacketSizeMode,
+    multicast: Option<Ipv4Addr>,
+    destination_port: Option<u16>,
+    rcvbuf_bytes: Option<usize>,
+}
+
+impl StreamOptions {
+    /// The defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Receive on this interface instead of the one routed to the camera.
+    pub fn iface(mut self, iface: Iface) -> Self {
+        self.iface = Some(iface);
+        self
+    }
+
+    /// Write this `GevSCPSPacketSize`, a ceiling for the path probe
+    /// ([`StreamBuilder::packet_size`]).
+    pub fn packet_size(mut self, size: u32) -> Self {
+        self.packet_size = PacketSizeMode::Explicit(size);
+        self
+    }
+
+    /// Set the packet size from the interface MTU, then probe
+    /// ([`StreamBuilder::auto_packet_size`]).
+    pub fn auto_packet_size(mut self) -> Self {
+        self.packet_size = PacketSizeMode::Auto;
+        self
+    }
+
+    /// Have the camera stream to a multicast group, and join it.
+    pub fn multicast(mut self, group: Ipv4Addr) -> Self {
+        self.multicast = Some(group);
+        self
+    }
+
+    /// Receive on this UDP port (default 0x5FFF).
+    pub fn destination_port(mut self, port: u16) -> Self {
+        self.destination_port = Some(port);
+        self
+    }
+
+    /// Ask for this `SO_RCVBUF` instead of letting the engine size it from
+    /// the frame (`max(4 MiB, 2 × PayloadSize)`).
+    pub fn rcvbuf_bytes(mut self, bytes: usize) -> Self {
+        self.rcvbuf_bytes = Some(bytes);
+        self
+    }
+}
+
+impl crate::Camera<crate::GigeRegisterIo> {
+    /// Open a GVSP stream from this camera, ready for `acquisition_start`.
+    ///
+    /// The one recipe every consumer uses (API-17): claim control (again, if
+    /// it was released), point the stream channel at this host — or at a
+    /// multicast group — negotiate the packet size, bind the socket, and start
+    /// the receive engine with the camera's `PayloadSize` and time sync. A
+    /// camera without a readable `PayloadSize` still streams: buffers are then
+    /// sized from each leader.
+    // The device lock is held across the builder's awaits: `StreamBuilder`
+    // borrows the device, and nothing else may use the control channel while
+    // the stream channel is being configured. The lint resolves at the
+    // enclosing body, so the allow lives here.
+    #[allow(clippy::await_holding_lock)]
+    pub fn open_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
+        let port = options.destination_port.unwrap_or(DEFAULT_STREAM_PORT);
+        if let Some(group) = options.multicast {
+            self.configure_stream_multicast(0, group, port)?;
+        }
+        let payload_size = read_payload_size(self);
+        let time_sync = self.time_sync().clone();
+        let transport = self.transport();
+        let stream = transport.block_on(async {
+            let mut device = transport.lock_device()?;
+            device
+                .claim_control()
+                .await
+                .map_err(|err| GenicamError::transport(format!("claim control: {err}")))?;
+            let iface = match options.iface {
+                Some(iface) => iface,
+                None => {
+                    let camera_ip = match device.remote_addr().ip() {
+                        IpAddr::V4(ip) => ip,
+                        IpAddr::V6(_) => {
+                            return Err(GenicamError::transport("IPv6 cameras are not supported"));
+                        }
+                    };
+                    Iface::from_remote_ipv4(camera_ip).map_err(|err| {
+                        GenicamError::transport(format!(
+                            "no local interface routes to {camera_ip}: {err}"
+                        ))
+                    })?
+                }
+            };
+            let mut builder = StreamBuilder::new(&mut device).iface(iface);
+            builder.packet_size_mode = options.packet_size;
+            if let Some(bytes) = options.rcvbuf_bytes {
+                builder = builder.rcvbuf_bytes(bytes);
+            }
+            if let Some(group) = options.multicast {
+                builder = builder.multicast(Some(group));
+            }
+            builder = builder.destination_port(port);
+            builder.build().await
+        })?;
+        Ok(FrameStream::start_with(
+            stream,
+            Some(time_sync),
+            payload_size,
+        ))
+    }
+}
+
+/// The camera's `PayloadSize`, or `None` — with a warning unless the camera
+/// simply has no such feature — when it cannot be read.
+fn read_payload_size<T: viva_genapi::RegisterIo>(camera: &crate::Camera<T>) -> Option<usize> {
+    match camera.get("PayloadSize") {
+        Ok(text) => {
+            let size = text.trim().parse::<u64>().ok().filter(|&size| size > 0);
+            if size.is_none() {
+                warn!(value = %text, "PayloadSize is not a positive integer; sizing frames from each leader");
+            }
+            size.and_then(|size| usize::try_from(size).ok())
+        }
+        Err(GenicamError::GenApi(viva_genapi::GenApiError::NodeNotFound(_))) => None,
+        Err(err) => {
+            warn!(error = %err, "could not read PayloadSize; sizing frames from each leader");
+            None
+        }
+    }
+}
+
+/// Handle returned by [`StreamBuilder`]: the bound socket and the negotiated
+/// parameters, ready for [`FrameStream::new`].
 pub struct Stream {
-    source: PacketSource,
+    socket: UdpSocket,
     stats: StreamStatsAccumulator,
     params: StreamParams,
     config: StreamConfig,
+    /// `SO_RCVBUF` the caller chose, which the engine leaves alone.
+    rcvbuf_bytes: Option<usize>,
 }
 
 impl Stream {
-    /// Borrow the underlying UDP socket (returns `None` when using a custom transport).
-    pub fn socket(&self) -> Option<&UdpSocket> {
-        self.source.as_udp_socket()
-    }
-
-    /// Consume the stream and return its parts.
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        PacketSource,
-        StreamStatsAccumulator,
-        StreamParams,
-        StreamConfig,
-    ) {
-        (self.source, self.stats, self.params, self.config)
-    }
-
     /// Access the negotiated stream parameters.
     pub fn params(&self) -> StreamParams {
         self.params
     }
 
-    /// Obtain a clone of the statistics accumulator handle for updates.
+    /// Obtain a clone of the statistics accumulator handle.
     pub fn stats_handle(&self) -> StreamStatsAccumulator {
         self.stats.clone()
     }
@@ -1002,357 +1001,19 @@ impl<'a> From<&'a mut GigeDevice> for StreamBuilder<'a> {
 // High-Level FrameStream API
 // ============================================================================
 
-/// Default timeout for frame assembly before declaring incomplete and moving on.
-const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_millis(100);
-
-/// GVSP header size preceding payload data.
-const GVSP_HEADER_SIZE: usize = 8;
-/// IPv4 header size used by GigE Vision streams.
-const IPV4_HEADER_SIZE: usize = 20;
-/// UDP header size used by GigE Vision streams.
-const UDP_HEADER_SIZE: usize = 8;
-/// Bytes in a GVSP data packet that are not image payload.
-const GVSP_PACKET_OVERHEAD: usize = IPV4_HEADER_SIZE + UDP_HEADER_SIZE + GVSP_HEADER_SIZE;
-
-/// The image bytes one GVSP data packet can carry at `packet_size`.
+/// Frames from one GVSP stream, assembled by a receive thread of its own.
 ///
-/// Also the stride reassembly places packets at, which is why
-/// [`SilenceWatch`] reports it: a stream carrying packets that completes no
-/// frame is usually a disagreement about this number.
-fn gvsp_payload_size(packet_size: u32) -> usize {
-    (packet_size as usize).saturating_sub(GVSP_PACKET_OVERHEAD)
-}
-
-/// State for a frame being assembled from GVSP packets.
+/// The thread starts when the stream is created and stops, joined within a
+/// few milliseconds, when it is dropped. It reads every datagram as it
+/// arrives, whether or not anything is waiting for a frame, and keeps up to
+/// four finished frames for [`next_block`](Self::next_block) or
+/// [`next_block_blocking`](Self::next_block_blocking); when the application
+/// falls behind, the oldest is dropped and counted in
+/// [`StreamStats::frames_backpressure`].
 ///
-/// On Windows the runtime path uses [`WindowsFrameAssembly`] instead, so the
-/// fields only this type's completion step reads (`block_id`, `width`, `height`,
-/// `pixel_format`, `timestamp`) have no reader there — the completion step lives
-/// in `next_frame`, which is `cfg(not(windows))`. The type is still built under
-/// `test` so the reassembly unit tests below run on every platform. Unifying the
-/// two implementations is backlog API-01; the allow goes away with them.
-#[cfg(any(not(windows), test))]
-#[cfg_attr(windows, allow(dead_code))]
-#[derive(Debug)]
-struct FrameAssemblyState {
-    block_id: u64,
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    timestamp: u64,
-    expected_packets: Option<usize>,
-    bitmap: Option<PacketBitmap>,
-    received_packet_ids: HashSet<u32>,
-    payload: BytesMut,
-    packet_payload_size: usize,
-    started: Instant,
-    trailer_size_y: u32,
-}
-
-#[cfg(any(not(windows), test))]
-impl FrameAssemblyState {
-    fn new(
-        block_id: u64,
-        width: u32,
-        height: u32,
-        pixel_format: PixelFormat,
-        timestamp: u64,
-        packet_payload_size: usize,
-    ) -> Self {
-        Self {
-            block_id,
-            width,
-            height,
-            pixel_format,
-            timestamp,
-            expected_packets: None,
-            bitmap: None,
-            received_packet_ids: HashSet::new(),
-            payload: BytesMut::new(),
-            packet_payload_size,
-            started: Instant::now(),
-            trailer_size_y: 0,
-        }
-    }
-
-    /// Ingest a payload packet. Returns true if this is a new packet.
-    fn ingest(&mut self, packet_id: u32, data: &[u8]) -> bool {
-        // Packet ID 0 is the leader. GVSP payload packet IDs begin at 1.
-        if packet_id == 0 || !self.received_packet_ids.insert(packet_id) {
-            return false;
-        }
-
-        let pid = packet_id as usize;
-
-        // A resent packet can arrive after the trailer established the expected
-        // count, so keep the bitmap in sync in that case.
-        if let Some(ref mut bitmap) = self.bitmap
-            && !bitmap.set(pid.saturating_sub(1))
-        {
-            return false; // Duplicate packet.
-        }
-
-        // Write data at the correct offset for zero-copy reassembly.
-        let offset = pid.saturating_sub(1) * self.packet_payload_size;
-        let required = offset + data.len();
-        if self.payload.len() < required {
-            self.payload.resize(required, 0);
-        }
-        self.payload[offset..offset + data.len()].copy_from_slice(data);
-        true
-    }
-
-    /// Set expected payload packets from the GVSP trailer packet ID.
-    ///
-    /// Packet ID 0 belongs to the leader and the trailer immediately follows
-    /// the last payload packet, so a complete frame contains every payload ID
-    /// in the range `1..trailer_packet_id`.
-    fn set_trailer_packet_id(&mut self, trailer_packet_id: u32) {
-        if self.expected_packets.is_none() {
-            let expected_packets = trailer_packet_id.saturating_sub(1) as usize;
-            let mut bitmap = PacketBitmap::new(expected_packets);
-            for packet_id in &self.received_packet_ids {
-                if *packet_id < trailer_packet_id {
-                    bitmap.set(packet_id.saturating_sub(1) as usize);
-                }
-            }
-            self.expected_packets = Some(expected_packets);
-            self.bitmap = Some(bitmap);
-        }
-    }
-
-    /// Check if all packets have been received.
-    fn is_complete(&self) -> bool {
-        self.bitmap.as_ref().is_some_and(|b| b.is_complete())
-    }
-
-    /// Check if assembly has timed out.
-    fn is_expired(&self, timeout: Duration) -> bool {
-        self.started.elapsed() > timeout
-    }
-
-    /// Get missing packet ranges for resend requests.
-    #[allow(dead_code)]
-    fn missing_ranges(&self) -> Vec<std::ops::RangeInclusive<u32>> {
-        self.bitmap
-            .as_ref()
-            .map(|b| b.missing_ranges())
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(windows)]
-struct WindowsFrameAssembly {
-    block_id: u64,
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    timestamp: u64,
-    next_packet_id: u32,
-    payload: BytesMut,
-    started: Instant,
-    trailer_size_y: u32,
-}
-
-#[cfg(windows)]
-struct WindowsReceiver {
-    frames: tokio::sync::mpsc::Receiver<Result<GenericStreamBlock, GenicamError>>,
-    stop: Arc<AtomicBool>,
-    join: Option<thread::JoinHandle<()>>,
-}
-
-#[cfg(windows)]
-fn windows_frame_receiver(
-    source: PacketSource,
-    packet_size: u32,
-    stats: StreamStatsAccumulator,
-    frame_timeout_ns: Arc<AtomicU64>,
-) -> WindowsReceiver {
-    let (tx, rx) = tokio::sync::mpsc::channel(2);
-    let stop = Arc::new(AtomicBool::new(false));
-
-    let PacketSource::Udp(socket) = source;
-    let socket = match socket.into_std() {
-        Ok(socket) => socket,
-        Err(err) => {
-            let _ = tx.try_send(Err(GenicamError::transport(format!(
-                "socket conversion failed: {err}"
-            ))));
-            return WindowsReceiver {
-                frames: rx,
-                stop,
-                join: None,
-            };
-        }
-    };
-    if let Err(err) = socket.set_nonblocking(false) {
-        let _ = tx.try_send(Err(GenicamError::transport(format!(
-            "set blocking mode failed: {err}"
-        ))));
-        return WindowsReceiver {
-            frames: rx,
-            stop,
-            join: None,
-        };
-    }
-    if let Err(err) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
-        let _ = tx.try_send(Err(GenicamError::transport(format!(
-            "set stream socket read timeout failed: {err}"
-        ))));
-        return WindowsReceiver {
-            frames: rx,
-            stop,
-            join: None,
-        };
-    }
-
-    let reader_stop = Arc::clone(&stop);
-    let reader = thread::spawn(move || {
-        let mut recv_buffer = vec![0u8; (packet_size as usize + 64).max(4096)];
-        let mut active: Option<WindowsFrameAssembly> = None;
-        let mut silence = SilenceWatch::new(packet_size);
-
-        while !reader_stop.load(Ordering::Acquire) {
-            let (len, _) = match socket.recv_from(&mut recv_buffer) {
-                Ok(result) => result,
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-                    ) =>
-                {
-                    if active.as_ref().is_some_and(|frame| {
-                        frame.started.elapsed().as_nanos()
-                            > frame_timeout_ns.load(Ordering::Relaxed) as u128
-                    }) {
-                        active = None;
-                        stats.record_drop();
-                    }
-                    silence.tick();
-                    continue;
-                }
-                Err(err) => {
-                    let _ = tx.try_send(Err(GenicamError::transport(format!(
-                        "socket receive failed: {err}"
-                    ))));
-                    break;
-                }
-            };
-
-            silence.record_packet();
-
-            let packet = match gvsp::parse_packet(&recv_buffer[..len]) {
-                Ok(packet) => packet,
-                Err(_) => continue,
-            };
-
-            match packet {
-                GvspPacket::Leader {
-                    block_id,
-                    width,
-                    height,
-                    pixel_format,
-                    timestamp,
-                    ..
-                } => {
-                    if active.take().is_some() {
-                        stats.record_drop();
-                    }
-                    active = Some(WindowsFrameAssembly {
-                        block_id,
-                        width,
-                        height,
-                        pixel_format: PixelFormat::from_code(pixel_format),
-                        timestamp,
-                        next_packet_id: 1,
-                        payload: BytesMut::new(),
-                        started: Instant::now(),
-                        trailer_size_y: 0,
-                    });
-                }
-                GvspPacket::Payload {
-                    block_id,
-                    packet_id,
-                    data,
-                } => {
-                    let Some(frame) = active.as_mut() else {
-                        continue;
-                    };
-                    if frame.block_id != block_id || frame.next_packet_id != packet_id {
-                        active = None;
-                        stats.record_drop();
-                        continue;
-                    }
-                    frame.payload.extend_from_slice(data.as_ref());
-                    frame.next_packet_id += 1;
-                    stats.record_packet();
-                }
-                GvspPacket::Trailer {
-                    block_id,
-                    packet_id,
-                    status,
-                    chunk_data,
-                    size_y,
-                    ..
-                } => {
-                    let Some(mut frame) = active.take() else {
-                        continue;
-                    };
-                    frame.trailer_size_y = size_y;
-                    let is_evs = matches!(
-                        frame.pixel_format,
-                        PixelFormat::VendorLucidEvsEvt30 | PixelFormat::VendorLucidEvsEvt21
-                    );
-                    let expected_bytes = frame.width as usize
-                        * frame.height as usize
-                        * frame.pixel_format.bytes_per_pixel().unwrap_or(1);
-                    if frame.block_id != block_id
-                        || frame.next_packet_id != packet_id
-                        || status != 0
-                        || (!is_evs && frame.payload.len() < expected_bytes)
-                    {
-                        stats.record_drop();
-                        continue;
-                    }
-                    if !is_evs {
-                        frame.payload.truncate(expected_bytes);
-                    }
-                    let chunks = if chunk_data.is_empty() {
-                        None
-                    } else {
-                        crate::chunks::parse_chunk_bytes(chunk_data.as_ref()).ok()
-                    };
-                    let completed = classify_completed_block(
-                        frame.payload.freeze(),
-                        frame.width,
-                        frame.height,
-                        frame.pixel_format,
-                        chunks,
-                        frame.timestamp,
-                        None,
-                        frame.trailer_size_y,
-                    );
-                    stats.record_frame(completed.payload().len(), None);
-                    silence.record_frame();
-                    if tx.try_send(Ok(completed)).is_err() {
-                        stats.record_backpressure_drop();
-                    }
-                }
-            }
-        }
-    });
-
-    WindowsReceiver {
-        frames: rx,
-        stop,
-        join: Some(reader),
-    }
-}
-
-/// High-level async iterator over reassembled GVSP frames.
-///
-/// Wraps a low-level [`Stream`] and handles packet parsing, reassembly,
-/// and optional resend requests automatically.
+/// Only complete frames are delivered unless
+/// [`set_deliver_incomplete`](Self::set_deliver_incomplete) asks otherwise;
+/// every block is counted either way.
 ///
 /// # Example
 ///
@@ -1363,94 +1024,146 @@ fn windows_frame_receiver(
 ///     .await?;
 /// let mut frame_stream = FrameStream::new(raw_stream, None);
 /// while let Some(frame) = frame_stream.next_frame().await? {
-///     println!("Frame: {}x{}", frame.width, frame.height);
+///     println!("Frame {}: {}x{}", frame.block_id, frame.width, frame.height);
 /// }
 /// ```
 pub struct FrameStream {
-    #[cfg(not(windows))]
-    source: PacketSource,
+    shared: Arc<Shared>,
+    receiver: Option<JoinHandle<()>>,
     stats: StreamStatsAccumulator,
     params: StreamParams,
-    config: StreamConfig,
-    #[cfg(not(windows))]
-    recv_buffer: Vec<u8>,
-    #[cfg(not(windows))]
-    active: Option<FrameAssemblyState>,
-    #[cfg(not(windows))]
-    silence: SilenceWatch,
-    frame_timeout: Duration,
-    #[cfg(windows)]
-    frame_timeout_ns: Arc<AtomicU64>,
-    #[cfg(windows)]
-    frame_rx: tokio::sync::mpsc::Receiver<Result<GenericStreamBlock, GenicamError>>,
-    #[cfg(windows)]
-    reader_stop: Arc<AtomicBool>,
-    #[cfg(windows)]
-    reader: Option<thread::JoinHandle<()>>,
+    config: Option<StreamConfig>,
     time_sync: Option<TimeSync>,
 }
 
 impl FrameStream {
-    /// Create a new frame stream from a configured [`Stream`].
+    /// Start receiving on a configured [`Stream`].
     ///
     /// Optionally accepts a [`TimeSync`] for mapping device timestamps to host time.
     pub fn new(stream: Stream, time_sync: Option<TimeSync>) -> Self {
-        let (source, stats, params, config) = stream.into_parts();
-        let frame_timeout = DEFAULT_FRAME_TIMEOUT;
-        #[cfg(not(windows))]
-        let buffer_size = (params.packet_size as usize + 64).max(4096);
-        #[cfg(windows)]
-        let frame_timeout_ns = Arc::new(AtomicU64::new(
-            frame_timeout.as_nanos().min(u64::MAX as u128) as u64,
-        ));
-        #[cfg(windows)]
-        let WindowsReceiver {
-            frames: frame_rx,
-            stop: reader_stop,
-            join: reader,
-        } = windows_frame_receiver(
-            source,
-            params.packet_size,
-            stats.clone(),
-            Arc::clone(&frame_timeout_ns),
-        );
+        Self::start_with(stream, time_sync, None)
+    }
 
-        Self {
-            #[cfg(not(windows))]
-            source,
+    /// As [`new`](Self::new), with `PayloadSize` in place before the receive
+    /// thread starts.
+    fn start_with(
+        stream: Stream,
+        time_sync: Option<TimeSync>,
+        payload_size: Option<usize>,
+    ) -> Self {
+        let Stream {
+            socket,
             stats,
             params,
             config,
-            #[cfg(not(windows))]
-            recv_buffer: vec![0u8; buffer_size],
-            #[cfg(not(windows))]
-            active: None,
-            #[cfg(not(windows))]
-            silence: SilenceWatch::new(params.packet_size),
-            frame_timeout,
-            #[cfg(windows)]
-            frame_timeout_ns,
-            #[cfg(windows)]
-            frame_rx,
-            #[cfg(windows)]
-            reader_stop,
-            #[cfg(windows)]
-            reader,
+            rcvbuf_bytes,
+        } = stream;
+        let mut frames = Self::idle(stats, params, Some(config), time_sync);
+        frames.shared.set_payload_size(payload_size);
+        match socket.into_std() {
+            Ok(socket) => frames.start(socket, rcvbuf_bytes),
+            Err(err) => frames
+                .shared
+                .queue
+                .fail(format!("socket conversion failed: {err}")),
+        }
+        frames
+    }
+
+    /// Receive GVSP on a socket the caller bound, from a camera configured
+    /// some other way: another application holds control, or the stream was
+    /// set up by hand.
+    ///
+    /// `packet_size` is the camera's `GevSCPSPacketSize`, which fixes where
+    /// each packet's bytes belong. [`config`](Self::config) is `None` for such
+    /// a stream.
+    pub fn from_socket(
+        socket: std::net::UdpSocket,
+        packet_size: u32,
+    ) -> Result<Self, GenicamError> {
+        if assembly::payload_stride(packet_size, viva_gige::gvsp::GVSP_EXTENDED_HEADER_SIZE) == 0 {
+            return Err(GenicamError::transport(format!(
+                "GVSP packet size {packet_size} leaves no room for data"
+            )));
+        }
+        let local = socket
+            .local_addr()
+            .map_err(|e| GenicamError::transport(format!("stream socket address: {e}")))?;
+        let host = match local.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+        };
+        let params = StreamParams {
+            packet_size,
+            packet_delay: 0,
+            mtu: packet_size,
+            host,
+            port: local.port(),
+        };
+        let mut frames = Self::idle(StreamStatsAccumulator::new(), params, None, None);
+        frames.start(socket, None);
+        Ok(frames)
+    }
+
+    fn idle(
+        stats: StreamStatsAccumulator,
+        params: StreamParams,
+        config: Option<StreamConfig>,
+        time_sync: Option<TimeSync>,
+    ) -> Self {
+        Self {
+            shared: Arc::new(Shared::new()),
+            receiver: None,
+            stats,
+            params,
+            config,
             time_sync,
         }
     }
 
-    /// Set the frame assembly timeout.
+    fn start(&mut self, socket: std::net::UdpSocket, rcvbuf_bytes: Option<usize>) {
+        match receiver::spawn(
+            socket,
+            self.params.packet_size,
+            self.stats.clone(),
+            self.shared.clone(),
+            rcvbuf_bytes,
+        ) {
+            Ok(handle) => self.receiver = Some(handle),
+            Err(err) => self
+                .shared
+                .queue
+                .fail(format!("could not start the GVSP receive thread: {err}")),
+        }
+    }
+
+    /// How long a block may go without a packet before it is closed as
+    /// incomplete (default 100 ms).
     ///
-    /// If a frame is not complete within this duration, it will be dropped
-    /// and assembly will move on to the next frame.
-    pub fn set_frame_timeout(&mut self, timeout: Duration) {
-        self.frame_timeout = timeout;
-        #[cfg(windows)]
-        self.frame_timeout_ns.store(
-            timeout.as_nanos().min(u64::MAX as u128) as u64,
-            Ordering::Relaxed,
-        );
+    /// Counted from the block's **last** packet, not its first: a large frame
+    /// on a slow or paced link takes as long as it takes, and only silence
+    /// ends it.
+    pub fn set_block_timeout(&mut self, timeout: Duration) {
+        self.shared.set_block_timeout(timeout);
+    }
+
+    /// The camera's `PayloadSize`: the exact size of every frame buffer.
+    ///
+    /// Without it each buffer is sized from the leader's geometry, which
+    /// cannot know about chunk data or vendor padding. Set it before
+    /// acquisition starts; blocks already in flight keep their buffers.
+    pub fn set_payload_size(&mut self, payload_size: Option<usize>) {
+        self.shared
+            .set_payload_size(payload_size.filter(|&s| s > 0));
+    }
+
+    /// Also deliver frames that did not complete, with their
+    /// [`FrameStatus`] saying how (default: off).
+    ///
+    /// Lost packets' bytes are zero in the payload. Every incomplete frame is
+    /// counted in [`StreamStats::frames_incomplete`] either way.
+    pub fn set_deliver_incomplete(&mut self, deliver: bool) {
+        self.shared.set_deliver_incomplete(deliver);
     }
 
     /// Update or set the time synchronization model for timestamp mapping.
@@ -1473,24 +1186,13 @@ impl FrameStream {
         self.params
     }
 
-    /// Immutable view of the stream configuration.
-    pub fn config(&self) -> &StreamConfig {
-        &self.config
+    /// The stream configuration, or `None` for a stream made with
+    /// [`from_socket`](Self::from_socket).
+    pub fn config(&self) -> Option<&StreamConfig> {
+        self.config.as_ref()
     }
 
-    /// Borrow the underlying UDP socket (returns `None` when using a custom transport).
-    pub fn socket(&self) -> Option<&UdpSocket> {
-        #[cfg(not(windows))]
-        {
-            self.source.as_udp_socket()
-        }
-        #[cfg(windows)]
-        {
-            None
-        }
-    }
-
-    /// Receive the next complete image frame.
+    /// Receive the next image frame.
     ///
     /// This backwards-compatible image API also returns an EVS block as a
     /// [`Frame`] carrying the raw bytes and its EVT PFNC code. New callers that
@@ -1502,223 +1204,75 @@ impl FrameStream {
             .map(GenericStreamBlock::into_legacy_frame))
     }
 
-    /// Receive and classify the next complete GVSP block.
+    /// Receive and classify the next GVSP block.
     ///
-    /// Unlike [`next_frame`](Self::next_frame), this method distinguishes LUCID
-    /// EVT payloads from conventional images without changing the established
-    /// frame API.
+    /// `Ok(None)` means the stream has ended. Cancel-safe: dropping the
+    /// future, as `tokio::select!` does, loses no block.
     pub async fn next_block(&mut self) -> Result<Option<GenericStreamBlock>, GenicamError> {
-        #[cfg(windows)]
-        {
-            return match self.frame_rx.recv().await {
-                Some(Ok(mut block)) => {
-                    if let Some(timestamp) = block.device_timestamp() {
-                        let ts_host = self
-                            .time_sync
-                            .as_ref()
-                            .and_then(|time_sync| time_sync.to_host_time(timestamp));
-                        block.set_host_time(ts_host);
-                    }
-                    Ok(Some(block))
-                }
-                Some(Err(err)) => Err(err),
-                None => Ok(None),
-            };
+        let popped = self.shared.queue.pop().await;
+        self.take(popped)
+    }
+
+    /// Wait up to `timeout` for the next block on the calling thread.
+    ///
+    /// For callers without an async runtime. `Ok(None)` means the stream has
+    /// ended; nothing within `timeout` is [`GenicamError::Timeout`].
+    pub fn next_block_blocking(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<GenericStreamBlock>, GenicamError> {
+        match self.shared.queue.pop_blocking(timeout) {
+            Popped::Empty => Err(GenicamError::Timeout(timeout)),
+            popped => self.take(popped),
         }
+    }
 
-        #[cfg(not(windows))]
-        {
-            loop {
-                // Check for timeout on active frame assembly.
-                if let Some(ref active) = self.active
-                    && active.is_expired(self.frame_timeout)
-                {
-                    let block_id = active.block_id;
-                    warn!(
-                        block_id,
-                        "frame assembly timeout, dropping incomplete frame"
-                    );
-                    self.stats.record_drop();
-                    self.active = None;
+    /// [`next_frame`](Self::next_frame) on the calling thread, waiting up to
+    /// `timeout`: `Ok(None)` when the stream has ended,
+    /// [`GenicamError::Timeout`] when nothing arrived.
+    pub fn next_frame_blocking(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Frame>, GenicamError> {
+        Ok(self
+            .next_block_blocking(timeout)?
+            .map(GenericStreamBlock::into_legacy_frame))
+    }
+
+    /// Account for a block leaving the queue and give it its host time.
+    fn take(
+        &mut self,
+        popped: Popped<GenericStreamBlock>,
+    ) -> Result<Option<GenericStreamBlock>, GenicamError> {
+        match popped {
+            Popped::Item(mut block) => {
+                let ts_host = block.device_timestamp().and_then(|timestamp| {
+                    self.time_sync
+                        .as_ref()
+                        .and_then(|time_sync| time_sync.to_host_time(timestamp))
+                });
+                block.set_host_time(ts_host);
+                if block.status().is_complete() {
+                    let latency = ts_host.and_then(|ts| SystemTime::now().duration_since(ts).ok());
+                    self.stats.record_frame(block.payload().len(), latency);
+                } else {
+                    self.stats.record_incomplete_frame();
                 }
-
-                // Receive next packet. The poll deadline exists so the loop
-                // keeps turning while nothing arrives: without it neither the
-                // DX-09 watch below nor the frame-assembly timeout above can
-                // fire on a stream that goes fully silent, because both are
-                // only reached when a packet does. The Windows reader thread
-                // has always had this, from its 100 ms socket read timeout.
-                let raw = match timeout(SILENCE_POLL, self.source.recv(&mut self.recv_buffer)).await
-                {
-                    Ok(Ok(data)) if data.is_empty() => return Ok(None), // Stream closed.
-                    Ok(Ok(data)) => data,
-                    Ok(Err(e)) => return Err(e),
-                    Err(_elapsed) => {
-                        self.silence.tick();
-                        continue;
-                    }
-                };
-                self.silence.record_packet();
-
-                // Parse GVSP packet.
-                let packet = match gvsp::parse_packet(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        trace!(error = %e, "discarding malformed GVSP packet");
-                        continue;
-                    }
-                };
-
-                // Process packet based on type.
-                match packet {
-                    GvspPacket::Leader {
-                        block_id,
-                        width,
-                        height,
-                        pixel_format,
-                        timestamp,
-                        ..
-                    } => {
-                        // Start new frame assembly, dropping any incomplete previous frame.
-                        if let Some(ref prev) = self.active
-                            && prev.block_id != block_id
-                        {
-                            debug!(
-                                old_block = prev.block_id,
-                                new_block = block_id,
-                                "new leader arrived, dropping incomplete frame"
-                            );
-                            self.stats.record_drop();
-                        }
-
-                        let pixel_format = PixelFormat::from_code(pixel_format);
-                        let packet_payload = gvsp_payload_size(self.params.packet_size);
-
-                        self.active = Some(FrameAssemblyState::new(
-                            block_id,
-                            width,
-                            height,
-                            pixel_format,
-                            timestamp,
-                            packet_payload,
-                        ));
-                        trace!(block_id, %pixel_format, width, height, "frame leader received");
-                    }
-
-                    GvspPacket::Payload {
-                        block_id,
-                        packet_id,
-                        data,
-                    } => {
-                        if let Some(ref mut active) = self.active
-                            && active.block_id == block_id
-                            && active.ingest(packet_id, data.as_ref())
-                        {
-                            self.stats.record_packet();
-                        }
-                    }
-
-                    GvspPacket::Trailer {
-                        block_id,
-                        packet_id,
-                        status,
-                        chunk_data,
-                        size_y,
-                        ..
-                    } => {
-                        let Some(mut active) = self.active.take() else {
-                            continue;
-                        };
-
-                        if active.block_id != block_id {
-                            // Mismatched trailer, drop and continue.
-                            self.stats.record_drop();
-                            continue;
-                        }
-
-                        if status != 0 {
-                            warn!(block_id, status, "trailer reported non-zero status");
-                            self.stats.record_drop();
-                            continue;
-                        }
-
-                        active.trailer_size_y = size_y;
-                        active.set_trailer_packet_id(packet_id);
-                        if !active.is_complete() {
-                            warn!(
-                                block_id,
-                                trailer_packet_id = packet_id,
-                                "dropping incomplete frame"
-                            );
-                            self.stats.record_drop();
-                            continue;
-                        }
-
-                        // Build the frame.
-                        let ts_host = self
-                            .time_sync
-                            .as_ref()
-                            .and_then(|ts| ts.to_host_time(active.timestamp));
-
-                        let chunks = if chunk_data.is_empty() {
-                            None
-                        } else {
-                            match crate::chunks::parse_chunk_bytes(&chunk_data) {
-                                Ok(map) => Some(map),
-                                Err(e) => {
-                                    debug!(error = %e, "failed to parse chunk data");
-                                    None
-                                }
-                            }
-                        };
-
-                        // Truncate payload to actual received size.
-                        // The bitmap tells us what we received; we use the payload as-is.
-                        let payload = active.payload.freeze();
-
-                        let block = classify_completed_block(
-                            payload,
-                            active.width,
-                            active.height,
-                            active.pixel_format,
-                            chunks,
-                            active.timestamp,
-                            ts_host,
-                            active.trailer_size_y,
-                        );
-
-                        // FrameStream is the sole owner of completed-frame
-                        // accounting. Consumers may snapshot this accumulator
-                        // through stats_handle(), but must not record the same
-                        // frame again.
-                        let latency = block
-                            .host_time()
-                            .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                        self.stats.record_frame(block.payload().len(), latency);
-                        self.silence.record_frame();
-
-                        debug!(
-                            block_id,
-                            width = block.width(),
-                            height = block.height(),
-                            bytes = block.payload().len(),
-                            "frame complete"
-                        );
-
-                        return Ok(Some(block));
-                    }
-                }
+                Ok(Some(block))
             }
+            Popped::Failed(message) => Err(GenicamError::transport(message)),
+            Popped::Finished | Popped::Empty => Ok(None),
         }
     }
 }
 
-#[cfg(windows)]
 impl Drop for FrameStream {
     fn drop(&mut self) {
-        self.reader_stop.store(true, Ordering::Release);
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        self.shared
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(receiver) = self.receiver.take() {
+            let _ = receiver.join();
         }
     }
 }
@@ -1829,15 +1383,15 @@ impl U3vFrameStream {
                     }
                     Ok(Some(raw)) => {
                         let pixel_format = PixelFormat::from_code(raw.leader.pixel_format);
-                        let frame = Frame {
-                            payload: raw.payload,
-                            width: raw.leader.width,
-                            height: raw.leader.height,
+                        let mut frame = Frame::new(
+                            raw.payload,
+                            raw.leader.width,
+                            raw.leader.height,
                             pixel_format,
-                            chunks: None,
-                            ts_dev: Some(raw.leader.timestamp),
-                            ts_host: None,
-                        };
+                        );
+                        frame.ts_dev = Some(raw.leader.timestamp);
+                        frame.block_id = raw.leader.block_id;
+                        frame.payload_type = raw.leader.payload_type;
                         if tx.blocking_send(Ok(frame)).is_err() {
                             break; // Receiver dropped.
                         }
@@ -2047,6 +1601,32 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assembly::LeaderInfo;
+
+    /// A complete assembled block with a leader, as the engine hands it over.
+    fn assembled(
+        payload: Bytes,
+        width: u32,
+        height: u32,
+        pixel_format: u32,
+        timestamp: u64,
+        trailer_size_y: u32,
+    ) -> AssembledBlock {
+        AssembledBlock {
+            block_id: 1,
+            status: FrameStatus::Complete,
+            leader: Some(LeaderInfo {
+                timestamp,
+                pixel_format,
+                width,
+                height,
+            }),
+            payload_type: 0x0001,
+            payload,
+            trailer_size_y,
+            chunk_data: None,
+        }
+    }
 
     /// Only a missing `PayloadSize` may be replaced by a computed size (Codex
     /// review of #180).
@@ -2063,103 +1643,18 @@ mod tests {
     }
 
     #[test]
-    fn frame_assembly_state_ingest_tracks_packets() {
-        let mut state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
-
-        // Ingest packets (packet_id 1 and 2 are payload, 0 is leader).
-        assert!(state.ingest(1, &[1, 2, 3]));
-        assert!(state.ingest(2, &[4, 5, 6]));
-
-        // Duplicate should return false.
-        assert!(!state.ingest(1, &[1, 2, 3]));
-
-        state.set_trailer_packet_id(3);
-        assert!(state.is_complete());
-    }
-
-    #[test]
-    fn gvsp_payload_size_excludes_ip_udp_and_gvsp_headers() {
-        assert_eq!(gvsp_payload_size(1458), 1422);
-        assert_eq!(gvsp_payload_size(9000), 8964);
-    }
-
-    #[test]
-    fn silence_watch_stays_quiet_inside_the_grace_period() {
-        let mut watch = SilenceWatch::new(1500);
-        assert_eq!(
-            watch.assess(SILENCE_GRACE - Duration::from_millis(1)),
-            Silence::Quiet
-        );
-        // Still unspoken, so the verdict is available once the grace expires.
-        assert_eq!(watch.assess(SILENCE_GRACE), Silence::NoPacket);
-    }
-
-    #[test]
-    fn silence_watch_distinguishes_no_packet_from_no_frame() {
-        let mut nothing = SilenceWatch::new(1500);
-        assert_eq!(nothing.assess(SILENCE_GRACE), Silence::NoPacket);
-
-        // The distinction is the whole point of DX-09: nothing arriving is a
-        // path or privilege problem, while packets arriving with no frame
-        // completing is a packet-size disagreement (SR-02).
-        let mut packets = SilenceWatch::new(1500);
-        packets.record_packet();
-        assert_eq!(packets.assess(SILENCE_GRACE), Silence::NoFrame);
-    }
-
-    #[test]
-    fn silence_watch_speaks_once_and_never_after_a_frame() {
-        let mut watch = SilenceWatch::new(1500);
-        assert_eq!(watch.assess(SILENCE_GRACE), Silence::NoPacket);
-        // A stream that stays silent must not warn on every poll.
-        assert_eq!(watch.assess(SILENCE_GRACE * 10), Silence::Quiet);
-
-        let mut healthy = SilenceWatch::new(1500);
-        healthy.record_packet();
-        healthy.record_frame();
-        assert_eq!(healthy.assess(SILENCE_GRACE * 10), Silence::Quiet);
-    }
-
-    #[test]
-    fn frame_assembly_state_rejects_missing_payload_packets() {
-        let mut state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
-        assert!(state.ingest(1, &[1, 2, 3]));
-
-        state.set_trailer_packet_id(3);
-
-        assert!(!state.is_complete());
-    }
-
-    #[test]
-    fn frame_assembly_state_accepts_out_of_order_payload_packets() {
-        let mut state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
-        assert!(state.ingest(2, &[4, 5, 6]));
-        assert!(state.ingest(1, &[1, 2, 3]));
-
-        state.set_trailer_packet_id(3);
-
-        assert!(state.is_complete());
-    }
-
-    #[test]
-    fn frame_assembly_state_timeout() {
-        let state = FrameAssemblyState::new(1, 640, 480, PixelFormat::Mono8, 0, 1400);
-        assert!(!state.is_expired(Duration::from_secs(10)));
-        assert!(state.is_expired(Duration::ZERO));
-    }
-
-    #[test]
     fn captured_lucid_evt30_metadata_is_classified_as_evs() {
         let payload = Bytes::from_static(&[0x8e, 0x8a, 0xff, 0xe0]);
         let block = classify_completed_block(
-            payload.clone(),
-            1,
-            64_000,
-            PixelFormat::from_code(0x8110_0e30),
+            assembled(
+                payload.clone(),
+                1,
+                64_000,
+                0x8110_0e30,
+                0x0000_422d_66d4_39c8,
+                824,
+            ),
             None,
-            0x0000_422d_66d4_39c8,
-            None,
-            824,
         );
 
         assert_eq!(block.payload(), &payload);
@@ -2180,14 +1675,8 @@ mod tests {
     #[test]
     fn evt21_is_classified_as_evs() {
         let block = classify_completed_block(
-            Bytes::from_static(&[0; 8]),
-            1,
-            64_000,
-            PixelFormat::from_code(0x8140_0e21),
+            assembled(Bytes::from_static(&[0; 8]), 1, 64_000, 0x8140_0e21, 7, 8),
             None,
-            7,
-            None,
-            8,
         );
 
         let StreamBlock::Evs(evs) = StreamBlock::from(block) else {
@@ -2201,14 +1690,15 @@ mod tests {
     fn unknown_pfnc_code_remains_an_image() {
         let pixel_format = PixelFormat::from_code(0x0220_ffff);
         let block = classify_completed_block(
-            Bytes::from_static(&[1, 2, 3, 4]),
-            2,
-            2,
-            pixel_format,
+            assembled(
+                Bytes::from_static(&[1, 2, 3, 4]),
+                2,
+                2,
+                pixel_format.code(),
+                9,
+                2,
+            ),
             None,
-            9,
-            None,
-            2,
         );
 
         let StreamBlock::Image(frame) = StreamBlock::from(block) else {
@@ -2229,14 +1719,15 @@ mod tests {
         .into_iter()
         .collect();
         let block = classify_completed_block(
-            payload.clone(),
-            1,
-            64_000,
-            PixelFormat::VendorLucidEvsEvt30,
+            assembled(
+                payload.clone(),
+                1,
+                64_000,
+                PixelFormat::VendorLucidEvsEvt30.code(),
+                11,
+                3,
+            ),
             Some(chunks),
-            11,
-            None,
-            3,
         );
 
         let frame = block.into_legacy_frame();

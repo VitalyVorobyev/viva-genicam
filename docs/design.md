@@ -101,10 +101,14 @@ Introspection API (`node_names()`, `dependents()`, `categories()`,
 and GVSP streaming. Uses the proper GVCP wire format (0x42 key byte, 4-byte
 addresses).
 
-**`FrameStream` / `U3vFrameStream`** (`viva-genicam`) — async frame iterators.
-The GigE side reassembles GVSP packets into frames; the U3V side wraps blocking
-USB bulk reads via `spawn_blocking` + an mpsc channel, created through
-`U3vStreamBuilder` or `U3vFrameStream::start()`.
+**`FrameStream` / `U3vFrameStream`** (`viva-genicam`) — frame streams. The
+GigE side is the GVSP receive engine
+([ADR-0025](adrs/adr0025-gvsp-receive-engine.md)): one thread per stream reads
+the socket, a socket-free assembler builds blocks in place, and frames reach the
+application through a four-frame drop-oldest queue, async or blocking; opened by
+`Camera::open_stream`. The U3V side wraps blocking USB bulk reads via
+`spawn_blocking` + an mpsc channel, created through `U3vStreamBuilder` or
+`U3vFrameStream::start()`.
 
 **`DeviceHandle`** (`viva-service`) — wraps `Camera<GigeRegisterIo>` in
 `spawn_blocking` for async-safe access from Zenoh queryable handlers, and owns
@@ -122,9 +126,10 @@ feature (pValue delegation, selectors, converters) into register operations →
 dependent cached values via the NodeMap dependency graph.
 
 **Streaming path** — device emits GVSP packets (GigE) or bulk transfers (U3V)
-→ transport reassembles leader/payload/trailer into a complete buffer → `Frame`
-with pixel-format metadata from `viva-pfnc` → application via
-`FrameStream`/`U3vFrameStream`.
+→ `viva-gige` parses each datagram in place, the receive engine's assembler
+places it in its block's buffer → `Frame` with block id, status and
+pixel-format metadata from `viva-pfnc`, counted in `StreamStats` → application
+via `FrameStream`/`U3vFrameStream`.
 
 **Service path** — camera → `viva-service`/`viva-service-u3v` (`DeviceHandle`)
 → Zenoh (types from `viva-zenoh-api`) → studio or other subscribers. The

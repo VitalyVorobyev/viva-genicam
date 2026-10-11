@@ -33,7 +33,7 @@ If your camera hits something, [open an issue](https://github.com/VitalyVorobyev
 
 - **Discovery** -- find GigE Vision cameras via GVCP broadcast; USB3 Vision cameras via USB enumeration
 - **Control** -- read and write device registers and GenApi features (Integer, Float, Enumeration, Boolean, Command, String, Register, SwissKnife, Converter, IntConverter)
-- **Streaming** -- GigE: GVSP reassembly with backpressure, plus raw capture from event-vision cameras; U3V: async frame iterator over USB bulk reads
+- **Streaming** -- GigE: a GVSP receive thread per stream, tolerant of reordering and extended IDs, counting every frame's fate, plus raw capture from event-vision cameras; U3V: async frame iterator over USB bulk reads
 - **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
 - **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)

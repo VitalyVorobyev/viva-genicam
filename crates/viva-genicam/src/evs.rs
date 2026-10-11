@@ -4,6 +4,7 @@ use bytes::Bytes;
 use viva_pfnc::PixelFormat;
 
 use crate::chunks::ChunkMap;
+use crate::frame::FrameStatus;
 
 /// Encoding used by a LUCID event-vision stream block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,8 +25,9 @@ impl EvsFormat {
     }
 }
 
-/// One complete raw event-vision block reassembled from GVSP packets.
+/// One raw event-vision block reassembled from GVSP packets.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EvsBlock {
     /// Encoded EVT bytes, preserved exactly as transmitted.
     pub payload: Bytes,
@@ -47,4 +49,8 @@ pub struct EvsBlock {
     pub chunks: Option<ChunkMap>,
     /// Host-correlated timestamp, when time synchronization is available.
     pub ts_host: Option<SystemTime>,
+    /// GVSP block id.
+    pub block_id: u64,
+    /// How the block ended.
+    pub status: FrameStatus,
 }

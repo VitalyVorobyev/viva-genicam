@@ -566,6 +566,15 @@ async fn setup_stream_sized(
     device_info: &gige::DeviceInfo,
     packet_size: Option<u32>,
 ) -> (viva_genicam::FrameStream, Camera<GigeRegisterIo>) {
+    setup_stream_with(device_info, packet_size, |builder| builder).await
+}
+
+/// As [`setup_stream_sized`], with further builder settings applied last.
+async fn setup_stream_with(
+    device_info: &gige::DeviceInfo,
+    packet_size: Option<u32>,
+    customize: impl for<'a> FnOnce(viva_genicam::StreamBuilder<'a>) -> viva_genicam::StreamBuilder<'a>,
+) -> (viva_genicam::FrameStream, Camera<GigeRegisterIo>) {
     use std::net::{IpAddr, SocketAddr};
 
     let control_addr = SocketAddr::new(IpAddr::V4(device_info.ip), gige::GVCP_PORT);
@@ -608,7 +617,7 @@ async fn setup_stream_sized(
     } else {
         builder = builder.auto_packet_size();
     }
-    let stream = builder.build().await.expect("build stream");
+    let stream = customize(builder).build().await.expect("build stream");
     let frame_stream = viva_genicam::FrameStream::new(stream, None);
 
     let handle = tokio::runtime::Handle::current();
@@ -980,7 +989,7 @@ async fn test_probe_leaves_the_size_alone_when_no_test_packet_returns() {
 ///
 /// So the datagrams are read from a plain `UdpSocket` this test binds itself,
 /// configured through `GigeDevice` directly. `StreamBuilder`, `Stream`,
-/// `FrameStream` and `gvsp::parse_packet` are all deliberately absent; a round
+/// `FrameStream` and `gvsp::parse_packet_ref` are all deliberately absent; a round
 /// trip through them would prove only that they agree with the fake.
 #[tokio::test]
 async fn test_fake_gvsp_packets_match_spec_layout() {
@@ -1943,4 +1952,175 @@ async fn test_little_endian_registers_are_not_byte_swapped() {
         ticks, "305419896",
         "little-endian 8-byte register was byte-swapped"
     );
+}
+
+// ---------------------------------------------------------------------------
+// GVSP receive engine against the fake (ADR-0025)
+// ---------------------------------------------------------------------------
+
+/// Start acquisition on a camera shared with a blocking task.
+async fn start_acquisition(camera: &Arc<Mutex<Camera<GigeRegisterIo>>>) {
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || cam.lock().unwrap().acquisition_start().expect("start"))
+        .await
+        .unwrap();
+}
+
+/// Stop acquisition on a camera shared with a blocking task.
+async fn stop_acquisition(camera: &Arc<Mutex<Camera<GigeRegisterIo>>>) {
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || cam.lock().unwrap().acquisition_stop().expect("stop"))
+        .await
+        .unwrap();
+}
+
+async fn next_frame_within(
+    frame_stream: &mut viva_genicam::FrameStream,
+    what: &str,
+) -> viva_genicam::Frame {
+    tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+        .await
+        .unwrap_or_else(|_| panic!("timeout waiting for {what}"))
+        .expect("stream error")
+        .unwrap_or_else(|| panic!("stream ended before {what}"))
+}
+
+/// A camera sending 20-byte extended-ID headers: every packet must land at
+/// the 12-byte-shorter stride, which the 0.8 receiver got wrong.
+#[tokio::test]
+async fn test_extended_id_stream_assembles_at_its_own_stride() {
+    let _cam = common::TestCamera::start_with(|b| b.extended_ids(true)).await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    start_acquisition(&camera).await;
+    let frame = next_frame_within(&mut frame_stream, "an extended-ID frame").await;
+    stop_acquisition(&camera).await;
+    assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+    assert_eq!(frame.payload.len(), (frame.width * frame.height) as usize);
+    assert!(frame.block_id >= 1);
+}
+
+/// `GevSCPD` paces packets in timestamp ticks (1 GHz on the fake, from
+/// bootstrap 0x093C/0x0940). 1.5 ms between 211 packets makes each frame take
+/// about 320 ms — longer than the 100 ms block timeout, which counts from the
+/// last packet and so must not fire.
+#[tokio::test]
+async fn test_a_paced_frame_longer_than_the_block_timeout_completes() {
+    let _cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) =
+        setup_stream_with(&device_info, Some(1500), |b| b.packet_delay(1_500_000)).await;
+    let camera = Arc::new(Mutex::new(camera));
+
+    // The tick frequency the pacing is converted with, read over the wire.
+    let high = blocking_read_register(&camera, 0x093C, 4).await;
+    let low = blocking_read_register(&camera, 0x0940, 4).await;
+    let word = |b: Vec<u8>| u64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    assert_eq!((word(high) << 32) | word(low), 1_000_000_000);
+
+    start_acquisition(&camera).await;
+    let started = std::time::Instant::now();
+    let frame = next_frame_within(&mut frame_stream, "a paced frame").await;
+    let took = started.elapsed();
+    stop_acquisition(&camera).await;
+    assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+    assert_eq!(frame.payload.len(), (frame.width * frame.height) as usize);
+    assert!(
+        took >= Duration::from_millis(200),
+        "pacing was not applied: the first frame took {took:?}"
+    );
+}
+
+/// Every block the fake sends is complete, incomplete, missed or dropped to
+/// backpressure on the host — under drops, a dropped block, repeats and
+/// reordering scripted by packet id.
+#[tokio::test]
+async fn test_every_block_the_fake_sends_is_accounted_for() {
+    use viva_fake_gige::{PacketScript, ScriptStep};
+    let script = PacketScript::new()
+        .step(ScriptStep::Drop {
+            block: 2,
+            packet: 5,
+        })
+        .step(ScriptStep::DropBlock { block: 4 })
+        .step(ScriptStep::Duplicate {
+            block: 5,
+            packet: 3,
+        })
+        .step(ScriptStep::Delay {
+            block: 6,
+            packet: 2,
+            by: 10,
+        })
+        .step(ScriptStep::TrailerBeforeLastPayload { block: 7 })
+        .step(ScriptStep::RepeatLeader { block: 8, after: 4 })
+        .step(ScriptStep::Interleave { block: 9 });
+    let cam = common::TestCamera::start_with(move |b| {
+        b.width(256).height(64).packet_script(script.clone())
+    })
+    .await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    start_acquisition(&camera).await;
+    let mut delivered = 0u64;
+    while delivered < 12 {
+        next_frame_within(&mut frame_stream, "a frame").await;
+        delivered += 1;
+    }
+    stop_acquisition(&camera).await;
+    // Let the last block in flight close, then take what is queued.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(Some(_)) = frame_stream.next_block_blocking(Duration::from_millis(50)) {}
+
+    let sent = cam.fake().blocks_sent();
+    let stats = frame_stream.stats();
+    assert_eq!(
+        stats.frames_complete
+            + stats.frames_incomplete
+            + stats.frames_missed
+            + stats.frames_backpressure
+            + stats.frames_unsupported,
+        sent,
+        "{stats:?}"
+    );
+    assert!(
+        stats.frames_incomplete >= 1,
+        "block 2 lost a packet: {stats:?}"
+    );
+    assert!(
+        stats.frames_missed >= 1,
+        "block 4 was dropped whole: {stats:?}"
+    );
+    assert!(stats.packets_duplicate >= 2, "{stats:?}");
+}
+
+/// A packed format is sized by bit depth end to end: `Mono12Packed` is 1.5
+/// bytes a pixel, which the 0.8 Windows reader truncated to one.
+#[tokio::test]
+async fn test_a_packed_frame_arrives_whole() {
+    let _cam =
+        common::TestCamera::start_with(|b| b.pixel_format(viva_fake_gige::MONO12_PACKED)).await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    start_acquisition(&camera).await;
+    let frame = next_frame_within(&mut frame_stream, "a Mono12Packed frame").await;
+    stop_acquisition(&camera).await;
+    assert_eq!(
+        frame.payload.len(),
+        (frame.width * frame.height * 3 / 2) as usize
+    );
+    assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+}
+
+/// TC-05: a camera announcing `0x4001` delivers images whose payload type
+/// keeps the chunk bit.
+#[tokio::test]
+async fn test_an_extended_chunk_payload_type_reaches_the_frame() {
+    let _cam = common::TestCamera::start_with(|b| b.payload_type(0x4001)).await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    start_acquisition(&camera).await;
+    let frame = next_frame_within(&mut frame_stream, "an 0x4001 frame").await;
+    stop_acquisition(&camera).await;
+    assert_eq!(frame.payload_type, 0x4001);
 }

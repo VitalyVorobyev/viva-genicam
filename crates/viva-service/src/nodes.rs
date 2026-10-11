@@ -69,12 +69,9 @@ pub async fn run_set_queryable<D: DeviceOps>(
                                                         )
                                                         .await;
                                                     }
-                                                    NodeOpResponse {
-                                                        invalidated: device
-                                                            .invalidated_by(&node_name)
-                                                            .await,
-                                                        ..NodeOpResponse::ok()
-                                                    }
+                                                    NodeOpResponse::ok().with_invalidated(
+                                                        device.invalidated_by(&node_name).await,
+                                                    )
                                                 }
                                                 Err(e) => NodeOpResponse::err(e.to_string()),
                                             }
@@ -133,10 +130,9 @@ pub async fn run_execute_queryable<D: DeviceOps>(
                         let response = match device.exec_command(&node_name).await {
                             Ok(()) => {
                                 debug!(device_id, node_name, "command executed");
-                                NodeOpResponse {
-                                    invalidated: device.invalidated_by(&node_name).await,
-                                    ..NodeOpResponse::ok()
-                                }
+                                NodeOpResponse::ok().with_invalidated(
+                                    device.invalidated_by(&node_name).await,
+                                )
                             }
                             Err(e) => NodeOpResponse::err(e.to_string()),
                         };
@@ -327,19 +323,15 @@ pub async fn run_bulk_read_queryable<D: DeviceOps>(
                                                 );
                                             }
                                         }
-                                        BulkReadResponse { values }
+                                        BulkReadResponse::new(values)
                                     }
                                     Err(e) => {
                                         warn!(device_id, error = %e, "invalid bulk read request");
-                                        BulkReadResponse {
-                                            values: std::collections::HashMap::new(),
-                                        }
+                                        BulkReadResponse::new(std::collections::HashMap::new())
                                     }
                                 }
                             }
-                            None => BulkReadResponse {
-                                values: std::collections::HashMap::new(),
-                            },
+                            None => BulkReadResponse::new(std::collections::HashMap::new()),
                         };
 
                         let Ok(payload) = serde_json::to_vec(&response) else {

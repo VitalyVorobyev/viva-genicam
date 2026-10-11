@@ -65,9 +65,7 @@ pub async fn serve(
                     include_xml,
                     ..ReportRequest::new(tool.clone(), target.clone())
                 };
-                let response = DeviceReportResponse {
-                    report: build_report(&request).await,
-                };
+                let response = DeviceReportResponse::new(build_report(&request).await);
                 let Ok(payload) = serde_json::to_vec(&response) else {
                     tracing::error!("failed to serialize the report");
                     continue;
@@ -116,9 +114,7 @@ mod tests {
             loop {
                 let replies = session
                     .get(keys::report(&device_id))
-                    .payload(
-                        serde_json::to_vec(&DeviceReportRequest { include_xml: false }).unwrap(),
-                    )
+                    .payload(serde_json::to_vec(&DeviceReportRequest::new(false)).unwrap())
                     .timeout(Duration::from_secs(5))
                     .await
                     .unwrap();

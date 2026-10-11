@@ -238,6 +238,22 @@ pub fn save_image(buffer: &[u8], path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// One line of a stream's counters, as the receive engine keeps them: every
+/// block the camera sent is complete, incomplete, missed or dropped to
+/// backpressure.
+pub fn print_stream_counters(prefix: &str, stats: &viva_genicam::StreamStats) {
+    println!(
+        "{prefix} fps={:.1} Mbps={:.2} complete={} incomplete={} missed={} backpressure={} bytes={}",
+        stats.avg_fps,
+        stats.avg_mbps,
+        stats.frames_complete,
+        stats.frames_incomplete,
+        stats.frames_missed,
+        stats.frames_backpressure,
+        stats.bytes,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

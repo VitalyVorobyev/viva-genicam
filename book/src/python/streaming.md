@@ -9,7 +9,9 @@ with cam.stream() as frames:
         ...
 ```
 
-No asyncio required — the underlying `tokio` runtime is managed inside the extension, and iteration blocks the calling thread while other Python threads stay runnable (the GIL is released during the blocking read).
+No asyncio required — the stream's receive engine runs on a thread of its own inside the extension, and iteration blocks the calling thread while other Python threads stay runnable (the GIL is released during the blocking read). The stream object itself may be handed to another thread, for a producer–consumer loop.
+
+Only complete frames come out of the iterator. A frame that lost packets on the network is counted by the stream and skipped, so a gap in the frames you receive is frames the network lost, not frames the library mangled.
 
 ## The `Frame` object
 
@@ -68,7 +70,7 @@ The `stream()` call accepts GigE-specific knobs:
 cam.stream(
     iface="en0",               # NIC override — or "192.168.0.5"
     auto_packet_size=True,     # size packets from the NIC MTU (or packet_size=N)
-    multicast="239.255.42.99", # subscribe to a multicast group instead of unicast
+    multicast="239.255.42.99", # have the camera stream to a multicast group, and join it
     destination_port=34567,    # fix the streaming UDP port
 )
 ```

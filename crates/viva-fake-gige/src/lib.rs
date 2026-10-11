@@ -34,12 +34,15 @@ pub use gvcp_server::{
     CommandCounters, FAKE_DEVICE_KEY, FAKE_GROUP_KEY, FAKE_GROUP_MASK, FAKE_MAC, FAKE_MANUFACTURER,
     FAKE_MODEL, FAKE_SERIAL, FAKE_USER_NAME, FAKE_VERSION, GvcpCommand, RegisterCommandRefusal,
 };
+pub mod gvsp;
 mod gvsp_sender;
 pub mod registers;
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+pub use gvsp::{PacketScript, ScriptStep};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
@@ -62,11 +65,16 @@ pub struct FakeCameraBuilder {
     max_on_wire: Option<u32>,
     refuse_register_commands: Option<RegisterCommandRefusal>,
     identity: gvcp_server::Identity,
+    sender: gvsp_sender::SenderOptions,
 }
 
 /// PFNC pixel format codes.
 pub const MONO8: u32 = 0x0108_0001;
 pub const RGB8: u32 = 0x0218_0014;
+/// GigE Vision `Mono12Packed`: two 12-bit pixels in three bytes.
+pub const MONO12_PACKED: u32 = 0x010C_0006;
+/// PFNC `Mono12p`: 12-bit pixels packed LSB-first.
+pub const MONO12P: u32 = 0x010C_0047;
 
 impl Default for FakeCameraBuilder {
     fn default() -> Self {
@@ -84,6 +92,7 @@ impl Default for FakeCameraBuilder {
             max_on_wire: None,
             refuse_register_commands: None,
             identity: gvcp_server::Identity::default(),
+            sender: gvsp_sender::SenderOptions::default(),
         }
     }
 }
@@ -188,6 +197,32 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Send 20-byte extended-ID GVSP headers with 64-bit block ids and 32-bit
+    /// packet ids (GigE Vision 2.0), as a LUCID TRT009S-E does (default: off).
+    ///
+    /// The stride shrinks by the 12 extra header bytes, so a receiver that
+    /// assumes the 8-byte header places every packet after the first 12 bytes
+    /// too far.
+    pub fn extended_ids(mut self, enable: bool) -> Self {
+        self.sender.extended_ids = enable;
+        self
+    }
+
+    /// Put `payload_type` in every leader and trailer instead of `0x0001`
+    /// (`0x4001` while chunk mode is active).
+    pub fn payload_type(mut self, payload_type: u16) -> Self {
+        self.sender.payload_type = Some(payload_type);
+        self
+    }
+
+    /// Damage the stream deterministically: drop, repeat or reorder packets
+    /// by block and packet id. Block ids count from 1 at each acquisition
+    /// start.
+    pub fn packet_script(mut self, script: PacketScript) -> Self {
+        self.sender.script = script;
+        self
+    }
+
     /// Report a different `GevHeartbeatTimeout` than the 3 000 ms default.
     ///
     /// A shorter window keeps a test that has to wait one out from dominating
@@ -252,6 +287,7 @@ impl FakeCameraBuilder {
         let acq_start = Arc::new(Notify::new());
         let acq_stop_flag = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(CommandCounters::default());
+        let blocks_sent = Arc::new(AtomicU64::new(0));
 
         // Bind GVCP control socket. On macOS `SO_REUSEADDR` is a no-op for UDP,
         // so also set `SO_REUSEPORT` to let a fresh socket rebind the port while
@@ -296,8 +332,10 @@ impl FakeCameraBuilder {
             let acq_start = acq_start.clone();
             let acq_stop = acq_stop_flag.clone();
             let fps = self.fps;
+            let options = self.sender;
+            let blocks_sent = blocks_sent.clone();
             tokio::spawn(async move {
-                gvsp_sender::run(regs, acq_start, acq_stop, fps).await;
+                gvsp_sender::run(regs, acq_start, acq_stop, fps, options, blocks_sent).await;
             })
         };
 
@@ -306,6 +344,7 @@ impl FakeCameraBuilder {
             gvsp_handle: Some(gvsp_handle),
             regs,
             counters,
+            blocks_sent,
             local_addr,
         })
     }
@@ -320,6 +359,7 @@ pub struct FakeCamera {
     gvsp_handle: Option<JoinHandle<()>>,
     regs: Arc<Mutex<registers::RegisterMap>>,
     counters: Arc<CommandCounters>,
+    blocks_sent: Arc<AtomicU64>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -351,6 +391,15 @@ impl FakeCamera {
     /// value cannot tell them apart.
     pub fn commands(&self) -> &CommandCounters {
         &self.counters
+    }
+
+    /// GVSP blocks this camera has produced, including any its packet script
+    /// then dropped whole.
+    ///
+    /// The left-hand side of a receiver's accounting identity: every block is
+    /// complete, incomplete, missed or dropped to backpressure on the host.
+    pub fn blocks_sent(&self) -> u64 {
+        self.blocks_sent.load(Ordering::Relaxed)
     }
 
     /// Read `len` bytes of device state directly, bypassing GVCP.

@@ -103,9 +103,12 @@ use tracing::{debug, info, warn};
 pub use chunks::{ChunkKind, ChunkMap, ChunkValue, parse_chunk_bytes};
 pub use events::{Event, EventStream};
 pub use evs::{EvsBlock, EvsFormat};
-pub use frame::Frame;
+pub use frame::{Frame, FrameStatus};
 pub use gige::action::{AckSummary, ActionParams};
-pub use stream::{FrameStream, GenericStreamBlock, Stream, StreamBlock, StreamBuilder, StreamDest};
+pub use stream::{
+    FrameStream, GenericStreamBlock, Stream, StreamBlock, StreamBuilder, StreamDest, StreamOptions,
+    StreamStats,
+};
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub use stream::{U3vFrameStream, U3vStreamBuilder};
@@ -142,6 +145,9 @@ pub enum GenicamError {
         /// How long [`Camera::execute_and_wait`] polled.
         waited: Duration,
     },
+    /// Nothing arrived within the time a blocking call was given.
+    #[error("timed out after {0:?}")]
+    Timeout(Duration),
 }
 
 impl GenicamError {
@@ -949,27 +955,32 @@ impl Drop for GigeRegisterIo {
     }
 }
 
-impl RegisterIo for GigeRegisterIo {
-    fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
-        let mut device = self.lock()?;
-        let fut = device.read_register_or_mem(addr, len);
+impl GigeRegisterIo {
+    /// Run `fut` to completion on the adapter's runtime from synchronous code:
+    /// inside a multi-thread runtime through `block_in_place`, elsewhere
+    /// directly. The same rule every register access follows.
+    pub(crate) fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::task::block_in_place(|| self.handle.block_on(fut))
         } else {
             self.handle.block_on(fut)
         }
-        .map_err(|err| GenApiError::Io(err.to_string()))
+    }
+}
+
+impl RegisterIo for GigeRegisterIo {
+    fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+        let mut device = self.lock()?;
+        let fut = device.read_register_or_mem(addr, len);
+        self.block_on(fut)
+            .map_err(|err| GenApiError::Io(err.to_string()))
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
         let mut device = self.lock()?;
         let fut = device.write_register_or_mem(addr, data);
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| self.handle.block_on(fut))
-        } else {
-            self.handle.block_on(fut)
-        }
-        .map_err(|err| GenApiError::Io(err.to_string()))
+        self.block_on(fut)
+            .map_err(|err| GenApiError::Io(err.to_string()))
     }
 }
 

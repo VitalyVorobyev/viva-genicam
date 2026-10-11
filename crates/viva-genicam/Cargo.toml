@@ -29,6 +29,11 @@ viva-pfnc = { version = "0.8", path = "../viva-pfnc" }
 viva-gencp = { version = "0.8", path = "../viva-gencp" }
 viva-u3v = { version = "0.8", path = "../viva-u3v", optional = true }
 
+# `cargo fuzz` builds with `--cfg fuzzing`, which compiles the fuzzing entry
+# point in `stream` (CI-09).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [features]
 default = []
 u3v = ["viva-u3v"]

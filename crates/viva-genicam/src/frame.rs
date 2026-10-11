@@ -8,8 +8,41 @@ use viva_pfnc::PixelFormat;
 
 use crate::chunks::{ChunkKind, ChunkMap, ChunkValue};
 
+/// How a frame's block ended.
+///
+/// A stream hands out only [`FrameStatus::Complete`] frames unless it was asked
+/// to deliver incomplete ones too (`FrameStream::set_deliver_incomplete`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FrameStatus {
+    /// Every packet arrived and the device reported success.
+    Complete,
+    /// The trailer arrived; `missing_packets` packets (the leader among them,
+    /// if it was lost) did not. Their bytes in the payload are zero.
+    Incomplete {
+        /// Packets that never arrived.
+        missing_packets: u32,
+    },
+    /// The trailer reported this error status (bit 15 set).
+    DeviceStatus(u16),
+    /// No trailer arrived before the block timed out or was displaced, so how
+    /// many packets the block had is unknown.
+    TrailerMissing,
+}
+
+impl FrameStatus {
+    /// Whether this is [`FrameStatus::Complete`].
+    pub fn is_complete(self) -> bool {
+        matches!(self, FrameStatus::Complete)
+    }
+}
+
 /// Image frame produced by the GigE Vision stream reassembler.
+///
+/// Construct one with [`Frame::new`]; the struct is `#[non_exhaustive]` so the
+/// stream can report more about a block without breaking callers.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Frame {
     /// Contiguous image payload containing pixel data.
     pub payload: Bytes,
@@ -25,9 +58,40 @@ pub struct Frame {
     pub ts_dev: Option<u64>,
     /// Host timestamp obtained by mapping the device ticks.
     pub ts_host: Option<SystemTime>,
+    /// Block id from the transport: 16 bits widened, or the 64-bit extended id.
+    pub block_id: u64,
+    /// Payload type from the leader, all 16 bits: `0x0001` is an image and
+    /// `0x4001` an image with extended chunk data (TC-05).
+    pub payload_type: u16,
+    /// How the block ended.
+    pub status: FrameStatus,
 }
 
+/// Payload type of an image block.
+const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
+
 impl Frame {
+    /// A complete image frame with no chunks, timestamps or block id.
+    pub fn new(payload: Bytes, width: u32, height: u32, pixel_format: PixelFormat) -> Self {
+        Self {
+            payload,
+            width,
+            height,
+            pixel_format,
+            chunks: None,
+            ts_dev: None,
+            ts_host: None,
+            block_id: 0,
+            payload_type: PAYLOAD_TYPE_IMAGE,
+            status: FrameStatus::Complete,
+        }
+    }
+
+    /// Whether every packet of the frame arrived.
+    pub fn is_complete(&self) -> bool {
+        self.status.is_complete()
+    }
+
     /// Retrieve a chunk value by kind if it exists.
     pub fn chunk(&self, kind: ChunkKind) -> Option<&ChunkValue> {
         self.chunks.as_ref()?.get(&kind)
@@ -257,15 +321,7 @@ mod tests {
         height: u32,
         pixel_format: PixelFormat,
     ) -> Frame {
-        Frame {
-            payload: Bytes::copy_from_slice(payload),
-            width,
-            height,
-            pixel_format,
-            chunks: None,
-            ts_dev: None,
-            ts_host: None,
-        }
+        Frame::new(Bytes::copy_from_slice(payload), width, height, pixel_format)
     }
 
     #[test]

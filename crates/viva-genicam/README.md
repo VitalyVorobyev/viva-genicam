@@ -25,7 +25,7 @@ and attach `viva-camctl report` output
 - **Discovery** -- find GigE Vision cameras on any network interface
 - **Connect & control** -- `connect_gige()` one-liner for camera connection with automatic XML fetch
 - **Feature access** -- `get`/`set` by feature name, parsed and encoded per node type (Integer, Float, Enumeration, Boolean, String, Command), plus typed accessors on the underlying `NodeMap`
-- **Streaming** -- `FrameStream` async iterator with reassembly and backpressure
+- **Streaming** -- `Camera::open_stream` and `FrameStream`: a receive thread per stream, frames with block id and status, async or blocking, and counters for every block the camera sent
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition
 - **Chunks & timestamps** -- parse chunk data; map device timestamps to host time
 - **USB3 Vision** -- optional `u3v` feature for USB3 Vision cameras

@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
-    Camera, FrameStream, GenicamError, GigeRegisterIo, StreamBuilder, connect_gige_with_xml, gige,
+    Camera, FrameStream, GenicamError, GigeRegisterIo, StreamOptions, connect_gige_with_xml, gige,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -39,16 +39,11 @@ pub trait DeviceOps: Send + Sync + 'static {
     /// static XML in that case rather than showing invented defaults.
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         let value = self.get_feature(name).await.map_err(|e| format!("{e}"))?;
-        Ok(FeatureState {
-            value: serde_json::Value::String(value),
-            access_mode: "RW".to_string(),
-            kind: "Unknown".to_string(),
-            is_implemented: true,
-            is_available: true,
-            numeric: None,
-            enum_available: None,
-            unit: None,
-        })
+        Ok(FeatureState::new(
+            serde_json::Value::String(value),
+            "RW",
+            "Unknown",
+        ))
     }
 
     /// The features a write to `name` may change, which a client should
@@ -112,11 +107,9 @@ impl DeviceHandle {
         self.iface.as_ref()
     }
 
-    /// Build a GVSP stream using the CCP-holding device.
-    ///
-    /// This configures the stream channel registers (SCDA, SCPH, SCPS) on the
-    /// device that owns Control Channel Privilege and binds the receiving UDP
-    /// socket. The returned [`FrameStream`] is ready for frame reception.
+    /// Open a GVSP stream through the camera's own control channel
+    /// ([`Camera::open_stream`]): stream channel, packet size, socket, and a
+    /// receive engine sized by the camera's `PayloadSize`.
     ///
     /// `packet_size` is a ceiling for the path probe; `None` negotiates one
     /// from the NIC's MTU.
@@ -126,21 +119,16 @@ impl DeviceHandle {
         packet_size: Option<u32>,
     ) -> Result<FrameStream, GenicamError> {
         let cam = self.camera.clone();
-        let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let cam = cam
+            let mut cam = cam
                 .lock()
                 .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
-            let mut device = cam.transport().lock_device()?;
-            handle.block_on(async {
-                let builder = StreamBuilder::new(&mut device).iface(iface);
-                let builder = match packet_size {
-                    Some(size) => builder.packet_size(size),
-                    None => builder.auto_packet_size(),
-                };
-                let stream = builder.build().await?;
-                Ok(FrameStream::new(stream, None))
-            })
+            let options = StreamOptions::new().iface(iface);
+            let options = match packet_size {
+                Some(size) => options.packet_size(size),
+                None => options.auto_packet_size(),
+            };
+            cam.open_stream(options)
         })
         .await
         .map_err(|e| GenicamError::Transport(e.to_string()))?

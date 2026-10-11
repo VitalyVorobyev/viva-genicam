@@ -22,12 +22,12 @@ pub fn derive_meta_key(image_key: &str) -> String {
 ///
 /// `payload_size` is set to `width * height` (one byte per pixel for Mono8).
 pub fn default_image_meta(width: u32, height: u32) -> ImageMeta {
-    ImageMeta {
-        pixel_format: PixelFormat::Mono8,
+    ImageMeta::new(
+        PixelFormat::Mono8,
         width,
         height,
-        payload_size: width as u64 * height as u64,
-    }
+        width as u64 * height as u64,
+    )
 }
 
 /// Deserialize an `ImageMeta` from a raw Zenoh payload (JSON bytes).

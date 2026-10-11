@@ -8,22 +8,25 @@ use pyo3::prelude::*;
 use tokio::time::timeout as tokio_timeout;
 
 use viva_genicam::gige::nic::Iface;
-use viva_genicam::{FrameStream, StreamBuilder, U3vFrameStream as U3vStream, U3vStreamBuilder};
+use viva_genicam::{
+    FrameStream, GenicamError, StreamOptions, U3vFrameStream as U3vStream, U3vStreamBuilder,
+};
 
 use crate::camera::{GigeCamera, U3vCamera};
 use crate::errors::{parse_error, transport_error, IntoPyErr};
 use crate::frame::PyFrame;
 use crate::runtime::runtime;
 
-/// `FrameStream` is far larger than `U3vStream` — it carries the GVSP receive
-/// buffer and reassembly state inline — so the variants are boxed to keep the
-/// enum from costing every `PyFrameStream` the GigE size regardless of transport.
+/// Boxed so the enum costs every `PyFrameStream` one pointer whichever
+/// transport it streams.
 enum StreamInner {
     Gige(Box<FrameStream>),
     U3v(Box<U3vStream>),
 }
 
-#[pyclass(module = "viva_genicam._native", unsendable)]
+/// Both streams are `Send + Sync` — the GigE receive engine runs on a thread
+/// of its own — so a frame stream may be handed to a worker thread.
+#[pyclass(module = "viva_genicam._native")]
 pub(crate) struct PyFrameStream {
     inner: Option<StreamInner>,
     /// Default per-frame timeout when `__next__` is called with no argument.
@@ -59,10 +62,11 @@ impl PyFrameStream {
             .as_mut()
             .ok_or_else(|| parse_error("frame stream is closed"))?;
         py.detach(|| match inner {
-            StreamInner::Gige(s) => runtime()
-                .block_on(async { tokio_timeout(to, s.next_frame()).await })
-                .map_err(|_| transport_error("timeout waiting for frame"))
-                .and_then(|res| res.into_py_err()),
+            // The receive engine's own blocking front end: no runtime needed.
+            StreamInner::Gige(s) => match s.next_frame_blocking(to) {
+                Err(GenicamError::Timeout(_)) => Err(transport_error("timeout waiting for frame")),
+                other => other.into_py_err(),
+            },
             StreamInner::U3v(s) => runtime()
                 .block_on(async { tokio_timeout(to, s.next_frame()).await })
                 .map_err(|_| transport_error("timeout waiting for frame"))
@@ -103,38 +107,27 @@ pub(crate) fn build_gige_stream(
         ));
     }
 
-    let time_sync = {
-        let g = camera
+    let frame_stream = py.detach(|| {
+        let mut cam = camera
             .lock()
             .map_err(|_| parse_error("camera mutex poisoned"))?;
-        g.time_sync().clone()
-    };
-
-    let stream = py.detach(|| {
-        let cam = camera
-            .lock()
-            .map_err(|_| parse_error("camera mutex poisoned"))?;
-        let io = cam.transport();
-        let mut device_guard = io.lock_device().map_err(crate::errors::to_py)?;
-        let mut builder = StreamBuilder::new(&mut device_guard);
+        let mut options = StreamOptions::new();
         if let Some(iface) = iface {
-            builder = builder.iface(iface);
+            options = options.iface(iface);
         }
         if auto_packet_size {
-            builder = builder.auto_packet_size();
+            options = options.auto_packet_size();
         } else if let Some(size) = packet_size {
-            builder = builder.packet_size(size);
+            options = options.packet_size(size);
         }
         if let Some(port) = destination_port {
-            builder = builder.destination_port(port);
+            options = options.destination_port(port);
         }
         if let Some(group) = multicast {
-            builder = builder.multicast(Some(group));
+            options = options.multicast(group);
         }
-        runtime().block_on(builder.build()).into_py_err()
+        cam.open_stream(options).into_py_err()
     })?;
-
-    let frame_stream = FrameStream::new(stream, Some(time_sync));
     Ok(PyFrameStream::gige(frame_stream))
 }
 

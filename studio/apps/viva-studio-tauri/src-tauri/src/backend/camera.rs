@@ -10,8 +10,8 @@ use std::time::Duration;
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::u3v::usb::UsbTransfer;
 use viva_genicam::{
-    Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, U3vFrameStream, U3vRegisterIo,
-    U3vStreamBuilder,
+    Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions, U3vFrameStream,
+    U3vRegisterIo, U3vStreamBuilder,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -97,40 +97,19 @@ impl Device for Camera<GigeRegisterIo> {
     }
 
     fn start(&mut self, options: &StartOptions) -> Result<Frames, String> {
-        let handle = tokio::runtime::Handle::current();
-        let mut device = self
-            .transport()
-            .lock_device()
-            .map_err(|e| format!("Failed to access device: {e}"))?;
-        handle
-            .block_on(device.claim_control())
-            .map_err(|e| format!("Failed to claim camera control: {e}"))?;
-
-        let camera_ipv4 = match device.remote_addr().ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            _ => return Err("IPv6 cameras are not supported".to_string()),
+        // The library's one stream-open recipe: claim control again (a
+        // release gave it up), route to the camera's interface, negotiate the
+        // packet size — a size the user measured for their link is a ceiling
+        // the path probe stays under (backlog ST-22, issue #112) — and start
+        // the receive engine with the camera's PayloadSize.
+        let stream_options = match options.packet_size {
+            Some(size) => StreamOptions::new().packet_size(size),
+            None => StreamOptions::new().auto_packet_size(),
         };
-        // camera_ipv4 belongs to the remote camera, not the host. Probe the OS
-        // route to find the local NIC and source address that the OS selected
-        // to reach that camera.
-        let iface = viva_genicam::gige::nic::Iface::from_remote_ipv4(camera_ipv4)
-            .map_err(|e| format!("Failed to detect network interface: {e}"))?;
-        let builder = viva_genicam::StreamBuilder::new(&mut device)
-            .iface(iface)
-            .rcvbuf_bytes(64 << 20); // 64 MiB to absorb bursty GVSP traffic
-        // A size the user measured for their link is a ceiling the path probe
-        // stays under; otherwise negotiate from the NIC MTU (backlog ST-22,
-        // issue #112).
-        let builder = match options.packet_size {
-            Some(size) => builder.packet_size(size),
-            None => builder.auto_packet_size(),
-        };
-        let stream = handle
-            .block_on(builder.build())
-            .map_err(|e| format!("Failed to build stream: {e}"))?;
-        drop(device);
-
-        let frames = Frames::Gige(Box::new(FrameStream::new(stream, None)));
+        let frames = self
+            .open_stream(stream_options)
+            .map_err(|e| format!("Failed to open the stream: {e}"))?;
+        let frames = Frames::Gige(Box::new(frames));
         self.acquisition_start()
             .map_err(|e| format!("Failed to start acquisition: {e}"))?;
         Ok(frames)
@@ -223,12 +202,12 @@ impl Frames {
         }
     }
 
-    /// Frames lost since the stream started: GVSP's abandoned incomplete or
-    /// discarded under backpressure, USB3 Vision's dropped because their
-    /// trailer reported an error.
+    /// Frames lost since the stream started: GVSP's closed incomplete, never
+    /// seen (block-id gaps) or discarded under backpressure; USB3 Vision's
+    /// dropped because their trailer reported an error.
     pub(crate) fn dropped(&self) -> u64 {
         match self {
-            Frames::Gige(stream) => stream.stats().drops,
+            Frames::Gige(stream) => stream.stats().frames_lost(),
             Frames::U3v(stream) => stream.dropped(),
         }
     }

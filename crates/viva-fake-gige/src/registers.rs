@@ -94,6 +94,12 @@ pub const PERSISTENT_SUBNET_MASK: u64 = 0x065C;
 pub const PERSISTENT_DEFAULT_GATEWAY: u64 = 0x066C;
 pub const CCP: u64 = 0x0a00;
 pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
+/// `GevTimestampTickFrequencyHigh`: upper 32 bits of the tick frequency.
+pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
+/// `GevTimestampTickFrequencyLow`: lower 32 bits of the tick frequency.
+pub const TIMESTAMP_TICK_FREQUENCY_LOW: u64 = 0x0940;
+/// The fake's timestamp clock: nanoseconds, so 1 GHz.
+pub const TICK_FREQUENCY_HZ: u64 = 1_000_000_000;
 /// Message channel destination port (`GevMCP`), port in the low 16 bits.
 pub const MESSAGE_CHANNEL_PORT: u64 = 0x0b00;
 /// Message channel destination address (`GevMCDA`).
@@ -1047,6 +1053,14 @@ impl RegisterMap {
         regs.insert(NUMBER_OF_STREAM_CHANNELS, 1u32.to_be_bytes().to_vec());
         regs.insert(CCP, vec![0, 0, 0, 0]);
         regs.insert(HEARTBEAT_TIMEOUT, 3000u32.to_be_bytes().to_vec());
+        regs.insert(
+            TIMESTAMP_TICK_FREQUENCY_HIGH,
+            ((TICK_FREQUENCY_HZ >> 32) as u32).to_be_bytes().to_vec(),
+        );
+        regs.insert(
+            TIMESTAMP_TICK_FREQUENCY_LOW,
+            (TICK_FREQUENCY_HZ as u32).to_be_bytes().to_vec(),
+        );
         regs.insert(MESSAGE_CHANNEL_PORT, 0u32.to_be_bytes().to_vec());
         regs.insert(MESSAGE_CHANNEL_ADDRESS, vec![0, 0, 0, 0]);
 
@@ -1528,6 +1542,20 @@ impl RegisterMap {
         u32::from_be_bytes([data[0], data[1], data[2], data[3]])
     }
 
+    /// `GevSCPD`: the delay between stream packets, in timestamp ticks.
+    pub fn stream_packet_delay_ticks(&self) -> u32 {
+        let data = self.read(STREAM_CHANNEL_BASE + SCP_PACKET_DELAY, 4);
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    }
+
+    /// Timestamp tick frequency from bootstrap 0x093C (high) and 0x0940 (low).
+    pub fn tick_frequency(&self) -> u64 {
+        let high = self.read(TIMESTAMP_TICK_FREQUENCY_HIGH, 4);
+        let low = self.read(TIMESTAMP_TICK_FREQUENCY_LOW, 4);
+        (u64::from(u32::from_be_bytes([high[0], high[1], high[2], high[3]])) << 32)
+            | u64::from(u32::from_be_bytes([low[0], low[1], low[2], low[3]]))
+    }
+
     /// Image width.
     pub fn width(&self) -> u32 {
         let data = self.read(REG_WIDTH, 4);
@@ -1635,6 +1663,19 @@ mod tests {
         let regs = map();
         assert_eq!(regs.read(NUMBER_OF_MESSAGE_CHANNELS, 4), vec![0, 0, 0, 1]);
         assert_eq!(regs.read(NUMBER_OF_STREAM_CHANNELS, 4), vec![0, 0, 0, 1]);
+    }
+
+    /// GigE Vision bootstrap: tick frequency high at 0x093C, low at 0x0940,
+    /// so `GevSCPD` (in ticks) can be converted to time.
+    #[test]
+    fn the_tick_frequency_is_published_at_bootstrap() {
+        let regs = map();
+        assert_eq!(regs.read(0x093C, 4), vec![0, 0, 0, 0]);
+        assert_eq!(
+            regs.read(0x0940, 4),
+            1_000_000_000u32.to_be_bytes().to_vec()
+        );
+        assert_eq!(regs.tick_frequency(), 1_000_000_000);
     }
 
     #[test]

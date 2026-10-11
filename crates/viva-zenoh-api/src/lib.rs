@@ -157,33 +157,82 @@ pub fn gige_device_id(mac: &[u8; 6]) -> String {
 
 // ── Connection Lifecycle ─────────────────────────────────────────────────────
 
+// Every payload below is `#[non_exhaustive]` and built with its constructor,
+// so a field added later is not a breaking change for the services and
+// clients that build them (API-13). Deserialization is unaffected.
+
 /// Device connection status pushed by the service on change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceStatus {
     pub connected: bool,
     pub error: Option<String>,
 }
 
+impl DeviceStatus {
+    /// The device is connected.
+    pub fn connected() -> Self {
+        Self {
+            connected: true,
+            error: None,
+        }
+    }
+
+    /// The device is not connected, and why, if known.
+    pub fn disconnected(error: Option<String>) -> Self {
+        Self {
+            connected: false,
+            error,
+        }
+    }
+}
+
 /// Response to `genicam/devices/{id}/xml` queryable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceXmlResponse {
     pub xml: String,
 }
 
+impl DeviceXmlResponse {
+    /// The device's GenApi XML.
+    pub fn new(xml: impl Into<String>) -> Self {
+        Self { xml: xml.into() }
+    }
+}
+
 /// Request payload for the `genicam/devices/{id}/report` queryable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceReportRequest {
     /// Include the device's GenApi XML; on unless the client asks otherwise.
     #[serde(default = "default_true")]
     pub include_xml: bool,
 }
 
+impl DeviceReportRequest {
+    /// A report request, with or without the GenApi XML.
+    pub fn new(include_xml: bool) -> Self {
+        Self { include_xml }
+    }
+}
+
 /// Response to the `report` queryable: the diagnostic report the service
 /// wrote for its device, as plain text, the same report `viva-camctl report`
 /// writes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceReportResponse {
     pub report: String,
+}
+
+impl DeviceReportResponse {
+    /// The report text.
+    pub fn new(report: impl Into<String>) -> Self {
+        Self {
+            report: report.into(),
+        }
+    }
 }
 
 // ── Node Values ──────────────────────────────────────────────────────────────
@@ -199,6 +248,7 @@ pub struct DeviceReportResponse {
 /// implementation/availability, available enum entries). `NodeValueUpdate`
 /// stays in the wire contract so older services/clients keep working.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NodeValueUpdate {
     pub value: serde_json::Value,
     pub access_mode: String,
@@ -213,6 +263,19 @@ pub struct NodeValueUpdate {
     pub inc: Option<f64>,
 }
 
+impl NodeValueUpdate {
+    /// A value and its access mode, with no constraint hints.
+    pub fn new(value: serde_json::Value, access_mode: impl Into<String>) -> Self {
+        Self {
+            value,
+            access_mode: access_mode.into(),
+            min: None,
+            max: None,
+            inc: None,
+        }
+    }
+}
+
 // ── FeatureState (live introspection) ────────────────────────────────────────
 
 /// Numeric range for an Integer or Float feature at the current camera state.
@@ -225,12 +288,20 @@ pub struct NodeValueUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(optional_fields))]
+#[non_exhaustive]
 pub struct NumericRange {
     pub min: f64,
     pub max: f64,
     /// Optional increment (step). Omitted when the feature has no grid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inc: Option<f64>,
+}
+
+impl NumericRange {
+    /// A range, with an increment when the feature has a grid.
+    pub fn new(min: f64, max: f64, inc: Option<f64>) -> Self {
+        Self { min, max, inc }
+    }
 }
 
 /// Live state of a GenICam feature at a single point in time.
@@ -256,6 +327,7 @@ pub struct NumericRange {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(optional_fields))]
+#[non_exhaustive]
 pub struct FeatureState {
     /// Current feature value, typed according to `kind`.
     ///
@@ -290,6 +362,25 @@ fn default_true() -> bool {
 }
 
 impl FeatureState {
+    /// An implemented, available feature with a value, an access mode and a
+    /// kind, and no range, entries or unit.
+    pub fn new(
+        value: serde_json::Value,
+        access_mode: impl Into<String>,
+        kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            value,
+            access_mode: access_mode.into(),
+            kind: kind.into(),
+            is_implemented: true,
+            is_available: true,
+            numeric: None,
+            enum_available: None,
+            unit: None,
+        }
+    }
+
     /// Project this state into the legacy [`NodeValueUpdate`] shape so callers
     /// that still speak the old contract keep working during migration.
     pub fn to_node_value_update(&self) -> NodeValueUpdate {
@@ -297,13 +388,11 @@ impl FeatureState {
             Some(r) => (Some(r.min), Some(r.max), r.inc),
             None => (None, None, None),
         };
-        NodeValueUpdate {
-            value: self.value.clone(),
-            access_mode: self.access_mode.clone(),
-            min,
-            max,
-            inc,
-        }
+        let mut update = NodeValueUpdate::new(self.value.clone(), self.access_mode.clone());
+        update.min = min;
+        update.max = max;
+        update.inc = inc;
+        update
     }
 }
 
@@ -381,6 +470,7 @@ fn f64_to_json(v: f64) -> serde_json::Value {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(optional_fields))]
+#[non_exhaustive]
 pub struct CommandResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,14 +484,43 @@ pub struct CommandResult {
     pub affected_states: std::collections::HashMap<String, FeatureState>,
 }
 
+impl CommandResult {
+    /// Success, with no affected states.
+    pub fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+            affected_states: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Failure, with its reason.
+    pub fn err(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(error.into()),
+            affected_states: std::collections::HashMap::new(),
+        }
+    }
+}
+
 /// Request payload for the `nodes/{name}/set` queryable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NodeSetRequest {
     pub value: serde_json::Value,
 }
 
+impl NodeSetRequest {
+    /// Write `value`.
+    pub fn new(value: serde_json::Value) -> Self {
+        Self { value }
+    }
+}
+
 /// Generic response for node write, execute, and acquisition control.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NodeOpResponse {
     pub ok: bool,
     pub error: Option<String>,
@@ -433,6 +552,12 @@ impl NodeOpResponse {
             invalidated: Vec::new(),
         }
     }
+
+    /// The same response, naming the features the operation invalidated.
+    pub fn with_invalidated(mut self, invalidated: Vec<String>) -> Self {
+        self.invalidated = invalidated;
+        self
+    }
 }
 
 // ── Bulk Node Read ────────────────────────────────────────────────────────────
@@ -441,8 +566,16 @@ impl NodeOpResponse {
 ///
 /// An empty `names` list is valid and returns an empty map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BulkReadRequest {
     pub names: Vec<String>,
+}
+
+impl BulkReadRequest {
+    /// Read these features.
+    pub fn new(names: Vec<String>) -> Self {
+        Self { names }
+    }
 }
 
 /// Response to a `nodes/bulk/read` query.
@@ -450,14 +583,23 @@ pub struct BulkReadRequest {
 /// `values` maps each requested node name to its current value + access_mode.
 /// Node names not found in the store are omitted (not an error).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BulkReadResponse {
     pub values: std::collections::HashMap<String, NodeValueUpdate>,
+}
+
+impl BulkReadResponse {
+    /// The values read, by feature name.
+    pub fn new(values: std::collections::HashMap<String, NodeValueUpdate>) -> Self {
+        Self { values }
+    }
 }
 
 // ── Acquisition ──────────────────────────────────────────────────────────────
 
 /// Request payload for the `acquisition/control` queryable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AcquisitionControlRequest {
     pub command: AcquisitionCommand,
     /// For `Start`: the GVSP packet size to use, as a ceiling the service's
@@ -488,10 +630,35 @@ pub enum AcquisitionCommand {
 /// Acquisition status pushed by the service on change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[non_exhaustive]
 pub struct AcquisitionStatus {
     pub active: bool,
     pub fps: Option<f32>,
+    /// Frames the stream did not deliver complete since it started: closed
+    /// with packets missing, never seen at all (block-id gaps), or discarded
+    /// because the receiver fell behind. USB3 Vision: blocks the device marked
+    /// failed.
     pub dropped: u64,
+}
+
+impl AcquisitionStatus {
+    /// Acquiring at `fps`, with `dropped` frames lost so far.
+    pub fn active(fps: Option<f32>, dropped: u64) -> Self {
+        Self {
+            active: true,
+            fps,
+            dropped,
+        }
+    }
+
+    /// Not acquiring.
+    pub fn inactive() -> Self {
+        Self {
+            active: false,
+            fps: None,
+            dropped: 0,
+        }
+    }
 }
 
 // ── Image ────────────────────────────────────────────────────────────────────
@@ -563,11 +730,24 @@ impl PixelFormat {
 /// Image stream metadata published at acquisition start and on format change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[non_exhaustive]
 pub struct ImageMeta {
     pub pixel_format: PixelFormat,
     pub width: u32,
     pub height: u32,
     pub payload_size: u64,
+}
+
+impl ImageMeta {
+    /// Image geometry and the bytes a frame carries.
+    pub fn new(pixel_format: PixelFormat, width: u32, height: u32, payload_size: u64) -> Self {
+        Self {
+            pixel_format,
+            width,
+            height,
+            payload_size,
+        }
+    }
 }
 
 // ── Announce cadence ─────────────────────────────────────────────────────────

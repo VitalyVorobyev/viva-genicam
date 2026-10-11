@@ -209,11 +209,7 @@ pub async fn execute_command(
     let invalidated = match backend.exec_command(&node_name).await {
         Ok(invalidated) => invalidated,
         Err(e) => {
-            return Ok(CommandResult {
-                ok: false,
-                error: Some(crate::error::humanize_error(&e)),
-                affected_states: HashMap::new(),
-            });
+            return Ok(CommandResult::err(crate::error::humanize_error(&e)));
         }
     };
     let affected: Vec<String> = nodes_affected_by_command(&node_name)
@@ -232,11 +228,9 @@ pub async fn execute_command(
         }
     }
     events.invalidated(&node_name, &invalidated);
-    Ok(CommandResult {
-        ok: true,
-        error: None,
-        affected_states,
-    })
+    let mut result = CommandResult::ok();
+    result.affected_states = affected_states;
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -250,11 +250,10 @@ async fn frame_loop(
                         let elapsed = fps_start.elapsed();
                         if elapsed >= fps_interval {
                             let fps = fps_frame_count as f32 / elapsed.as_secs_f32();
-                            let status = AcquisitionStatus {
-                                active: true,
-                                fps: Some(fps),
-                                dropped: frame_stream.stats().drops,
-                            };
+                            let status = AcquisitionStatus::active(
+                                Some(fps),
+                                frame_stream.stats().frames_lost(),
+                            );
                             if let Ok(payload) = serde_json::to_vec(&status) {
                                 let _ = session.put(&status_key, payload).await;
                             }
@@ -507,10 +506,10 @@ fn receive_iface(chosen: Option<&Iface>, camera_ip: std::net::Ipv4Addr) -> Resul
 
 /// Publish acquisition status to Zenoh.
 pub async fn publish_status(session: &Session, device_id: &str, active: bool) {
-    let status = AcquisitionStatus {
-        active,
-        fps: None,
-        dropped: 0,
+    let status = if active {
+        AcquisitionStatus::active(None, 0)
+    } else {
+        AcquisitionStatus::inactive()
     };
     let key = keys::acquisition_status(device_id);
     if let Ok(payload) = serde_json::to_vec(&status) {
@@ -547,12 +546,7 @@ pub async fn publish_image_meta<D: crate::device::DeviceOps>(
 
     let payload_size = (width as u64) * (height as u64) * (pixel_format.bytes_per_pixel() as u64);
 
-    let meta = ImageMeta {
-        pixel_format,
-        width,
-        height,
-        payload_size,
-    };
+    let meta = ImageMeta::new(pixel_format, width, height, payload_size);
 
     let key = keys::image_meta(device_id);
     if let Ok(payload) = serde_json::to_vec(&meta) {

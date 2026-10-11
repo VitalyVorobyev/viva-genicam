@@ -58,10 +58,10 @@ except vg.TransportError as e:
 All five inherit from `GenicamError`, so `except vg.GenicamError:` catches every
 error the bindings *raise deliberately*. Two failures escape it:
 
-- Using a `Camera`, `Frame` or `FrameStream` **from a thread other than the one
-  that created it** raises `pyo3_runtime.PanicException`, which subclasses
-  `BaseException` — so even `except Exception:` misses it. These objects are
-  `unsendable`; keep each one on its own thread.
+- Using a `Camera` or `Frame` **from a thread other than the one that created
+  it** raises `pyo3_runtime.PanicException`, which subclasses `BaseException` —
+  so even `except Exception:` misses it. These objects are `unsendable`; keep
+  each one on its own thread. A `FrameStream` may move between threads.
 - A panic anywhere in the Rust layer surfaces the same way.
 
 If you are wrapping this in a service that must not die, catch `BaseException`
@@ -138,11 +138,13 @@ number, so the set you select is the set that is saved or loaded. `cam.get()`
 on a Command raises, and there is nothing to read back.
 
 `execute` **waits until the camera reports the command finished** — GenICam's
-`IsDone` — for up to `timeout` seconds (5 by default), and raises
-`GenicamError` if it has not finished by then; the command was still sent.
-Most commands write a write-only register and count as finished as soon as the
-write is acknowledged. A self-clearing one is polled until it clears.
-`execute(name, wait=False)` returns once the write is acknowledged.
+`IsDone` — for up to `timeout` seconds (5 by default), and returns `True` once
+it does. If the camera has not reported completion by then, `execute` emits a
+`RuntimeWarning` and returns `False`; the command was still sent. Most commands
+write a write-only register and count as finished as soon as the write is
+acknowledged. A self-clearing one is polled until it clears.
+`execute(name, wait=False)` returns `False` once the write is acknowledged,
+without asking.
 
 A command can be refused before anything is sent: Hikrobot's `UserSetSave`
 is unavailable while `Default` is selected, and `execute` raises

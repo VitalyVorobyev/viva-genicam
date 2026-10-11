@@ -124,8 +124,8 @@ Then check the three things that most often stop a camera working on Windows:
 - **Firewall.** On first run Windows may ask whether to allow the program on
   Private / Public networks. Allow it on the profile the camera network uses —
   if in doubt, both. Discovery replies and the GVSP stream are both inbound UDP
-  (the stream arrives on port `10040` by default, or whatever you pass to
-  `--port`), so a firewall that blocks them breaks discovery or streaming even
+  (the stream arrives on `viva-camctl stream`'s `--port`, `10040` by default;
+  the library, Python and Viva Studio default to `0x5FFF`, 24575), so a firewall that blocks them breaks discovery or streaming even
   though nothing reports an error. Running the terminal as Administrator the
   first time makes sure the prompt can appear.
 - **Power saving.** Turn off "energy efficient Ethernet" and similar options in
@@ -208,7 +208,7 @@ Yours — substitute your own:
 | Host link-local address | Let the OS assign one, or pick an unused `169.254.x.y` |
 | Camera address | Whatever `viva-camctl list` reports; it can change between sessions |
 | firewalld zone | `firewall-cmd --get-active-zones` |
-| GVSP destination port | `10040` unless you pass `--port` to `viva-camctl stream` |
+| GVSP destination port | `10040` for `viva-camctl stream` unless you pass `--port`; `24575` (`0x5FFF`) for the library unless you set `StreamBuilder::destination_port` |
 
 ### 3.2. Giving the host a link-local address (Linux)
 
@@ -254,10 +254,12 @@ sudo firewall-cmd --zone=public \
 Replace `public` with your zone. Keep `169.254.0.0/16` and `3956`.
 
 Streaming needs a second rule, because GVSP arrives on the port the host asked
-the camera to send to — `10040` by default:
+the camera to send to — `10040` for `viva-camctl stream`, `24575` (`0x5FFF`)
+for the library, Python and Viva Studio:
 
 ```bash
-sudo firewall-cmd --zone=public --add-port=10040/udp
+sudo firewall-cmd --zone=public --add-port=10040/udp   # viva-camctl stream
+sudo firewall-cmd --zone=public --add-port=24575/udp   # the library, Python, Viva Studio
 ```
 
 If you override the port, allow the one you actually use:

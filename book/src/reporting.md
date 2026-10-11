@@ -53,9 +53,9 @@ viva-camctl report --usb 0 --out viva-report.txt
 ```
 
 A USB3 Vision report also lists the camera's bootstrap registers, decoded and
-as raw bytes, and still does when its XML cannot be read. USB3 Vision support
-has not been tried on a real camera yet, so those bytes are exactly what we
-need to see.
+as raw bytes, and still does when its XML cannot be read. USB3 Vision has
+[not run on a real camera yet](welcome.md#status), so those bytes are exactly
+what we need to see.
 
 The `.txt` extension is not cosmetic: GitHub rejects `.xml` attachments, so the
 bundle is written as text you can drag onto an issue. Zip the raw XML if you

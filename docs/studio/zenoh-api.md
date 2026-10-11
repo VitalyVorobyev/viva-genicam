@@ -1,7 +1,9 @@
-# GenICam Studio — Zenoh API Contract
+# Viva Studio — Zenoh API Contract
 
 This document defines the Zenoh key schema, payload types, and interaction semantics
-between the external camera service and GenICam Studio (Tauri shell).
+between the camera services (`viva-service`, `viva-service-u3v`) and Viva Studio
+in remote mode — or any other client. The payload types are defined in
+`viva-zenoh-api`.
 
 ## Key Naming Convention
 
@@ -452,34 +454,10 @@ sequenceDiagram
 
 ---
 
-## Tauri IPC Commands (App Internal)
+## Tauri IPC (App Internal)
 
-The same commands in both modes; the backend behind them is embedded or
-remote (`DeviceBackend`, ADR-0024).
-
-| Command | Direction | Description |
-|---------|-----------|-------------|
-| `list_discovered_devices()` | → `Vec<DeviceInfo>` | Current discovered device list |
-| `connect_device(device_id)` | → `ParseXmlResponse` | Connect and fetch XML |
-| `disconnect_device()` | → `()` | Let go of the device and its subscriptions |
-| `get_connection_state()` | → `ConnectionState` | Current state enum |
-| `query_feature_states_bulk(names)` | → `Map<string, FeatureState>` | Live state of the features the UI shows |
-| `write_node(node_name, value)` | → `FeatureState` | Write, then read back |
-| `execute_command(node_name)` | → `CommandResult` | Execute a Command node |
-| `start_acquisition(packet_size?)` | → `StreamerInfo` | Start acquisition and the viewer's WebSocket; `packet_size` is the user's GVSP packet size for the link, absent to negotiate |
-| `stop_acquisition()` | → `()` | Stop both |
-| `generate_report(include_xml)` | → `string` | The diagnostic report on the connected camera: built in-process in embedded mode, asked of the service's `report` key in remote mode |
-
-## Tauri Events (Backend → Frontend)
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `device-discovered` | `DeviceInfo` | New device seen on Zenoh |
-| `device-lost` | `{ device_id: string }` | Device announce timed out |
-| `api-version-mismatch` | `{ device_id: string, device_version: number \| null, app_version: number }` | Emitted once per device on first discovery when `api_version` is absent or differs from `API_VERSION`; device is still discovered |
-| `feature-state-changed` | `{ name, state: FeatureState }` | Live feature update, the same in both modes; remote mode forwards the service's `nodes/{name}/state` publications |
-| `features-invalidated` | `{ cause: string, names: string[] }` | After a write or command: the features it may have changed (`NodeMap::invalidated_by`, or the service's `NodeOpResponse.invalidated`), for the UI to re-read the ones it shows |
-| `acquisition-status` | `AcquisitionStatus` | Acquisition state change |
-| `connection-state-changed` | `ConnectionState` | Connect/disconnect/error |
-| `image-meta-changed` | `ImageMeta` | Image format or dimension change; emitted by TB-01 on each image/meta Zenoh update |
-| `disconnect-reason` | `DisconnectReason` | Emitted when service signals `{ connected: false }`. Fields: `message: string`, `device_id: string`. Used to display a reconnect prompt. |
+Studio's own commands and events — the same in embedded and remote mode — are
+not part of this contract. The commands are registered in
+`studio/apps/viva-studio-tauri/src-tauri/src/main.rs`, and their payload and
+event types are generated into
+[`studio/ui/viva-studio-ui/src/generated/ipc.ts`](../../studio/ui/viva-studio-ui/src/generated/ipc.ts).

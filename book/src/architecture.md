@@ -31,7 +31,8 @@ there when you need to reach past it.
 
 Around the stack: `viva-pfnc` and `viva-sfnc` name pixel formats and standard
 features; `viva-service` and `viva-service-u3v` serve cameras over
-[Zenoh](https://zenoh.io) for [Viva Studio](studio.md) and other clients;
+[Zenoh](https://zenoh.io) for [Viva Studio](studio.md) and other clients, with
+the messages defined in `viva-zenoh-api`;
 `viva-fake-gige` and `viva-fake-u3v` are cameras that run in your process
 ([Testing without hardware](tutorials/fake-camera.md)). The
 [Crates](crates/README.md) page says which of them you are likely to need.
@@ -66,10 +67,27 @@ short block is acceptable, such as a blocking-pool task. The reasoning is in
 
 ## Errors and logs
 
-Each layer has its own error type — `GigeError`, `GenCpError`, `XmlError`,
-`GenApiError` — and `GenicamError` wraps them at the top
-([Error Handling & Logging](errors-logging.md)). Everything logs through
-`tracing`; `RUST_LOG=debug` shows the protocol traffic.
+The facade returns `GenicamError`: it carries a `GenApiError` from the NodeMap
+as it is, and a transport failure as a message (`GenicamError::Transport`).
+Below the facade, each crate has an error type of its own, and all of them
+implement `std::error::Error`:
+
+| Error | Crate | Raised by |
+|---|---|---|
+| `GenicamError` | `viva-genicam` | connecting, `Camera`, streams |
+| `ChunkError` | `viva-genicam` | decoding chunk data |
+| `GenApiError` | `viva-genapi` | feature access: access mode, range, locks, formulas, register I/O ([the variants](crates/viva-genapi.md#errors)) |
+| `XmlError` | `viva-genapi-xml` | fetching or parsing a GenApi document |
+| `GigeError` | `viva-gige` | GVCP discovery and control, including a status code the camera returned |
+| `GvspError` | `viva-gige` | malformed or unsupported GVSP packets |
+| `TimeError` | `viva-gige` | the timestamp registers |
+| `U3vError` | `viva-u3v` | USB I/O, timeouts and device status on USB3 Vision |
+| `GenCpError` | `viva-gencp` | decoding a control message |
+
+Everything logs through [`tracing`](https://docs.rs/tracing). Install a
+subscriber that reads `RUST_LOG` — `tracing_subscriber::fmt::init()` does, with
+`tracing-subscriber`'s `env-filter` feature — and set `RUST_LOG=debug` to see
+the protocol traffic. `viva-camctl -v` and `-vv` log at `debug` and `trace`.
 
 ## Platforms
 

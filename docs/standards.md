@@ -1,106 +1,44 @@
-# GenICam Standards: A Practical Introduction
+# GenICam standards and the crates that implement them
 
-GenICam (Generic Interface for Cameras) is a set of EMVA standards that give industrial cameras a uniform control interface regardless of the physical connection. The same code can discover a GigE Vision camera over Ethernet and a USB3 Vision camera over USB -- the features, names, and access patterns are identical.
+Which EMVA standard each crate implements, and where the sources come from for
+the one that is not freely available. What the standards are is in the user
+guide's [primer](https://vitalyvorobyev.github.io/viva-genicam/primer.html);
+how the crates layer, in [design.md](design.md).
 
-This document covers what you need to know to use viva-genicam effectively.
+| Standard | What it defines | Crate |
+|---|---|---|
+| **GenApi** | The camera's XML self-description: typed feature nodes, their registers, formulas (`SwissKnife`, `Converter`), selectors and `pValue` delegation | `viva-genapi-xml` parses it; `viva-genapi` builds the node map and evaluates it |
+| **GenCP** | Register-map access: `READMEM`/`WRITEMEM`, `PENDING_ACK`, events, request ids, status codes, and the ABRM at address 0 | `viva-gencp` (vocabulary); `viva-u3v` (framing) |
+| **GVCP** | GigE Vision control: discovery, register and memory access, events, action commands; cameras listen on UDP 3956 | `viva-gencp` (opcodes, headers); `viva-gige` |
+| **GVSP** | GigE Vision streaming: image transfer in UDP packets, reassembled by the host | `viva-gige`; known gaps, packet resend among them, in [#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191) |
+| **USB3 Vision** | GenCP over USB bulk endpoints, plus a streaming interface; discovery by USB enumeration | `viva-u3v` |
+| **SFNC** | Standard feature names (`ExposureTime`, not `Exposure`) | `viva-sfnc` |
+| **PFNC** | Pixel-format codes (`Mono8` is `0x01080001`) | `viva-pfnc`, the single authority for codes and layouts |
 
-## The problem GenICam solves
+## GenCP and GVCP
 
-Every camera model has hundreds of hardware registers controlling exposure, gain, pixel format, I/O lines, and more. Without a standard, each vendor invents its own register layout and SDK. GenICam eliminates this by requiring every camera to carry a self-description (an XML file) that tells the host software exactly how to read and write its features.
-
-## Key standards
-
-### GenApi -- the feature model
-
-Each camera stores an XML document describing its features: names, types, register addresses, value ranges, dependencies, and formulas. A GenApi library parses this XML into a **node map** -- an in-memory graph of typed feature nodes.
-
-Common node types:
-
-| Type | Example | Description |
-|------|---------|-------------|
-| Integer | `Width`, `Height` | Integer value with min/max/increment |
-| Float | `ExposureTime`, `Gain` | Floating-point value with unit |
-| Enumeration | `PixelFormat`, `TriggerMode` | Choice from named entries |
-| Boolean | `ChunkModeActive` | On/off toggle |
-| Command | `AcquisitionStart` | Trigger an action |
-| Category | `ImageFormatControl` | Groups related features |
-
-Features can reference each other. A `SwissKnife` node computes values from formulas. A `Converter` applies linear or polynomial transforms. `pValue` delegation lets a high-level feature (e.g. `ExposureTime`) read from a raw register node transparently.
-
-**In viva-genicam:** `viva-genapi-xml` parses the XML, `viva-genapi` builds the node map and evaluates features.
-
-### GenCP -- the control protocol
-
-GenCP (the Generic Control Protocol, EMVA; free to download) defines how a
-host reads and writes a camera's register map: `READMEM` and `WRITEMEM`
-commands, a `PENDING_ACK` for a device that needs more time, events, request
-ids, status codes, and the Technology Agnostic Bootstrap Register Map (ABRM)
-every GenCP device has at address 0. A transport fills in the byte order and
-the framing.
+GenCP (the Generic Control Protocol, free to download from EMVA) defines how a
+host reads and writes a camera's register map. A transport fills in the byte
+order and the framing.
 
 USB3 Vision carries GenCP itself, little-endian. GigE Vision's GVCP is a
 protocol of its own that GenCP generalised: the same ideas, a shared core of
 status codes, but its own opcodes (`READREG`/`WRITEREG` among them), headers
-and big-endian fields. The two do not share bytes on the wire.
+and big-endian fields. The two do not share bytes on the wire. `viva-gencp`
+holds GenCP's command ids and flags, GVCP's opcodes and headers, and the status
+codes the two share.
 
-**In viva-genicam:** `viva-gencp` holds GenCP's command ids and flags, GVCP's
-opcodes and headers, and the status codes the two share.
+## USB3 Vision sources
 
-### GVCP / GVSP -- GigE Vision protocols
-
-GigE Vision defines two protocols of its own:
-
-- **GVCP** (Control Protocol) -- UDP-based device discovery, register access, event delivery, and action commands. Cameras listen on port 3956.
-- **GVSP** (Streaming Protocol) -- UDP-based image transfer with packet reassembly; packet resend is specified but not yet wired into the receive path.
-
-**In viva-genicam:** `viva-gige` implements both protocols.
-
-### USB3 Vision
-
-USB3 Vision cameras use USB bulk endpoints: one pair for GenCP control, another for image data. Device discovery uses standard USB enumeration: interface class `0xEF`, subclass `0x05`, with the protocol telling control, event and streaming interfaces apart. Bootstrap registers (ABRM, SBRM, SIRM) describe the device and configure its stream. The USB3 Vision standard is not freely available; what this implementation follows, and where that comes from, is in `crates/viva-u3v/src/bootstrap.rs`.
-
-**In viva-genicam:** `viva-u3v` implements the transport layer. It has not yet been run against a real camera (backlog TC-27).
-
-### SFNC -- standard feature names
-
-The Standard Features Naming Convention ensures that common features use the same name across all cameras. `ExposureTime` is always `ExposureTime`, not `Exposure` or `ShutterTime`.
-
-**In viva-genicam:** `viva-sfnc` provides these names as string constants.
-
-### PFNC -- standard pixel formats
-
-The Pixel Format Naming Convention assigns numeric codes to pixel formats. `Mono8` is `0x01080001`, `RGB8` is `0x02180014`, etc.
-
-**In viva-genicam:** `viva-pfnc` provides the `PixelFormat` enum with code-to-name conversion.
-
-## How it fits together
-
-```
-Application
-    |
-    v
-viva-genicam (facade)     -- Camera<T>, discovery, streaming, events
-    |
-    +-- viva-genapi        -- NodeMap, feature evaluation
-    |     +-- viva-genapi-xml  -- XML parsing
-    |
-    +-- viva-gige          -- GigE Vision (GVCP + GVSP)
-    |     +-- viva-gencp   -- GenCP packets
-    |
-    +-- viva-u3v           -- USB3 Vision
-    |     +-- viva-gencp   -- GenCP packets (shared)
-    |
-    +-- viva-sfnc          -- Feature name constants
-    +-- viva-pfnc          -- Pixel format tables
-```
-
-1. **Discover** -- find cameras on the network (GVCP broadcast) or USB bus
-2. **Connect** -- claim control, fetch the GenICam XML, build the node map
-3. **Configure** -- read and write features via the node map (which translates to register I/O)
-4. **Stream** -- receive image frames (GVSP over UDP or USB bulk transfers)
+USB3 Vision devices use bulk endpoints: one pair for GenCP control, another for
+image data. Discovery is standard USB enumeration — interface class `0xEF`,
+subclass `0x05`, with the protocol telling control, event and streaming
+interfaces apart. Bootstrap registers (ABRM, SBRM, SIRM) describe the device
+and configure its stream. The USB3 Vision standard is not freely available;
+what this implementation follows, and where that comes from, is in
+`crates/viva-u3v/src/bootstrap.rs`.
 
 ## Further reading
 
-- [EMVA GenICam website](https://www.emva.org/standards-technology/genicam/) -- official standard documents
-- [viva-genicam book](https://vitalyvorobyev.github.io/viva-genicam/) -- tutorials and architecture guide
-- [viva-genicam API reference](https://docs.rs/viva-genicam) -- Rust API documentation
+- [EMVA GenICam website](https://www.emva.org/standards-technology/genicam/) —
+  the standard documents

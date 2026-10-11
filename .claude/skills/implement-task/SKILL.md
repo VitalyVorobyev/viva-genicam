@@ -47,10 +47,14 @@ needed) until all gates pass.
 - **NEVER push to main.** Create a feature branch, commit using the repo
   commit-footer conventions, and open a PR whose title/body reference the
   backlog ID.
-- Update `CHANGELOG.md` `[Unreleased]` when the change is user-visible.
+- Add a bullet to `[Unreleased]` in `CHANGELOG.md` when the change is
+  user-visible, following the changelog rules in `CONTRIBUTING.md` (one
+  bullet per change, what and why, the PR linked).
+- Update the user docs in the same PR: the book page for the feature, and the
+  status list on `book/src/welcome.md` if a limitation changed.
 
 ## 6. After merge
 
 Delete the task's row from `docs/backlog.md` in the same PR (the backlog's
-rule: it lists only open work); `CHANGELOG.md` records what shipped. Never
+rule: it lists only open work); the changelog records what shipped. Never
 push to main directly.

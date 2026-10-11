@@ -1,9 +1,9 @@
 # GenICam & Vision Standards Primer
 
-This chapter orients you in the standards and shows how they map to the crates in this repo. If you’re an end‑user, skim the concepts and jump to tutorials. If you’re a contributor, the mappings help you navigate the code.
+This chapter orients you in the standards behind GigE Vision and USB3 Vision cameras: skim the concepts, then jump to the tutorials.
 
 ## 1) Control vs. Data paths (big picture)
-- **Control**: configure the device, read status, fetch the GenApi XML. In GigE Vision, control is **GVCP** (GigE Vision Control Protocol, UDP) carrying **GenCP** (Generic Control Protocol) semantics for register reads/writes and feature access.
+- **Control**: configure the device, read status, fetch the GenApi XML. In GigE Vision, control is **GVCP** (GigE Vision Control Protocol, UDP): register and memory reads and writes. GVCP is a protocol of its own that **GenCP** (Generic Control Protocol) generalised — the same ideas and a shared core of status codes, but its own opcodes, headers and big-endian fields. USB3 Vision carries GenCP itself.
 - **Data**: receive image/metadata stream(s). In GigE Vision, data is **GVSP** (GigE Vision Streaming Protocol, UDP), typically one-way from camera → host.
 - **Events & Actions**: GVCP supports device→host events and host→device action commands for sync/triggering.
 
@@ -13,7 +13,7 @@ This chapter orients you in the standards and shows how they map to the crates i
    |  (this repository)     |        |  (GigE Vision)     |
    +-----------+------------+        +----------+---------+
                | GVCP (UDP, control)           |
-               |  GenCP (registers/features)   |
+               |  registers, memory, XML       |
                v                                ^
        Configure, query, XML                    |
                                                 |
@@ -37,23 +37,17 @@ This chapter orients you in the standards and shows how they map to the crates i
 - Selectors (e.g., `GainSelector`) change the **addressing** or **active branch** so the same feature name maps to different underlying registers or computed paths.
 
 ## 3) Streaming: GVSP
-- **UDP** packets carry payloads (image data/metadata). The host reassembles frames, chooses a **packet size** that fits the path MTU, and may introduce **packet delay** to avoid NIC/driver overflow. GVSP also defines packet **resend**; this library does not request resends yet.
+- **UDP** packets carry payloads (image data/metadata). The host reassembles frames, chooses a **packet size** that fits the path MTU, and may introduce **packet delay** to avoid NIC/driver overflow.
 - **Chunks**: optional metadata blocks (e.g., `Timestamp`, `ExposureTime`) can be enabled and parsed alongside image data.
 - **Time mapping**: devices often use **tick counters**; the host maintains a mapping between device ticks and host time for cross‑correlation.
 
 ## 4) How standards map to crates
-| Concept | Crate | Responsibility |
-|---|---|---|
-| GenCP (encode/decode, status) | `viva-gencp` | Message formats, errors, helpers for control-path operations |
-| GVCP/GVSP (GigE Vision) | `viva-gige` | Discovery, control channel, GVSP packet handling, MTU/packet size/delay, events/actions |
-| GenApi XML loader | `viva-genapi-xml` | Fetch XML via control path and parse schema‑lite into an internal representation |
-| NodeMap & evaluation | `viva-genapi` | Node types (incl. **SwissKnife**), dependency resolution, selector routing, value get/set |
-| Public façade | `viva-genicam` | End‑user API combining transport + NodeMap + utilities (examples live here) |
+Each layer of the standards is a crate of its own; [How the library fits together](architecture.md) shows which.
 
 ## 5) USB3 Vision
 - Similar split between control and data paths, but with **USB3** transport (`viva-u3v`): GenCP over USB bulk endpoints for control, and a separate bulk endpoint for image data. Discovery is USB enumeration rather than a broadcast. The higher‑level GenApi and NodeMap concepts remain the same.
 
 ## 6) What to read next
 - [How the library fits together](architecture.md) for the layers, which one to use, and what blocks.
-- [Crates](crates/README.md) for deep dives (APIs, examples, edge cases).
+- [Crates](crates/README.md) for the transport and GenApi deep dives.
 - [Tutorials](tutorials/README.md) to configure features and receive frames end‑to‑end.

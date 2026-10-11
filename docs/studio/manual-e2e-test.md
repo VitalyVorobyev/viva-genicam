@@ -2,63 +2,13 @@
 
 No external tools required. Uses the built-in `viva-fake-gige` camera simulator.
 
-## Setup (3 terminals)
+## Setup
 
-All commands run from the repository root.
-
-**Terminal 1 -- fake camera (stays alive until Ctrl+C):**
-```bash
-cargo run -p viva-fake-gige
-```
-
-Output:
-```
-Fake camera running on 127.0.0.1:3956 (640x480 Mono8 @ 30 fps)
-Press Ctrl+C to stop.
-```
-
-Custom dimensions:
-```bash
-cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15
-```
-
-**Terminal 2 -- camera service:**
-```bash
-RUST_LOG=viva_service=debug,viva_genicam=info,warn \
-  cargo run -p viva-service -- \
-    --iface lo0 \
-    --zenoh-config studio/config/zenoh-local.json5 \
-    -v
-```
-
-> On Linux, use `--iface lo` instead of `--iface lo0`.
->
-> The `--zenoh-config` flag is **required** for local testing. It makes the
-> service listen on `tcp/127.0.0.1:7447` so the studio can connect. Without
-> it, the service uses Zenoh multicast scouting which often fails on macOS.
-
-**Terminal 3 -- studio:**
-```bash
-# Required, and absolute: the `cd` below would break a relative path.
-export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-cd studio/apps/viva-studio-tauri
-RUST_LOG=viva_studio_tauri=info,viva_streamer=debug,warn cargo tauri dev
-```
-
-> The studio does **not** load a Zenoh config on its own — there is no default
-> path and no dev-mode auto-detection. Without `ZENOH_CONFIG` it starts in
-> embedded mode, which never scans loopback, so this fake camera cannot show up
-> (#132). The header chip tells you which mode you got.
-
-## Quick verification with CLI (optional, no studio needed)
-
-With Terminal 1 running, open a new terminal:
-```bash
-cargo run -p viva-camctl -- list --iface 127.0.0.1
-cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width
-cargo run -p viva-camctl -- set --ip 127.0.0.1 --name Width --value 320
-cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
-```
+Start the fake camera, `viva-service` and Studio in remote mode as in
+[`testing-cookbook.md`](testing-cookbook.md#quick-start-service--fake-camera).
+For the debug checkpoints below, give the service
+`RUST_LOG=viva_service=debug,viva_genicam=info,warn` and Studio
+`RUST_LOG=viva_studio_tauri=info,viva_streamer=debug,warn`.
 
 ## Test checklist
 
@@ -216,13 +166,9 @@ cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width   # should show 320
 
 ## CLI flags (`viva-fake-gige`)
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--width` | 640 | Image width in pixels |
-| `--height` | 480 | Image height in pixels |
-| `--fps` | 30 | Target frame rate |
-| `--bind` | 127.0.0.1 | Bind address |
-| `--port` | 3956 | GVCP port |
+`cargo run -p viva-fake-gige -- --help` lists them: size, frame rate, pixel
+format, bind address and port, heartbeat enforcement, a packet-size cap, and
+the identity (MAC, model, serial, user name).
 
 ## Debug checkpoints
 

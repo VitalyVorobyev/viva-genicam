@@ -92,6 +92,94 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --workspace
 
+      # The flags `publish-docs.yml` builds the published API docs with, so a
+      # broken intra-doc link fails the PR rather than the deploy on main (CI-08).
       - name: Cargo doc
         if: ${{ !cancelled() }}
-        run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps
+
+  # Each crate on its own, with each of its features alone (CI-01). The
+  # workspace build above unifies features: `viva-camctl` enables `u3v-usb`, so
+  # `viva-genicam` with its own defaults (none), or `viva-u3v` without `usb`,
+  # was never compiled. `--no-dev-deps` keeps test-only features out of the
+  # resolution. `-D warnings` because clippy sees only the unified build, so an
+  # import used under one feature alone would otherwise go unnoticed.
+  #
+  # No system libusb is installed: without one, libusb1-sys builds its bundled
+  # source (netlink hotplug on Linux), as it already does for the matrix above.
+  features:
+    name: feature matrix
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack@0.6.45
+
+      - name: Check each feature of each crate
+        run: cargo hack check --workspace --each-feature --no-dev-deps
+
+  # The declared `rust-version` (CI-03), read from the root Cargo.toml so this
+  # job cannot drift from it. Libraries and binaries only: the MSRV is a promise
+  # to users, and tests and examples (which also build today) are not part of it.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Read the declared MSRV
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check
+        run: cargo check --workspace --locked
+
+  # Viva Studio browses XML offline through `viva-genapi-xml` and `viva-genapi`
+  # (`NullIo`), and docs/design.md promises both compile for the browser. This
+  # is the only thing that checks it. Twice: with default features (`fetch`
+  # adds the pure-Rust `zip`), and `viva-genapi-xml` without them, which is how
+  # `studio/Cargo.toml` takes it.
+  wasm:
+    name: wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check (default features)
+        run: cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml -p viva-genapi
+
+      - name: Cargo check (viva-genapi-xml without default features)
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml --no-default-features

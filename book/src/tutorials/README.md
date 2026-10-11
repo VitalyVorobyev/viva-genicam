@@ -10,9 +10,8 @@ The focus is a **GigE Vision** camera accessed over Ethernet, using:
 Each tutorial has a CLI variant and a Rust variant built on the examples in
 `crates/viva-genicam/examples/`.
 
-If you haven't done so yet, first read the [Welcome](../welcome.md) and
-[Quick start](../quick-start.md) chapters; they explain how to build the
-workspace and verify that your toolchain works.
+If you haven't yet, start with the [Quick start](../quick-start.md): it
+installs the library and the CLI and runs a first discovery.
 
 ---
 
@@ -38,12 +37,17 @@ full application or debug deeper GenApi issues.
 
 ## What you need before starting
 
-- A Rust toolchain, 1.88 or newer (the workspace's `rust-version`).
-- A workspace that builds:
+- A Rust toolchain, 1.88 or newer, and a clone of the repository. The
+  commands run from its root, as `cargo run -p viva-camctl -- …` and
+  `cargo run -p viva-genicam --example …`:
 
   ```bash
-  cargo build --workspace
+  git clone https://github.com/VitalyVorobyev/viva-genicam
+  cd viva-genicam
   ```
+
+  With `viva-camctl` installed ([Quick start](../quick-start.md)),
+  `viva-camctl …` does the same as `cargo run -p viva-camctl -- …`.
 
 - At least one GigE Vision camera reachable from your machine — connected
   directly to a NIC, or through a switch on a dedicated subnet. No camera yet?

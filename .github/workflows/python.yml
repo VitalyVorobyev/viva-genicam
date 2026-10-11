@@ -5,6 +5,9 @@ on:
     branches: [main]
     tags: ['py-v*']
   pull_request:
+    # Every crate the wheel builds from: viva-pygenicam's path dependencies and
+    # theirs (`cargo metadata` in crates/viva-pygenicam lists them). Keep this in
+    # step when that graph changes (CI-07).
     paths:
       - 'crates/viva-pygenicam/**'
       # The wheel installs a `viva-camctl` console script backed by this crate,
@@ -12,10 +15,18 @@ on:
       - 'crates/viva-camctl/**'
       - 'crates/viva-genicam/**'
       - 'crates/viva-genapi*/**'
+      - 'crates/viva-gencp/**'
       - 'crates/viva-gige/**'
       - 'crates/viva-u3v/**'
       - 'crates/viva-pfnc/**'
       - 'crates/viva-sfnc/**'
+      # A dependency of the wheel, and the camera the `test` job runs against.
+      - 'crates/viva-fake-gige/**'
+      # The path dependencies inherit `[workspace.package]` and
+      # `[workspace.dependencies]` from the root manifest, and the `test` job
+      # builds viva-fake-gige against the root lockfile.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/python.yml'
   workflow_dispatch:
 

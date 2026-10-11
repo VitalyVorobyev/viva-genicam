@@ -195,9 +195,8 @@ belong to this layer:
 ### Resend
 
 The resend building blocks live here — `ResendPlanner`, `coalesce_missing`,
-`GigeDevice::request_resend` — but they are **not wired into the receive
-path**, so `resends` stays at zero; see
-[Streaming → What the statistics do and do not tell you](../tutorials/streaming.md#43-what-the-statistics-do-and-do-not-tell-you).
+`GigeDevice::request_resend` — but no stream requests a resend yet
+([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)).
 
 ### Chunk data
 
@@ -209,8 +208,8 @@ what it does not recognise; `viva_genicam::ChunkMap` maps the known ones
 ### Statistics
 
 `StreamStats` carries `frames`, `bytes`, `drops`, `packets`, `avg_fps`,
-`avg_mbps`, `avg_latency_ms` and the elapsed window. The resend and
-backpressure counters stay at zero for the reason above.
+`avg_mbps`, `avg_latency_ms` and the elapsed window. The resend counters stay
+at zero for the reason above.
 
 ---
 

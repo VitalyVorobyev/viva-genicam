@@ -17,7 +17,6 @@
   - [Streaming (GVSP) – first steps](tutorials/streaming.md)
   - [Testing without hardware](tutorials/fake-camera.md)
 - [Networking Guide (GigE Vision)](networking.md)
-- [Error Handling & Logging](errors-logging.md)
 
 # Python
 

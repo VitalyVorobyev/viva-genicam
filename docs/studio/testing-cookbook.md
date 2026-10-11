@@ -71,28 +71,10 @@ embedded mode, whose discovery skips loopback, so the fake camera never appears
 - `acquisition/status` reports the measured FPS (30 by default, `--fps`).
 - Stop acquisition; frames stop.
 
-## Zenoh Key Reference
+## Zenoh keys
 
-All keys prefixed with `genicam/devices/{device_id}/`:
-
-| Key suffix | Direction | Description |
-|------------|-----------|-------------|
-| `announce` | Service → App | Periodic device announcement (cadence: backlog SVC-01) |
-| `xml` | App → Service (query) | Full GenICam XML |
-| `status` | Service → App | Connection status |
-| `nodes/{name}/value` | Service → App | Node value updates (published on connect and after writes) |
-| `nodes/{name}/set` | App → Service (query) | Write node value |
-| `nodes/{name}/execute` | App → Service (query) | Execute command node |
-| `nodes/bulk/read` | App → Service (query) | Batch read node values |
-| `nodes/{name}/state` | Service → App; App → Service (query) | One node's `FeatureState` (ADR-0010): published alongside `value` on connect and after writes, and answered on query |
-| `nodes/bulk/state` | App → Service (query) | `FeatureState` for many nodes |
-| `acquisition/control` | App → Service (query) | Start/stop acquisition |
-| `acquisition/status` | Service → App | Acquisition state with FPS |
-| `image` | Service → Streamer | Binary: 16-byte FrameHeader + raw pixels |
-| `image/meta` | Service → App | JSON: pixel_format, width, height, payload_size |
-| `evs` | Service → subscribers | Binary: 24-byte EvsHeader + encoded events (event-vision cameras only) |
-
-Full specification: [`docs/studio/zenoh-api.md`](zenoh-api.md)
+The keys the service publishes and answers, and their payloads, are in
+[`zenoh-api.md`](zenoh-api.md).
 
 ## Automated tests
 
@@ -100,7 +82,7 @@ What runs today, and where:
 
 | Suite | Where | Runs in CI |
 |-------|-------|------------|
-| Library integration suites (`fake_camera`, `predicates`, `heartbeat`, …) | repo root, see `CLAUDE.md` → Commands | yes (`ci.yml`) |
+| Library integration suites (`fake_camera`, `predicates`, `heartbeat`, …) | repo root, see [`CONTRIBUTING.md`](../../CONTRIBUTING.md#tests) | yes (`ci.yml`) |
 | `viva-service --test fake_camera_e2e` | repo root | yes (`ci.yml`) |
 | Studio workspace unit tests (`viva_xml_model`, `viva_streamer`) | `studio/`: `cargo test --workspace` | yes (`studio-ci.yml`) |
 | Tauri backend tests, both modes end to end against `viva-fake-gige`: embedded in-process, and remote through `viva-service` run in-process on a shared Zenoh session (`backend/embedded.rs`, `backend/remote.rs`, `main.rs`) | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, on macOS, Ubuntu and Windows (`studio-ci.yml`) |

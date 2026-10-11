@@ -171,19 +171,6 @@ change is a wrong answer, not a slow one.
 
 ---
 
-## For contributors
-
-- Keep evaluation pure and reach the device only through `RegisterIo`. That
-  separation is what makes `NullIo` and the corpus test possible.
-- New node kinds go behind the same evaluation path, and must land in
-  `skipped()` rather than aborting the document when something is unsupported.
-- Test against the specification, not against our own parser. When the two
-  disagree, the specification wins unless real hardware says otherwise —
-  [ADR-0018](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0018-genapi-conformance-over-convenience.md)
-  lists eight defects that each looked reasonable in isolation.
-
----
-
 ## See also
 
 - [GenApi XML tutorial](../tutorials/genapi-xml.md) — where the document comes from

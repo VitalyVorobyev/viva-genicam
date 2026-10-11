@@ -61,8 +61,10 @@ If no frames arrive at all:
 
 - Confirm nothing else is already consuming the stream (a vendor viewer holds
   the control channel exclusively).
-- Confirm the host firewall permits inbound UDP on the stream port — `10040` by
-  default, changeable with `--port`.
+- Confirm the host firewall permits inbound UDP on the stream port —
+  `viva-camctl stream` uses `10040` unless you pass `--port`; the library's
+  `StreamBuilder` defaults to `0x5FFF` (24575) unless you call
+  `destination_port`.
 - Confirm the `--iface` interface is one the camera can actually reach.
 
 ### 2.2. Saving frames
@@ -215,16 +217,10 @@ appear only at high frame rates.
 ### 4.3. What the statistics do and do not tell you
 
 `drops` counts frames that arrived incomplete. That number is real, and it is
-the one to watch.
-
-**`resends` is not.** GVSP defines packet resend, and this library contains the
-pieces — a resend planner, and the GVCP command to request one — but they are
-not wired into the receive path. Nothing in a real stream increments that
-counter, so `resends=0` means "not implemented", not "none were needed". Do not
-read it as evidence that your network is healthy; read `drops` instead.
-
-The same applies to `backpressure_drops` and the resend-range counters exposed
-on `StreamStats`.
+the one to watch. `resends` (and `resend_ranges` on `StreamStats`) stays at 0
+until packet resend lands
+([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)), so
+`resends=0` says nothing about the health of your network.
 
 ---
 
@@ -235,7 +231,8 @@ lower the frame rate or ROI to confirm it is a bandwidth problem rather than a
 configuration one. A dedicated NIC and switch removes a whole class of cause.
 
 **Discovery and feature access work, but no frames arrive.** Almost always the
-stream port: check the firewall for inbound UDP on `--port` (10040 by default).
+stream port: check the firewall for inbound UDP on it (see
+[2.1](#21-a-basic-stream) for the defaults).
 On Linux with firewalld, this is a separate rule from the GVCP one — see
 [Letting the reply back in](../networking.md#33-letting-the-reply-back-in-firewalld).
 
@@ -258,8 +255,7 @@ vendor's viewer on the same cabling. If it still makes no sense,
 You should now be able to:
 
 - Start a stream from the CLI and from Rust, and save frames or event blocks.
-- Read `drops` as the meaningful reliability signal, and know that `resends` is
-  not one yet.
+- Read `drops` as the meaningful reliability signal.
 - Know which knob to reach for first: packet size and MTU, then packet delay.
 
 Next: the [Networking Guide](../networking.md) for host and switch

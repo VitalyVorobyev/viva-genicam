@@ -15,7 +15,20 @@ report it with the fix hint, and do not continue until it is fixed.
 | 1 | `cargo fmt --all --check` | run `cargo fmt --all`, then re-check |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | fix every warning — CI treats them as errors |
 | 3 | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` | fix doc warnings (broken links, missing docs) |
-| 4 | `cargo test --workspace` | show failing test names + output, fix, re-run |
+| 4 | `cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml -p viva-genapi` and `cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml --no-default-features` | Studio browses XML in the browser through these two crates. The usual cause is a new dependency that does not build for wasm32 (`socket2`, tokio's `net`, anything compiling C): keep it out of them, or behind a feature that is off by default. Needs `rustup target add wasm32-unknown-unknown` once |
+| 5 | `cargo test --workspace` | show failing test names + output, fix, re-run |
+
+CI also runs two jobs that are too slow for every push; run them locally when
+a crate's `[features]` or a dependency changes:
+
+- **feature matrix** — `cargo hack check --workspace --each-feature --no-dev-deps`
+  with `RUSTFLAGS="-D warnings"` (`cargo install cargo-hack`). Each crate alone,
+  each feature alone: the workspace build unifies features and hides a crate
+  that does not compile with its own defaults. `--no-dev-deps` rewrites the
+  manifests while it runs, so run it in a copy of the tree, not in a checkout
+  other work is happening in.
+- **MSRV** — `cargo +<rust-version> check --workspace --locked`, with the
+  version from the root `Cargo.toml` (`rustup toolchain install <version>`).
 
 ## Studio workspace (only if files under `studio/` changed)
 
@@ -103,6 +116,7 @@ End with a compact table, one row per gate that ran:
 | cargo fmt (root)            | PASS   |
 | cargo clippy (root)         | PASS   |
 | cargo doc (root)            | PASS   |
+| wasm32 check                | PASS   |
 | cargo test (root)           | PASS   |
 | studio gates                | SKIP (no studio changes) |
 ```

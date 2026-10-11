@@ -72,7 +72,13 @@ jobs:
           set -euo pipefail
           STAGE="viva-genicam-${TAG}-${TARGET}"
           mkdir -p "$STAGE"
+          # The index plus this release's series file (changelog/0.9.md for v0.9.x).
+          # The series comes from the workspace version, not the tag: a
+          # pull-request run has no tag (`github.ref_name` is `<n>/merge`), and
+          # on a tag publish-crates.yml fails unless the two agree.
+          SERIES="$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"$/\1/p' Cargo.toml | head -1)"
           cp README.md LICENSE CHANGELOG.md "$STAGE/"
+          cp "changelog/${SERIES}.md" "$STAGE/CHANGELOG-${SERIES}.md"
           if [ "$ARCHIVE" = "zip" ]; then
             cp "target/${TARGET}/release/viva-camctl.exe" "$STAGE/"
             cp "target/${TARGET}/release/viva-service.exe" "$STAGE/"
@@ -104,9 +110,13 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          # The oldest Ubuntu runner: the AppImage and the deb need at least
-          # the glibc they were built against.
-          - os: ubuntu-22.04
+          # The AppImage and the deb need at least the glibc they were built
+          # against, so this is the oldest Ubuntu runner we can rely on. It was
+          # ubuntu-22.04 (glibc 2.35) until CI-18: GitHub retires that image on
+          # 2027-04-17, with brownouts from 2027-03-23. On 24.04 the floor is
+          # glibc 2.39 — Ubuntu 24.04, Debian 13 or Fedora 40 and later; older
+          # distributions need a container build to get it back down.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -177,7 +187,7 @@ jobs:
     needs: [build, studio]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write    # the only write in this workflow: create the release
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8

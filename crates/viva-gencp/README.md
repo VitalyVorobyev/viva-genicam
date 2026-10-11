@@ -1,8 +1,11 @@
 # viva-gencp
 
-Transport-agnostic primitives for the GenICam Generic Control Protocol (GenCP).
+Control-protocol primitives shared by the GigE Vision and USB3 Vision transports.
 
-Provides buffer builders, parsers, status codes, and command/acknowledgment helpers that work with any transport layer (GigE Vision UDP, USB3 Vision bulk, or custom).
+GigE Vision's GVCP and GenCP (which USB3 Vision carries) share ideas and a core
+of status codes, but not their bytes on the wire. This crate holds both
+vocabularies: GVCP's opcodes and headers, GenCP's command ids and flags, and
+the status codes the two share.
 
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
@@ -10,32 +13,10 @@ Provides buffer builders, parsers, status codes, and command/acknowledgment help
 
 ## Features
 
-- **Command encoding** -- build GenCP request buffers (`ReadRegister`, `WriteRegister`, `ReadMem`, `WriteMem`)
-- **Acknowledgment decoding** -- parse response buffers with status and payload extraction
+- **Acknowledgment decoding** -- `decode_ack` parses a GVCP acknowledgement: status, request id and payload
 - **Status codes** -- typed `StatusCode` enum (Success, NotImplemented, InvalidParameter, etc.)
-- **Op codes & flags** -- `OpCode` enum and `CommandFlags` bitflags
+- **Op codes & flags** -- GVCP's `OpCode` and `CommandFlags`; GenCP's `command_id` and `ccd_flags`
 - **Zero-copy** -- uses `bytes::Bytes` for efficient buffer handling
-
-## Usage
-
-```bash
-cargo add viva-gencp
-```
-
-```rust
-use viva_gencp::{GenCpCmd, CommandHeader, OpCode, CommandFlags, encode_cmd};
-
-let cmd = GenCpCmd {
-    header: CommandHeader {
-        flags: CommandFlags::ACK_REQUIRED,
-        opcode: OpCode::ReadRegister,
-        length: 8,
-        request_id: 1,
-    },
-    payload: vec![0x00, 0x00, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x04].into(),
-};
-let bytes = encode_cmd(&cmd);
-```
 
 ## Documentation
 

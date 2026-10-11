@@ -51,13 +51,6 @@ Demo complete. All operations succeeded without hardware.
 | Timestamp latch (GevTimestampValue) | Supported |
 | Chunk data (Timestamp, ExposureTime) | Supported when ChunkModeActive=1 |
 
-## Running integration tests
-
-The workspace's integration tests use the fake cameras automatically, so
-`cargo test --workspace` needs no hardware. The individual suites are listed in
-the repository's
-[CONTRIBUTING.md](https://github.com/VitalyVorobyev/viva-genicam/blob/main/CONTRIBUTING.md#tests).
-
 ## Using the fake camera in your own code
 
 Add `viva-fake-gige` as a dev-dependency:
@@ -96,7 +89,7 @@ which goes on to build a `FrameStream` and grab five frames.
 
 The `viva-fake-gige` binary starts a long-running fake camera that stays alive
 until Ctrl+C. This is the way to test interactively with `viva-camctl`, or with
-`viva-service` and Viva Studio.
+`viva-service` and Viva Studio. It runs from a clone of the repository.
 
 ```bash
 # Terminal 1: start the fake camera
@@ -127,47 +120,16 @@ cargo run -p viva-camctl -- list --iface 127.0.0.1
 cargo run -p viva-camctl -- get --ip 127.0.0.1 --name Width
 cargo run -p viva-camctl -- set --ip 127.0.0.1 --name Width --value 512
 cargo run -p viva-camctl -- get --ip 127.0.0.1 --name DeviceModelName
+
+# FORCEIP (temporary) and persistent IP, against the fake's MAC address
+cargo run -p viva-camctl -- --iface 127.0.0.1 set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force
+cargo run -p viva-camctl -- --iface 127.0.0.1 set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
 ```
 
-## E2E testing with Viva Studio
+## Watching it in Viva Studio
 
-Viva Studio lives in `studio/` in this repository, as a separate Cargo
-workspace. The full-stack test uses three terminals:
-
-```bash
-# Terminal 1: fake camera
-cargo run -p viva-fake-gige
-
-# Terminal 2: camera service (bridges the camera onto Zenoh).
-# --zenoh-config is required on the service side so Studio can connect via TCP.
-cargo run -p viva-service -- \
-  --iface lo0 \
-  --zenoh-config studio/config/zenoh-local.json5
-# On Linux: --iface lo
-
-# Terminal 3: the desktop app. ZENOH_CONFIG is what selects remote mode, and it
-# has to be absolute — the `cd` below would break a relative path.
-export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-cd studio/apps/viva-studio-tauri
-cargo tauri dev
-```
-
-Studio should discover the fake camera, show its feature tree, and stream
-gradient images in the viewer. The chip in the header reads **Remote**.
-
-If you skip `ZENOH_CONFIG`, the app still starts — in *embedded* mode, where it
-drives cameras directly instead of through the service. That mode does not scan
-loopback, so this fake camera cannot appear and the device list simply stays
-empty. The header chip reads **Embedded**, which is how you tell the two apart.
-
-For USB3 Vision the service can host its own fake, so two terminals suffice:
-
-```bash
-cargo run -p viva-service-u3v -- --fake --zenoh-config studio/config/zenoh-local.json5
-
-export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-cd studio/apps/viva-studio-tauri && cargo tauri dev
-```
+Run the fake behind `viva-service` and start Viva Studio in remote mode:
+[Viva Studio → Trying it without a camera](../studio.md#trying-it-without-a-camera).
 
 ## Fake camera configuration
 

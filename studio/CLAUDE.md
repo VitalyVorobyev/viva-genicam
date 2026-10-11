@@ -11,8 +11,8 @@ workspace at the repo root — see ADR-0017).
 
 - Root `CLAUDE.md` — repo-wide rules (pre-push gates, version bumps).
 - `docs/design.md` — overall architecture; `docs/backlog.md` — ST epic.
-- `docs/studio/` — Zenoh API contract, camera-service API, testing
-  cookbook, manual E2E checklist.
+- `docs/studio/` — the Zenoh API contract (`zenoh-api.md`), the testing
+  cookbook, and the manual E2E checklist.
 
 ## Build & Run
 
@@ -25,17 +25,12 @@ cd studio/ui/viva-studio-ui && bun install && bun run dev
 
 # Tauri dev
 cd studio/apps/viva-studio-tauri && cargo tauri dev
-
-# E2E against the in-repo fake camera (3 terminals, repo root)
-# T1: cargo run -p viva-fake-gige
-# T2: cargo run -p viva-service -- --iface lo0 --zenoh-config studio/config/zenoh-local.json5
-# T3: export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-#     cd studio/apps/viva-studio-tauri && cargo tauri dev
 ```
 
-`ZENOH_CONFIG` on T3 is required and must be absolute (the `cd` breaks a
-relative path). Without it the app starts in embedded mode, whose discovery
-skips loopback — so the fake camera never appears. See `#132`.
+Against the in-repo fake camera, follow `docs/studio/testing-cookbook.md`.
+`ZENOH_CONFIG` is required there and must be absolute; without it the app
+starts in embedded mode, whose discovery skips loopback — so the fake camera
+never appears (#132).
 
 ## Key Invariants
 

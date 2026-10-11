@@ -11,35 +11,38 @@ itself? The developer documentation lives in the repository — see
 
 ## What works today
 - **GigE Vision**: GVCP discovery, GVSP streaming with frame reassembly, events, action commands, chunk parsing, FORCEIP, persistent IP configuration.
-- **USB3 Vision**: device discovery, GenCP register I/O, bulk-endpoint streaming, async frame iterator. Built to the GenCP standard and to what independent implementations agree on, but **not yet run on a real camera**: if you have one, a report from `viva-camctl report --usb 0` is the most useful thing you can send ([Reporting a problem](reporting.md)).
+- **USB3 Vision**: device discovery, GenCP register I/O, bulk-endpoint streaming, async frame iterator — see [Status](#status).
 - **GenApi**: NodeMap with the standard node types (Integer, Float, Enumeration, Boolean, Command, Category, String, Register, SwissKnife, Converter, IntConverter), pValue delegation, selectors, runtime access predicates (`pIsLocked`, `pIsAvailable`, `pIsImplemented`), node metadata and visibility filtering.
 - **CLI** (`viva-camctl`): discovery, feature get/set, command execution, streaming (including raw event-vision capture), events, chunks, benchmarks, IP configuration, XML dump, and a diagnostic report bundle.
 - **Service bridge**: expose cameras over Zenoh for Viva Studio, the desktop app in `studio/`.
 
-## What does not work yet
+## Status
 
-Worth knowing before you build on it:
+viva-genicam is pre-1.0: the API still changes between releases.
 
-- **Packet resend is not wired in**, so the `resends` statistic is always zero;
-  watch `drops` instead. See
-  [Streaming → What the statistics do and do not tell you](tutorials/streaming.md#43-what-the-statistics-do-and-do-not-tell-you).
-- **The Python bindings are narrower than the Rust API** — no chunks, events
-  or action commands. [Python bindings](python.md) lists the gaps.
-- **Viva Studio is experimental.** It works, and it has been driven against very
-  little hardware.
+- **GigE Vision**: users have run discovery, control and streaming against real
+  cameras from several vendors, on Linux, Windows and macOS.
+- **USB3 Vision has never run on a real camera.** It follows the GenCP
+  standard and what independent implementations agree on, and is tested
+  against a fake built from those sources. If you have a USB3 Vision camera, a
+  report from `viva-camctl report --usb 0` is the most useful thing you can
+  send ([Reporting a camera we can't open](reporting.md)).
+- **Viva Studio is experimental**: it works, and it has been driven against
+  very little hardware.
+- **There is no camera in CI.** The tests run against built-in fake cameras
+  and a corpus of real vendor GenApi XML; hardware confirmations come from
+  users with their own devices.
 
-> **Status.** The protocol implementations follow the published EMVA
-> specifications and are tested against built-in fake cameras and a corpus of
-> dozens of real vendor GenApi XML descriptions. Users have run discovery,
-> control and streaming against real cameras from several vendors on Linux,
-> Windows and macOS. There is no camera in CI, though -- hardware confirmations
-> come from users with their own devices -- so bug reports and compatibility
-> feedback remain the main way this gets better.
+**The full, current list of known gaps is
+[issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)**,
+updated as fixes land. If your camera hits something that is not on it,
+[tell us](reporting.md).
 
 ## How this book is organized
 - **Getting started**: the Quick Start runs a first discovery; the Primer and
-  *How the library fits together* give the big picture.
-- **Using the library**: tutorials, networking, errors and logging.
+  *How the library fits together* give the big picture, errors and logging
+  included.
+- **Using the library**: tutorials and networking.
 - **Python** and **Viva Studio** each have a part of their own.
 - **Help**: FAQ & Troubleshooting, and how to report a camera we cannot open.
 - **Reference**: the crates, the API docs, a glossary.

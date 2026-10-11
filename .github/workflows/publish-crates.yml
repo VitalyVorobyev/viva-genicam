@@ -13,6 +13,11 @@ on:
         description: "Release tag to (re)publish, e.g. v0.6.0"
         required: true
 
+# Least privilege (CI-05); the `publish` job adds the OIDC token that Trusted
+# Publishing exchanges for a crates.io token.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}

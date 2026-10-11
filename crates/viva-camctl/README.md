@@ -14,7 +14,9 @@ cargo install viva-camctl
 
 It also ships with the Python package: `pip install viva-genicam` installs a
 `viva-camctl` command, linked into the extension module, so no Rust toolchain
-is needed. From a checkout, `cargo run -p viva-camctl -- <command>` works too.
+is needed. Each [GitHub release](https://github.com/VitalyVorobyev/viva-genicam/releases)
+also attaches it, prebuilt, in the `viva-genicam-<version>-<platform>` archives.
+From a checkout, `cargo run -p viva-camctl -- <command>` works too.
 
 ## Commands
 
@@ -63,6 +65,17 @@ viva-camctl stream --ip 192.168.0.10 --save 0 --raw-out capture.evt3 --duration-
 
 # Run a 60-second streaming benchmark
 viva-camctl bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
+
+# Give a camera a temporary address (FORCEIP), or a persistent one
+viva-camctl set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force
+viva-camctl set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
+
+# USB3 Vision: discover, read and write a feature, stream and save 3 frames
+viva-camctl list-usb
+viva-camctl get-usb --name ExposureTime
+viva-camctl set-usb --name ExposureTime --value 5000
+viva-camctl stream-usb --save 3
+viva-camctl report --usb 0 --out viva-report.txt
 ```
 
 ## Global options

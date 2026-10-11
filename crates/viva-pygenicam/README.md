@@ -30,11 +30,8 @@ See the [documentation](https://vitalyvorobyev.github.io/viva-genicam/python.htm
 
 ## Build from source
 
-```bash
-uv venv .venv
-uv pip install --python .venv/bin/python maturin numpy pytest
-uv run --python .venv/bin/python maturin develop -m crates/viva-pygenicam/Cargo.toml
-```
+See [CONTRIBUTING.md](https://github.com/VitalyVorobyev/viva-genicam/blob/main/CONTRIBUTING.md)
+in the repository.
 
 ## Licensing
 

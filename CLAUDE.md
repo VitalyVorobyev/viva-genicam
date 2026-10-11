@@ -17,34 +17,17 @@ We do not maintain backward compatibility at this early development stage. The p
 
 ```bash
 cargo build --workspace
-cargo test --workspace                     # unit + integration + service e2e
+cargo test --workspace                     # unit, integration (fake cameras), service e2e, doc checks
 RUST_LOG=debug cargo test --workspace -- --nocapture
-
-# Integration suites (in-process fakes; no hardware, no external tools)
-cargo test -p viva-genicam --test fake_camera        # 39: GigE discovery, features, streaming
-cargo test -p viva-genicam --test predicates         # 6: pIsLocked, pIsAvailable, ... on the fake camera
-cargo test -p viva-genicam --test heartbeat          # 2: idle keepalive survival + a negative control
-cargo test -p viva-genicam --test inflight_keepalive # 1: probes continue while register I/O holds the mutex
-cargo test -p viva-genicam --test keepalive_shutdown # 6: dropping the transport cancels and joins keepalive I/O
-cargo test -p viva-gige --test inflight_keepalive    # 5: heartbeats during long ACK waits (ADR-0023)
-cargo test -p viva-genicam --test register_access    # 6: READREG/WRITEREG dispatch and fallback
-cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # 11: U3V open, features, streaming,
-                                                     #    packed payloads, reader shutdown, StreamEnable
-                                                     #    cleared on stop (and on a busy drop), no frame
-                                                     #    before AcquisitionStart, failed blocks dropped
-cargo test -p viva-u3v --test gencp_conformance      # 9: U3V wire layouts from GenCP 1.2 and vendor XML
-cargo test -p viva-service --test fake_camera_e2e    # 8: acquisition, double start, sustained streaming,
-                                                     #    predicates, write-only/command snapshot, EVS topic,
-                                                     #    what a write invalidates, the report queryable
-cargo test -p viva-genicam --test book_includes      # 1: every mdBook {{#include}} resolves
-cargo test -p viva-genicam --test doc_links          # 2: every relative Markdown link resolves
-
-# Every fake-camera suite binds UDP 3956: two test processes running at once
-# (e.g. in two worktrees) cross-talk and fail spuriously.
 
 cargo run -p viva-service -- --iface en0   # GigE sensor service
 cargo run -p viva-camctl -- list           # CLI
 ```
+
+Each integration suite, and how to run it alone, is listed in
+[CONTRIBUTING.md → Tests](CONTRIBUTING.md#tests). Every fake-camera suite binds
+UDP 3956: two test processes running at once (e.g. in two worktrees) cross-talk
+and fail spuriously.
 
 ## Pre-Push Checklist
 
@@ -58,20 +41,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 
-CI rejects fmt and clippy failures; its `cargo doc` step does not yet deny
-warnings (backlog CI-08), so the local doc gate is the one that catches them.
+CI rejects all three: its `cargo doc` runs with `--all-features` and
+`RUSTDOCFLAGS=-D warnings`. CI also runs what this list does not: a
+per-feature check (`cargo hack --each-feature`), a `cargo check` on the
+declared MSRV, and a `wasm32-unknown-unknown` check of `viva-genapi-xml` and
+`viva-genapi`.
 Transitive feature unification can mask breakage locally (a workspace sibling
 may already pull a crate in with extra features) — don't rely on "it built on
 my machine".
 
 ## Architecture
 
-Strict layering, bottom to top: `viva-gencp` → `viva-gige` / `viva-u3v` →
-`viva-genapi-xml` → `viva-genapi` → `viva-genicam` (facade) → `viva-service` /
-`viva-service-u3v` (Zenoh bridges), with `viva-camctl` and `viva-pygenicam` on
-top. The crate map, key abstractions, data flows and **design tenets** live in
-[docs/design.md](docs/design.md); when a change conflicts with a tenet, write or
-update an ADR in `docs/adrs/` rather than silently deviating.
+The crate map and strict layering, key abstractions, data flows and **design
+tenets** live in [docs/design.md](docs/design.md); when a change conflicts with
+a tenet, write or update an ADR in `docs/adrs/` rather than silently deviating.
 
 `viva-genapi-xml` and `viva-genapi` are consumed by Viva Studio (`studio/`), so
 keep these constraints:
@@ -87,7 +70,8 @@ keep these constraints:
 
 Unit tests live in source modules (`mod tests { }`). Integration tests use the
 in-process fakes `viva-fake-gige` and `viva-fake-u3v` and run under
-`cargo test --workspace`; the suites are listed under [Commands](#commands).
+`cargo test --workspace`; the suites are listed in
+[CONTRIBUTING.md](CONTRIBUTING.md#tests).
 
 ### Vendor XML corpus
 
@@ -109,10 +93,9 @@ The `viva-genapi` stage builds a `NodeMap` from each document and evaluates
 every node against a stub transport — that is where formulas, addressing and
 numeric codecs are exercised, and where the #35 defects lived, invisible to the
 XML-layer test ([ADR-0018](docs/adrs/adr0018-genapi-conformance-over-convenience.md)).
-The documents are vendor copyright, so we fetch rather than redistribute them.
-The test is a no-op when the directory is absent; the `Vendor XML Corpus`
-workflow runs it weekly and on demand. Point `VIVA_GENICAM_XML_CORPUS` at
-another directory to check XML dumped from your own hardware.
+The `Vendor XML Corpus` workflow runs it weekly and on demand. Why the
+documents are fetched, the no-op without them, and `VIVA_GENICAM_XML_CORPUS`
+are in [CONTRIBUTING.md](CONTRIBUTING.md#vendor-xml-corpus).
 
 **When a user reports a camera we cannot open, ask for their XML and add it to
 the corpus** — that is how this class of bug stops recurring. Point them at the
@@ -214,43 +197,16 @@ result. Two pitfalls that hand-written suggestions have hit:
 us push the repair directly, keeping their authorship and costing them no
 round-trip. Do not ask a contributor to fix our whitespace.
 
-### Fake camera binary
+### Viva Studio against a fake camera
 
-For interactive testing or E2E testing with Viva Studio:
-
-```bash
-# Start fake camera (stays alive until Ctrl+C)
-cargo run -p viva-fake-gige
-cargo run -p viva-fake-gige -- --width 512 --height 512 --fps 15 --pixel-format rgb8
-
-# Use CLI to interact
-cargo run -p viva-camctl -- list --iface 127.0.0.1
-
-# E2E with studio — GigE (3 terminals)
-# T1: cargo run -p viva-fake-gige
-# T2: cargo run -p viva-service -- --iface lo0 --zenoh-config studio/config/zenoh-local.json5
-# T3: export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-#     cd studio/apps/viva-studio-tauri && cargo tauri dev
-
-# E2E with studio — USB3 Vision fake camera (2 terminals)
-# T1: cargo run -p viva-service-u3v -- --fake --zenoh-config studio/config/zenoh-local.json5
-# T2: export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-#     cd studio/apps/viva-studio-tauri && cargo tauri dev
-
-# FORCEIP / persistent IP against the fake (T1: cargo run -p viva-fake-gige)
-cargo run -p viva-camctl -- --iface 127.0.0.1 set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force
-cargo run -p viva-camctl -- --iface 127.0.0.1 set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
-```
-
-**Important**: both sides need their own Zenoh config, and neither is
-automatic. The **service** takes `--zenoh-config studio/config/zenoh-local.json5`
-(GigE and U3V alike). The **studio** reads the `ZENOH_CONFIG` environment
-variable — there is no default path, no dev-mode auto-detection, and no
-`--zenoh-config` flag on that binary. Point it at `zenoh-studio.json5` with an
-absolute path, because the walkthrough `cd`s into the app directory first.
-Without `ZENOH_CONFIG` the studio runs in *embedded* mode, whose GigE discovery
-deliberately skips loopback (`backend/embedded.rs`), so the fake camera never
-appears.
+Studio's remote mode needs a Zenoh config on **both** sides, and neither is
+automatic: the service takes `--zenoh-config studio/config/zenoh-local.json5`
+(GigE and U3V alike); Studio reads only the `ZENOH_CONFIG` environment variable
+— no default path, no dev-mode auto-detection, no flag — which must be an
+absolute path to `studio/config/zenoh-studio.json5`. Without it Studio runs in
+*embedded* mode, whose GigE discovery deliberately skips loopback
+(`backend/embedded.rs`), so the fake camera never appears. The recipes are in
+[docs/studio/testing-cookbook.md](docs/studio/testing-cookbook.md).
 
 ## Documentation
 
@@ -264,10 +220,22 @@ User and developer documentation are kept apart:
   **developer** documentation: building, checks, test suites, design, ADRs,
   roadmap, backlog. `studio/README.md` is Studio's developer notes.
 - **API docs** — `cargo doc`, published to GitHub Pages.
-- **Examples** — 18 in `crates/viva-genicam/examples/` (`demo_fake_camera` is
-  the zero-hardware demo).
-- **Standards intro** — [docs/standards.md](docs/standards.md): what
-  GenApi/GenCP/GVCP/GVSP/SFNC/PFNC are and how they map to crates.
+- **Examples** — `crates/viva-genicam/examples/` (`demo_fake_camera` is the
+  zero-hardware demo).
+- **Standards** — [docs/standards.md](docs/standards.md): which crate
+  implements which EMVA standard — GenApi (Tier-1 + Tier-2, including pValue
+  delegation), GenCP, GVCP/GVSP, USB3 Vision, SFNC, PFNC.
+- **Changelog** — `CHANGELOG.md` is an index plus `[Unreleased]`; each release
+  series has its own file in `changelog/`. Entries follow
+  [CONTRIBUTING's changelog rules](CONTRIBUTING.md#the-changelog).
+- **Known gaps** — [issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)
+  is the public list of what does not work yet; the book's welcome page and the
+  READMEs link to it instead of listing gaps. When a fix for one of its items
+  merges, tick that item on #191.
+
+**One fact, one place.** Each fact has one canonical page per audience
+(CONTRIBUTING's Documentation section names them); everywhere else links to it
+rather than repeating it.
 
 **The book's Rust snippets come from the examples**, via mdBook
 `{{#include <file>:<anchor>}}` against `// ANCHOR:` / `// ANCHOR_END:`
@@ -284,10 +252,10 @@ additionally greps `mdbook build` output for `[ERROR]`.
 
 ## Development Docs
 
-- [docs/design.md](docs/design.md) — architecture, key abstractions, data flows, design tenets
-- [docs/roadmap.md](docs/roadmap.md) — mid-term direction by phase
-- [docs/backlog.md](docs/backlog.md) — immediate actionable tasks; pick up work from here
-- [docs/adrs/](docs/adrs/) — decision records; add one via the template in `docs/adrs/README.md` when making an architectural decision (retrospective ADRs welcome)
+[docs/README.md](docs/README.md) indexes them. Pick up work from
+[docs/backlog.md](docs/backlog.md); record an architectural decision as an ADR
+in `docs/adrs/` (template in `docs/adrs/README.md`, or `/adr-new`;
+retrospective ADRs welcome).
 
 ## Skills
 
@@ -332,9 +300,3 @@ curl -sSL -H 'User-Agent: viva-genicam-dev' \
 
 `null` reads as "not published", so it can talk you out of a correct release or
 into re-publishing one — check the raw body before believing an absence.
-
-## Standards
-
-The EMVA standards implemented here — GenApi (Tier-1 + Tier-2, including
-pValue delegation), GVCP/GVSP, GenCP, PFNC/SFNC — and how they map to crates:
-[docs/standards.md](docs/standards.md).

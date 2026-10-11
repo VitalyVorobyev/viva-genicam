@@ -93,26 +93,15 @@ produce `block_NNNN.evt3` / `.evt21` files instead; see
 
 ---
 
-## "How do I generate documentation?"
-
-From the repository root:
-
-```bash
-cargo install mdbook          # if not already installed
-mdbook build book             # this book, into book/book/
-
-cargo doc --workspace --all-features --no-deps   # Rust API docs, into target/doc/
-```
-
----
-
 ## "Where should I report bugs or ask questions?"
 
 If a camera does not work, start with
 [Reporting a camera we can't open](./reporting.md) — it gives you two commands
 that collect everything we need.
 
-For anything else, open an issue on
+What is known not to work yet is listed in
+[issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191). For
+anything else, open an issue on
 [GitHub](https://github.com/VitalyVorobyev/viva-genicam/issues) with what you
 ran and what happened, your OS and camera model, and logs from
 `RUST_LOG=debug` or `viva-camctl -vv`.

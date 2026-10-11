@@ -1,6 +1,6 @@
 # viva-gige
 
-GigE Vision transport layer: GVCP discovery, GenCP-over-UDP register I/O, and GVSP streaming.
+GigE Vision transport layer: GVCP discovery and register I/O, and GVSP streaming.
 
 Implements the networking building blocks for communicating with GigE Vision cameras over Ethernet.
 
@@ -10,10 +10,10 @@ Implements the networking building blocks for communicating with GigE Vision cam
 
 ## Features
 
-- **GVCP discovery** -- broadcast and unicast device discovery on selected network interfaces
-- **Register I/O** -- read/write device memory via GenCP-over-UDP with retry and backoff
-- **GVSP streaming** -- packet parsing, frame reassembly, chunk parsing, backpressure. Resend building blocks (missing-packet tracking, the resend request) exist but are not wired into the receive path yet
-- **Multicast** -- IGMP join/leave for multicast stream reception
+- **GVCP discovery** -- directed-broadcast device discovery on selected network interfaces
+- **Register I/O** -- read/write device registers and memory over GVCP, with retry and backoff
+- **GVSP streaming** -- packet parsing, frame reassembly, chunk parsing, backpressure. Packet resend has building blocks here but is not requested yet ([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191))
+- **Multicast** -- IGMP join for multicast stream reception
 - **Events** -- GVCP message channel for asynchronous camera events
 - **Action commands** -- broadcast-triggered synchronized acquisition
 - **Packet size** -- interface MTU lookup, GVSP test-packet requests and `GevSCPSPacketSize` read/write. The `viva-genicam` stream builder keeps the camera's packet size by default; sizing from the interface MTU is opt-in

@@ -112,32 +112,9 @@ Vision §18.4 and the GenCP status table before this ADR moves to Accepted.
 
 ### What is implemented so far
 
-This ADR is **Proposed**, and the decision above is deliberately larger than
-the change that introduces it. Landed now:
-
-- Points 3 (`Display` with name and hex), 4 (pending-ack as a command id,
-  with the acknowledgement's command validated against
-  `OpCode::ack_code()`) and 5 (a literal `SPEC_STATUS_TABLE` fixture,
-  independent of `to_raw`).
-- The shared `StatusCode` corrected: `WriteProtect`, `BadAlignment`,
-  `AccessDenied`, `Busy` and `GenericError` added; `DeviceBusy` and the
-  catch-all `Error` removed. `is_retryable()` added, which fixed a third
-  consequence of the mislabelling — GVCP's retry loop matched the old
-  `DeviceBusy` (`0x8004`), so it retried `WRITE_PROTECT`, a refusal no
-  retry can satisfy, and returned immediately on `0x8007 BUSY`, the one
-  status where retrying is the right answer.
-
-Still to do, tracked as **TC-16**:
-
-- Points 1 and 2, the per-transport wrapper types. Until they exist, a
-  transport-specific code decodes as `Unknown(raw)` — correct and
-  reportable, just not named. `0x800B` is the case that forces the split,
-  and no code path we have decodes it today, which is why the structural
-  work can follow the correctness fix rather than block it.
-
-Splitting this way keeps the change that fixes a user-visible defect small
-enough to review against the tables, and leaves the API break for the
-0.4.0 consolidation window where API-02 and API-03 already live.
+Points 3, 4 and 5 landed with this ADR, together with the corrected shared
+`StatusCode`. Points 1 and 2 — the per-transport types — are backlog **TC-16**,
+which tracks what remains ([`docs/backlog.md`](../backlog.md)).
 
 ## Consequences
 

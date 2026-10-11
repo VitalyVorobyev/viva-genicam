@@ -32,7 +32,8 @@ understands.
 | `StatusCode` | Transport-neutral status, with `Unknown(u16)` for anything not in the table |
 | `CommandHeader` / `AckHeader` | GVCP's 8-byte headers |
 | `GenCpCmd` / `GenCpAck` | Header plus payload |
-| `encode_cmd` / `decode_ack` | The two functions you call |
+| `decode_ack` | Parses a GVCP acknowledgement; `viva-gige` uses it |
+| `encode_cmd` | Encodes a command without GVCP's `0x42` key byte, so it is not what `viva-gige` sends |
 | `GenCpError` | Decode failures |
 | `HEADER_SIZE`, `PENDING_ACK_COMMAND` | `8` and `0x0805` |
 
@@ -88,13 +89,12 @@ a pending acknowledge, or the other way round.
 
 ## Using it directly
 
-You would only do this for diagnostics or a vendor escape hatch. The shape:
+You would only do this for diagnostics. `decode_ack` turns the bytes of a GVCP
+acknowledgement into a `GenCpAck`:
 
 ```rust,ignore
-use viva_gencp::{StatusCode, decode_ack, encode_cmd};
+use viva_gencp::{StatusCode, decode_ack};
 
-let bytes = encode_cmd(&cmd);       // -> Bytes, ready for the transport
-// ... the transport sends `bytes` and receives `buf` ...
 let ack = decode_ack(&buf)?;        // -> GenCpAck
 
 // `AckHeader::status` is already a decoded `StatusCode`; `from_raw`/`to_raw`
@@ -110,9 +110,9 @@ match ack.header.status {
 sent, and `OpCode::ack_code()` (`command_code() + 1`) is the opcode it should
 have come back with.
 
-For anything above raw diagnostics, prefer the layers that already do this
-correctly: `viva_gige::GigeDevice::{read_register, write_register, read_mem,
-write_mem}`, or `Camera::{get, set}` above them.
+To send commands, use the layers that build them correctly:
+`viva_gige::GigeDevice::{read_register, write_register, read_mem, write_mem}`,
+or `Camera::{get, set}` above them.
 
 ---
 
@@ -120,22 +120,12 @@ write_mem}`, or `Camera::{get, set}` above them.
 
 GenCP leaves the byte order to the transport, but requires it to match the
 device's bootstrap registers (GenCP 1.2 §2.3): GVCP is big-endian, USB3
-Vision little-endian. `encode_cmd` and `decode_ack` are GVCP's and handle the
-big-endian side; `viva-u3v` encodes its own little-endian packets. The structs
+Vision little-endian. `decode_ack` is GVCP's and handles the big-endian side;
+`viva-u3v` encodes its own little-endian packets. The structs
 hold host-order values. Register widths must match the address
 alignment, and devices do return `BadAlignment` when they do not — which is why
 that status has a name of its own rather than being folded into
 `InvalidParameter`.
-
----
-
-## Testing
-
-Encode/decode is exactly the kind of code that should be tested against the
-**specification**, not against the parser. Fixtures derived from the parser
-only assert that the code agrees with itself: when a fake camera and the client
-share one wrong assumption, the test asserts it back. See
-[ADR-0018](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0018-genapi-conformance-over-convenience.md).
 
 ---
 

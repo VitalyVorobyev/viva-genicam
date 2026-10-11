@@ -4,6 +4,9 @@ USB3 Vision transport layer for GenICam cameras.
 
 Implements bootstrap register parsing, GenCP-over-USB control, device descriptor handling, and bulk-endpoint streaming. The `usb` feature enables real USB hardware access via [`rusb`](https://crates.io/crates/rusb).
 
+USB3 Vision support has not run on a real camera yet; known gaps are in
+[issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191).
+
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
 > GenICam is a trademark of EMVA.

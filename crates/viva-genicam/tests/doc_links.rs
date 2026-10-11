@@ -2,11 +2,13 @@
 //!
 //! mdBook checks its `{{#include}}`s (`book_includes`) but not plain links, and
 //! nothing checked the Markdown outside the book: links to files moved under
-//! `docs/` went stale for weeks unnoticed. This reads the documentation a
-//! reader follows — the top-level Markdown, `book/src`, `docs/`, `studio/` and
-//! each crate's README — and fails on a relative link whose target does not
-//! exist. Web links are not checked: that needs the network, and they change
-//! under us.
+//! `docs/` went stale for weeks unnoticed. This reads every Markdown file in
+//! the repository and fails on a relative link whose target does not exist.
+//! Web links are not checked: that needs the network, and they change under us.
+//!
+//! It walks the whole tree rather than a list of directories because a list
+//! goes stale the same way the links did: `changelog/`, `.github/` and
+//! `.claude/skills/` all held Markdown that a fixed list never read.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,8 +25,29 @@ fn repo_root() -> PathBuf {
 /// published site's `api/`, which exists only once published.
 const PUBLISHED_ONLY: &[(&str, &str)] = &[("book/src", "api/")];
 
-/// Directories that hold generated or third-party Markdown.
-const SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", ".git", "book/book"];
+/// Directories that hold generated, fetched or third-party Markdown, matched
+/// against the end of the path from the repository root: a single name
+/// (`target`) at any depth, a longer path (`book/book`) where it appears.
+/// `.claude/worktrees` holds whole checkouts of other branches.
+const SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "dist",
+    "book/book",
+    "fixtures/vendor-xml",
+    ".claude/worktrees",
+];
+
+/// Hidden directories are tool state (`.git`, `.venv`, `.codegraph`,
+/// `.pytest_cache`) and are skipped — except these, which hold Markdown a
+/// contributor follows: issue templates and the project skills.
+const HIDDEN_DIRS_READ: &[&str] = &[".github", ".claude"];
+
+fn skipped_dir(relative: &Path) -> bool {
+    let name = relative.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    (name.starts_with('.') && !HIDDEN_DIRS_READ.contains(&name))
+        || SKIP_DIRS.iter().any(|skip| relative.ends_with(skip))
+}
 
 fn markdown_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -32,15 +55,14 @@ fn markdown_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        if SKIP_DIRS
-            .iter()
-            .any(|skip| relative.ends_with(skip) || relative.starts_with(skip))
-        {
+        // `file_type` does not follow symlinks, so a link cycle cannot recurse.
+        let Ok(file_type) = entry.file_type() else {
             continue;
-        }
-        if path.is_dir() {
-            markdown_files(root, &path, out);
+        };
+        if file_type.is_dir() {
+            if !skipped_dir(path.strip_prefix(root).unwrap_or(&path)) {
+                markdown_files(root, &path, out);
+            }
         } else if path.extension().is_some_and(|ext| ext == "md") {
             out.push(path);
         }
@@ -100,12 +122,14 @@ fn is_relative_file_link(target: &str) -> bool {
 fn every_relative_markdown_link_resolves() {
     let root = repo_root();
     let mut files = Vec::new();
-    for top in ["README.md", "CONTRIBUTING.md", "CHANGELOG.md", "CLAUDE.md"] {
-        files.push(root.join(top));
-    }
-    for dir in ["book/src", "docs", "studio", "crates"] {
-        markdown_files(&root, &root.join(dir), &mut files);
-    }
+    markdown_files(&root, &root, &mut files);
+    files.sort();
+    // A walk that silently found nothing would pass vacuously.
+    assert!(
+        files.iter().any(|f| f.ends_with("README.md")),
+        "the walk from {} found no README.md",
+        root.display()
+    );
 
     let mut broken = Vec::new();
     for file in &files {

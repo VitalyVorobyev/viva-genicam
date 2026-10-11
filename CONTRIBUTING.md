@@ -18,26 +18,7 @@ have not seen. `viva-camctl report` writes everything we need to diagnose one
 | `book/` | The user guide (mdBook), published to GitHub Pages |
 | `docs/` | Developer documentation: design, standards, decisions, roadmap and backlog ([`docs/README.md`](docs/README.md)) |
 
-```
-crates/
-  viva-gencp/          GenCP encode/decode (transport-agnostic)
-  viva-gige/           GigE Vision transport (GVCP/GVSP)
-  viva-u3v/            USB3 Vision transport
-  viva-genapi-xml/     GenICam XML parser
-  viva-genapi/         GenApi node map & evaluation engine
-  viva-genicam/        Public API facade
-  viva-pfnc/           Pixel Format Naming Convention tables
-  viva-sfnc/           Standard Feature Naming Convention constants
-  viva-zenoh-api/      Message payloads and topic names for the services
-  viva-service/        Zenoh bridge: GigE cameras -> Viva Studio
-  viva-service-u3v/    Zenoh bridge: U3V cameras -> Viva Studio
-  viva-camctl/         CLI binary
-  viva-pygenicam/      Python bindings (PyO3)
-  viva-fake-gige/      Fake GigE camera for testing
-  viva-fake-u3v/       Fake U3V camera for testing
-```
-
-The layering, the key abstractions and the design tenets are in
+The crate map, the layering, the key abstractions and the design tenets are in
 [`docs/design.md`](docs/design.md); the GenICam standards, and which crate
 implements which, in [`docs/standards.md`](docs/standards.md).
 
@@ -62,6 +43,16 @@ The Python bindings are a separate workspace, and so is the Tauri app:
 (cd studio/apps/viva-studio-tauri/src-tauri && cargo clippy --all-targets -- -D warnings)
 ```
 
+To build the Python package from source and run its tests (with
+[uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv venv .venv
+uv pip install --python .venv/bin/python maturin numpy pytest
+uv run --python .venv/bin/python maturin develop -m crates/viva-pygenicam/Cargo.toml
+.venv/bin/python -m pytest crates/viva-pygenicam/tests
+```
+
 Run the Tauri crate's clippy whenever a public type in the library changes,
 not only when `studio/` does: a new enum variant can break it with nothing else
 local noticing. Studio's own checks are in [`studio/README.md`](studio/README.md#quality-gates).
@@ -73,13 +64,22 @@ start in-process fake cameras (`viva-fake-gige`, `viva-fake-u3v`) on loopback.
 `cargo test --workspace` runs all of them; the suites can also run alone:
 
 ```bash
-cargo test -p viva-genicam --test fake_camera        # GigE: discovery, features, streaming
+# GigE Vision, against viva-fake-gige
+cargo test -p viva-genicam --test fake_camera        # discovery, features, streaming
 cargo test -p viva-genicam --test predicates         # pIsLocked, pIsAvailable, ... end to end
-cargo test -p viva-genicam --test heartbeat          # control-channel keepalive
 cargo test -p viva-genicam --test register_access    # which GVCP command a register access sends
-cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # USB3 Vision
-cargo test -p viva-u3v --test gencp_conformance      # USB3 Vision framing from the standards
+cargo test -p viva-genicam --test report             # the diagnostic report every tool writes
+# Control-channel keepalive, against fixtures that withhold or delay ACKs
+cargo test -p viva-genicam --test heartbeat          # idle keepalive, with a negative control
+cargo test -p viva-genicam --test inflight_keepalive # probes continue while register I/O holds the mutex
+cargo test -p viva-genicam --test keepalive_shutdown # dropping the transport cancels keepalive I/O
+cargo test -p viva-gige    --test inflight_keepalive # heartbeats during long ACK waits (ADR-0023)
+# USB3 Vision
+cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva-fake-u3v
+cargo test -p viva-u3v     --test gencp_conformance  # wire layouts from GenCP 1.2 and vendor XML
+# Services
 cargo test -p viva-service --test fake_camera_e2e    # viva-service end to end over Zenoh
+# Documentation
 cargo test -p viva-genicam --test book_includes      # every code include in the book resolves
 cargo test -p viva-genicam --test doc_links          # every relative Markdown link resolves
 ```
@@ -123,14 +123,33 @@ and the changelog, is in [`CLAUDE.md`](CLAUDE.md#evidence-hierarchy).
   they compile with the workspace; add a snippet by anchoring it in an example,
   never inline. `book_includes` fails on an include that does not resolve.
 - **`docs/`** is for developers: design, ADRs, roadmap, backlog.
-- **`doc_links`** fails on any relative link in `README.md`, this file,
-  `CHANGELOG.md`, `book/`, `docs/` or `studio/` that points at nothing.
+- **`doc_links`** fails on any relative link, in any Markdown file in the
+  repository, that points at nothing.
+- **One fact, one place.** Each audience has one canonical page for a fact —
+  the book's [welcome page](book/src/welcome.md) for what works and what does
+  not, [`book/src/architecture.md`](book/src/architecture.md) and
+  [`docs/design.md`](docs/design.md) for the crate map — and other pages link
+  to it rather than repeat it, so a change edits one file.
+
+### The changelog
+
+[`CHANGELOG.md`](CHANGELOG.md) is an index plus the `[Unreleased]` section;
+each release series has its own file in [`changelog/`](changelog/). Entries are
+for users:
+
+- one bullet per user-visible change: what changed and why, in a sentence or
+  two, with the pull request linked;
+- no narrative, no test inventories, no internal refactors a user cannot see —
+  the pull request holds those;
+- a change that needs action on upgrade also goes in the release's opening
+  "Read before upgrading" list.
 
 ## Pull requests
 
 - Keep a pull request to one review surface; several related fixes in one PR
   are fine.
-- Add an entry to the `[Unreleased]` section of [`CHANGELOG.md`](CHANGELOG.md).
+- Add an entry to `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md), following
+  [the changelog rules](#the-changelog).
 - Refer to issues with "Addresses #N", not "Closes #N": an issue about a camera
   closes when its reporter confirms the fix on their hardware.
 - An architectural decision gets an ADR in `docs/adrs/` (template in

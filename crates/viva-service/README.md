@@ -20,35 +20,26 @@ Client applications connect to the service for camera discovery, feature control
 ## Usage
 
 ```bash
-# Start the service
-cargo run -p viva-service -- --iface en0
+# Start the service (prebuilt in the release archives, or cargo run -p viva-service -- …)
+viva-service --iface en0
 
 # With verbose logging
-cargo run -p viva-service -- --iface en0 -vv
+viva-service --iface en0 -vv
+
+# With a Zenoh configuration, as Viva Studio's remote mode needs
+viva-service --iface en0 --zenoh-config zenoh-local.json5
 ```
+
+Viva Studio's remote mode, including the configuration files both sides need,
+is described in the user guide's
+[Viva Studio → Remote mode](https://vitalyvorobyev.github.io/viva-genicam/studio.html#remote-mode).
 
 ## Zenoh API
 
-Cameras are exposed under `genicam/devices/{id}/`:
-
-| Endpoint | Description |
-|----------|-------------|
-| `announce` | Periodic device announcements |
-| `status` | Connection status of the device |
-| `xml` | Queryable returning the GenICam XML |
-| `nodes/{name}/value` | Node value updates |
-| `nodes/{name}/state` | Queryable and updates carrying the full live `FeatureState` of one node |
-| `nodes/{name}/set` | Queryable for writing node values |
-| `nodes/{name}/execute` | Queryable for executing commands |
-| `nodes/bulk/read` | Queryable for batch reads |
-| `nodes/bulk/state` | Queryable returning the `FeatureState` of many nodes at once |
-| `acquisition/control` | Start/stop acquisition |
-| `acquisition/status` | Whether acquisition is running, with frame rate and drop count |
-| `image` | Raw frame data with a 16-byte binary header |
-| `image/meta` | Image geometry and pixel format |
-| `evs` | Event-vision blocks (EVT 3.0 / 2.1) with a 24-byte binary header; never sent on `image` |
-
-Wire types are defined in [`viva-zenoh-api`](https://crates.io/crates/viva-zenoh-api).
+Cameras are exposed under `genicam/devices/{id}/`. The keys, their payloads and
+their semantics are specified in
+[`docs/studio/zenoh-api.md`](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/studio/zenoh-api.md);
+the wire types are defined in [`viva-zenoh-api`](https://crates.io/crates/viva-zenoh-api).
 
 ## Documentation
 

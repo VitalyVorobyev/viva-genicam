@@ -13,35 +13,27 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-> **Status -- pre-1.0, and working.** Users have run discovery, control and
-> streaming against real GigE Vision cameras from several vendors, on Linux,
-> Windows and macOS. The protocol layers are implemented against the EMVA
-> specifications and covered by automated tests against in-process fake
-> cameras, and by a corpus of dozens of real vendor GenApi XML descriptions.
->
-> What pre-1.0 means in practice: the API still changes between releases, and
-> **there is no camera in CI** -- hardware confirmations come from users with
-> their own devices. So a camera nobody has tried yet may well hit something. If
-> yours does, [open an issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose):
-> that is how camera-specific bugs here get found and fixed.
-
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
 > GenICam is a trademark of EMVA.
 
 ---
 
+## Status and known gaps
+
+Pre-1.0, and working: users have run discovery, control and streaming against
+real GigE Vision cameras from several vendors, on Linux, Windows and macOS.
+USB3 Vision has not run on a real camera yet, and the API still changes
+between releases. What has been verified is on the user guide's
+[welcome page](https://vitalyvorobyev.github.io/viva-genicam/welcome.html#status);
+the full list of known gaps is [issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191).
+If your camera hits something, [open an issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose).
+
 ## Features
 
 - **Discovery** -- find GigE Vision cameras via GVCP broadcast; USB3 Vision cameras via USB enumeration
 - **Control** -- read and write device registers and GenApi features (Integer, Float, Enumeration, Boolean, Command, String, Register, SwissKnife, Converter, IntConverter)
-- **Streaming** -- GigE: GVSP reassembly with backpressure, plus raw capture from event-vision cameras (packet resend is not wired into the receive path yet); U3V: async frame iterator over USB bulk reads
-
-> **USB3 Vision has not met a camera yet.** It follows the GenCP standard and
-> what independent implementations agree on, and is tested against a fake built
-> from those sources, but no one has reported running it on real hardware. If
-> you have a USB3 Vision camera, `viva-camctl report --usb 0 --out report.txt`
-> attached to an issue is the most useful thing you can send.
+- **Streaming** -- GigE: GVSP reassembly with backpressure, plus raw capture from event-vision cameras; U3V: async frame iterator over USB bulk reads
 - **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
 - **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)
@@ -56,8 +48,8 @@
 - **A desktop app** -- [Viva Studio](#viva-studio), from the release downloads.
 - **Cameras over the network** -- `viva-service` / `viva-service-u3v` serve them over Zenoh ([viva-service](#viva-service-zenoh-bridge)).
 
-Every crate, and what it is for, is listed in the book's
-[Crates](https://vitalyvorobyev.github.io/viva-genicam/crates/) page.
+Every crate, and what it is for, is in the book's
+[How the library fits together](https://vitalyvorobyev.github.io/viva-genicam/architecture.html).
 
 ## Viva Studio
 
@@ -135,7 +127,7 @@ For users:
 
 - **[User guide](https://vitalyvorobyev.github.io/viva-genicam/)** -- tutorials, networking, Python, Viva Studio, troubleshooting
 - **[API reference (docs.rs)](https://docs.rs/viva-genicam)** -- the Rust API
-- **[Examples](crates/viva-genicam/examples/)** -- runnable programs for discovery, streaming, events, chunks and more; the guide's Rust snippets come from them, so they compile in CI
+- **[Examples](crates/viva-genicam/examples/)** -- runnable programs for discovery, streaming, events, chunks and more (`cargo run -p viva-genicam --example demo_fake_camera` needs no camera); the guide's Rust snippets come from them, so they compile in CI
 - **[Reporting a camera we can't open](https://vitalyvorobyev.github.io/viva-genicam/reporting.html)** -- what to send us
 
 For developers:
@@ -143,96 +135,20 @@ For developers:
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** -- building, checks, tests, pull requests
 - **[docs/](docs/README.md)** -- design, standards, decision records, roadmap and backlog
 
-## Examples (from a clone of this repository)
-
-```bash
-# Discover cameras
-cargo run -p viva-genicam --example list_cameras
-
-# Read/write features
-cargo run -p viva-genicam --example get_set_feature
-cargo run -p viva-genicam --example get_set_feature -- --name Gain --value 3.0
-
-# Fetch and inspect the camera's GenApi XML
-cargo run -p viva-genicam --example fetch_xml
-
-# Grab frames from the first camera found, on the host NIC you name
-cargo run -p viva-genicam --example grab_gige -- --iface 192.168.0.5
-
-# Zero-hardware demo (uses built-in fake camera)
-cargo run -p viva-genicam --example demo_fake_camera
-```
-
 ## viva-camctl CLI
 
-The examples below use `cargo run` from a checkout. If you would rather not
-build it, `pip install viva-genicam` installs the same CLI as a `viva-camctl`
-command — the wheel links it in, so `viva-camctl report ...` works with no Rust
-toolchain.
-
-```bash
-# Discover GigE Vision cameras
-cargo run -p viva-camctl -- list
-
-# Collect a diagnostic bundle to attach to a bug report
-cargo run -p viva-camctl -- report --ip 192.168.0.10 --out viva-report.txt
-
-# Dump the camera's GenApi XML (parses nothing, so it works on a camera we cannot open)
-cargo run -p viva-camctl -- xml --ip 192.168.0.10 --out camera.xml
-
-# Read a feature
-cargo run -p viva-camctl -- get --ip 192.168.0.10 --name ExposureTime
-
-# Write a feature
-cargo run -p viva-camctl -- set --ip 192.168.0.10 --name ExposureTime --value 5000
-
-# Stream frames. By default the camera's GevSCPSPacketSize is kept.
-# --auto: set from NIC MTU, then path-probe / bisect. --packet-size N: explicit ceiling.
-cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
-# Cap for a known narrow path (e.g. a switch that only forwards ~9K frames):
-cargo run -p viva-camctl -- stream --ip 192.168.0.10 --iface 192.168.0.5 --packet-size 9000 --save 2
-
-# Sustained streaming benchmark
-cargo run -p viva-camctl -- bench --ip 192.168.0.10 --duration-s 60 --json-out bench.json
-
-# Assign temporary IP via FORCEIP
-cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --force
-
-# Configure persistent IP
-cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100
-
-# Event-vision camera: append every EVT block to one file
-cargo run -p viva-camctl -- stream --ip 192.168.0.10 --save 0 --raw-out capture.evt3 --duration-s 10
-
-# USB3 Vision: discover, read/write features, stream
-cargo run -p viva-camctl -- list-usb
-cargo run -p viva-camctl -- get-usb --name ExposureTime
-cargo run -p viva-camctl -- set-usb --name ExposureTime --value 5000
-cargo run -p viva-camctl -- stream-usb --save 3
-```
+`viva-camctl` discovers cameras, reads and writes features, streams and
+benchmarks, sets IP addresses, and writes the diagnostic report a bug report
+needs. It comes with `pip install viva-genicam`, in the release archives, and
+from `cargo install viva-camctl`. Its commands and examples are in
+[crates/viva-camctl/README.md](crates/viva-camctl/README.md).
 
 ## viva-service (Zenoh bridge)
 
-```bash
-# Start the GigE Vision service
-cargo run -p viva-service -- --iface en0
-
-# Start the USB3 Vision service (real camera)
-cargo run -p viva-service-u3v
-
-# Start the USB3 Vision service with a fake camera
-cargo run -p viva-service-u3v -- --fake
-```
-
-The service discovers cameras, publishes device announcements, serves GenICam XML,
-handles node read/write, and streams frames over Zenoh for Viva Studio
-(the desktop GUI in `studio/`).
-
-## Developing
-
-Build, test and contribution instructions are in
-[CONTRIBUTING.md](CONTRIBUTING.md); everything runs without hardware, against
-cameras simulated in-process.
+`viva-service` (GigE Vision) and `viva-service-u3v` (USB3 Vision) serve cameras
+over Zenoh — discovery, XML, feature read/write and frames — for Viva Studio's
+remote mode and other clients: [crates/viva-service/README.md](crates/viva-service/README.md),
+and the wire contract in [docs/studio/zenoh-api.md](docs/studio/zenoh-api.md).
 
 ## Troubleshooting
 
@@ -242,4 +158,5 @@ cameras simulated in-process.
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE). The Python wheel also links libusb statically, which makes it
+`MIT AND LGPL-2.1-or-later` ([details](crates/viva-pygenicam/README.md#licensing)).

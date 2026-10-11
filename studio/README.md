@@ -58,7 +58,6 @@ The minimal model the UI needs, from `crates/viva_xml_model`:
 - `nodes_by_name` — GenICam `Name` → `UiNode`
 - `categories` — category name → `UiCategory` (with `features: string[]`)
 - `root_category` — the chosen root, preferring `"Root"` when present
-
 - `skipped` — declarations the library could not turn into features, with
   each one's tag, name and reason (omitted when empty)
 
@@ -96,38 +95,13 @@ bun run dev      # bun run test / bun run build
 
 ### End-to-end with a fake camera
 
-No hardware needed. Three terminals for GigE:
-
-```sh
-# 1: fake camera (from the repository root)
-cargo run -p viva-fake-gige
-
-# 2: the Zenoh bridge — --zenoh-config is required on the service side
-cargo run -p viva-service -- --iface lo0 --zenoh-config studio/config/zenoh-local.json5
-# On Linux: --iface lo
-
-# 3: the app. ZENOH_CONFIG is required, and must be absolute — the `cd` below
-# means a relative path would no longer resolve.
-export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-cd studio/apps/viva-studio-tauri && cargo tauri dev
-```
-
-USB3 Vision needs only two, because the service hosts its own fake:
-
-```sh
-cargo run -p viva-service-u3v -- --fake --zenoh-config studio/config/zenoh-local.json5
-
-export ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
-cd studio/apps/viva-studio-tauri && cargo tauri dev
-```
-
-**`ZENOH_CONFIG` is what puts the app in remote mode.** There is no default
-path and no dev-mode auto-detection: without it the app starts in *embedded*
-mode and talks to cameras directly, which is a perfectly good mode but not this
-one — embedded discovery does not scan loopback, so a fake camera on
-`127.0.0.1` never appears and the device list stays empty. The mode is shown in
-the app header, and a `ZENOH_CONFIG` that fails to load is reported as an error
-rather than silently ignored.
+The recipes — GigE through `viva-service`, USB3 Vision through
+`viva-service-u3v --fake` — are in
+[`../docs/studio/testing-cookbook.md`](../docs/studio/testing-cookbook.md).
+**`ZENOH_CONFIG`, as an absolute path, is what puts the app in remote mode.**
+Without it the app runs embedded, which does not scan loopback, so a fake
+camera never appears; a `ZENOH_CONFIG` that fails to load is reported as an
+error rather than silently ignored.
 
 ## Building
 
@@ -162,29 +136,12 @@ from the main workspace — `NullIo` makes it work offline too.
 
 ## Quality gates
 
-Run from `studio/`:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-and, because `src-tauri` is outside that workspace:
-
-```sh
-cd apps/viva-studio-tauri/src-tauri
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-plus the UI:
-
-```sh
-cd ui/viva-studio-ui
-bun install --frozen-lockfile && bunx tsc --noEmit && bun run lint && bun run test -- --run && bun run build
-```
+Studio is three things CI checks separately: the `studio/` workspace, the Tauri
+app in `apps/viva-studio-tauri/src-tauri` (outside that workspace), and the UI.
+The commands for all three are in the quality-gate skill,
+[`../.claude/skills/quality-gate/SKILL.md`](../.claude/skills/quality-gate/SKILL.md)
+(`/quality-gate` in Claude Code); the repository-wide checks are in
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md#build-and-check).
 
 `bun run lint` is [Oxlint](https://oxc.rs), configured in `.oxlintrc.json` with
 an explicit rule list: ESLint's and typescript-eslint's recommended rules

@@ -19,9 +19,21 @@ the same version (ADR-0024).
 3. `crates/viva-pygenicam/pyproject.toml` — `[project] version` (what PyPI
    reads)
 4. `crates/viva-pygenicam/python/viva_genicam/__init__.py` — `__version__`
-5. `CHANGELOG.md` — rename `[Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`,
-   add a fresh empty `[Unreleased]` section, add the footer link line
-   (Keep a Changelog categories: Added / Changed / Fixed / …)
+5. The changelog. `CHANGELOG.md` is only an index plus `[Unreleased]`; each
+   release series has its own file, `changelog/X.Y.md`.
+   - Move the `[Unreleased]` entries into `changelog/X.Y.md` under
+     `## [X.Y.Z] - YYYY-MM-DD`, newest release first. A new minor starts a new
+     file with the same two-line header the others have; a patch goes on top
+     of its series file.
+   - Open the release with a short "Read before upgrading" list, then the Keep
+     a Changelog categories (Added / Changed / Fixed / Removed). Edit the
+     accumulated entries down to one bullet per user-visible change — what
+     changed and why, with the PR link (the style rule in `CONTRIBUTING.md`).
+   - Add `[X.Y.Z]: …/releases/tag/vX.Y.Z` at the bottom of the series file,
+     add or extend the series row in the index table, leave `[Unreleased]`
+     empty, and move its compare link to `vX.Y.Z...HEAD`.
+   - `release.yml` copies `changelog/X.Y.md` into every CLI archive and fails
+     the build if it is missing.
 6. **Intra-workspace dependency ranges** in every `crates/*/Cargo.toml`
    and `studio/**/Cargo.toml` — `viva-foo = { version = "0.2", path = ... }`.
    These are caret ranges, so a minor bump makes them unsatisfiable once

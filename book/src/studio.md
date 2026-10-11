@@ -6,11 +6,10 @@ diagnostic report we ask for when something goes wrong. It runs the library
 itself, so it is also the quickest way to try viva-genicam on your camera.
 
 > **Experimental.** Studio discovers cameras, reads and writes features and
-> streams live images, but it is the least-exercised part of the project: it
-> has no camera in CI, and its hardware reports come from a few users and
-> camera models. USB3 Vision has not been tried on a real camera at all. If
-> what Studio shows disagrees with your camera, please
-> [report it](reporting.md).
+> streams live images, but it is the least-exercised part of the project: its
+> hardware reports come from a few users and camera models
+> ([Status](welcome.md#status)). If what Studio shows disagrees with your
+> camera, please [report it](reporting.md).
 
 ## Install
 
@@ -24,7 +23,7 @@ under the same version as the library, as `viva-studio-<tag>-<target>.<ext>`:
 | Linux x86_64 | `.deb` or `.AppImage` | `sudo apt install ./viva-studio-….deb`, or `chmod +x` the AppImage and run it |
 | Windows x86_64 | `.msi` | Run the installer |
 
-The Linux builds need glibc 2.35 (Ubuntu 22.04) or newer and WebKitGTK 4.1,
+The Linux builds need glibc 2.39 (Ubuntu 24.04) or newer and WebKitGTK 4.1,
 which the `.deb` pulls in. Running the AppImage needs FUSE 2 (`libfuse2t64` on
 Ubuntu 24.04). `SHA256SUMS.txt` on the release lists every file's checksum.
 There is no Intel Mac build.
@@ -107,10 +106,69 @@ you can send us.
 Instead of opening cameras itself, Studio can show cameras that `viva-service`
 (GigE Vision) or `viva-service-u3v` (USB3 Vision) serve over
 [Zenoh](https://zenoh.io): for a camera on another machine, or several viewers
-of one camera. Start Studio with the `ZENOH_CONFIG` environment variable set to
-an absolute path to a Zenoh configuration file; without it Studio runs in its
-default, direct mode. The services and their wire protocol are described in
-the repository's
+of one camera. `viva-service` is in the `viva-genicam-<version>-<platform>`
+archive on each [GitHub release](https://github.com/VitalyVorobyev/viva-genicam/releases);
+`viva-service-u3v` runs from a clone of the repository.
+
+Both sides need a Zenoh configuration, and neither loads one by itself. The
+repository's
+[`studio/config/`](https://github.com/VitalyVorobyev/viva-genicam/tree/main/studio/config)
+holds a pair for one machine: the service listens on `tcp/127.0.0.1:7447`
+(`zenoh-local.json5`) and Studio connects there (`zenoh-studio.json5`). For a
+service on another machine, put that machine's address in both.
+
+1. Start the service with its configuration, naming the network interface the
+   cameras are on:
+
+   ```bash
+   viva-service --iface eth0 --zenoh-config /path/to/zenoh-local.json5
+   ```
+
+2. Start Studio with the `ZENOH_CONFIG` environment variable set to the
+   **absolute** path of its configuration:
+
+   ```bash
+   # macOS
+   open -a "Viva Studio" --env ZENOH_CONFIG=/path/to/zenoh-studio.json5
+   # Linux, the AppImage
+   ZENOH_CONFIG=/path/to/zenoh-studio.json5 ./viva-studio-….AppImage
+   ```
+
+   On Windows, set `ZENOH_CONFIG` as a user environment variable, then start
+   Studio; remove the variable to go back to direct mode.
+
+The chip in Studio's header reads **Remote** or **Embedded** (direct mode).
+Without `ZENOH_CONFIG` Studio runs in direct mode; a `ZENOH_CONFIG` it cannot
+load is reported as an error, not ignored.
+
+### Trying it without a camera
+
+From a clone of the repository, a fake GigE Vision camera on loopback stands in
+for a real one ([Testing without hardware](tutorials/fake-camera.md)):
+
+```bash
+# Terminal 1: the fake camera
+cargo run -p viva-fake-gige
+
+# Terminal 2: the service, on the loopback interface (lo0 on macOS, lo on Linux)
+cargo run -p viva-service -- --iface lo0 --zenoh-config studio/config/zenoh-local.json5
+
+# Terminal 3: Studio in remote mode, as in step 2, with an absolute path
+open -a "Viva Studio" --env ZENOH_CONFIG=$(pwd)/studio/config/zenoh-studio.json5
+```
+
+Studio lists the fake camera, shows its features, and streams a gradient image.
+For USB3 Vision the service hosts a fake of its own, which replaces the first
+two terminals:
+
+```bash
+cargo run -p viva-service-u3v -- --fake --zenoh-config studio/config/zenoh-local.json5
+```
+
+A fake camera appears only in remote mode: direct mode does not look for
+cameras on loopback, so without `ZENOH_CONFIG` the device list stays empty.
+
+The services and their wire protocol are described in the repository's
 [`docs/studio/zenoh-api.md`](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/studio/zenoh-api.md).
 
 ## Not there yet

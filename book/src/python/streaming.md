@@ -26,8 +26,7 @@ frame.payload()          # raw bytes, one copy
 `ts_host` is the frame's device timestamp mapped onto the host clock, which
 needs a fit of the two clocks first. On a GigE camera, call
 `cam.time_calibrate()` before opening the stream; without it `ts_host` is
-`None`. Before 0.8 it was the wall-clock time the frame was handed over,
-whatever the device said.
+`None`.
 
 ### `to_numpy()` — natural shape
 

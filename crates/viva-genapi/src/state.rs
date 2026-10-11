@@ -146,11 +146,24 @@ impl NodeMap {
         let usable = is_implemented && is_available;
         let has_value =
             usable && !self.is_write_only(name) && !self.command_targets().contains(name);
+        // A chunk or event feature with nothing attached has no value now and
+        // cannot be used: the port it reads is "not present" (GenICam
+        // Standard v2.1.1 §2.8.16), as it is between frames.
+        let mut detached = false;
         let value = if has_value {
-            self.read_value(node, io)?
+            match self.read_value(node, io) {
+                Err(GenApiError::NotAttached { .. }) => {
+                    detached = true;
+                    FeatureValue::None
+                }
+                other => other?,
+            }
         } else {
             FeatureValue::None
         };
+        let is_available = is_available && !detached;
+        let usable = usable && !detached;
+        let access = if detached { None } else { access };
 
         // A bound is reported only when something declares it: a `<Min>`,
         // a `<pMin>`, or one of those on the node `<pValue>` delegates to. A

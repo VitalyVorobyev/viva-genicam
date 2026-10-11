@@ -5881,6 +5881,7 @@ dependencies = [
 name = "viva-genapi"
 version = "0.8.0"
 dependencies = [
+ "bytes",
  "thiserror 2.0.21",
  "tracing",
  "viva-genapi-xml",

@@ -96,14 +96,14 @@ use crate::events::{
     bind_socket as bind_event_socket_internal,
     configure_message_channel_raw as configure_message_channel_fallback,
 };
-use crate::genapi::{GenApiError, Node, NodeMap, RegisterIo, SkOutput};
+use crate::genapi::{GenApiError, Node, NodeMap, PortKind, RegisterIo, SkOutput};
 use gige::GigeDevice;
 use gige::gvcp::consts as gvcp_consts;
 use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-pub use chunks::{ChunkKind, ChunkMap, ChunkValue, parse_chunk_bytes};
+pub use chunks::{ChunkData, ChunkError, chunk_data};
 pub use events::{Event, EventStream};
 pub use evs::{EvsBlock, EvsFormat};
 pub use frame::{Frame, FrameStatus};
@@ -587,6 +587,109 @@ impl<T: RegisterIo> Camera<T> {
             }
             Ok(())
         })
+    }
+
+    /// Read features from a frame's chunks: attach them to the nodemap's
+    /// chunk ports, run `f`, and detach them again.
+    ///
+    /// Inside `f`, `cam.get("ChunkExposureTime")` reads the value this frame
+    /// carried — from the chunk whose ID the camera's XML names, at the offset
+    /// and in the byte order the XML declares (ADR-0026). Nothing is read from
+    /// the device for it. A frame without chunks attaches none, and chunk
+    /// features then fail with [`GenApiError::NotAttached`].
+    ///
+    /// ```rust,no_run
+    /// # fn example(
+    /// #     camera: &mut viva_genicam::Camera<viva_genicam::GigeRegisterIo>,
+    /// #     frame: &viva_genicam::Frame,
+    /// # ) -> Result<(), viva_genicam::GenicamError> {
+    /// let exposure = camera.with_chunks(frame, |cam| cam.get("ChunkExposureTime"))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_chunks<R>(&mut self, frame: &Frame, f: impl FnOnce(&Self) -> R) -> R {
+        let chunks = frame.chunks.clone().unwrap_or_default();
+        self.nodemap.attach_chunks(&chunks);
+        let result = f(self);
+        self.nodemap.detach_chunks();
+        result
+    }
+
+    /// Every feature `frame`'s chunks feed, with its value or the error that
+    /// kept it from being read, sorted by name.
+    ///
+    /// The features are the ones the camera's XML lists in a category and
+    /// derives from a chunk port whose chunk the frame carries — `ChunkTimestamp`,
+    /// not the `ChunkTimestamp_Val` register behind it. Empty for a frame
+    /// without chunks.
+    pub fn chunk_features(&mut self, frame: &Frame) -> Vec<(String, Result<String, GenicamError>)> {
+        let Some(chunks) = frame.chunks.as_ref() else {
+            return Vec::new();
+        };
+        let ids: Vec<u64> = chunks.ids().collect();
+        let names = self.features_on_ports(
+            |kind| matches!(kind, PortKind::Chunk { chunk_id } if ids.contains(&chunk_id)),
+        );
+        self.with_chunks(frame, |cam| {
+            names
+                .into_iter()
+                .map(|name| {
+                    let value = cam.get(&name);
+                    (name, value)
+                })
+                .collect()
+        })
+    }
+
+    /// Read features from a received event: attach it to the ports whose
+    /// `<EventID>` is the event's, run `f`, and detach events again.
+    ///
+    /// Inside `f`, `cam.get("EventExposureEndTimestamp")` reads the event's
+    /// own bytes at the offset the camera's XML declares — 0x8 for the
+    /// timestamp on every corpus document, which is where the event header has
+    /// it.
+    pub fn with_event<R>(&mut self, event: &Event, f: impl FnOnce(&Self) -> R) -> R {
+        self.nodemap
+            .attach_event(u64::from(event.id), event.raw.clone());
+        let result = f(self);
+        self.nodemap.detach_events();
+        result
+    }
+
+    /// Every feature `event` feeds, with its value or the error that kept it
+    /// from being read, sorted by name: the category features derived from a
+    /// port whose `<EventID>` is the event's. Empty when the XML declares no
+    /// port for it.
+    pub fn event_features(&mut self, event: &Event) -> Vec<(String, Result<String, GenicamError>)> {
+        let id = u64::from(event.id);
+        let names = self.features_on_ports(
+            |kind| matches!(kind, PortKind::Event { event_id } if event_id == id),
+        );
+        self.with_event(event, |cam| {
+            names
+                .into_iter()
+                .map(|name| {
+                    let value = cam.get(&name);
+                    (name, value)
+                })
+                .collect()
+        })
+    }
+
+    /// The features fed by the ports `which` selects, sorted, without
+    /// repeats.
+    fn features_on_ports(&self, which: impl Fn(PortKind) -> bool) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .nodemap
+            .ports()
+            .into_iter()
+            .filter(|(_, kind)| which(*kind))
+            .flat_map(|(port, _)| self.nodemap.port_features(port))
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Configure the GVCP message channel and enable delivery of the requested events.

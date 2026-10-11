@@ -50,8 +50,9 @@ versions and the platforms with pre-built wheels are listed in
 The Rust API is wider than the bindings. These exist in `viva-genicam` and have
 no Python equivalent today:
 
-- **Chunk data.** `frame.chunks` is not surfaced; `ChunkConfig` and
-  `configure_chunks` are Rust-only.
+- **Chunk data.** `frame.chunks` is not surfaced; `ChunkConfig`,
+  `configure_chunks` and the chunk features (`Camera::chunk_features`) are
+  Rust-only.
 - **Events.** There is no binding for the message channel or `EventStream`.
 - **Action commands** and **FORCEIP / persistent IP** configuration. (GenApi
   *`<Command>` features* — `UserSetLoad`, `TriggerSoftware` — are a different

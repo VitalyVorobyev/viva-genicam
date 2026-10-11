@@ -4,12 +4,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
 
-**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. C, L and U, like the receive engine and packet resend already on `main`, are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
-
-## C — Chunks and events through GenApi ports
-
-**Goal**: chunk and event features read through their own ports, keyed by `ChunkID` and `<EventID>`, in the specification's layouts.
-**Rows**: GA-12, GA-13, GA-39, TC-06, TC-21.
+**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. L and U, like the receive engine, packet resend and the chunk and event ports already on `main`, are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
 ## L — GigE session lifecycle and discovery
 
@@ -57,6 +52,8 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, once L enables `PENDING_ACK` (TC-30).
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
 - **TC-27**: USB3 Vision has never met a camera; needs `viva-camctl report --usb 0` from one.
+- **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.
+- **TC-37**: the chunk and event layouts (ADR-0026) have met no camera; one capture with chunk mode on settles them.
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.
 - **DC-03**: `Scan3d*` scale, offset and invalid value; one capture ([#93](https://github.com/VitalyVorobyev/viva-genicam/pull/93)) is the only evidence of what a 3D device sends.
 - **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture; behind GA-09.

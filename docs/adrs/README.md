@@ -37,6 +37,7 @@ of the record.
 | [0023](adr0023-inflight-gvcp-heartbeats.md) | Heartbeats during GVCP acknowledgement waits | Proposed |
 | [0024](adr0024-studio-reference-viewer.md) | Viva Studio is the library's reference viewer | Accepted |
 | [0025](adr0025-gvsp-receive-engine.md) | One GVSP receive engine | Accepted |
+| [0026](adr0026-genapi-ports-chunks-events.md) | Chunk and event data through GenApi ports | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

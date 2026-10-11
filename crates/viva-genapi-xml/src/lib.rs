@@ -21,8 +21,8 @@ use thiserror::Error;
 
 use parsers::{
     missing_command_value, parse_boolean, parse_category, parse_category_empty, parse_command,
-    parse_converter, parse_enum, parse_float, parse_int_converter, parse_integer, parse_register,
-    parse_string, parse_struct_reg, parse_swissknife,
+    parse_converter, parse_enum, parse_float, parse_int_converter, parse_integer, parse_port,
+    parse_port_empty, parse_register, parse_string, parse_struct_reg, parse_swissknife,
 };
 use util::{attribute_value, skip_element};
 
@@ -284,6 +284,15 @@ pub enum Addressing {
         terms: Vec<AddressTerm>,
         /// Length of the register block in bytes.
         len: u32,
+        /// `<pPort>`: the port the address is relative to, verbatim; `None`
+        /// when the element is absent, which means the device.
+        ///
+        /// A chunk port's addresses count from the start of one chunk in a
+        /// stream buffer, an event port's from the start of one event — not
+        /// from anywhere in the device's memory (GenICam Standard v2.1.1
+        /// §2.8.16). [`XmlModel::ports`] says which port is which.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<String>,
     },
 }
 
@@ -291,7 +300,12 @@ pub enum Addressing {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddressTerm {
     /// `<Address>` — a literal offset.
-    Fixed(u64),
+    ///
+    /// Signed: GenICam Standard v2.1.1 §2.8.16 lets a register on a chunk port
+    /// declare a negative address, "interpreted as offset from the back of the
+    /// chunk". Baumer's HXG20 reads `ChunkImageLength` at `-4`. A hex literal
+    /// keeps its bit pattern, so `0xFFFFFFFFFFFFFFFC` is `-4` too.
+    Fixed(i64),
     /// `<pAddress>` — an offset read from another node at runtime.
     Node(String),
     /// `<pIndex>` — an index read from another node, scaled by a stride.
@@ -315,11 +329,12 @@ pub enum IndexOffset {
 }
 
 impl Addressing {
-    /// A plain register at a literal address.
-    pub fn fixed(address: u64, len: u32) -> Self {
+    /// A plain device register at a literal address.
+    pub fn fixed(address: i64, len: u32) -> Self {
         Addressing::Sum {
             terms: vec![AddressTerm::Fixed(address)],
             len,
+            port: None,
         }
     }
 
@@ -327,6 +342,13 @@ impl Addressing {
     pub fn byte_len(&self) -> u32 {
         match self {
             Addressing::Sum { len, .. } => *len,
+        }
+    }
+
+    /// The `<pPort>` the address is relative to; `None` means the device.
+    pub fn port(&self) -> Option<&str> {
+        match self {
+            Addressing::Sum { port, .. } => port.as_deref(),
         }
     }
 
@@ -655,11 +677,6 @@ pub struct RegisterDecl {
     pub addressing: Addressing,
     /// Access privileges. An absent `<AccessMode>` means read-only.
     pub access: AccessMode,
-    /// `<pPort>` target, verbatim; `None` when the element was absent.
-    ///
-    /// Anything other than `None` or `"Device"` is not routed yet — see GA-12.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<String>,
     /// Predicate refs gating implementation / availability / lock state.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
     pub predicates: PredicateRefs,
@@ -908,6 +925,41 @@ pub struct SkippedNode {
     pub error: String,
 }
 
+/// What a `<Port>` gives access to.
+///
+/// GenICam Standard v2.1.1 §2.8.16: a port "is just a proxy that forwards Read
+/// and Write calls to the transport layer". One with a `<ChunkID>` "does not
+/// give access to a real device, but rather to the chunk of data residing in
+/// memory"; one with an `<EventID>` likewise to the data an event message
+/// carries. The ids are hexadecimal numbers written without a `0x`: FLIR's
+/// `TimestampPort` is `<ChunkID>0508000E</ChunkID>`, its
+/// `EventExposureEndPort` `<EventID>9C43</EventID>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum PortKind {
+    /// The device's own register space.
+    Device,
+    /// One chunk of a stream buffer, found by its chunk ID.
+    Chunk {
+        /// `<ChunkID>`.
+        chunk_id: u64,
+    },
+    /// One event message, found by its event ID.
+    Event {
+        /// `<EventID>`.
+        event_id: u64,
+    },
+}
+
+/// A `<Port>` declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortDecl {
+    /// Port name, as `<pPort>` elements refer to it.
+    pub name: String,
+    /// What the port reads.
+    pub kind: PortKind,
+}
+
 /// Full XML model describing the GenICam schema version and all declared nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XmlModel {
@@ -915,6 +967,9 @@ pub struct XmlModel {
     pub version: String,
     /// Flat list of node declarations present in the document.
     pub nodes: Vec<NodeDecl>,
+    /// The `<Port>` declarations, in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortDecl>,
     /// Node elements that failed to parse and were skipped. Empty for a clean
     /// document.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1085,6 +1140,29 @@ fn parse_isolated_node(element: &str) -> Result<Vec<NodeDecl>, XmlError> {
     }
 }
 
+/// Parse one `<Port>` element in isolation, as [`parse_isolated_node`] does
+/// for a node.
+fn parse_isolated_port(element: &str) -> Result<PortDecl, XmlError> {
+    let mut reader = Reader::from_str(element);
+    reader.config_mut().trim_text(true);
+    reader.config_mut().allow_dangling_amp = true;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let start = e.into_owned();
+                return parse_port(&mut reader, start);
+            }
+            Ok(Event::Empty(e)) => return parse_port_empty(&e),
+            Ok(Event::Eof) => {
+                return Err(XmlError::Invalid("port element is empty".into()));
+            }
+            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            _ => {}
+        }
+    }
+}
+
 /// Parse a GenICam XML document into an [`XmlModel`].
 ///
 /// The parser only understands a practical subset of the schema. Unknown tags
@@ -1105,6 +1183,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
     let mut buf = Vec::new();
     let mut version = String::from("0.0.0");
     let mut nodes = Vec::new();
+    let mut ports = Vec::new();
     let mut skipped = Vec::new();
 
     loop {
@@ -1121,8 +1200,34 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     // let child events surface in the next loop iterations.
                 }
                 "Port" => {
-                    // Port nodes are transport-level abstractions; skip them.
-                    skip_element(&mut reader, e.name().as_ref())?;
+                    let name = attribute_value(e, "Name")?;
+                    reader
+                        .read_to_end(QName("Port"))
+                        .map_err(|err| XmlError::Xml(err.to_string()))?;
+                    let element = xml
+                        .get(element_start..reader.buffer_position() as usize)
+                        .ok_or_else(|| {
+                            XmlError::Invalid(format!(
+                                "reader offset {element_start}..{} is not a character \
+                                 boundary in the document",
+                                reader.buffer_position()
+                            ))
+                        });
+                    match element.and_then(parse_isolated_port) {
+                        Ok(port) => ports.push(port),
+                        Err(err) => {
+                            tracing::warn!(
+                                port = name.as_deref().unwrap_or("<unnamed>"),
+                                error = %err,
+                                "skipping unparsable port"
+                            );
+                            skipped.push(SkippedNode {
+                                tag: "Port".to_string(),
+                                name,
+                                error: err.to_string(),
+                            });
+                        }
+                    }
                 }
                 tag if is_node_tag(tag) => {
                     let tag = tag.to_owned();
@@ -1191,9 +1296,15 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     let node = parse_category_empty(e)?;
                     nodes.push(node);
                 }
-                // Same transport-level abstraction the Start arm skips; four
-                // corpus documents declare it as `<Port Name="Device"/>`.
-                "Port" => {}
+                // Four corpus documents declare `<Port Name="Device"/>`.
+                "Port" => match parse_port_empty(e) {
+                    Ok(port) => ports.push(port),
+                    Err(err) => skipped.push(SkippedNode {
+                        tag: "Port".to_string(),
+                        name: None,
+                        error: err.to_string(),
+                    }),
+                },
                 tag => {
                     if let Some(record) = unknown_node(tag, e)? {
                         skipped.push(record);
@@ -1218,6 +1329,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
     Ok(XmlModel {
         version,
         nodes,
+        ports,
         skipped,
     })
 }
@@ -1574,7 +1686,7 @@ mod tests {
             } => {
                 assert_eq!(name, "Gain");
                 match addressing {
-                    Some(Addressing::Sum { terms, len }) => {
+                    Some(Addressing::Sum { terms, len, .. }) => {
                         assert_eq!(
                             terms,
                             &[AddressTerm::Node("RegAddr".into()), AddressTerm::Fixed(0x8),]
@@ -1648,7 +1760,7 @@ mod tests {
         for node in &model.nodes {
             match node {
                 NodeDecl::Integer { addressing, .. } => match addressing {
-                    Some(Addressing::Sum { terms, len }) => {
+                    Some(Addressing::Sum { terms, len, .. }) => {
                         assert_eq!(
                             terms,
                             &[
@@ -2548,5 +2660,119 @@ mod tests {
         );
         assert!(model.skipped.is_empty(), "{:?}", model.skipped);
         assert!(invalidators_of(&model.nodes[0]).is_empty());
+    }
+
+    /// GA-12: `<pPort>` is read on every register-backed node, and `<Port>`
+    /// declarations say what each port reads. Shapes from the corpus: FLIR's
+    /// chunk and event ports, Baumer's negative chunk address, Basler's
+    /// `<MaskedIntReg>` on a chunk port, scanCONTROL's `<Register>` and
+    /// `<StringReg>` on chunk ports.
+    #[test]
+    fn ports_and_the_registers_on_them() {
+        let model = parse(
+            r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                 <Port Name="Device"/>
+                 <Port Name="TimestampPort"><ChunkID>0508000E</ChunkID></Port>
+                 <Port Name="EventExposureEndPort" NameSpace="Custom">
+                   <ToolTip>Exposure end</ToolTip><EventID>9C43</EventID>
+                 </Port>
+                 <IntReg Name="Ts"><Address>0x0</Address><Length>8</Length><pPort>TimestampPort</pPort></IntReg>
+                 <MaskedIntReg Name="Masked"><Address>0x4</Address><Length>4</Length><pPort>TimestampPort</pPort><LSB>7</LSB><MSB>0</MSB></MaskedIntReg>
+                 <FloatReg Name="Exposure"><Address>0x0</Address><Length>4</Length><pPort>TimestampPort</pPort></FloatReg>
+                 <StringReg Name="Message"><Address>0x20</Address><Length>32</Length><pPort>EventExposureEndPort</pPort></StringReg>
+                 <Register Name="Results"><Address>0x0</Address><Length>104</Length><pPort>TimestampPort</pPort></Register>
+                 <IntReg Name="Length"><Address>-4</Address><Length>4</Length><pPort>TimestampPort</pPort></IntReg>
+                 <StructReg Comment="Status">
+                   <Address>0x8</Address><Length>4</Length><pPort>EventExposureEndPort</pPort>
+                   <StructEntry Name="Flag"><Bit>0</Bit></StructEntry>
+                 </StructReg>
+                 <IntReg Name="OnDevice"><Address>0x100</Address><Length>4</Length></IntReg>
+               </RegisterDescription>"#,
+        )
+        .expect("parse");
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        assert_eq!(
+            model.ports,
+            vec![
+                PortDecl {
+                    name: "Device".into(),
+                    kind: PortKind::Device
+                },
+                PortDecl {
+                    name: "TimestampPort".into(),
+                    kind: PortKind::Chunk {
+                        chunk_id: 0x0508_000E
+                    }
+                },
+                PortDecl {
+                    name: "EventExposureEndPort".into(),
+                    kind: PortKind::Event { event_id: 0x9C43 }
+                },
+            ]
+        );
+        let port_of = |name: &str| -> Option<String> {
+            let node = model.nodes.iter().find(|n| n.name() == name).expect(name);
+            let addressing = match node {
+                NodeDecl::Integer { addressing, .. } | NodeDecl::Float { addressing, .. } => {
+                    addressing.clone().expect("addressed")
+                }
+                NodeDecl::String(decl) => decl.addressing.clone(),
+                NodeDecl::Register(decl) => decl.addressing.clone(),
+                other => panic!("unexpected {other:?}"),
+            };
+            addressing.port().map(str::to_string)
+        };
+        for name in ["Ts", "Masked", "Exposure", "Results", "Length"] {
+            assert_eq!(port_of(name).as_deref(), Some("TimestampPort"), "{name}");
+        }
+        for name in ["Message", "Flag"] {
+            assert_eq!(
+                port_of(name).as_deref(),
+                Some("EventExposureEndPort"),
+                "{name}"
+            );
+        }
+        assert_eq!(port_of("OnDevice"), None);
+        match model.nodes.iter().find(|n| n.name() == "Length") {
+            Some(NodeDecl::Integer {
+                addressing: Some(Addressing::Sum { terms, .. }),
+                ..
+            }) => assert_eq!(terms, &[AddressTerm::Fixed(-4)]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// What a port cannot be is recorded, not guessed: a `<pChunkID>` (no
+    /// corpus document uses one) and a port claiming to be both kinds.
+    #[test]
+    fn unsupported_ports_are_skipped_and_say_why() {
+        let model = parse(
+            r#"<RegisterDescription>
+                 <Port Name="Indirect"><pChunkID>ChunkIdNode</pChunkID></Port>
+                 <Port Name="Both"><ChunkID>1</ChunkID><EventID>2</EventID></Port>
+                 <Port Name="NotHex"><ChunkID>xyz</ChunkID></Port>
+               </RegisterDescription>"#,
+        )
+        .expect("parse");
+        assert!(model.ports.is_empty(), "{:?}", model.ports);
+        let reasons: Vec<(&str, &str)> = model
+            .skipped
+            .iter()
+            .map(|s| (s.name.as_deref().unwrap_or(""), s.error.as_str()))
+            .collect();
+        assert_eq!(reasons.len(), 3, "{reasons:?}");
+        assert!(reasons[0].0 == "Indirect" && reasons[0].1.contains("<pChunkID>"));
+        assert!(reasons[1].0 == "Both" && reasons[1].1.contains("both"));
+        assert!(reasons[2].0 == "NotHex" && reasons[2].1.contains("hexadecimal"));
+    }
+
+    /// A hex address keeps its bit pattern: device addresses above 2^31 stay
+    /// positive, and a full-width pattern is the negative number it spells.
+    #[test]
+    fn addresses_parse_signed() {
+        assert_eq!(util::parse_address("-4").expect("dec"), -4);
+        assert_eq!(util::parse_address("0xFFFFF0F0").expect("hex"), 0xFFFF_F0F0);
+        assert_eq!(util::parse_address("0xFFFFFFFFFFFFFFFC").expect("hex"), -4);
+        assert!(util::parse_address("-0x4").is_err());
     }
 }

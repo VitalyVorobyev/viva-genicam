@@ -17,6 +17,13 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
+
+[dev-dependencies]
+# The corpus test finds port-bound registers with a reader of its own, so it
+# can disagree with `viva-genapi-xml` about which registers those are.
+quick-xml = { workspace = true }
+bytes = { workspace = true }

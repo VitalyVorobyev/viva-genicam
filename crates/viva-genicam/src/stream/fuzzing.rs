@@ -30,5 +30,11 @@ pub fn fuzz_assemble(packet_size: u32, payload_size: Option<usize>, datagrams: &
         snapshot.frames_unsupported as usize + out.len() <= datagrams.len(),
         "more blocks than datagrams"
     );
-    out.len()
+    let delivered = out.len();
+    // Splitting a block into its image and chunks reads the payload from its
+    // end (TC-06); it must not panic on anything a block can hold.
+    for block in out {
+        let _ = super::classify_completed_block(block);
+    }
+    delivered
 }

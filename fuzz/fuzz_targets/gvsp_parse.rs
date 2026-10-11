@@ -15,7 +15,10 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(bytes.len(), data.len() - packet.header.header_len);
         }
         GvspContent::Trailer(trailer) => {
-            assert!(trailer.chunk_data.len() <= data.len());
+            assert_eq!(
+                trailer.chunk_layout_id.is_some(),
+                trailer.chunk_payload_length.is_some()
+            );
         }
         _ => {}
     }

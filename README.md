@@ -36,7 +36,7 @@ If your camera hits something, [open an issue](https://github.com/VitalyVorobyev
 - **Streaming** -- GigE: a GVSP receive thread per stream, tolerant of reordering and extended IDs, counting every frame's fate, plus raw capture from event-vision cameras; U3V: async frame iterator over USB bulk reads
 - **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
-- **Time & chunks** -- map device timestamps to host time; parse chunk data (timestamp, exposure, gain)
+- **Time, chunks & events** -- map device timestamps to host time; read chunk and event features (timestamp, exposure, frame id, ...) through the camera's own XML
 - **Service bridge** -- expose cameras over [Zenoh](https://zenoh.io/) for Viva Studio (the desktop GUI in `studio/`)
 - **No hardware required** -- built-in fake cameras (`viva-fake-gige`, `viva-fake-u3v`) for testing and demos
 

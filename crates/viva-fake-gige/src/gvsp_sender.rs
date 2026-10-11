@@ -12,9 +12,13 @@ use tracing::{debug, info, trace, warn};
 
 use crate::gvsp::{
     BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketKind,
-    PacketScript, block_datagrams, image_size, interleave,
+    PacketScript, block_datagrams, chunk_payload, image_size, interleave,
 };
-use crate::registers::RegisterMap;
+use crate::registers::{
+    CHUNK_ID_EXPOSURE_TIME, CHUNK_ID_FRAME_ID, CHUNK_ID_IMAGE, CHUNK_ID_IMAGE_INFO,
+    CHUNK_ID_TIMESTAMP, CHUNK_SELECTOR_EXPOSURE_TIME, CHUNK_SELECTOR_FRAME_ID,
+    CHUNK_SELECTOR_IMAGE_INFO, CHUNK_SELECTOR_TIMESTAMP, EVENT_EXPOSURE_END, RegisterMap,
+};
 use crate::resend::{Retention, StreamPath};
 
 /// IPv4 header size counted by `GevSCPSPacketSize` per the GigE Vision spec.
@@ -26,6 +30,8 @@ const UDP_HEADER_SIZE: usize = 8;
 const GVCP_CMD_KEY: u8 = 0x42;
 /// GVCP `EVENT_CMD` opcode.
 const EVENT_CMD: u16 = 0x00C0;
+/// GVCP `EVENTDATA_CMD` opcode: one event followed by device data.
+const EVENTDATA_CMD: u16 = 0x00C2;
 /// `GEV_EVENT_START_OF_TRANSFER`, emitted as each frame begins.
 const GEV_EVENT_START_OF_TRANSFER: u16 = 0x0005;
 /// Size of one 16-bit-block-id event entry.
@@ -123,17 +129,27 @@ pub(crate) async fn run(
                 // for *this* event and the message channel has a destination.
                 // What the controller selected most recently is irrelevant —
                 // enabling a second event must not silence this one.
-                let event_dest = if store.event_notification_on(GEV_EVENT_START_OF_TRANSFER)
-                    && store.message_dest_port() != 0
-                    && store.message_dest_ip() != Ipv4Addr::UNSPECIFIED
-                {
-                    Some(SocketAddr::new(
-                        std::net::IpAddr::V4(store.message_dest_ip()),
-                        store.message_dest_port(),
-                    ))
-                } else {
-                    None
-                };
+                let message_dest = (store.message_dest_port() != 0
+                    && store.message_dest_ip() != Ipv4Addr::UNSPECIFIED)
+                    .then(|| {
+                        SocketAddr::new(
+                            std::net::IpAddr::V4(store.message_dest_ip()),
+                            store.message_dest_port(),
+                        )
+                    });
+                let event_dest = message_dest
+                    .filter(|_| store.event_notification_on(GEV_EVENT_START_OF_TRANSFER));
+                let exposure_end_dest =
+                    message_dest.filter(|_| store.event_notification_on(EVENT_EXPOSURE_END));
+                let chunks_enabled = [
+                    CHUNK_SELECTOR_TIMESTAMP,
+                    CHUNK_SELECTOR_EXPOSURE_TIME,
+                    CHUNK_SELECTOR_FRAME_ID,
+                    CHUNK_SELECTOR_IMAGE_INFO,
+                ]
+                .into_iter()
+                .filter(|selector| store.chunk_enabled(*selector))
+                .collect();
                 FrameConfig {
                     dest_ip: store.stream_dest_ip(),
                     dest_port: store.stream_dest_port(),
@@ -146,8 +162,10 @@ pub(crate) async fn run(
                     height: store.height(),
                     pixel_format: store.pixel_format_code(),
                     chunk_active: store.chunk_mode_active(),
+                    chunks_enabled,
                     exposure_time: store.exposure_time(),
                     event_dest,
+                    exposure_end_dest,
                     max_on_wire: store.max_on_wire(),
                 }
             };
@@ -209,6 +227,26 @@ pub(crate) async fn run(
                         spoofed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+            }
+
+            // ExposureEnd: the exposure is over before its transfer starts.
+            // An EVENTDATA carrying the frame id, timestamped like the
+            // block's leader, so a test can tie the two together.
+            if let Some(dest) = config.exposure_end_dest {
+                let timestamp = datagrams
+                    .iter()
+                    .find(|d| d.kind == PacketKind::Leader && d.block_id == first)
+                    .and_then(|leader| leader_timestamp(&leader.bytes, options.extended_ids))
+                    .unwrap_or_default();
+                let event = build_eventdata(
+                    request_id,
+                    EVENT_EXPOSURE_END,
+                    first as u16,
+                    timestamp,
+                    &first.to_le_bytes(),
+                );
+                let _ = socket.send_to(&event, dest).await;
+                request_id = request_id.wrapping_add(1).max(1);
             }
 
             // GEV_EVENT_START_OF_TRANSFER precedes the leader, as on a real
@@ -275,8 +313,11 @@ struct FrameConfig {
     height: u32,
     pixel_format: u32,
     chunk_active: bool,
+    /// `ChunkSelector` values whose `ChunkEnable` is on.
+    chunks_enabled: Vec<u32>,
     exposure_time: f64,
     event_dest: Option<SocketAddr>,
+    exposure_end_dest: Option<SocketAddr>,
     max_on_wire: Option<u32>,
 }
 
@@ -323,6 +364,11 @@ fn build_block(
         timestamp: clock_origin.elapsed().as_nanos() as u64,
         trailer_status: 0,
         size_y: config.height,
+        // Changes whenever the set of chunks does, as the layout ID must.
+        chunk_layout_id: config
+            .chunks_enabled
+            .iter()
+            .fold(0, |mask, selector| mask | 1 << selector),
     };
     if spec.payload_stride() == 0 {
         return None;
@@ -334,12 +380,12 @@ fn build_block(
         size,
         block_id as u16,
     );
-    let chunk_data = if config.chunk_active {
-        build_chunk_data(spec.timestamp, config.exposure_time)
+    let data = if config.chunk_active {
+        chunk_block(config, &spec, &image)
     } else {
-        Vec::new()
+        image
     };
-    Some(block_datagrams(&spec, &image, &chunk_data))
+    Some(block_datagrams(&spec, &data))
 }
 
 /// Send one GVSP datagram, unless a configured path ceiling would have
@@ -467,23 +513,72 @@ fn build_event(request_id: u16, event_id: u16, block_id: u16, timestamp: u64) ->
     buf.to_vec()
 }
 
-/// Build chunk data blocks: Timestamp (0x0001) + ExposureTime (0x1002).
-///
-/// Each chunk: [id: u16][reserved: u16][length: u32][data...]
-fn build_chunk_data(timestamp: u64, exposure_time: f64) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(32);
+/// An image with the enabled chunks after it, in the layout a GigE Vision
+/// device sends with payload type `0x4001`: the image as the first chunk,
+/// then each value's chunk, every chunk followed by its tag
+/// ([`chunk_payload`]). The values are encoded as this fake's XML declares
+/// them — little-endian timestamp, exposure and frame id; big-endian image
+/// info, whose last four bytes are the length `ChunkImageLength` reads at
+/// address `-4`.
+fn chunk_block(config: &FrameConfig, spec: &BlockSpec, image: &[u8]) -> Vec<u8> {
+    let mut values: Vec<(u32, Vec<u8>)> = Vec::new();
+    for selector in &config.chunks_enabled {
+        match *selector {
+            CHUNK_SELECTOR_TIMESTAMP => {
+                values.push((CHUNK_ID_TIMESTAMP, spec.timestamp.to_le_bytes().to_vec()));
+            }
+            CHUNK_SELECTOR_EXPOSURE_TIME => values.push((
+                CHUNK_ID_EXPOSURE_TIME,
+                config.exposure_time.to_le_bytes().to_vec(),
+            )),
+            CHUNK_SELECTOR_FRAME_ID => {
+                values.push((CHUNK_ID_FRAME_ID, spec.block_id.to_le_bytes().to_vec()));
+            }
+            CHUNK_SELECTOR_IMAGE_INFO => {
+                let mut info = Vec::with_capacity(16);
+                info.extend_from_slice(&spec.width.to_be_bytes());
+                info.extend_from_slice(&spec.height.to_be_bytes());
+                info.extend_from_slice(&0u32.to_be_bytes()); // reserved
+                info.extend_from_slice(&(image.len() as u32).to_be_bytes());
+                values.push((CHUNK_ID_IMAGE_INFO, info));
+            }
+            _ => {}
+        }
+    }
+    let mut chunks: Vec<(u32, &[u8])> = vec![(CHUNK_ID_IMAGE, image)];
+    chunks.extend(values.iter().map(|(id, data)| (*id, data.as_slice())));
+    chunk_payload(&chunks)
+}
 
-    // Chunk: Timestamp (id=0x0001, 8 bytes LE)
-    buf.put_u16(0x0001); // chunk id
+/// The timestamp a leader datagram carries: 8 bytes after the reserved word
+/// and the payload type, past an 8- or 20-byte header.
+fn leader_timestamp(leader: &[u8], extended_ids: bool) -> Option<u64> {
+    let at = if extended_ids { 20 } else { 8 } + 4;
+    let bytes: [u8; 8] = leader.get(at..at + 8)?.try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
+}
+
+/// Build a GVCP `EVENTDATA_CMD`: one 16-byte event entry — reserved, event
+/// id, stream channel, block id, timestamp — followed by device data, written
+/// out from the GigE Vision field table with this crate's own constants.
+fn build_eventdata(
+    request_id: u16,
+    event_id: u16,
+    block_id: u16,
+    timestamp: u64,
+    data: &[u8],
+) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(8 + EVENT_ENTRY_LEN as usize + data.len());
+    buf.put_u8(GVCP_CMD_KEY);
+    buf.put_u8(0); // no acknowledgement requested, 16-bit block ids
+    buf.put_u16(EVENTDATA_CMD);
+    buf.put_u16(EVENT_ENTRY_LEN + data.len() as u16);
+    buf.put_u16(request_id);
     buf.put_u16(0); // reserved
-    buf.put_u32(8); // data length
-    buf.put_u64_le(timestamp); // timestamp value (little-endian per spec)
-
-    // Chunk: ExposureTime (id=0x1002, 8 bytes LE)
-    buf.put_u16(0x1002); // chunk id
-    buf.put_u16(0); // reserved
-    buf.put_u32(8); // data length
-    buf.put_f64_le(exposure_time); // exposure time value (little-endian)
-
+    buf.put_u16(event_id);
+    buf.put_u16(0); // stream channel index
+    buf.put_u16(block_id);
+    buf.put_u64(timestamp);
+    buf.extend_from_slice(data);
     buf.to_vec()
 }

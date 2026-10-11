@@ -96,7 +96,18 @@ delegation: Integer/Float/Enum/Boolean/Command nodes can delegate to `IntReg`
 or other backing nodes. The `Node` enum covers Integer, Float, Enum, Boolean,
 Command, Category, SwissKnife, Converter, IntConverter, String, Register.
 Introspection API (`node_names()`, `dependents()`, `categories()`,
-`kind_name()`, `access_mode()`) serves external consumers such as the studio.
+`kind_name()`, `access_mode()`, `ports()`, `port_features()`) serves external
+consumers such as the studio.
+
+**Ports** (`viva-genapi`) — every register reaches its bytes through the
+`<Port>` its `<pPort>` names ([ADR-0026](adrs/adr0026-genapi-ports-chunks-events.md)).
+The device port is the `RegisterIo`. A chunk port (`<ChunkID>`) reads one chunk
+of the frame attached with `NodeMap::attach_chunks`, an event port
+(`<EventID>`) the event attached with `attach_event`; their addresses count from
+the start of that chunk or event, and a negative chunk address from its end.
+Nothing attached is `NotAttached`, never a device read; writes are refused;
+attaching invalidates everything that depends on the port. The facade's
+`Camera::with_chunks` / `with_event` attach, read and detach.
 
 **`GigeDevice`** (`viva-gige`) — async UDP wrapper for GVCP discovery/control
 and GVSP streaming. Uses the proper GVCP wire format (0x42 key byte, 4-byte
@@ -131,7 +142,10 @@ dependent cached values via the NodeMap dependency graph.
 → `viva-gige` parses each datagram in place, the receive engine's assembler
 places it in its block's buffer → `Frame` with block id, status and
 pixel-format metadata from `viva-pfnc`, counted in `StreamStats` → application
-via `FrameStream`/`U3vFrameStream`.
+via `FrameStream`/`U3vFrameStream`. A block that carries chunks is split into
+the image and its chunks by ID (`viva_gige::gvsp::parse_chunks`, read from the
+end); their values are read through the nodemap's chunk ports, never decoded
+here.
 
 **Service path** — camera → `viva-service`/`viva-service-u3v` (`DeviceHandle`)
 → Zenoh (types from `viva-zenoh-api`) → studio or other subscribers. The

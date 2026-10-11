@@ -13,16 +13,28 @@ use crate::GenicamError;
 use crate::time::TimeSync;
 
 /// Public representation of a GigE Vision event.
+///
+/// Its features — `EventExposureEndTimestamp`, `EventExposureEndFrameID` and
+/// the rest — are read through GenApi from the port whose `<EventID>` matches
+/// [`Event::id`]: see [`Camera::with_event`](crate::Camera::with_event).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
-    /// Raw event identifier reported by the device.
+    /// Event identifier reported by the device.
     pub id: u16,
+    /// Stream channel the event concerns, when it concerns one.
+    pub stream_channel: u16,
+    /// GVSP block the event concerns: 16 bits widened, or the 64-bit
+    /// extended id.
+    pub block_id: u64,
     /// Device timestamp associated with the event (ticks).
     pub ts_dev: u64,
     /// Host timestamp mapped from the device ticks when synchronisation is available.
     pub ts_host: SystemTime,
-    /// Raw payload bytes following the event header.
+    /// Event data following the event header; empty for an `EVENT_CMD`.
     pub data: Bytes,
+    /// The whole event as the device sent it, header included: what the
+    /// camera's event port addresses.
+    pub raw: Bytes,
 }
 
 /// Asynchronous stream of events delivered over the GVCP message channel.
@@ -72,9 +84,12 @@ impl EventStream {
         };
         Event {
             id: packet.event_id,
+            stream_channel: packet.stream_channel,
+            block_id: packet.block_id,
             ts_dev: packet.timestamp_dev,
             ts_host,
             data: packet.payload,
+            raw: packet.raw,
         }
     }
 }
@@ -129,13 +144,16 @@ mod tests {
             src: SocketAddr::from(([127, 0, 0, 1], 4000)),
             event_id: 0x1000,
             timestamp_dev: 42,
-            stream_channel: 0,
-            block_id: 0,
+            stream_channel: 3,
+            block_id: 9,
             payload: Bytes::from_static(b"abcd"),
+            raw: Bytes::from_static(b"0123456789abcdefabcd"),
         };
         let event = EventStream::map_packet(packet.clone(), None);
         assert_eq!(event.id, packet.event_id);
         assert_eq!(event.ts_dev, packet.timestamp_dev);
         assert_eq!(event.data, packet.payload);
+        assert_eq!((event.stream_channel, event.block_id), (3, 9));
+        assert_eq!(event.raw, packet.raw);
     }
 }

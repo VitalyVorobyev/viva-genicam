@@ -76,6 +76,10 @@ cargo test -p viva-genicam --test keepalive_shutdown # dropping the transport ca
 cargo test -p viva-gige    --test inflight_keepalive # heartbeats during long ACK waits (ADR-0023)
 # GVSP receive engine, from scripted datagrams on ephemeral ports (no UDP 3956)
 cargo test -p viva-genicam --test gvsp_engine        # reordering, loss, resend, timeouts, counters (ADR-0025)
+# Chunk and event features through GenApi ports, from the fake's encoder (no sockets)
+cargo test -p viva-genicam --test chunk_features     # ADR-0026
+cargo test -p viva-genapi  --test ports              # port routing, attach/detach, invalidation
+cargo test -p viva-gige    --test chunk_layout       # the chunk layout, from hand-written bytes
 # USB3 Vision
 cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva-fake-u3v
 cargo test -p viva-u3v     --test gencp_conformance  # wire layouts from GenCP 1.2 and vendor XML
@@ -88,7 +92,7 @@ cargo test -p viva-genicam --test doc_links          # every relative Markdown l
 
 GVSP parsing and block assembly also have fuzz targets, in `fuzz/` (outside
 the workspace; needs nightly and `cargo install cargo-fuzz`):
-`cargo +nightly fuzz run gvsp_parse` or `gvsp_assemble`.
+`cargo +nightly fuzz run gvsp_parse`, `gvsp_assemble` or `chunk_parse`.
 
 Every fake-camera suite binds UDP port 3956, so two test processes running at
 once — in two checkouts, say — interfere and fail spuriously. Run them one at a

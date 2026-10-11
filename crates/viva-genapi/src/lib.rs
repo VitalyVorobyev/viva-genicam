@@ -12,14 +12,14 @@ pub mod swissknife;
 
 pub use error::GenApiError;
 pub use io::{NullIo, RegisterIo};
-pub use nodemap::NodeMap;
+pub use nodemap::{ChunkData, NodeMap};
 pub use nodes::{
     BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, FormulaVar, IntegerNode, Node,
     NodeMeta, RegisterNode, Representation, SkNode, Visibility,
 };
 pub use state::{FeatureState, FeatureValue, ValueRange};
 pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
-pub use viva_genapi_xml::{AccessMode, SkOutput, SkippedNode};
+pub use viva_genapi_xml::{AccessMode, PortKind, SkOutput, SkippedNode};
 
 #[cfg(test)]
 mod tests {
@@ -314,6 +314,13 @@ mod tests {
                 <AccessMode>RO</AccessMode>
                 <pPort>Chunk4007</pPort>
             </Register>
+            <Port Name="Chunk4007"><ChunkID>00004007</ChunkID></Port>
+            <Register Name="OnAnUndeclaredPort">
+                <Address>0x0</Address>
+                <Length>4</Length>
+                <AccessMode>RO</AccessMode>
+                <pPort>SerialPort</pPort>
+            </Register>
             <Register Name="DynamicBlock">
                 <Address>0x4000</Address>
                 <pLength>BlockLength</pLength>
@@ -380,15 +387,16 @@ mod tests {
         );
     }
 
-    /// A chunk-port register is listed but cannot be read.
+    /// A chunk-port register reads its chunk, never the device.
     ///
-    /// Its address is relative to a port we do not route. Reading it through
-    /// the device port would not error — it would return whatever lives at
-    /// that address, which for a scanCONTROL's `0x0` is the GVCP bootstrap
-    /// area. Silent wrong answers are what ADR-0018 exists to refuse (GA-12).
+    /// Its address is relative to the chunk (the scanCONTROL's three
+    /// `Chunk*Results` registers all sit at `0x0` of chunks `0x4007`–`0x4009`).
+    /// Reading it through the device port would not error — it would return
+    /// the GVCP bootstrap area. Silent wrong answers are what ADR-0018 exists
+    /// to refuse (GA-12).
     #[test]
-    fn register_on_a_non_device_port_is_listed_but_not_readable() {
-        let nodemap = build_register_nodemap();
+    fn register_on_a_chunk_port_reads_the_chunk_not_the_device() {
+        let mut nodemap = build_register_nodemap();
         let io = MockIo::with_registers(&[(0x0, vec![1, 2, 3, 4])]);
 
         assert!(
@@ -398,12 +406,30 @@ mod tests {
 
         let err = nodemap
             .get_register("ChunkMeasurementResults", &io)
-            .expect_err("a chunk-port register must not be read through the device port");
-        let text = err.to_string();
+            .expect_err("with no chunk attached there is nothing to read");
         assert!(
-            text.contains("Chunk4007") && text.contains("GA-12"),
-            "the error must name the port and the reason: {text}"
+            matches!(&err, GenApiError::NotAttached { port, .. } if port == "Chunk4007"),
+            "the error must name the port: {err}"
         );
+
+        nodemap.attach_chunks(
+            &[(0x4007, bytes::Bytes::from_static(&[9, 8, 7, 6, 5]))]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            nodemap
+                .get_register("ChunkMeasurementResults", &io)
+                .expect("attached chunk"),
+            vec![9, 8, 7, 6],
+            "the register reads the chunk, not device address 0x0"
+        );
+
+        // A port the document never declares is not guessed at.
+        let err = nodemap
+            .get_register("OnAnUndeclaredPort", &io)
+            .expect_err("an undeclared port is not the device");
+        assert!(err.to_string().contains("SerialPort"), "{err}");
 
         // An explicit <pPort>Device</pPort> is the device port and reads fine.
         let io = MockIo::with_registers(&[(0x3000, vec![5, 6, 7, 8])]);
@@ -463,8 +489,8 @@ mod tests {
             entry.error
         );
 
-        // The other four nodes still built.
-        assert_eq!(nodemap.node_names().count(), 4);
+        // The other five nodes still built.
+        assert_eq!(nodemap.node_names().count(), 5);
     }
 
     /// Structural elements are not features and must not be reported as lost.

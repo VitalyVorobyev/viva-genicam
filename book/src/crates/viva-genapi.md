@@ -200,6 +200,9 @@ change is a wrong answer, not a slow one.
 | `EnumValueUnknown` / `EnumNoSuchEntry` | Raw value maps to no entry, or no entry has that name |
 | `BadIndirectAddress` | `pAddress` resolved to something impossible |
 | `BitfieldOutOfRange` / `ValueTooWide` | Bitfield metadata exceeds the register, or the value exceeds the field |
+| `NotAttached { node, port }` | A chunk or event feature read with no frame or event attached to its port |
+| `PortNotWritable { node, port }` | A write to a chunk or event port, which holds data the camera sent |
+| `PortOutOfRange` | A chunk or event register reaches past the data attached to its port |
 
 ---
 

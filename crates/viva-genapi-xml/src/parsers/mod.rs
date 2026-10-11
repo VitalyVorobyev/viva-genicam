@@ -3,6 +3,7 @@
 mod control;
 mod converter;
 mod numeric;
+mod port;
 mod register;
 mod struct_reg;
 mod swissknife;
@@ -11,6 +12,7 @@ mod symbolic;
 pub use control::{missing_command_value, parse_category, parse_category_empty, parse_command};
 pub use converter::{parse_converter, parse_int_converter, parse_string};
 pub use numeric::{parse_float, parse_integer};
+pub use port::{parse_port, parse_port_empty};
 pub use register::parse_register;
 pub use struct_reg::parse_struct_reg;
 pub use swissknife::parse_swissknife;
@@ -20,11 +22,14 @@ use quick_xml::Reader;
 use quick_xml::events::BytesStart;
 
 use crate::builders::AddressingBuilder;
-use crate::util::{attribute_value, parse_u64, read_text_start};
+use crate::util::{attribute_value, parse_address, parse_u64, read_text_start};
 use crate::{IndexOffset, NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
 
 /// XML element name referencing another node that provides an address.
 pub const TAG_P_ADDRESS: &str = "pAddress";
+
+/// `<pPort>`: the port a register's address is relative to.
+pub const TAG_P_PORT: &str = "pPort";
 
 /// `<pIndex>`: an index node whose value is scaled and added to the address.
 pub const TAG_P_INDEX: &str = "pIndex";
@@ -182,7 +187,15 @@ pub fn handle_addressing_start(
     match event.name().as_ref() {
         "Address" => {
             let text = read_text_start(reader, event)?;
-            addressing.push_fixed_address(parse_u64(&text)?);
+            addressing.push_fixed_address(parse_address(&text)?);
+            Ok(true)
+        }
+        TAG_P_PORT => {
+            let text = read_text_start(reader, event)?;
+            let target = text.trim();
+            if !target.is_empty() {
+                addressing.set_port(target);
+            }
             Ok(true)
         }
         TAG_P_ADDRESS => {

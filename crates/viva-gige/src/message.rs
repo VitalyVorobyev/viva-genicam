@@ -141,11 +141,23 @@ pub struct EventPacket {
     pub block_id: u64,
     /// Event data following the entry, empty for a bare `EVENT_CMD`.
     pub payload: Bytes,
+    /// The whole event as the device sent it — the 16- or 24-byte entry, then
+    /// any data — which is what a GenApi event port addresses: every corpus
+    /// document that names an event's timestamp puts it at offset 0x8 of
+    /// this, where the 16-bit-block-id entry has it (ADR-0026).
+    pub raw: Bytes,
 }
 
 impl EventPacket {
-    /// Decode one event entry. `entry` must be at least `header.entry_size()`.
-    fn parse_entry(src: SocketAddr, header: &MessageHeader, entry: &[u8], payload: Bytes) -> Self {
+    /// Decode one event entry. `entry` must be at least `header.entry_size()`;
+    /// `raw` is the entry with any data after it.
+    fn parse_entry(
+        src: SocketAddr,
+        header: &MessageHeader,
+        entry: &[u8],
+        payload: Bytes,
+        raw: Bytes,
+    ) -> Self {
         let event_id = u16::from_be_bytes([entry[2], entry[3]]);
         let stream_channel = u16::from_be_bytes([entry[4], entry[5]]);
         let (block_id, ts_at) = if header.extended_ids {
@@ -175,6 +187,7 @@ impl EventPacket {
             stream_channel,
             block_id,
             payload,
+            raw,
         }
     }
 
@@ -196,8 +209,9 @@ impl EventPacket {
             // Packing several variable-length events into one EVENTDATA_CMD
             // needs the GEV 2.1 per-event size field, which we do not read;
             // no corpus device has been observed doing it.
-            let payload = Bytes::copy_from_slice(&body[entry_size..]);
-            vec![Self::parse_entry(src, &header, body, payload)]
+            let raw = Bytes::copy_from_slice(body);
+            let payload = raw.slice(entry_size..);
+            vec![Self::parse_entry(src, &header, body, payload, raw)]
         } else {
             if header.length % entry_size != 0 {
                 return Err(io::Error::new(
@@ -206,7 +220,10 @@ impl EventPacket {
                 ));
             }
             body.chunks_exact(entry_size)
-                .map(|entry| Self::parse_entry(src, &header, entry, Bytes::new()))
+                .map(|entry| {
+                    let raw = Bytes::copy_from_slice(entry);
+                    Self::parse_entry(src, &header, entry, Bytes::new(), raw)
+                })
                 .collect()
         };
 
@@ -378,6 +395,11 @@ mod tests {
         assert_eq!(ev.block_id, 8);
         assert_eq!(ev.timestamp_dev, 0x0002_0003_0004_0005);
         assert!(ev.payload.is_empty());
+        assert_eq!(
+            &ev.raw[..],
+            &EVENT_CMD_GOLDEN[8..],
+            "the entry, header included"
+        );
     }
 
     /// The opcode the parser used to demand. 0x000D is in the GenCP register
@@ -463,6 +485,12 @@ mod tests {
         assert_eq!(events[0].event_id, 0x0009);
         assert_eq!(events[0].block_id, 42);
         assert_eq!(&events[0].payload[..], &data);
+        assert_eq!(
+            &events[0].raw[..],
+            &buf[8..],
+            "entry and data, as the device sent them"
+        );
+        assert_eq!(&events[0].raw[16..], &data);
     }
 
     #[test]

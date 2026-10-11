@@ -12,6 +12,24 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **Chunk values come from the camera's XML.** `ChunkKind`, `ChunkValue`,
+  `ChunkMap`, `parse_chunk_bytes` and `Frame::chunk` are removed: `Frame::chunks`
+  holds the frame's chunks by ID, and `Camera::with_chunks` /
+  `Camera::chunk_features` read them as features. For an image with chunks,
+  `Frame::payload` is now the image alone. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
+- **`viva_gige::gvsp::parse_chunks` reads the GigE Vision layout**, from the end
+  of the payload, and returns a `Result`; `ChunkRaw` borrows the payload and its
+  `id` is a `u32`. `GvspTrailer` reports the chunk payload length and layout ID
+  in place of a chunk region. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
+- **A register on a chunk or event port no longer reads device memory**: with
+  no frame or event attached it fails with `GenApiError::NotAttached`, and
+  writing it fails with `PortNotWritable`. `NodeMap::register_address` refuses
+  it. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
+- **XML model** (consumed by Viva Studio): `<pPort>` is part of `Addressing`
+  (`RegisterDecl::port` moved there), `AddressTerm::Fixed` is signed, and
+  `XmlModel::ports` lists the `<Port>` declarations. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
+- **`Event` gains `stream_channel`, `block_id` and `raw`**, the event as the
+  camera sent it; `viva_gige::message::EventPacket` gains `raw`. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
 - **Commands write the value their XML declares.** `<pCommandValue>` was
   ignored, so every such command wrote `1` (19 of 38 corpus documents). On a
   Hikrobot MV-CS050 with `UserSet2` selected, `UserSetSave` overwrote user
@@ -62,6 +80,13 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- Chunk and event features read through the camera's own XML (ADR-0026):
+  `Camera::with_chunks` and `chunk_features` for a frame, `with_event` and
+  `event_features` for an event; underneath, `NodeMap::attach_chunks`,
+  `attach_event`, `ports` and `port_features`. Every register on a chunk or
+  event port reads its chunk or event at the address its XML gives, negative
+  addresses counting from the end of a chunk. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
+- The receive engine assembles chunk-data blocks (payload type `0x0004`). ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
 - `Camera::open_stream(StreamOptions)`: one call that claims control and only
   then configures the stream channel (multicast included), negotiates the
   packet size and starts the receive engine with the camera's `PayloadSize`.
@@ -142,6 +167,16 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- 518 registers on chunk and event ports in 19 vendor documents read device
+  memory at their port-relative address: `EventExposureEndTimestamp` returned
+  GVCP bootstrap bytes, and 2-byte event registers at 0x2 went out as unaligned
+  `READMEM`s — the likely cause of the `BAD_ALIGNMENT` errors on
+  [#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112), not yet
+  confirmed on that camera. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
+- Chunk data was looked for in the GVSP trailer, front to back, with 16-bit
+  IDs, and decoded from a four-entry table; it is read from the payload, from
+  the end, with the 32-bit IDs cameras declare. Baumer HXG20's
+  `ChunkImageLength`, at a negative address, now builds. ([#197](https://github.com/VitalyVorobyev/viva-genicam/pull/197))
 - A frame whose transfer took longer than 100 ms never completed: the timeout
   counted from the leader. Large frames and paced links now complete.
   ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))

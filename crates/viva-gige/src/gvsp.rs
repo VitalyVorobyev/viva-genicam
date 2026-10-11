@@ -9,9 +9,9 @@ use std::net::Ipv4Addr;
 use std::ops::RangeInclusive;
 
 use crate::nic::Iface;
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// GVSP payload type for image data. Bits 13..0 of the 16-bit field carry the
 /// type; bit 14 ([`PAYLOAD_TYPE_EXTENDED_CHUNK`]) flags extended chunk data,
@@ -22,12 +22,24 @@ pub const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
 /// Bit 14 of the payload type: the block carries extended chunk data.
 pub const PAYLOAD_TYPE_EXTENDED_CHUNK: u16 = 0x4000;
 
+/// GVSP payload type for chunk data: a block made only of chunks, whose
+/// leader carries no image geometry (`reserved | payload type | timestamp`)
+/// and whose trailer reports the payload data length where an image's
+/// reports Size Y. Layout corroborated by Wireshark's
+/// `dissect_chunk_data_leader` / `_trailer`.
+pub const PAYLOAD_TYPE_CHUNK_DATA: u16 = 0x0004;
+
 /// Bits of the payload type that name the type itself.
 const PAYLOAD_TYPE_MASK: u16 = 0x3FFF;
 
 /// Whether `payload_type` is an image, with or without extended chunk data.
 pub fn is_image_payload(payload_type: u16) -> bool {
     payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_IMAGE
+}
+
+/// Whether `payload_type` is chunk data, with or without the chunk flag.
+pub fn is_chunk_data_payload(payload_type: u16) -> bool {
+    payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_CHUNK_DATA
 }
 
 /// Whether `payload_type` flags extended chunk data (bit 14).
@@ -142,45 +154,93 @@ pub enum GvspError {
     Invalid(&'static str),
 }
 
-/// Raw GVSP chunk extracted from a payload or trailer block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChunkRaw {
-    pub id: u16,
-    pub data: Bytes,
+/// Length of a chunk tag: chunk ID and data length, 32 bits each.
+const CHUNK_TAG_LEN: usize = 8;
+
+/// One chunk of a GVSP chunk payload, borrowing the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkRaw<'a> {
+    /// Chunk ID: 32 bits, as a `<Port>`'s `<ChunkID>` names it.
+    pub id: u32,
+    /// Where the chunk's data starts in the payload.
+    pub offset: usize,
+    /// The chunk's data, without its tag.
+    pub data: &'a [u8],
 }
 
-/// Parse a chunk payload following the `[id][reserved][length][data...]` layout.
-pub fn parse_chunks(mut payload: &[u8]) -> Vec<ChunkRaw> {
+/// A chunk payload that does not tile into tagged chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ChunkError {
+    /// What remains at the front of the payload is too short for a tag.
+    #[error(
+        "{remaining} bytes remain at offset 0 of the chunk data, too few for an \
+         8-byte chunk tag"
+    )]
+    TruncatedTag {
+        /// Bytes left before the last chunk parsed.
+        remaining: usize,
+    },
+    /// A tag claims more data than precedes it.
+    #[error(
+        "chunk {id:#010x} tagged at offset {tag_offset} claims {length} bytes of data, \
+         more than the {tag_offset} before it"
+    )]
+    LengthPastStart {
+        /// The chunk ID in the tag.
+        id: u32,
+        /// Where the tag starts.
+        tag_offset: usize,
+        /// The data length it claims.
+        length: u32,
+    },
+}
+
+/// Split a GigE Vision chunk payload into its chunks, in payload order.
+///
+/// Each chunk is its data followed by an 8-byte tag — the chunk ID, then the
+/// data length, both 32-bit big-endian — so the payload can only be read from
+/// its end: the last 8 bytes are the last chunk's tag, its length says where
+/// that chunk's data begins, and the 8 bytes before that are the previous
+/// tag. With payload type `0x4001` the image is the first chunk, and the scan
+/// ends exactly at offset 0 after it.
+///
+/// The GigE Vision specification is not available to us; the layout is
+/// corroborated by aravis (`arv_buffer_get_chunk_data` walks
+/// `{u32 id; u32 size}` tags back from the received size, big-endian for
+/// GigE Vision) and by the vendor corpus's 32-bit `<ChunkID>`s such as
+/// FLIR's `0x0508000E` (ADR-0026). `payload` must end where the camera's data
+/// ends — the received length, not a buffer sized from `PayloadSize`.
+///
+/// Remote input: a tag that claims more than precedes it, or a front too
+/// short for a tag, is an error naming the offset. A zero-length chunk is a
+/// chunk; the scan still moves back by its tag, so it cannot loop.
+pub fn parse_chunks(payload: &[u8]) -> Result<Vec<ChunkRaw<'_>>, ChunkError> {
     let mut chunks = Vec::new();
-    while !payload.is_empty() {
-        if payload.len() < 8 {
-            warn!(remaining = payload.len(), "chunk header truncated");
-            break;
-        }
-        let mut cursor = payload;
-        let id = cursor.get_u16();
-        let _reserved = cursor.get_u16();
-        let length = cursor.get_u32() as usize;
-        let total = 8 + length;
-        if payload.len() < total {
-            warn!(
-                chunk_id = format_args!("{:#06x}", id),
-                len = payload.len(),
-                expected = total,
-                "chunk data truncated"
-            );
-            break;
-        }
-        let data = Bytes::copy_from_slice(&payload[8..total]);
-        debug!(
-            chunk_id = format_args!("{:#06x}", id),
-            len = length,
-            "parsed chunk"
-        );
-        chunks.push(ChunkRaw { id, data });
-        payload = &payload[total..];
+    let mut end = payload.len();
+    while end > 0 {
+        let tag_offset = end
+            .checked_sub(CHUNK_TAG_LEN)
+            .ok_or(ChunkError::TruncatedTag { remaining: end })?;
+        let tag = &payload[tag_offset..end];
+        let id = u32::from_be_bytes([tag[0], tag[1], tag[2], tag[3]]);
+        let length = u32::from_be_bytes([tag[4], tag[5], tag[6], tag[7]]);
+        let start = tag_offset
+            .checked_sub(length as usize)
+            .ok_or(ChunkError::LengthPastStart {
+                id,
+                tag_offset,
+                length,
+            })?;
+        chunks.push(ChunkRaw {
+            id,
+            offset: start,
+            data: &payload[start..tag_offset],
+        });
+        end = start;
     }
-    chunks
+    chunks.reverse();
+    Ok(chunks)
 }
 
 /// The header every GVSP packet starts with, in either layout.
@@ -243,15 +303,21 @@ pub struct GvspLeader {
     pub image: Option<ImageLeader>,
 }
 
-/// The fields of a data trailer, borrowing its chunk region.
+/// The fields of a data trailer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GvspTrailer<'a> {
+pub struct GvspTrailer {
     /// Payload type the trailer closes, chunk flag included.
     pub payload_type: u16,
-    /// Size Y: the lines the block delivered.
+    /// Size Y for an image: the lines the block delivered. For a chunk-data
+    /// block (`0x0004`) the same field is the payload data length.
     pub size_y: u32,
-    /// Bytes after the 8-byte trailer payload, if any.
-    pub chunk_data: &'a [u8],
+    /// With the chunk flag (`0x4000`), the chunk data payload length the
+    /// trailer reports after its 8 bytes; `None` without one.
+    pub chunk_payload_length: Option<u32>,
+    /// With the chunk flag, the chunk layout ID: the device changes it when
+    /// the set or position of chunks changes, so a receiver may cache a
+    /// layout while it holds.
+    pub chunk_layout_id: Option<u32>,
 }
 
 /// What a GVSP packet carries after its header.
@@ -263,7 +329,7 @@ pub enum GvspContent<'a> {
     /// Generic data payload, borrowed from the datagram.
     Payload(&'a [u8]),
     /// Data trailer.
-    Trailer(GvspTrailer<'a>),
+    Trailer(GvspTrailer),
     /// A packet format this crate does not assemble: all-in (`0x04`),
     /// H.264 (`0x05`), multi-zone (`0x06`), multipart (`0x07`), GenDC (`0x08`)
     /// or anything else. Kept as a value so a receiver can count it rather than
@@ -403,28 +469,29 @@ fn parse_leader(body: &[u8]) -> Result<GvspLeader, GvspError> {
 
 /// Parse a data trailer's payload.
 ///
-/// | Offset | Size | Field        |
-/// |--------|------|--------------|
-/// |      0 |    2 | Reserved     |
-/// |      2 |    2 | Payload type |
-/// |      4 |    4 | Size Y       |
-/// |      8 |    * | Chunk data   |
+/// | Offset | Size | Field                                         |
+/// |--------|------|-----------------------------------------------|
+/// |      0 |    2 | Reserved                                      |
+/// |      2 |    2 | Payload type                                  |
+/// |      4 |    4 | Size Y (image), payload data length (`0x0004`)|
+/// |      8 |    4 | Chunk data payload length, with `0x4000`      |
+/// |     12 |    4 | Chunk layout ID, with `0x4000`                |
 ///
-/// Chunk data begins at offset **8**. Reading it from offset 2 — as this
-/// parser once did — feeds `payload_type` and `size_y` to the chunk parser
-/// as if they were a chunk header, which is where the per-frame
-/// `chunk header truncated remaining=6` came from: those six bytes *are* the
-/// two fields.
+/// Chunk data travels in the data packets, not here: with the chunk flag set
+/// the trailer only adds the two fields at 8 and 12. Those 8 bytes used to be
+/// handed to the chunk parser as a "chunk region" (TC-06). The layout is
+/// corroborated by Wireshark's `dissect_packet_trailer` and
+/// `dissect_extra_chunk_info`; the specification is not available to us.
 ///
 /// `status` comes from the packet header, not from here; the first two bytes
 /// of this payload are reserved and carry no status.
-fn parse_trailer(block_id: u64, body: &[u8]) -> Result<GvspTrailer<'_>, GvspError> {
+fn parse_trailer(block_id: u64, body: &[u8]) -> Result<GvspTrailer, GvspError> {
     if body.len() < 2 {
         return Err(GvspError::Invalid("trailer truncated"));
     }
     // The specification fixes this payload at 8 bytes. A device that sends
-    // fewer still gets its frame delivered — we simply have no chunk region
-    // to report — rather than having the short read treated as chunk data.
+    // fewer still gets its frame delivered, with the fields it left out
+    // reported as zero.
     if body.len() < 8 {
         debug!(
             block_id,
@@ -434,16 +501,24 @@ fn parse_trailer(block_id: u64, body: &[u8]) -> Result<GvspTrailer<'_>, GvspErro
         return Ok(GvspTrailer {
             payload_type: 0,
             size_y: 0,
-            chunk_data: &[],
+            chunk_payload_length: None,
+            chunk_layout_id: None,
         });
     }
     let mut cursor = &body[2..];
     let payload_type = cursor.get_u16();
     let size_y = cursor.get_u32();
+    let (chunk_payload_length, chunk_layout_id) =
+        if has_extended_chunks(payload_type) && cursor.len() >= 8 {
+            (Some(cursor.get_u32()), Some(cursor.get_u32()))
+        } else {
+            (None, None)
+        };
     Ok(GvspTrailer {
         payload_type,
         size_y,
-        chunk_data: &body[8..],
+        chunk_payload_length,
+        chunk_layout_id,
     })
 }
 
@@ -654,7 +729,7 @@ mod tests {
         assert_eq!(packet.header.status, 0);
         assert_eq!(trailer.payload_type, PAYLOAD_TYPE_IMAGE);
         assert_eq!(trailer.size_y, 824);
-        assert!(trailer.chunk_data.is_empty());
+        assert_eq!(trailer.chunk_payload_length, None);
     }
 
     /// A standard-header image leader with `payload_type`, written from the
@@ -684,39 +759,13 @@ mod tests {
         assert_eq!(leader.payload_type, 0x4001);
     }
 
-    #[test]
-    fn parse_multiple_chunks() {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&0x0001u16.to_be_bytes());
-        payload.extend_from_slice(&0u16.to_be_bytes());
-        payload.extend_from_slice(&4u32.to_be_bytes());
-        payload.extend_from_slice(&[1, 2, 3, 4]);
-        payload.extend_from_slice(&0x0002u16.to_be_bytes());
-        payload.extend_from_slice(&0u16.to_be_bytes());
-        payload.extend_from_slice(&2u32.to_be_bytes());
-        payload.extend_from_slice(&[5, 6]);
-        let chunks = parse_chunks(&payload);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].id, 0x0001);
-        assert_eq!(chunks[0].data.as_ref(), &[1, 2, 3, 4]);
-        assert_eq!(chunks[1].id, 0x0002);
-        assert_eq!(chunks[1].data.as_ref(), &[5, 6]);
-    }
-
-    #[test]
-    fn truncated_chunk_is_ignored() {
-        let payload = vec![0u8; 6];
-        let chunks = parse_chunks(&payload);
-        assert!(chunks.is_empty());
-    }
-
     /// A GVSP data trailer, assembled from the specification rather than from
     /// what our own parser or fake camera happen to produce (ADR-0019).
     ///
     /// Standard header (8 bytes): `status(2) | block_id(2) | format(1) |
     /// packet_id(3)`, then the trailer payload (8 bytes): `reserved(2) |
-    /// payload_type(2) | size_y(4)`, then any chunk region.
-    fn golden_trailer(status: u16, payload_type: u16, size_y: u32, chunks: &[u8]) -> Vec<u8> {
+    /// payload_type(2) | size_y(4)`, then whatever `extra` holds.
+    fn golden_trailer(status: u16, payload_type: u16, size_y: u32, extra: &[u8]) -> Vec<u8> {
         let mut pkt = Vec::new();
         pkt.extend_from_slice(&status.to_be_bytes());
         pkt.extend_from_slice(&0x0007u16.to_be_bytes()); // block_id
@@ -725,16 +774,16 @@ mod tests {
         pkt.extend_from_slice(&0u16.to_be_bytes()); // reserved
         pkt.extend_from_slice(&payload_type.to_be_bytes());
         pkt.extend_from_slice(&size_y.to_be_bytes());
-        pkt.extend_from_slice(chunks);
+        pkt.extend_from_slice(extra);
         pkt
     }
 
     /// The regression behind the per-frame `chunk header truncated
-    /// remaining=6` a JAI produced on issue #70. A trailer closing a plain
-    /// image block carries no chunk region at all — the six bytes previously
-    /// reported as a truncated chunk header were `payload_type` and `size_y`.
+    /// remaining=6` a JAI produced on issue #70: a trailer closing a plain
+    /// image block is 8 bytes — `payload_type` and `size_y` were what the old
+    /// parser reported as a truncated chunk header.
     #[test]
-    fn trailer_without_chunks_yields_no_chunk_region() {
+    fn a_plain_image_trailer_has_no_chunk_fields() {
         let pkt = golden_trailer(0, PAYLOAD_TYPE_IMAGE, 1536, &[]);
         assert_eq!(pkt.len(), 16, "8-byte header + 8-byte trailer payload");
 
@@ -748,44 +797,29 @@ mod tests {
         assert_eq!(packet.header.status, 0);
         assert_eq!(trailer.payload_type, 0x0001);
         assert_eq!(trailer.size_y, 1536);
-        assert!(
-            trailer.chunk_data.is_empty(),
-            "chunk region begins at offset 8, so a plain image trailer has none"
-        );
-        assert!(parse_chunks(trailer.chunk_data).is_empty());
+        assert_eq!(trailer.chunk_payload_length, None);
+        assert_eq!(trailer.chunk_layout_id, None);
     }
 
-    /// With chunk mode on the same six bytes desynchronised every chunk that
-    /// followed, so `ChunkTimestamp` could not decode on a real camera.
+    /// TC-06: with the chunk flag the trailer grows by two 32-bit fields —
+    /// the chunk data payload length, then the chunk layout ID (Wireshark's
+    /// `dissect_extra_chunk_info`, corroboration only). The chunks themselves
+    /// travel in the data packets; these eight bytes used to be parsed as a
+    /// chunk region.
     #[test]
-    fn trailer_chunk_region_starts_after_the_payload_header() {
-        let mut chunks = Vec::new();
-        chunks.extend_from_slice(&0x0001u16.to_be_bytes()); // ChunkTimestamp
-        chunks.extend_from_slice(&0u16.to_be_bytes()); // reserved
-        chunks.extend_from_slice(&8u32.to_be_bytes()); // length
-        chunks.extend_from_slice(&0x0123_4567_89AB_CDEFu64.to_be_bytes());
-
-        // 0x4001 — Image Extended Chunk, the payload type real cameras use to
-        // deliver chunks.
-        let pkt = golden_trailer(0, 0x4001, 1536, &chunks);
-
+    fn an_extended_chunk_trailer_reports_length_and_layout_id() {
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0004_B044u32.to_be_bytes()); // chunk payload length
+        extra.extend_from_slice(&0xC0DE_0001u32.to_be_bytes()); // chunk layout id
+        let pkt = golden_trailer(0, 0x4001, 480, &extra);
         let GvspContent::Trailer(trailer) = parse_packet_ref(&pkt).expect("parse trailer").content
         else {
             panic!("expected a trailer");
         };
-
         assert_eq!(trailer.payload_type, 0x4001);
-        let parsed = parse_chunks(trailer.chunk_data);
-        assert_eq!(
-            parsed.len(),
-            1,
-            "exactly one chunk, not a desynchronised run"
-        );
-        assert_eq!(parsed[0].id, 0x0001);
-        assert_eq!(
-            parsed[0].data.as_ref(),
-            &0x0123_4567_89AB_CDEFu64.to_be_bytes()
-        );
+        assert_eq!(trailer.size_y, 480);
+        assert_eq!(trailer.chunk_payload_length, Some(0x0004_B044));
+        assert_eq!(trailer.chunk_layout_id, Some(0xC0DE_0001));
     }
 
     /// The status word lives in the packet header, not in the trailer payload
@@ -799,38 +833,6 @@ mod tests {
         let packet = parse_packet_ref(&pkt).expect("parse trailer");
         assert!(matches!(packet.content, GvspContent::Trailer(_)));
         assert_eq!(packet.header.status, 0x8004);
-    }
-
-    #[test]
-    fn parse_chunks_tolerates_padding() {
-        for _ in 0..128 {
-            let count = fastrand::usize(..6);
-            let mut payload = Vec::new();
-            let mut entries = Vec::new();
-            for _ in 0..count {
-                let id = fastrand::u16(..);
-                let len = fastrand::usize(..16);
-                let mut data = vec![0u8; len];
-                for byte in &mut data {
-                    *byte = fastrand::u8(..);
-                }
-                payload.extend_from_slice(&id.to_be_bytes());
-                payload.extend_from_slice(&0u16.to_be_bytes());
-                payload.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                payload.extend_from_slice(&data);
-                entries.push((id, data));
-            }
-            let padding_len = fastrand::usize(..8);
-            for _ in 0..padding_len {
-                payload.push(fastrand::u8(..));
-            }
-            let parsed = parse_chunks(&payload);
-            assert!(parsed.len() <= entries.len());
-            for (idx, chunk) in parsed.iter().enumerate() {
-                assert_eq!(chunk.id, entries[idx].0);
-                assert_eq!(chunk.data.as_ref(), entries[idx].1.as_slice());
-            }
-        }
     }
 
     #[test]

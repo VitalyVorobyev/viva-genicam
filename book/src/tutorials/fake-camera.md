@@ -49,7 +49,8 @@ Demo complete. All operations succeeded without hardware.
 | GVSP frame streaming | Synthetic gradient images at configurable FPS |
 | Device timestamps (1 GHz tick rate) | Supported (ns since acquisition start) |
 | Timestamp latch (GevTimestampValue) | Supported |
-| Chunk data (Timestamp, ExposureTime) | Supported when ChunkModeActive=1 |
+| Chunk data (Timestamp, ExposureTime, FrameID, ImageInfo) | In the GigE Vision layout when ChunkModeActive=1, per ChunkEnable |
+| Events (StartOfTransfer, ExposureEnd with data) | Per EventNotification, on the message channel |
 
 ## Using the fake camera in your own code
 
@@ -83,7 +84,8 @@ From there it is the ordinary API:
 
 The full program those excerpts come from is
 [`examples/demo_fake_camera.rs`](https://github.com/VitalyVorobyev/viva-genicam/blob/main/crates/viva-genicam/examples/demo_fake_camera.rs),
-which goes on to build a `FrameStream` and grab five frames.
+which goes on to build a `FrameStream`, grab five frames with their chunks,
+and read an ExposureEnd event.
 
 ## Running as a standalone server
 

@@ -76,6 +76,43 @@ pub enum GenApiError {
     /// Attempted to select an enum entry that does not exist.
     #[error("enum {node} has no entry named {entry}")]
     EnumNoSuchEntry { node: String, entry: String },
+    /// The node reads a chunk or event port, and nothing is attached to it.
+    ///
+    /// A chunk port's registers address one chunk of a stream buffer, an
+    /// event port's one event (GenICam Standard v2.1.1 §2.8.16): there is no
+    /// device memory behind them to fall back on. Attach a frame's chunks or a
+    /// received event first ([`crate::NodeMap::attach_chunks`],
+    /// [`crate::NodeMap::attach_event`]).
+    #[error("{node} reads port {port}, and no chunk or event data is attached to it")]
+    NotAttached {
+        /// The register that was read.
+        node: String,
+        /// Its `<pPort>`.
+        port: String,
+    },
+    /// The node is on a chunk or event port, which holds data the camera sent
+    /// and cannot be written.
+    #[error("{node} is on port {port}, which holds data the camera sent and cannot be written")]
+    PortNotWritable {
+        /// The register that was written.
+        node: String,
+        /// Its `<pPort>`.
+        port: String,
+    },
+    /// The register lies outside the chunk or event data attached to its port.
+    #[error("{node} reads {len} bytes at offset {offset} of port {port}, which holds {size} bytes")]
+    PortOutOfRange {
+        /// The register that was read.
+        node: String,
+        /// Its `<pPort>`.
+        port: String,
+        /// The resolved offset; negative on a chunk port counts from the end.
+        offset: i64,
+        /// Bytes the register spans.
+        len: u32,
+        /// Bytes attached to the port.
+        size: usize,
+    },
     /// Indirect addressing resolved to an invalid register.
     #[error("node {name} resolved invalid indirect address {addr:#X}")]
     BadIndirectAddress { name: String, addr: i64 },

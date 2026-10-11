@@ -1506,39 +1506,36 @@ async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
     .unwrap();
 }
 
-/// Chunk data survives the whole round trip: enable it through GenApi, receive
-/// a frame, decode the trailer.
+/// Chunk features read through GenApi from a streamed frame (GA-12, TC-06):
+/// chunk mode turned on through the nodemap, a frame received, and each
+/// `Chunk*` feature read from that frame's own chunk — at the offset and in
+/// the byte order the fake's XML declares, with nothing read from the device.
 ///
-/// Nothing exercised this path before. `Camera::configure_chunks` calls
-/// `set_bool` on `ChunkModeActive` — correct, SFNC defines it as IBoolean — but
-/// `viva-fake-gige` declared it as `<Integer>`, so the call failed with a type
-/// mismatch and the only camera the project can test against could not turn
-/// chunks on. That is why TC-17, which made chunks undecodable on *every*
-/// conforming camera, was found in a user's log rather than here (backlog
-/// TC-19).
-///
-/// What this proves, precisely: `ChunkModeActive`/`ChunkEnable` are writable as
-/// booleans, the trailer's chunk region is located at the offset TC-17 fixed,
-/// and two chunk entries decode into typed values. What it does **not** prove
-/// is the byte order of a chunk *value* — the fake writes them little-endian
-/// and `chunks.rs` reads them little-endian, so the two agree with each other
-/// and a real camera is not consulted. That is TC-06, and it needs the spec or
-/// hardware, not this test.
+/// The fake lays chunks out in the GigE Vision layout (data, then a 32-bit
+/// big-endian ID and length) with its own encoder; the client finds them by
+/// scanning from the end. Each value is checked against something the chunk
+/// cannot have copied from the client: the leader's timestamp, the block id,
+/// the exposure the test set, the image's own size.
 #[tokio::test]
-async fn test_chunk_data_round_trips_through_genapi() {
-    use viva_genicam::{ChunkConfig, ChunkKind, ChunkValue};
+async fn test_chunk_features_read_through_genapi_from_a_streamed_frame() {
+    use viva_genicam::ChunkConfig;
 
     let _cam = common::TestCamera::start().await;
     let device_info = discover_fake().await;
 
     let (mut frame_stream, camera) = setup_stream(&device_info).await;
 
-    // Turn chunk mode on through the nodemap, exactly as an application would.
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
         let mut cam = cam.lock().unwrap();
+        cam.set("ExposureTime", "1234.5").expect("set exposure");
         cam.configure_chunks(&ChunkConfig {
-            selectors: vec!["Timestamp".to_string(), "ExposureTime".to_string()],
+            selectors: vec![
+                "Timestamp".to_string(),
+                "ExposureTime".to_string(),
+                "FrameID".to_string(),
+                "ImageInfo".to_string(),
+            ],
             active: true,
         })
         .expect("configure chunks");
@@ -1553,41 +1550,72 @@ async fn test_chunk_data_round_trips_through_genapi() {
         .expect("frame error")
         .expect("stream ended without a frame");
 
-    // The image itself must be unaffected by the chunk region that follows it.
+    assert_eq!(frame.payload_type, 0x4001, "image with extended chunk data");
+    // The image is the first chunk, delivered without the chunks after it.
     assert_eq!(
         frame.payload.len(),
         (frame.width * frame.height) as usize,
-        "chunk mode must not change the image payload length for Mono8"
+        "the frame's payload is the image alone"
+    );
+    let chunks = frame.chunks.as_ref().expect("the frame carried chunks");
+    assert_eq!(
+        chunks.ids().collect::<Vec<_>>(),
+        vec![
+            0x0000_0001,
+            0x0000_0002,
+            0x0000_0003,
+            0x0504_0003,
+            0xA5A5_0100
+        ],
+        "the image chunk, then the four enabled chunks, by their 32-bit IDs"
     );
 
-    let chunks = frame
-        .chunks
-        .as_ref()
-        .expect("frame carried no chunk map with chunk mode active");
-
-    match frame.chunk(ChunkKind::Timestamp) {
-        Some(ChunkValue::U64(ts)) => assert!(*ts > 0, "timestamp chunk should be non-zero"),
-        other => panic!("expected a U64 timestamp chunk, got {other:?}"),
-    }
-    match frame.chunk(ChunkKind::ExposureTime) {
-        Some(ChunkValue::F64(us)) => {
-            assert!(
-                us.is_finite() && *us > 0.0,
-                "exposure chunk should be a positive finite value, got {us}"
-            );
-        }
-        other => panic!("expected an F64 exposure chunk, got {other:?}"),
-    }
-
-    // A desynchronised chunk region decodes as a run of `Unknown` ids rather
-    // than failing outright, which is how TC-17 stayed invisible for so long.
-    let unknown: Vec<_> = chunks
-        .keys()
-        .filter(|k| matches!(k, ChunkKind::Unknown(_)))
+    let cam = camera.clone();
+    let frame_for_read = frame.clone();
+    let values = tokio::task::spawn_blocking(move || {
+        let mut cam = cam.lock().unwrap();
+        let values = cam.chunk_features(&frame_for_read);
+        // Detached once read: the value does not outlive the frame.
+        let after = cam.get("ChunkFrameID");
+        (values, after)
+    })
+    .await
+    .unwrap();
+    let (values, after) = values;
+    let values: std::collections::BTreeMap<String, String> = values
+        .into_iter()
+        .map(|(name, value)| (name, value.expect("chunk feature readable")))
         .collect();
+    assert_eq!(
+        values.get("ChunkTimestamp").map(String::as_str),
+        Some(frame.ts_dev.expect("leader timestamp").to_string().as_str()),
+        "ChunkTimestamp is the leader's timestamp"
+    );
+    assert_eq!(
+        values.get("ChunkFrameID").map(String::as_str),
+        Some(frame.block_id.to_string().as_str()),
+        "ChunkFrameID is the block id"
+    );
+    assert_eq!(
+        values.get("ChunkExposureTime").map(String::as_str),
+        Some("1234.5")
+    );
+    assert_eq!(
+        values.get("ChunkWidth").map(String::as_str),
+        Some(frame.width.to_string().as_str())
+    );
+    assert_eq!(
+        values.get("ChunkHeight").map(String::as_str),
+        Some(frame.height.to_string().as_str())
+    );
+    assert_eq!(
+        values.get("ChunkImageLength").map(String::as_str),
+        Some(frame.payload.len().to_string().as_str()),
+        "ChunkImageLength, at address -4, counts from the end of its chunk"
+    );
     assert!(
-        unknown.is_empty(),
-        "chunk region parsed at the wrong offset: unexpected ids {unknown:?}"
+        after.is_err(),
+        "a chunk feature with no frame attached must not read: {after:?}"
     );
 
     let cam = camera.clone();
@@ -1599,11 +1627,11 @@ async fn test_chunk_data_round_trips_through_genapi() {
     .unwrap();
 }
 
-/// With chunk mode off, the trailer carries no chunk region at all.
+/// With chunk mode off, the frame is a plain image (`0x0001`) with no chunks.
 ///
 /// The negative control for the test above: it is what makes a passing
-/// `test_chunk_data_round_trips_through_genapi` mean chunks were *enabled*
-/// rather than always present.
+/// `test_chunk_features_read_through_genapi_from_a_streamed_frame` mean chunks
+/// were *enabled* rather than always present.
 #[tokio::test]
 async fn test_no_chunks_when_chunk_mode_is_off() {
     let _cam = common::TestCamera::start().await;
@@ -1625,10 +1653,8 @@ async fn test_no_chunks_when_chunk_mode_is_off() {
         .expect("frame error")
         .expect("stream ended without a frame");
 
-    assert!(
-        frame.chunks.as_ref().is_none_or(|c| c.is_empty()),
-        "chunk mode is off, so the trailer must carry no chunk entries"
-    );
+    assert_eq!(frame.payload_type, 0x0001);
+    assert!(frame.chunks.is_none(), "chunk mode is off: no chunks");
 
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
@@ -1873,6 +1899,97 @@ async fn test_event_stream_receives_start_of_transfer() {
     assert_eq!(event.id, 0x0005, "event identifier");
     assert!(event.ts_dev > 0, "device timestamp should not be zero");
     assert!(event.data.is_empty(), "EVENT_CMD carries no event data");
+
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        cam.lock().unwrap().acquisition_stop().expect("stop");
+    })
+    .await
+    .unwrap();
+}
+
+/// An event feature read from a received event (GA-39): the fake sends an
+/// `EVENTDATA` for ExposureEnd, and `EventExposureEndTimestamp` and
+/// `EventExposureEndFrameID` read through GenApi from the port whose
+/// `<EventID>` matches — the timestamp at 0x8 of the event as sent, header
+/// included, the frame id in the event's data.
+///
+/// The fake timestamps the event like the block's leader and puts the block id
+/// in the data, so both values are checked against the frame they belong to.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_event_features_read_from_a_received_event() {
+    let _cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+
+    let (mut frame_stream, mut camera) = setup_stream_owned(&device_info).await;
+    let local: std::net::Ipv4Addr = [127, 0, 0, 1].into();
+    let port = 10_021u16;
+
+    camera
+        .configure_events(local, port, &["ExposureEnd"])
+        .await
+        .expect("configure events");
+    let events = camera
+        .open_event_stream(local, port)
+        .await
+        .expect("open event stream");
+
+    let camera = Arc::new(Mutex::new(camera));
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        cam.lock().unwrap().acquisition_start().expect("start");
+    })
+    .await
+    .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), events.next())
+        .await
+        .expect("timed out waiting for an event")
+        .expect("event");
+    assert_eq!(event.id, 0x9001, "the fake's ExposureEnd event id");
+    assert_eq!(event.raw.len(), 16 + 8, "16-byte entry, then the frame id");
+
+    // The frame the event belongs to.
+    let frame = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+            .await
+            .expect("timeout waiting for frame")
+            .expect("frame error")
+            .expect("stream ended");
+        if frame.block_id == event.block_id {
+            break frame;
+        }
+    };
+
+    let cam = camera.clone();
+    let event_for_read = event.clone();
+    let (values, after) = tokio::task::spawn_blocking(move || {
+        let mut cam = cam.lock().unwrap();
+        let values = cam.event_features(&event_for_read);
+        (values, cam.get("EventExposureEndTimestamp"))
+    })
+    .await
+    .unwrap();
+    let values: std::collections::BTreeMap<String, String> = values
+        .into_iter()
+        .map(|(name, value)| (name, value.expect("event feature readable")))
+        .collect();
+    assert_eq!(
+        values.get("EventExposureEnd").map(String::as_str),
+        Some("36865"),
+        "the event id, 0x9001, read from offset 0x2"
+    );
+    assert_eq!(
+        values.get("EventExposureEndTimestamp").map(String::as_str),
+        Some(frame.ts_dev.expect("leader timestamp").to_string().as_str()),
+        "the event's timestamp, from offset 0x8"
+    );
+    assert_eq!(
+        values.get("EventExposureEndFrameID").map(String::as_str),
+        Some(frame.block_id.to_string().as_str()),
+        "the frame id, from the event data at 0x10"
+    );
+    assert!(after.is_err(), "detached after the read: {after:?}");
 
     let cam = camera.clone();
     tokio::task::spawn_blocking(move || {
@@ -2221,6 +2338,71 @@ async fn test_resend_recovers_every_scripted_drop() {
     // One request per range: block 2's packet, block 3's two, block 4's run.
     assert!(device.requests >= 4, "{device:?}");
     assert!(device.packets_resent >= 6, "{device:?}");
+}
+
+/// Chunks survive a resend: the fake's retention ring holds the packets that
+/// carry the chunk tags, the stream asks for them, and the recovered frame
+/// splits into its image and chunks like any other (ADR-0026 with SR-04).
+///
+/// 640 × 480 Mono8 with the image, timestamp, frame id and image-info chunks
+/// is 307 264 bytes at a 1 464-byte stride: 210 data packets, the last two
+/// holding every chunk tag. Both are dropped in flight.
+#[tokio::test]
+async fn test_resend_recovers_the_packets_that_carry_chunks() {
+    use viva_fake_gige::{PacketScript, ScriptStep};
+    use viva_genicam::ChunkConfig;
+    let script = PacketScript::new()
+        .step(ScriptStep::Drop {
+            block: 2,
+            packet: 209,
+        })
+        .step(ScriptStep::Drop {
+            block: 2,
+            packet: 210,
+        });
+    let _cam = common::TestCamera::start_with(move |b| b.packet_script(script.clone())).await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    assert!(frame_stream.resend_enabled(), "the fake advertises resend");
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        cam.lock()
+            .unwrap()
+            .configure_chunks(&ChunkConfig {
+                selectors: vec![
+                    "Timestamp".to_string(),
+                    "FrameID".to_string(),
+                    "ImageInfo".to_string(),
+                ],
+                active: true,
+            })
+            .expect("configure chunks");
+    })
+    .await
+    .unwrap();
+    start_acquisition(&camera).await;
+    let frames = frames_through(&mut frame_stream, 2).await;
+    stop_acquisition(&camera).await;
+
+    let frame = frames.get(&2).expect("block 2 delivered").clone();
+    assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+    assert_eq!(frame.payload.len(), 640 * 480, "the image alone");
+    let stats = frame_stream.stats();
+    assert_eq!(stats.resend_recovered, 2, "{stats:?}");
+
+    let cam = camera.clone();
+    let values = tokio::task::spawn_blocking(move || cam.lock().unwrap().chunk_features(&frame))
+        .await
+        .unwrap();
+    let values: std::collections::BTreeMap<String, String> = values
+        .into_iter()
+        .map(|(name, value)| (name, value.expect("chunk feature readable")))
+        .collect();
+    assert_eq!(values.get("ChunkFrameID").map(String::as_str), Some("2"));
+    assert_eq!(
+        values.get("ChunkImageLength").map(String::as_str),
+        Some("307200")
+    );
 }
 
 /// A camera whose capability register lacks packet resend is never asked,

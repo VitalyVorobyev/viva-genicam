@@ -220,10 +220,13 @@ else. When and how often the engine asks is in
 
 ### Chunk data
 
-With `ChunkModeActive` set, the payload carries the image followed by chunk
-blocks (`[id][reserved][length][data]`). `parse_chunks` extracts them and skips
-what it does not recognise; `viva_genicam::ChunkMap` maps the known ones
-(timestamp, exposure, gain) to typed values.
+With `ChunkModeActive` set, a frame's payload is a run of chunks: the image
+first, then one chunk per enabled value, each its data followed by an 8-byte
+tag — chunk ID and length, 32-bit big-endian. `parse_chunks` reads them from
+the end of the payload and reports a malformed layout with the offset where it
+went wrong. This crate does not decode the values: `viva-genicam` splits each
+frame into its image and its chunks, and the camera's XML says what each chunk
+holds — see [Chunks and events](../tutorials/streaming.md#31-chunks-and-events).
 
 ### Statistics
 

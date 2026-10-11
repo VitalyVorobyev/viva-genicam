@@ -40,7 +40,6 @@ pub fn parse_register(
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
-    let mut port: Option<String> = None;
     let mut p_length: Option<String> = None;
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -52,13 +51,6 @@ pub fn parse_register(
                 "AccessMode" => {
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
-                }
-                "pPort" => {
-                    let text = read_text_start(reader, e)?;
-                    let target = text.trim();
-                    if !target.is_empty() {
-                        port = Some(target.to_string());
-                    }
                 }
                 "pLength" => {
                     let text = read_text_start(reader, e)?;
@@ -101,7 +93,6 @@ pub fn parse_register(
         meta: meta_builder.build(),
         addressing: addressing.build(),
         access,
-        port,
         predicates,
         invalidators,
     }))
@@ -206,8 +197,8 @@ mod tests {
         assert_eq!(len_of(&decl.addressing), 8);
     }
 
-    /// The node is kept, so it can be listed; refusing to *read* it is the
-    /// GenApi layer's job (GA-12).
+    /// The port is kept with the address; routing the read to the chunk is
+    /// the GenApi layer's job (ADR-0026).
     #[test]
     fn p_port_is_captured_verbatim() {
         let decl = parse_one(
@@ -218,7 +209,7 @@ mod tests {
                </Register>"#,
         )
         .expect("parse");
-        assert_eq!(decl.port.as_deref(), Some("Chunk4007"));
+        assert_eq!(decl.addressing.port(), Some("Chunk4007"));
     }
 
     #[test]
@@ -226,7 +217,7 @@ mod tests {
         let decl =
             parse_one(r#"<Register Name="R"><Address>0x10</Address><Length>4</Length></Register>"#)
                 .expect("parse");
-        assert_eq!(decl.port, None);
+        assert_eq!(decl.addressing.port(), None);
     }
 
     /// The gap must name itself. A `<Register>` dropped for any *other* reason

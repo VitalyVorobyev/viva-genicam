@@ -11,7 +11,8 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::{TAG_P_ADDRESS, TAG_P_INDEX, handle_invalidator_start, index_offset};
 use crate::util::{
-    attribute_value, attribute_value_required, parse_u64, read_text_start, skip_element,
+    attribute_value, attribute_value_required, parse_address, parse_u64, read_text_start,
+    skip_element,
 };
 use crate::{
     AccessMode, AddressTerm, Addressing, BitField, ByteOrder, NodeDecl, NodeMeta, PredicateRefs,
@@ -28,6 +29,7 @@ pub fn parse_struct_reg(
     // keeping only one of them puts every inquiry bit in the document at the
     // wrong address — 860 of them on the camera in issue #35.
     let mut terms: Vec<AddressTerm> = Vec::new();
+    let mut port: Option<String> = None;
     let mut length: u32 = 4;
     let mut access = AccessMode::RW;
     let mut byte_order = ByteOrder::Little;
@@ -42,7 +44,16 @@ pub fn parse_struct_reg(
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
                 "Address" => {
                     let text = read_text_start(reader, e)?;
-                    terms.push(AddressTerm::Fixed(parse_u64(&text)?));
+                    terms.push(AddressTerm::Fixed(parse_address(&text)?));
+                }
+                // Every entry shares the struct's port, as it shares its
+                // address.
+                "pPort" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        port = Some(target.to_string());
+                    }
                 }
                 TAG_P_ADDRESS => {
                     let text = read_text_start(reader, e)?;
@@ -131,7 +142,11 @@ pub fn parse_struct_reg(
             "StructReg declares no <Address>, <pAddress> or <pIndex>".into(),
         ));
     }
-    let addressing = Addressing::Sum { terms, len: length };
+    let addressing = Addressing::Sum {
+        terms,
+        len: length,
+        port,
+    };
 
     // Convert each StructEntry into a NodeDecl::Integer with shared addressing.
     let nodes = entries

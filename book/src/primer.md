@@ -38,7 +38,7 @@ This chapter orients you in the standards behind GigE Vision and USB3 Vision cam
 
 ## 3) Streaming: GVSP
 - **UDP** packets carry payloads (image data/metadata). The host reassembles frames, chooses a **packet size** that fits the path MTU, and may introduce **packet delay** to avoid NIC/driver overflow.
-- **Chunks**: optional metadata blocks (e.g., `Timestamp`, `ExposureTime`) can be enabled and parsed alongside image data.
+- **Chunks**: optional metadata blocks (e.g., `Timestamp`, `ExposureTime`) sent with each frame; the camera's GenApi XML declares, per chunk, the features that read it.
 - **Time mapping**: devices often use **tick counters**; the host maintains a mapping between device ticks and host time for cross‑correlation.
 
 ## 4) How standards map to crates

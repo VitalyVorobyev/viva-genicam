@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use viva_fake_gige::FakeCamera;
 use viva_genicam::gige;
-use viva_genicam::{StreamOptions, connect_gige_with_xml};
+use viva_genicam::{ChunkConfig, StreamOptions, connect_gige_with_xml};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,8 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Width readback = {}\n", camera.get("Width")?);
     // ANCHOR_END: read_features
 
-    // ── 6. Stream frames ────────────────────────────────────────────────────
-    println!("Streaming 5 frames ...");
+    // ── 6. Stream frames, with chunks ───────────────────────────────────────
+    println!("Streaming 5 frames with chunk data ...");
 
     // The camera's own control channel configures the stream.
     let iface_name = if cfg!(target_os = "macos") {
@@ -106,6 +106,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // jumbo MTU and a frame this size would fit in a couple of packets.
             .packet_size(1500),
     )?;
+
+    // ANCHOR: enable_chunks
+    // Chunk mode: each frame carries the values the camera used for it.
+    camera.configure_chunks(&ChunkConfig {
+        selectors: vec!["Timestamp".into(), "ExposureTime".into(), "FrameID".into()],
+        active: true,
+    })?;
+    // ANCHOR_END: enable_chunks
+
+    // ── 7. Events ───────────────────────────────────────────────────────────
+    // ANCHOR: enable_events
+    let host: std::net::Ipv4Addr = [127, 0, 0, 1].into();
+    camera
+        .configure_events(host, 10_020, &["ExposureEnd"])
+        .await?;
+    let events = camera.open_event_stream(host, 10_020).await?;
+    // ANCHOR_END: enable_events
 
     camera.acquisition_start()?;
 
@@ -124,12 +141,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame.ts_dev.unwrap_or(0),
         );
 
-        if let Some(ref chunks) = frame.chunks {
-            for (kind, value) in chunks.iter() {
-                println!("    chunk {:?} = {:?}", kind, value);
+        // ANCHOR: chunk_features
+        // Read through the camera's XML: which chunk holds each value, at
+        // which offset, in which byte order.
+        for (name, value) in camera.chunk_features(&frame) {
+            match value {
+                Ok(value) => println!("    {name} = {value}"),
+                Err(err) => println!("    {name} = <error: {err}>"),
             }
         }
+        let exposure = camera.with_chunks(&frame, |cam| cam.get("ChunkExposureTime"))?;
+        // ANCHOR_END: chunk_features
+        println!("    (ChunkExposureTime alone: {exposure} us)");
     }
+
+    // ANCHOR: event_features
+    let event = tokio::time::timeout(Duration::from_secs(5), events.next()).await??;
+    println!("  Event 0x{:04X} for block {}:", event.id, event.block_id);
+    for (name, value) in camera.event_features(&event) {
+        match value {
+            Ok(value) => println!("    {name} = {value}"),
+            Err(err) => println!("    {name} = <error: {err}>"),
+        }
+    }
+    // ANCHOR_END: event_features
 
     camera.acquisition_stop()?;
     println!("\nDemo complete. All operations succeeded without hardware.");

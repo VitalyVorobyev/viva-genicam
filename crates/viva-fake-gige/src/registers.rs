@@ -216,7 +216,39 @@ pub const CHUNK_WIDTH_PX: u32 = 1440;
 /// Chunk data registers.
 pub const REG_CHUNK_MODE_ACTIVE: u64 = 0x20080;
 pub const REG_CHUNK_SELECTOR: u64 = 0x20084;
+/// `ChunkEnable` for the selected chunk: a *selected* feature, backed by the
+/// set of enabled selector values — see [`RegisterMap::chunk_enabled`].
 pub const REG_CHUNK_ENABLE: u64 = 0x20088;
+
+/// `ChunkSelector` entry values, this fake's own numbering.
+pub const CHUNK_SELECTOR_TIMESTAMP: u32 = 1;
+/// `ChunkSelector` = `ExposureTime`.
+pub const CHUNK_SELECTOR_EXPOSURE_TIME: u32 = 2;
+/// `ChunkSelector` = `FrameID`.
+pub const CHUNK_SELECTOR_FRAME_ID: u32 = 4;
+/// `ChunkSelector` = `ImageInfo`: width, height and image length in one
+/// chunk, with the length at a negative address as Baumer's HXG20 declares
+/// `ChunkImageLength`.
+pub const CHUNK_SELECTOR_IMAGE_INFO: u32 = 5;
+
+/// Chunk IDs on this fake's chunk ports, as its XML declares them. A real
+/// camera's are whatever its XML says; two here are above 0xFFFF, which a
+/// 16-bit ID could not carry.
+pub const CHUNK_ID_IMAGE: u32 = 0x0000_0001;
+/// `ChunkTimestamp`: the leader's timestamp, 8 bytes little-endian.
+pub const CHUNK_ID_TIMESTAMP: u32 = 0x0000_0002;
+/// `ChunkExposureTime`: IEEE 754 double, little-endian.
+pub const CHUNK_ID_EXPOSURE_TIME: u32 = 0x0000_0003;
+/// `ChunkFrameID`: the block id, 8 bytes little-endian.
+pub const CHUNK_ID_FRAME_ID: u32 = 0x0504_0003;
+/// `ImageInfo`: width, height, reserved, image length — four big-endian
+/// `u32`s; `ChunkImageLength` reads the last at address `-4`.
+pub const CHUNK_ID_IMAGE_INFO: u32 = 0xA5A5_0100;
+
+/// GigE Vision event identifier this fake sends for ExposureEnd, as an
+/// `EVENTDATA` carrying the frame id. Device-specific range, this fake's own
+/// choice; its event port declares `<EventID>9001</EventID>`.
+pub const EVENT_EXPOSURE_END: u16 = 0x9001;
 
 /// `EventSelector` backing register: a GigE Vision event identifier.
 /// `REG_FEATURE_STATUS` is a FLIR-shaped feature-status word: one big-endian
@@ -412,12 +444,21 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>ChunkModeActive</pFeature>
     <pFeature>ChunkSelector</pFeature>
     <pFeature>ChunkEnable</pFeature>
+    <pFeature>ChunkTimestamp</pFeature>
+    <pFeature>ChunkExposureTime</pFeature>
+    <pFeature>ChunkFrameID</pFeature>
+    <pFeature>ChunkWidth</pFeature>
+    <pFeature>ChunkHeight</pFeature>
+    <pFeature>ChunkImageLength</pFeature>
   </Category>
 
   <Category Name="EventControl">
     <DisplayName>Event Control</DisplayName>
     <pFeature>EventSelector</pFeature>
     <pFeature>EventNotification</pFeature>
+    <pFeature>EventExposureEnd</pFeature>
+    <pFeature>EventExposureEndTimestamp</pFeature>
+    <pFeature>EventExposureEndFrameID</pFeature>
   </Category>
 
   <!-- ════════════════════════════════════════════════════════════════════
@@ -915,6 +956,8 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <EnumEntry Name="Timestamp"><Value>1</Value></EnumEntry>
     <EnumEntry Name="ExposureTime"><Value>2</Value></EnumEntry>
     <EnumEntry Name="Gain"><Value>3</Value></EnumEntry>
+    <EnumEntry Name="FrameID"><Value>4</Value></EnumEntry>
+    <EnumEntry Name="ImageInfo" NameSpace="Custom"><Value>5</Value></EnumEntry>
     <pValue>ChunkSelectorReg</pValue>
   </Enumeration>
   <IntReg Name="ChunkSelectorReg"><Address>0x20084</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
@@ -925,6 +968,58 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Boolean>
   <IntReg Name="ChunkEnableReg"><Address>0x20088</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
+  <!-- Chunk ports (GenICam Standard v2.1.1 §2.8.16): each register below
+       addresses one chunk of a frame, from the chunk's start, not device
+       memory. The shapes are the corpus's: FLIR declares its chunk values
+       little-endian at offset 0 of their own chunks; Baumer's HXG20 reads
+       ChunkImageLength at address -4, "offset from the back of the chunk". -->
+  <Port Name="ChunkImagePort" NameSpace="Custom"><ChunkID>00000001</ChunkID></Port>
+  <Port Name="ChunkTimestampPort" NameSpace="Custom"><ChunkID>00000002</ChunkID></Port>
+  <Port Name="ChunkExposureTimePort" NameSpace="Custom"><ChunkID>00000003</ChunkID></Port>
+  <Port Name="ChunkFrameIDPort" NameSpace="Custom"><ChunkID>05040003</ChunkID></Port>
+  <Port Name="ChunkImageInfoPort" NameSpace="Custom"><ChunkID>A5A50100</ChunkID></Port>
+
+  <Integer Name="ChunkTimestamp" NameSpace="Standard">
+    <ToolTip>Timestamp of the image, in ticks</ToolTip>
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>ChunkTimestampReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkTimestampReg"><Address>0x0</Address><Length>8</Length><AccessMode>RO</AccessMode><pPort>ChunkTimestampPort</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess></IntReg>
+
+  <Float Name="ChunkExposureTime" NameSpace="Standard">
+    <ToolTip>Exposure time used to capture the image</ToolTip>
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>ChunkExposureTimeReg</pValue>
+    <Unit>us</Unit>
+  </Float>
+  <FloatReg Name="ChunkExposureTimeReg"><Address>0x0</Address><Length>8</Length><AccessMode>RO</AccessMode><pPort>ChunkExposureTimePort</pPort><Endianess>LittleEndian</Endianess></FloatReg>
+
+  <Integer Name="ChunkFrameID" NameSpace="Standard">
+    <ToolTip>Frame id of the image</ToolTip>
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>ChunkFrameIDReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkFrameIDReg"><Address>0x0</Address><Length>8</Length><AccessMode>RO</AccessMode><pPort>ChunkFrameIDPort</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess></IntReg>
+
+  <Integer Name="ChunkWidth" NameSpace="Standard">
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>ChunkWidthReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkWidthReg"><Address>0x0</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>ChunkImageInfoPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <Integer Name="ChunkHeight" NameSpace="Standard">
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>ChunkHeightReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkHeightReg"><Address>0x4</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>ChunkImageInfoPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <Integer Name="ChunkImageLength" NameSpace="Custom">
+    <ToolTip>Bytes of image data, read from the end of the ImageInfo chunk</ToolTip>
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>ChunkImageLengthReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkImageLengthReg"><Address>-4</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>ChunkImageInfoPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
   <!-- Event delivery is selected through GenApi, not through a bootstrap
        register: EventSelector picks a GigE Vision event id and
        EventNotification turns it on. The ids are the standard ones
@@ -933,6 +1028,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <ToolTip>Select which event to configure</ToolTip>
     <EnumEntry Name="StartOfTransfer"><Value>5</Value></EnumEntry>
     <EnumEntry Name="EndOfTransfer"><Value>6</Value></EnumEntry>
+    <EnumEntry Name="ExposureEnd"><Value>0x9001</Value></EnumEntry>
     <pValue>EventSelectorReg</pValue>
   </Enumeration>
   <IntReg Name="EventSelectorReg"><Address>0x200A0</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
@@ -944,6 +1040,27 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pValue>EventNotificationReg</pValue>
   </Enumeration>
   <IntReg Name="EventNotificationReg"><Address>0x200A4</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <!-- The ExposureEnd event port: its registers address the event as it was
+       sent, header included — the event id at 0x2 and the timestamp at 0x8,
+       where every corpus document puts them, and the frame id in the event
+       data at 0x10, little-endian, as FLIR declares EventExposureEndFrameID. -->
+  <Port Name="EventExposureEndPort"><EventID>9001</EventID></Port>
+  <Integer Name="EventExposureEnd" NameSpace="Standard">
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>EventExposureEndReg</pValue>
+  </Integer>
+  <IntReg Name="EventExposureEndReg"><Address>0x2</Address><Length>2</Length><AccessMode>RO</AccessMode><pPort>EventExposureEndPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <Integer Name="EventExposureEndTimestamp" NameSpace="Standard">
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>EventExposureEndTimestampReg</pValue>
+  </Integer>
+  <IntReg Name="EventExposureEndTimestampReg"><Address>0x8</Address><Length>8</Length><AccessMode>RO</AccessMode><pPort>EventExposureEndPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <Integer Name="EventExposureEndFrameID" NameSpace="Standard">
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>EventExposureEndFrameIDReg</pValue>
+  </Integer>
+  <IntReg Name="EventExposureEndFrameIDReg"><Address>0x10</Address><Length>8</Length><AccessMode>RO</AccessMode><pPort>EventExposureEndPort</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess></IntReg>
 
 </RegisterDescription>
 "#;
@@ -965,6 +1082,9 @@ pub struct RegisterMap {
     /// address twice with a different selector in between — and a single
     /// stored word would let the second write turn the first event back off.
     enabled_events: HashSet<u16>,
+    /// `ChunkSelector` values whose `ChunkEnable` is on: a selected feature,
+    /// as `EventNotification` is.
+    enabled_chunks: HashSet<u32>,
     /// When a register-access command was last served, for the heartbeat rule.
     last_register_command: Instant,
     /// Whether [`RegisterMap::enforce_heartbeat`] is armed.
@@ -1198,6 +1318,7 @@ impl RegisterMap {
             xml_blob,
             clock_origin: Instant::now(),
             enabled_events: HashSet::new(),
+            enabled_chunks: HashSet::new(),
             last_register_command: Instant::now(),
             enforce_heartbeat: false,
             max_packet_size: None,
@@ -1375,6 +1496,14 @@ impl RegisterMap {
             return result;
         }
 
+        if addr == REG_CHUNK_ENABLE {
+            let on = u32::from(self.chunk_enabled(self.chunk_selector()));
+            let mut result = on.to_be_bytes().to_vec();
+            result.resize(len, 0);
+            result.truncate(len);
+            return result;
+        }
+
         // Exact register match
         if let Some(data) = self.regs.get(&addr) {
             let mut result = data.clone();
@@ -1440,6 +1569,16 @@ impl RegisterMap {
                 self.enabled_events.insert(event);
             } else {
                 self.enabled_events.remove(&event);
+            }
+            return;
+        }
+
+        if addr == REG_CHUNK_ENABLE && data.len() >= 4 {
+            let selector = self.chunk_selector();
+            if u32::from_be_bytes([data[0], data[1], data[2], data[3]]) != 0 {
+                self.enabled_chunks.insert(selector);
+            } else {
+                self.enabled_chunks.remove(&selector);
             }
             return;
         }
@@ -1623,6 +1762,18 @@ impl RegisterMap {
         u32::from_be_bytes([data[0], data[1], data[2], data[3]])
     }
 
+    /// Value currently selected by `ChunkSelector`.
+    pub fn chunk_selector(&self) -> u32 {
+        let data = self.read(REG_CHUNK_SELECTOR, 4);
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    }
+
+    /// Whether `ChunkEnable` is on for `selector`, whichever chunk the
+    /// controller selected last.
+    pub fn chunk_enabled(&self, selector: u32) -> bool {
+        self.enabled_chunks.contains(&selector)
+    }
+
     /// Whether chunk mode is active.
     pub fn chunk_mode_active(&self) -> bool {
         let data = self.read(REG_CHUNK_MODE_ACTIVE, 4);
@@ -1671,6 +1822,24 @@ mod tests {
         select_and_enable(&mut regs, 6, true);
         assert!(regs.event_notification_on(5));
         assert!(regs.event_notification_on(6));
+    }
+
+    /// `ChunkEnable` is a selected feature too: enabling two chunks writes
+    /// the same address twice, with `ChunkSelector` changed in between.
+    #[test]
+    fn chunk_enable_follows_the_selector() {
+        let mut regs = map();
+        for selector in [CHUNK_SELECTOR_TIMESTAMP, CHUNK_SELECTOR_FRAME_ID] {
+            regs.write(REG_CHUNK_SELECTOR, &selector.to_be_bytes());
+            regs.write(REG_CHUNK_ENABLE, &1u32.to_be_bytes());
+        }
+        assert!(regs.chunk_enabled(CHUNK_SELECTOR_TIMESTAMP));
+        assert!(regs.chunk_enabled(CHUNK_SELECTOR_FRAME_ID));
+        assert!(!regs.chunk_enabled(CHUNK_SELECTOR_IMAGE_INFO));
+        regs.write(REG_CHUNK_SELECTOR, &CHUNK_SELECTOR_IMAGE_INFO.to_be_bytes());
+        assert_eq!(regs.read(REG_CHUNK_ENABLE, 4), vec![0, 0, 0, 0]);
+        regs.write(REG_CHUNK_SELECTOR, &CHUNK_SELECTOR_FRAME_ID.to_be_bytes());
+        assert_eq!(regs.read(REG_CHUNK_ENABLE, 4), vec![0, 0, 0, 1]);
     }
 
     #[test]

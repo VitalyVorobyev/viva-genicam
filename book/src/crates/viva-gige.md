@@ -54,9 +54,13 @@ address or an OS interface name — and `resolve()` turns it into an `Iface`.
 
 ## Discovery (GVCP)
 
-A broadcast command, then replies collected for a timeout window. Each reply
-becomes a `DeviceInfo` with IP, MAC, manufacturer, model, version, serial and
-user-defined name.
+A broadcast command — to each interface's subnet and to `255.255.255.255` —
+then replies collected for a timeout window. Each reply becomes a `DeviceInfo`
+with IP, MAC, manufacturer, model, version, serial, user-defined name, subnet
+and gateway; `shares_subnet_with_host()` says whether the camera can be
+reached from the interface that heard it. `discover_ip` asks one address
+directly, and `discover_with` takes `DiscoveryOptions`
+([Networking → Using --iface and discovery quirks](../networking.md#7-using---iface-and-discovery-quirks)).
 
 ```rust,ignore
 {{#include ../../../crates/viva-genicam/examples/list_cameras.rs:discover}}

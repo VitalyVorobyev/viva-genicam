@@ -735,6 +735,7 @@ async fn run_frame_reader(
             frame.pixel_format,
             frame.width,
             frame.height,
+            frame.row_stride(),
             frame.payload.as_ref(),
         ) {
             Ok(bmp) => {

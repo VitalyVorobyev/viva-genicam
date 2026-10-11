@@ -42,10 +42,13 @@ Both dataclasses expose `.to_dict()` for JSON-friendly export.
 ## Connection
 
 ```python
-vg.connect_gige(device_info: GigeDeviceInfo, iface: Optional[str] = None) -> Camera
+vg.connect_gige(device_info: GigeDeviceInfo, iface: Optional[str] = None, monitor: bool = False) -> Camera
 vg.connect_u3v(device_info: U3vDeviceInfo) -> Camera
 vg.Camera.open(device_info, **kwargs) -> Camera   # dispatches on type
 ```
+
+`monitor=True` opens a GigE camera read-only, alongside the application that
+controls it ([Networking → One camera, several applications](../networking.md#61-one-camera-several-applications)).
 
 ## Camera
 

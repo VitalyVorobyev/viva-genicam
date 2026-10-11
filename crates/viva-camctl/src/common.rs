@@ -10,13 +10,11 @@ use serde::Serialize;
 use std::convert::TryInto;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use viva_genapi_xml::{self, XmlError};
-use viva_genicam::genapi::NodeMap;
 use viva_genicam::image_io::{self, ImageFormat};
 use viva_genicam::pfnc::{self, PixelFormat};
-use viva_genicam::{Camera, GigeRegisterIo};
+use viva_genicam::{Access, Camera, GigeRegisterIo, connect_gige_as};
 use viva_gige::DeviceInfo;
 use viva_gige::discover_on_interface;
 use viva_gige::gvcp::GigeDevice;
@@ -100,21 +98,14 @@ pub async fn fetch_xml(control: Arc<Mutex<GigeDevice>>) -> Result<String> {
     .context("fetch GenApi XML")
 }
 
-pub async fn open_camera(device: &DeviceInfo) -> Result<Camera<GigeRegisterIo>> {
-    let addr = SocketAddr::new(IpAddr::V4(device.ip), GVCP_PORT);
-    let control =
-        Arc::new(Mutex::new(GigeDevice::open(addr).await.with_context(
-            || format!("connect GVCP control channel at {}", device.ip),
-        )?));
-    let xml = fetch_xml(control.clone()).await?;
-    let model = viva_genapi_xml::parse(&xml).context("parse GenApi XML")?;
-    let nodemap = NodeMap::try_from_xml(model)?;
-    let handle = Handle::current();
-    let device = Arc::try_unwrap(control)
-        .map_err(|_| anyhow!("control connection still in use"))?
-        .into_inner();
-    let transport = GigeRegisterIo::new(handle, device);
-    Ok(Camera::new(transport, nodemap))
+/// Open a camera with its nodemap: as the controller for a command that
+/// writes, as a read-only monitor for one that only reads — which then works
+/// while another application controls the camera.
+pub async fn open_camera(device: &DeviceInfo, access: Access) -> Result<Camera<GigeRegisterIo>> {
+    let (camera, _xml) = connect_gige_as(device, access)
+        .await
+        .with_context(|| format!("open the camera at {}", device.ip))?;
+    Ok(camera)
 }
 
 /// Open the GVCP control channel and stop there.
@@ -246,11 +237,13 @@ pub enum SaveFormat {
 }
 
 /// A frame's pixels as a file in `save`, and the extension to give it.
-/// `rgb` writes colour even for a monochrome frame.
+/// `rgb` writes colour even for a monochrome frame; `row_stride` is the
+/// frame's, for a camera that pads its lines.
 pub fn encode_frame(
     format: PixelFormat,
     width: u32,
     height: u32,
+    row_stride: Option<usize>,
     payload: &[u8],
     save: SaveFormat,
     rgb: bool,
@@ -259,19 +252,19 @@ pub fn encode_frame(
         SaveFormat::Pnm if !rgb && format == PixelFormat::Mono8 => {
             let mut converter = pfnc::convert::Converter::new();
             let pixels = converter
-                .gray8(format, width, height, payload)
+                .gray8(format, width, height, row_stride, payload)
                 .map_err(|e| anyhow!("convert frame: {e}"))?;
             return Ok((encode_pgm(width, height, pixels)?, "pgm"));
         }
         SaveFormat::Pnm => {
-            let pixels = pfnc::convert::to_rgb8(format, width, height, payload)
+            let pixels = pfnc::convert::to_rgb8(format, width, height, row_stride, payload)
                 .map_err(|e| anyhow!("convert frame to RGB8: {e}"))?;
             return Ok((encode_ppm(width, height, &pixels)?, "ppm"));
         }
         SaveFormat::Png => ImageFormat::Png,
         SaveFormat::Tiff => ImageFormat::Tiff,
     };
-    let pixels = pfnc::convert::full_depth(format, width, height, payload)
+    let pixels = pfnc::convert::full_depth(format, width, height, row_stride, payload)
         .map_err(|e| anyhow!("convert frame: {e}"))?;
     let pixels = if rgb { pixels.into_rgb() } else { pixels };
     let encoded = image_io::encode(&pixels, width, height, file)
@@ -321,7 +314,8 @@ mod tests {
     /// Mono8 stays PGM by default; PNG and TIFF keep a 12-bit camera's depth.
     #[test]
     fn a_frame_is_saved_in_the_format_asked_for() {
-        let mono8 = |save, rgb| encode_frame(PixelFormat::Mono8, 1, 1, &[7], save, rgb).unwrap();
+        let mono8 =
+            |save, rgb| encode_frame(PixelFormat::Mono8, 1, 1, None, &[7], save, rgb).unwrap();
         let (pgm, ext) = mono8(SaveFormat::Pnm, false);
         assert_eq!((pgm.as_slice(), ext), (&b"P5\n1 1\n255\n\x07"[..], "pgm"));
         let (ppm, ext) = mono8(SaveFormat::Pnm, true);
@@ -331,19 +325,43 @@ mod tests {
         );
 
         let mono12 = [0xBC, 0x0A];
-        let (png, ext) =
-            encode_frame(PixelFormat::Mono12, 1, 1, &mono12, SaveFormat::Png, false).unwrap();
+        let (png, ext) = encode_frame(
+            PixelFormat::Mono12,
+            1,
+            1,
+            None,
+            &mono12,
+            SaveFormat::Png,
+            false,
+        )
+        .unwrap();
         assert_eq!(ext, "png");
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
         // IHDR: bit depth 16, colour type 0 (greyscale).
         assert_eq!(&png[24..26], [16, 0]);
-        let (png, _) =
-            encode_frame(PixelFormat::Mono12, 1, 1, &mono12, SaveFormat::Png, true).unwrap();
+        let (png, _) = encode_frame(
+            PixelFormat::Mono12,
+            1,
+            1,
+            None,
+            &mono12,
+            SaveFormat::Png,
+            true,
+        )
+        .unwrap();
         // Colour type 2 (truecolour).
         assert_eq!(&png[24..26], [16, 2]);
 
-        let (tiff, ext) =
-            encode_frame(PixelFormat::Mono12, 1, 1, &mono12, SaveFormat::Tiff, false).unwrap();
+        let (tiff, ext) = encode_frame(
+            PixelFormat::Mono12,
+            1,
+            1,
+            None,
+            &mono12,
+            SaveFormat::Tiff,
+            false,
+        )
+        .unwrap();
         assert_eq!(ext, "tiff");
         assert!(tiff.starts_with(b"II*\0") || tiff.starts_with(b"MM\0*"));
     }

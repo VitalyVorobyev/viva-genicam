@@ -141,6 +141,8 @@ pub(crate) struct LeaderInfo {
     pub pixel_format: u32,
     pub width: u32,
     pub height: u32,
+    /// Bytes after every line of the image.
+    pub padding_x: u16,
 }
 
 /// A block the assembler is finished with.
@@ -674,6 +676,7 @@ impl Assembler {
                 pixel_format: 0,
                 width: 0,
                 height: 0,
+                padding_x: 0,
             });
             return;
         }
@@ -696,6 +699,7 @@ impl Assembler {
             pixel_format: image.pixel_format,
             width: image.width,
             height: image.height,
+            padding_x: image.padding_x,
         });
         // `PayloadSize` normally covers the geometry; a stale one read before
         // a ROI or format change does not, and the leader wins.

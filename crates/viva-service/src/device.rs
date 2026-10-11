@@ -150,7 +150,23 @@ impl DeviceHandle {
         const BASE_DELAY: Duration = Duration::from_millis(500);
         const MAX_DELAY: Duration = Duration::from_secs(16);
 
-        // 1. Retry connection with exponential backoff.
+        // 1. Give control up first: the old connection holds it until the swap
+        //    below drops it, and a camera refuses a second application's claim
+        //    while another holds control.
+        let old = self.camera.clone();
+        let released = tokio::task::spawn_blocking(move || {
+            old.lock()
+                .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))
+                .and_then(|camera| camera.transport().release_control())
+        })
+        .await;
+        if let Ok(Err(error)) | Err(error) =
+            released.map_err(|e| GenicamError::Transport(e.to_string()))
+        {
+            debug!(device_id = self.device_id, %error, "releasing control before reconnecting");
+        }
+
+        // 2. Retry connection with exponential backoff.
         let mut attempt = 0u32;
         let result = loop {
             attempt += 1;
@@ -181,7 +197,7 @@ impl DeviceHandle {
             }
         };
 
-        // 2. Swap the camera handle. Dropping the old one retires its keepalive.
+        // 3. Swap the camera handle. Dropping the old one retires its keepalive.
         let (camera, _xml) = result?;
         let mut slot = self
             .camera

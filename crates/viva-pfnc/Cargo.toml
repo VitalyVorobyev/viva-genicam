@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "Pixel Format Naming Convention (PFNC) tables and helpers"
 readme = "README.md"

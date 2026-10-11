@@ -99,6 +99,13 @@ pub(crate) async fn run(
                 continue;
             }
         };
+        // A multicast destination leaves from the camera's own interface, and
+        // reaches receivers on this host too: on loopback both are the test.
+        let sock = socket2::SockRef::from(&*socket);
+        if let Err(e) = sock.set_multicast_if_v4(&source_ip) {
+            debug!(error = %e, "IP_MULTICAST_IF not set on the GVSP socket");
+        }
+        let _ = sock.set_multicast_loop_v4(true);
         let spoof_socket = match options.spoof_source {
             Some(addr) => match UdpSocket::bind((addr, 0)).await {
                 Ok(s) => Some(s),
@@ -369,6 +376,7 @@ fn build_block(
             .chunks_enabled
             .iter()
             .fold(0, |mask, selector| mask | 1 << selector),
+        padding_x: 0,
     };
     if spec.payload_stride() == 0 {
         return None;

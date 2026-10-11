@@ -183,14 +183,15 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
         Some(Err(err)) => (None, Some(err)),
         None => (None, None),
     };
-    let (width, height, pixel_format, ts_dev) = match block.leader {
+    let (width, height, pixel_format, ts_dev, padding_x) = match block.leader {
         Some(leader) => (
             leader.width,
             leader.height,
             PixelFormat::from_code(leader.pixel_format),
             Some(leader.timestamp),
+            leader.padding_x,
         ),
-        None => (0, 0, PixelFormat::Unknown(0), None),
+        None => (0, 0, PixelFormat::Unknown(0), None, 0),
     };
     let evs = match pixel_format {
         PixelFormat::VendorLucidEvsEvt30 => Some(crate::evs::EvsFormat::Evt30),
@@ -212,6 +213,7 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
         }),
         None => {
             let mut frame = Frame::new(payload, width, height, pixel_format);
+            frame.padding_x = padding_x;
             frame.chunks = chunks;
             frame.ts_dev = ts_dev;
             frame.block_id = block.block_id;
@@ -696,7 +698,7 @@ impl<'a> StreamBuilder<'a> {
             dst_port: self.dst_port,
         });
 
-        let iface_mtu = nic::mtu(&iface).map_err(|err| GenicamError::transport(err.to_string()))?;
+        let iface_mtu = nic::mtu(&iface).bytes();
         let mtu = self
             .target_mtu
             .map_or(iface_mtu, |limit| limit.min(iface_mtu));
@@ -935,7 +937,7 @@ fn delay_in_ticks(delay: Duration, hz: u64) -> Result<u32, GenicamError> {
 /// `PACKETRESEND_CMD`. Unreadable counts as no.
 async fn camera_supports_resend(device: &mut GigeDevice) -> bool {
     match device.gvcp_capability().await {
-        Ok(caps) => caps & viva_gige::gvcp::consts::CAPABILITY_PACKET_RESEND != 0,
+        Ok(caps) => caps.packet_resend(),
         Err(err) => {
             debug!(error = %err, "could not read GVCP Capability; packet resend stays off");
             false
@@ -958,9 +960,26 @@ pub struct StreamOptions {
     rcvbuf_bytes: Option<usize>,
     packet_delay: Option<Duration>,
     resend: ResendPolicy,
+    monitor: bool,
 }
 
 impl StreamOptions {
+    /// Watch a multicast stream another application configured: claim
+    /// nothing, write nothing, read the group, port and packet size from the
+    /// camera's stream channel registers, join the group and receive. Never
+    /// asks for lost packets.
+    ///
+    /// The camera must already stream to a multicast group; one streaming
+    /// unicast to another host cannot be watched. Works on a camera opened
+    /// with [`Access::Monitor`](crate::Access::Monitor) and on one this
+    /// application controls.
+    pub fn monitor() -> Self {
+        Self {
+            monitor: true,
+            ..Self::default()
+        }
+    }
+
     /// The defaults.
     pub fn new() -> Self {
         Self::default()
@@ -1036,8 +1055,23 @@ impl crate::Camera<crate::GigeRegisterIo> {
     // borrows the device, and nothing else may use the control channel while
     // the stream channel is being configured. The lint resolves at the
     // enclosing body, so the allow lives here.
+    ///
+    /// [`StreamOptions::monitor`] instead watches a multicast stream another
+    /// application configured, claiming and writing nothing; it is the only
+    /// stream a camera opened with [`Access::Monitor`](crate::Access::Monitor)
+    /// can open.
     #[allow(clippy::await_holding_lock)]
     pub fn open_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
+        if options.monitor {
+            return self.watch_stream(options);
+        }
+        if self.transport().control_state() == crate::ControlState::Monitor {
+            return Err(GenicamError::transport(
+                "the camera was opened as a read-only monitor, which cannot configure a stream; \
+                 watch a multicast stream with StreamOptions::monitor(), or open the camera \
+                 with Access::Control",
+            ));
+        }
         let payload_size = read_payload_size(self);
         let time_sync = self.time_sync().clone();
         let transport = self.transport();
@@ -1082,11 +1116,72 @@ impl crate::Camera<crate::GigeRegisterIo> {
             }
             builder.build().await
         })?;
+        // Control was claimed again above, so a session that had lost or
+        // released it holds it once more.
+        transport.note_claimed();
         Ok(FrameStream::start_with(
             stream,
             Some(time_sync),
             payload_size,
         ))
+    }
+
+    /// [`StreamOptions::monitor`]: join the multicast group the camera
+    /// already streams to, reading where from its registers. Nothing is
+    /// written.
+    #[allow(clippy::await_holding_lock)]
+    fn watch_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
+        const CHANNEL: u32 = 0;
+        let payload_size = read_payload_size(self);
+        let time_sync = self.time_sync().clone();
+        let transport = self.transport();
+        let (socket, packet_size, group, iface_ip, camera_ip) = transport.block_on(async {
+            let mut device = transport.lock_device()?;
+            let IpAddr::V4(camera_ip) = device.remote_addr().ip() else {
+                return Err(GenicamError::transport("IPv6 cameras are not supported"));
+            };
+            let (group, port) = device.stream_destination(CHANNEL).await.map_err(|err| {
+                GenicamError::transport(format!("read GevSCDA/GevSCPHostPort: {err}"))
+            })?;
+            if !group.is_multicast() || port == 0 {
+                return Err(GenicamError::transport(format!(
+                    "the camera streams to {group}:{port}, not to a multicast group; a monitor \
+                     can only watch a stream the controlling application sent to one"
+                )));
+            }
+            let packet_size = device
+                .get_stream_packet_size(CHANNEL)
+                .await
+                .map_err(|err| GenicamError::transport(format!("read GevSCPSPacketSize: {err}")))?;
+            let iface = match options.iface {
+                Some(iface) => iface,
+                None => Iface::from_remote_ipv4(camera_ip).map_err(|err| {
+                    GenicamError::transport(format!(
+                        "no local interface routes to {camera_ip}: {err}"
+                    ))
+                })?,
+            };
+            let iface_ip = iface
+                .ipv4()
+                .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
+            let mc = McOptions {
+                rcvbuf_bytes: options.rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
+                ..McOptions::default()
+            };
+            let socket = nic::bind_multicast(&iface, group, port, &mc)
+                .await
+                .map_err(|err| GenicamError::transport(format!("join {group}:{port}: {err}")))?;
+            info!(%group, port, packet_size, "watching the camera's multicast stream");
+            Ok((socket, packet_size, group, iface_ip, camera_ip))
+        })?;
+        let socket = socket
+            .into_std()
+            .map_err(|err| GenicamError::transport(format!("socket conversion failed: {err}")))?;
+        let mut frames = FrameStream::watch_multicast(socket, packet_size, group, iface_ip)?;
+        frames.set_source_filter(Some(camera_ip));
+        frames.set_payload_size(payload_size);
+        frames.set_time_sync(time_sync);
+        Ok(frames)
     }
 }
 
@@ -1192,6 +1287,46 @@ pub struct FrameStream {
     params: StreamParams,
     config: Option<StreamConfig>,
     time_sync: Option<TimeSync>,
+    /// The multicast group the socket joined, left when the stream drops.
+    membership: Option<Membership>,
+}
+
+/// A multicast group a stream's socket joined.
+///
+/// Holds a duplicate of the socket, so the group is left explicitly when the
+/// stream drops — an IGMP leave the switch sees at once (SR-08) — rather than
+/// whenever the last descriptor of the socket happens to close.
+struct Membership {
+    socket: std::net::UdpSocket,
+    group: Ipv4Addr,
+    iface: Ipv4Addr,
+}
+
+impl Membership {
+    fn of(socket: &std::net::UdpSocket, group: Ipv4Addr, iface: Ipv4Addr) -> Option<Self> {
+        match socket.try_clone() {
+            Ok(socket) => Some(Self {
+                socket,
+                group,
+                iface,
+            }),
+            Err(err) => {
+                debug!(%group, error = %err, "cannot keep the stream socket to leave its group");
+                None
+            }
+        }
+    }
+}
+
+impl Drop for Membership {
+    fn drop(&mut self) {
+        match self.socket.leave_multicast_v4(&self.group, &self.iface) {
+            Ok(()) => debug!(group = %self.group, "left the multicast group"),
+            Err(err) => {
+                debug!(group = %self.group, error = %err, "leaving the multicast group failed")
+            }
+        }
+    }
 }
 
 impl FrameStream {
@@ -1218,6 +1353,10 @@ impl FrameStream {
             resend,
         } = stream;
         let source_filter = config.source_filter;
+        let group = match (&config.dest, config.iface.ipv4()) {
+            (StreamDest::Multicast { group, .. }, Some(iface)) => Some((*group, iface)),
+            _ => None,
+        };
         let mut frames = Self::idle(stats, params, Some(config), time_sync);
         frames.shared.set_payload_size(payload_size);
         frames.shared.set_source_filter(source_filter);
@@ -1228,7 +1367,11 @@ impl FrameStream {
             frames.shared.set_resend_target(Some((camera, channel)));
         }
         match socket.into_std() {
-            Ok(socket) => frames.start(socket, rcvbuf_bytes),
+            Ok(socket) => {
+                frames.membership =
+                    group.and_then(|(group, iface)| Membership::of(&socket, group, iface));
+                frames.start(socket, rcvbuf_bytes);
+            }
             Err(err) => frames
                 .shared
                 .queue
@@ -1281,6 +1424,20 @@ impl FrameStream {
         Ok(frames)
     }
 
+    /// Receive on `socket`, already joined to `group` on the interface at
+    /// `iface`, and leave the group when the stream drops (SR-08).
+    pub(crate) fn watch_multicast(
+        socket: std::net::UdpSocket,
+        packet_size: u32,
+        group: Ipv4Addr,
+        iface: Ipv4Addr,
+    ) -> Result<Self, GenicamError> {
+        let membership = Membership::of(&socket, group, iface);
+        let mut frames = Self::from_socket(socket, packet_size)?;
+        frames.membership = membership;
+        Ok(frames)
+    }
+
     fn idle(
         stats: StreamStatsAccumulator,
         params: StreamParams,
@@ -1294,6 +1451,7 @@ impl FrameStream {
             params,
             config,
             time_sync,
+            membership: None,
         }
     }
 
@@ -1630,6 +1788,7 @@ impl U3vFrameStream {
                             pixel_format,
                         );
                         frame.ts_dev = Some(raw.leader.timestamp);
+                        frame.padding_x = raw.leader.x_padding;
                         frame.block_id = raw.leader.block_id;
                         frame.payload_type = raw.leader.payload_type;
                         if tx.blocking_send(Ok(frame)).is_err() {
@@ -1850,6 +2009,28 @@ mod tests {
     use super::*;
     use assembly::LeaderInfo;
 
+    /// SR-08: a stream that joined a multicast group leaves it when it drops,
+    /// rather than leaving the membership to the socket's close — which
+    /// never comes while anything else holds the socket. A duplicate of the
+    /// socket shows it: leaving through it fails once the stream has left.
+    #[test]
+    fn a_multicast_stream_leaves_its_group_when_dropped() {
+        let group = Ipv4Addr::new(239, 192, 1, 31);
+        let iface = Ipv4Addr::LOCALHOST;
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("bind");
+        if let Err(err) = socket.join_multicast_v4(&group, &iface) {
+            eprintln!("skipped: cannot join a group on loopback here: {err}");
+            return;
+        }
+        let duplicate = socket.try_clone().expect("duplicate");
+        let stream = FrameStream::watch_multicast(socket, 1500, group, iface).expect("stream");
+        drop(stream);
+        assert!(
+            duplicate.leave_multicast_v4(&group, &iface).is_err(),
+            "the group was still joined after the stream dropped"
+        );
+    }
+
     /// A complete assembled block with a leader, as the engine hands it over.
     fn assembled(
         payload: Bytes,
@@ -1863,6 +2044,7 @@ mod tests {
             block_id: 1,
             status: FrameStatus::Complete,
             leader: Some(LeaderInfo {
+                padding_x: 0,
                 timestamp,
                 pixel_format,
                 width,

@@ -69,9 +69,10 @@ cargo test -p viva-genicam --test fake_camera        # discovery, features, stre
 cargo test -p viva-genicam --test predicates         # pIsLocked, pIsAvailable, ... end to end
 cargo test -p viva-genicam --test register_access    # which GVCP command a register access sends
 cargo test -p viva-genicam --test report             # the diagnostic report every tool writes
+cargo test -p viva-genicam --test gige_session       # control release, monitors, PENDING_ACK, discovery, multicast monitors
 # Control-channel keepalive, against fixtures that withhold or delay ACKs
 cargo test -p viva-genicam --test heartbeat          # idle keepalive, with a negative control
-cargo test -p viva-genicam --test inflight_keepalive # probes continue while register I/O holds the mutex
+cargo test -p viva-genicam --test inflight_keepalive # probes continue while register I/O holds the mutex (against the fake)
 cargo test -p viva-genicam --test keepalive_shutdown # dropping the transport cancels keepalive I/O
 cargo test -p viva-gige    --test inflight_keepalive # heartbeats during long ACK waits (ADR-0023)
 # GVSP receive engine, from scripted datagrams on ephemeral ports (no UDP 3956)

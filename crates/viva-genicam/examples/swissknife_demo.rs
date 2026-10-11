@@ -71,7 +71,9 @@ fn run_real() -> Result<(), Box<dyn Error>> {
     };
 
     let addr = SocketAddr::new(IpAddr::V4(info.ip), viva_genicam::gige::GVCP_PORT);
-    let device = rt.block_on(GigeDevice::open(addr))?;
+    let mut device = rt.block_on(GigeDevice::open(addr))?;
+    // The adapter below keeps control alive and releases it when dropped.
+    rt.block_on(device.claim_control())?;
     let device = std::sync::Arc::new(tokio::sync::Mutex::new(device));
     let xml = rt.block_on(viva_genapi_xml::fetch_and_load_xml({
         let device = device.clone();

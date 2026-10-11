@@ -10,6 +10,7 @@
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::time::Duration;
 
 use if_addrs::IfAddr;
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
@@ -433,24 +434,61 @@ fn available() -> String {
     out
 }
 
+/// An interface MTU, and whether the operating system reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mtu {
+    /// The operating system reported this MTU.
+    Measured(u32),
+    /// The lookup failed, or this platform has none: Ethernet's 1500 bytes,
+    /// [`ASSUMED_MTU`], stands in.
+    Assumed(u32),
+}
+
+/// The MTU assumed when the operating system does not report one.
+pub const ASSUMED_MTU: u32 = 1500;
+
+impl Mtu {
+    /// The MTU in bytes, measured or assumed.
+    pub fn bytes(self) -> u32 {
+        match self {
+            Mtu::Measured(bytes) | Mtu::Assumed(bytes) => bytes,
+        }
+    }
+
+    /// Whether the operating system reported it.
+    pub fn is_measured(self) -> bool {
+        matches!(self, Mtu::Measured(_))
+    }
+}
+
+impl std::fmt::Display for Mtu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mtu::Measured(bytes) => write!(f, "{bytes}"),
+            Mtu::Assumed(bytes) => write!(f, "{bytes} (assumed)"),
+        }
+    }
+}
+
 /// Read the MTU configured for the provided interface.
 ///
 /// Linux reads `/sys/class/net/<iface>/mtu`, Windows `GetIfEntry2`, macOS
 /// the link-layer entry's `if_data.ifi_mtu` from `getifaddrs(3)`. Anything
-/// else, or a failed lookup, falls back to the Ethernet MTU of 1500 bytes.
-pub fn mtu(_iface: &Iface) -> io::Result<u32> {
+/// else, or a failed lookup, is [`Mtu::Assumed`] at [`ASSUMED_MTU`].
+pub fn mtu(_iface: &Iface) -> Mtu {
     #[cfg(target_os = "linux")]
     {
         let path = format!("/sys/class/net/{}/mtu", _iface.name());
         match fs::read_to_string(path) {
-            Ok(contents) => {
-                let mtu = contents
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-                tracing::debug!(name = _iface.name(), mtu, "resolved interface MTU");
-                return Ok(mtu);
-            }
+            Ok(contents) => match contents.trim().parse::<u32>() {
+                Ok(mtu) => {
+                    tracing::debug!(name = _iface.name(), mtu, "resolved interface MTU");
+                    return Mtu::Measured(mtu);
+                }
+                Err(err) => {
+                    warn!(name = _iface.name(), error = %err, "unreadable MTU, using default");
+                }
+            },
             Err(err) => {
                 warn!(name = _iface.name(), error = %err, "failed to read MTU, using default");
             }
@@ -472,7 +510,7 @@ pub fn mtu(_iface: &Iface) -> io::Result<u32> {
                 mtu = row.Mtu,
                 "resolved interface MTU"
             );
-            return Ok(row.Mtu);
+            return Mtu::Measured(row.Mtu);
         }
 
         let err = io::Error::from_raw_os_error(status as i32);
@@ -487,7 +525,7 @@ pub fn mtu(_iface: &Iface) -> io::Result<u32> {
     match link_mtu(_iface.name()) {
         Some(mtu) => {
             tracing::debug!(name = _iface.name(), mtu, "resolved interface MTU");
-            return Ok(mtu);
+            return Mtu::Measured(mtu);
         }
         None => {
             debug!(
@@ -497,7 +535,7 @@ pub fn mtu(_iface: &Iface) -> io::Result<u32> {
         }
     }
 
-    Ok(1500)
+    Mtu::Assumed(ASSUMED_MTU)
 }
 
 /// The MTU of interface `name` from its `AF_LINK` entry in `getifaddrs(3)`,
@@ -707,6 +745,61 @@ pub fn join_multicast(sock: &UdpSocket, group: Ipv4Addr, iface: &Iface) -> io::R
     Ok(())
 }
 
+/// Wait up to `timeout` for `socket` to have a datagram — or a pending error
+/// — to read. `Ok(false)` when the time ran out.
+///
+/// For a receive loop that must also wake on a timer: wait here, then read
+/// the socket non-blocking. A receive timeout (`SO_RCVTIMEO`) does the same
+/// in one call, but Windows documents the socket's state as indeterminate
+/// once a receive has timed out, and a datagram arriving as the timeout
+/// fires can be lost — which a stream that times out every 5 ms meets often
+/// enough to drop a frame now and then.
+pub fn wait_readable(socket: &StdUdpSocket, timeout: Duration) -> io::Result<bool> {
+    let millis = timeout.as_millis().clamp(0, i32::MAX as u128) as i32;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let mut fd = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid `pollfd` for a descriptor `socket` keeps open
+        // for the duration of the call.
+        let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+        match ready {
+            -1 => {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    Ok(false)
+                } else {
+                    Err(err)
+                }
+            }
+            0 => Ok(false),
+            _ => Ok(true),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{POLLRDNORM, WSAPOLLFD, WSAPoll};
+        let mut fd = WSAPOLLFD {
+            fd: socket.as_raw_socket() as _,
+            events: POLLRDNORM,
+            revents: 0,
+        };
+        // SAFETY: one valid `WSAPOLLFD` for a socket `socket` keeps open for
+        // the duration of the call.
+        let ready = unsafe { WSAPoll(&mut fd, 1, millis) };
+        match ready {
+            -1 => Err(io::Error::last_os_error()),
+            0 => Ok(false),
+            _ => Ok(true),
+        }
+    }
+}
+
 /// Helper returning the default bind address for discovery convenience.
 pub fn default_bind_addr() -> IpAddr {
     IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -761,9 +854,37 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn loopback_mtu_is_read_on_macos() {
         let lo0 = Iface::from_system("lo0").expect("lo0");
-        let mtu = mtu(&lo0).expect("mtu");
-        assert_ne!(mtu, 1500, "the fallback, not lo0's own MTU");
-        assert!(mtu > 1500, "{mtu}");
+        let mtu = mtu(&lo0);
+        assert!(mtu.is_measured(), "{mtu:?}");
+        assert!(mtu.bytes() > 1500, "{mtu}");
+    }
+
+    /// A wait with nothing to read times out; a datagram makes the socket
+    /// readable at once.
+    #[test]
+    fn wait_readable_reports_a_datagram_and_times_out_without_one() {
+        let rx = StdUdpSocket::bind("127.0.0.1:0").expect("bind");
+        let started = std::time::Instant::now();
+        assert!(!wait_readable(&rx, Duration::from_millis(20)).expect("wait"));
+        assert!(started.elapsed() >= Duration::from_millis(15));
+        let tx = StdUdpSocket::bind("127.0.0.1:0").expect("bind");
+        tx.send_to(b"x", rx.local_addr().unwrap()).expect("send");
+        assert!(wait_readable(&rx, Duration::from_secs(2)).expect("wait"));
+    }
+
+    /// An MTU the operating system did not report says so, rather than
+    /// passing Ethernet's 1500 off as measured (Codex review of #195).
+    #[test]
+    fn an_mtu_the_os_does_not_report_is_assumed() {
+        let unknown = Iface {
+            name: "viva-no-such-if0".to_string(),
+            index: 0,
+            ipv4: None,
+            ipv6: None,
+        };
+        assert_eq!(mtu(&unknown), Mtu::Assumed(ASSUMED_MTU));
+        assert_eq!(Mtu::Assumed(1500).to_string(), "1500 (assumed)");
+        assert_eq!(Mtu::Measured(9000).to_string(), "9000");
     }
 
     #[test]

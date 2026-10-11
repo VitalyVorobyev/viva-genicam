@@ -49,11 +49,14 @@ impl FrameEncoder {
 
     /// Encode one `width × height` frame: monochrome as an 8-bit grey BMP,
     /// everything else as 24-bit RGB. Bytes past the image are ignored.
+    /// `row_stride` is the frame's own (`Frame::row_stride`), for a camera
+    /// that pads its lines.
     pub fn encode(
         &mut self,
         format: PixelFormat,
         width: u32,
         height: u32,
+        row_stride: Option<usize>,
         pixels: &[u8],
     ) -> Result<Bytes, EncodeError> {
         if self.size != (width, height) {
@@ -62,13 +65,17 @@ impl FrameEncoder {
             self.rgb = None;
         }
         if format.is_mono() {
-            let gray = self.converter.gray8(format, width, height, pixels)?;
+            let gray = self
+                .converter
+                .gray8(format, width, height, row_stride, pixels)?;
             let encoder = self
                 .gray
                 .get_or_insert_with(|| BmpEncoder::new(width, height));
             Ok(encoder.encode_gray8(gray)?)
         } else {
-            let rgb = self.converter.rgb8(format, width, height, pixels)?;
+            let rgb = self
+                .converter
+                .rgb8(format, width, height, row_stride, pixels)?;
             let encoder = self
                 .rgb
                 .get_or_insert_with(|| BmpEncoder::new_rgb24(width, height));
@@ -155,7 +162,7 @@ mod tests {
         let mut enc = FrameEncoder::new();
         // 0x0FF0 at 12 bits is 0xFF at 8.
         let bmp = enc
-            .encode(PixelFormat::Mono12, 1, 1, &[0xF0, 0x0F])
+            .encode(PixelFormat::Mono12, 1, 1, None, &[0xF0, 0x0F])
             .unwrap();
         assert_eq!(first_pixel(&bmp, 1), [0xFF]);
     }
@@ -164,12 +171,12 @@ mod tests {
     fn bgr8_lands_in_bmp_order() {
         let mut enc = FrameEncoder::new();
         let bmp = enc
-            .encode(PixelFormat::BGR8Packed, 1, 1, &[1, 2, 3])
+            .encode(PixelFormat::BGR8Packed, 1, 1, None, &[1, 2, 3])
             .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [1, 2, 3]);
         // Negative control: the same bytes as RGB are swapped.
         let bmp = enc
-            .encode(PixelFormat::RGB8Packed, 1, 1, &[1, 2, 3])
+            .encode(PixelFormat::RGB8Packed, 1, 1, None, &[1, 2, 3])
             .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [3, 2, 1]);
     }
@@ -178,7 +185,7 @@ mod tests {
     fn rgba8_drops_the_alpha() {
         let mut enc = FrameEncoder::new();
         let bmp = enc
-            .encode(PixelFormat::RGBa8, 1, 1, &[1, 2, 3, 99])
+            .encode(PixelFormat::RGBa8, 1, 1, None, &[1, 2, 3, 99])
             .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [3, 2, 1]);
     }
@@ -188,15 +195,19 @@ mod tests {
         let mut enc = FrameEncoder::new();
         // A uniform 2x2 mosaic at 12-bit 0x0800 is mid-grey everywhere.
         let mosaic: Vec<u8> = [0x00, 0x08].repeat(4);
-        let bmp = enc.encode(PixelFormat::BayerRG12, 2, 2, &mosaic).unwrap();
+        let bmp = enc
+            .encode(PixelFormat::BayerRG12, 2, 2, None, &mosaic)
+            .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [0x80, 0x80, 0x80]);
     }
 
     #[test]
     fn a_new_size_gets_new_headers() {
         let mut enc = FrameEncoder::new();
-        let small = enc.encode(PixelFormat::Mono8, 2, 2, &[0; 4]).unwrap();
-        let large = enc.encode(PixelFormat::Mono8, 4, 4, &[0; 16]).unwrap();
+        let small = enc.encode(PixelFormat::Mono8, 2, 2, None, &[0; 4]).unwrap();
+        let large = enc
+            .encode(PixelFormat::Mono8, 4, 4, None, &[0; 16])
+            .unwrap();
         let width = |bmp: &[u8]| i32::from_le_bytes(bmp[18..22].try_into().unwrap());
         assert_eq!((width(&small), width(&large)), (2, 4));
     }
@@ -205,7 +216,7 @@ mod tests {
     fn short_and_undrawable_frames_are_errors() {
         let mut enc = FrameEncoder::new();
         assert!(matches!(
-            enc.encode(PixelFormat::Mono12Packed, 2, 2, &[0; 5]),
+            enc.encode(PixelFormat::Mono12Packed, 2, 2, None, &[0; 5]),
             Err(EncodeError::Convert(_))
         ));
         assert!(!FrameEncoder::can_draw(PixelFormat::Coord3DABC32f));
@@ -216,7 +227,9 @@ mod tests {
     #[test]
     fn bytes_past_the_image_are_ignored() {
         let mut enc = FrameEncoder::new();
-        let bmp = enc.encode(PixelFormat::Mono8, 1, 1, &[7, 0xEE]).unwrap();
+        let bmp = enc
+            .encode(PixelFormat::Mono8, 1, 1, None, &[7, 0xEE])
+            .unwrap();
         assert_eq!(first_pixel(&bmp, 1), [7]);
     }
 
@@ -303,9 +316,9 @@ mod tests {
                     *pair = (u16::from_le_bytes(*pair) >> (16 - bits)).to_le_bytes();
                 }
             }
-            let library = viva_pfnc::convert::to_rgb8(format, width, height, &src).unwrap();
+            let library = viva_pfnc::convert::to_rgb8(format, width, height, None, &src).unwrap();
             let bmp = FrameEncoder::new()
-                .encode(format, width, height, &src)
+                .encode(format, width, height, None, &src)
                 .unwrap_or_else(|e| panic!("{format}: {e}"));
             assert_eq!(bmp_rgb(&bmp), library, "{format}");
         }

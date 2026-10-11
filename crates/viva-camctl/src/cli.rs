@@ -47,6 +47,14 @@ pub enum Cmd {
         /// Host interface, by IPv4 address or by OS name
         #[arg(long)]
         iface: Option<IfaceSelector>,
+        /// Ask the camera at this address directly (unicast), for one that
+        /// broadcast discovery does not reach
+        #[arg(long)]
+        ip: Option<Ipv4Addr>,
+        /// Let cameras broadcast their answer, for one configured for another
+        /// subnet that cannot answer the host directly
+        #[arg(long)]
+        allow_broadcast_ack: bool,
     },
     /// Read a feature via GenApi NodeMap
     Get {
@@ -325,9 +333,17 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::List {
             timeout_ms,
             iface: cmd_iface,
+            ip,
+            allow_broadcast_ack,
         } => {
             let iface = cmd_iface.or(iface);
-            cmd_list::run(timeout_ms, iface, json).await?
+            let args = cmd_list::ListArgs {
+                timeout_ms,
+                iface,
+                ip,
+                allow_broadcast_ack,
+            };
+            cmd_list::run(args, json).await?
         }
         Cmd::Get { ip, index, name } => cmd_get::run(ip, index, name, iface, json).await?,
         Cmd::Xml {

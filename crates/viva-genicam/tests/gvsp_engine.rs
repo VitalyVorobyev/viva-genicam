@@ -823,6 +823,27 @@ async fn datagrams_from_another_address_are_ignored() {
     assert_eq!(block.block_id(), 2);
 }
 
+/// The leader's `padding_x` reaches the frame, and conversion reads each
+/// line from its own start (Codex review of #196).
+#[tokio::test]
+async fn a_leaders_line_padding_reaches_the_frame_and_its_conversion() {
+    let mut h = Harness::new(576);
+    let mut spec = BlockSpec::image(1, 4, 2, MONO8, 576);
+    spec.padding_x = 3;
+    let data = [1, 2, 3, 4, 0xEE, 0xEE, 0xEE, 5, 6, 7, 8, 0xEE, 0xEE, 0xEE];
+    h.send(&block_datagrams(&spec, &data));
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("the frame completes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.padding_x, 3);
+    assert_eq!(frame.row_stride(), Some(7));
+    let rgb = frame.to_rgb8().expect("convert");
+    let grey: Vec<u8> = rgb.as_chunks::<3>().0.iter().map(|px| px[0]).collect();
+    assert_eq!(grey, [1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
 // ---------------------------------------------------------------------------
 // Chunk payloads (TC-06)
 // ---------------------------------------------------------------------------

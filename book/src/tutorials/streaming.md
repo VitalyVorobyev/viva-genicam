@@ -140,6 +140,9 @@ cargo run -p viva-camctl -- stream \
   --mode multicast --group 239.192.0.10
 ```
 
+Another host can then watch the same stream without touching the camera:
+see [Networking → One camera, several applications](../networking.md#61-one-camera-several-applications).
+
 ---
 
 ## 3. Streaming from Rust

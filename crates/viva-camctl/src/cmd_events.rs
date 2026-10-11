@@ -47,7 +47,7 @@ pub async fn run(
         .ipv4()
         .ok_or_else(|| anyhow!("interface routing to {} has no IPv4 address", device.ip))?;
     info!(ip = %device.ip, %local_ip, port, "configuring events");
-    let mut camera = common::open_camera(&device)
+    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
         .await
         .context("open camera for events")?;
 

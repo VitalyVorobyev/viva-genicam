@@ -13,7 +13,7 @@ use pyo3::types::{PyDict, PyList};
 
 use viva_genicam::gige::nic::{Iface, IfaceSelector};
 use viva_genicam::{
-    connect_gige_with_xml, connect_u3v_with_xml, Camera, GenicamError, GigeRegisterIo,
+    connect_gige_as, connect_u3v_with_xml, Access, Camera, GenicamError, GigeRegisterIo,
     U3vRegisterIo,
 };
 use viva_u3v::usb::RusbTransfer;
@@ -88,19 +88,25 @@ pub(crate) fn iface_from_str(selector: &str) -> PyResult<Iface> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (device_info, iface=None))]
+#[pyo3(signature = (device_info, iface=None, monitor=false))]
 fn connect_gige(
     py: Python<'_>,
     device_info: PyGigeDeviceInfo,
     iface: Option<&str>,
+    monitor: bool,
 ) -> PyResult<PyCamera> {
     let iface_resolved = match iface {
         Some(name) => Some(iface_from_str(name)?),
         None => None,
     };
     let info = device_info.inner.clone();
+    let access = if monitor {
+        Access::Monitor
+    } else {
+        Access::Control
+    };
     let (camera, xml) = py
-        .detach(|| runtime().block_on(async move { connect_gige_with_xml(&info).await }))
+        .detach(|| runtime().block_on(async move { connect_gige_as(&info, access).await }))
         .into_py_err()?;
     Ok(PyCamera {
         inner: CameraInner::Gige {

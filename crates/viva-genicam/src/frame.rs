@@ -44,7 +44,8 @@ impl FrameStatus {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Frame {
-    /// The image: contiguous pixel data.
+    /// The image: its lines one after another, each followed by
+    /// [`padding_x`](Self::padding_x) bytes.
     ///
     /// For an image with chunks (`0x4001`) this is the image chunk alone,
     /// without the chunks that follow it. A chunk-data block (`0x0004`) has
@@ -75,6 +76,9 @@ pub struct Frame {
     pub payload_type: u16,
     /// How the block ended.
     pub status: FrameStatus,
+    /// Bytes the camera sends after every line of the image: the GVSP image
+    /// leader's `padding_x`, 0 for none. See [`row_stride`](Self::row_stride).
+    pub padding_x: u16,
 }
 
 /// Payload type of an image block.
@@ -94,7 +98,22 @@ impl Frame {
             block_id: 0,
             payload_type: PAYLOAD_TYPE_IMAGE,
             status: FrameStatus::Complete,
+            padding_x: 0,
         }
+    }
+
+    /// Bytes from the start of one line to the start of the next, when the
+    /// camera pads its lines: the line's own bytes, a packing group it ends
+    /// inside completed (PFNC 2.4 §6.7), plus [`padding_x`](Self::padding_x).
+    /// `None` without padding: the lines then follow one another, and the
+    /// pixels run on from one line to the next.
+    pub fn row_stride(&self) -> Option<usize> {
+        if self.padding_x == 0 {
+            return None;
+        }
+        self.pixel_format
+            .line_bytes(self.width)
+            .map(|line| line + usize::from(self.padding_x))
     }
 
     /// Whether every packet of the frame arrived.
@@ -123,13 +142,19 @@ impl Frame {
     /// Bayer mosaic is demosaiced bilinearly — the same pixels Viva Studio's
     /// viewer shows. Bytes past the image are ignored.
     pub fn to_rgb8(&self) -> Result<Vec<u8>, crate::GenicamError> {
-        viva_pfnc::convert::to_rgb8(self.pixel_format, self.width, self.height, &self.payload)
-            .map_err(|err| match err {
-                ConvertError::Unsupported(format) => {
-                    crate::GenicamError::UnsupportedPixelFormat(format)
-                }
-                other => crate::GenicamError::Parse(other.to_string()),
-            })
+        viva_pfnc::convert::to_rgb8(
+            self.pixel_format,
+            self.width,
+            self.height,
+            self.row_stride(),
+            &self.payload,
+        )
+        .map_err(|err| match err {
+            ConvertError::Unsupported(format) => {
+                crate::GenicamError::UnsupportedPixelFormat(format)
+            }
+            other => crate::GenicamError::Parse(other.to_string()),
+        })
     }
 }
 
@@ -211,7 +236,7 @@ mod tests {
             let frame = frame_with_payload(&payload, width, height, format);
             assert_eq!(
                 frame.to_rgb8().ok(),
-                convert::to_rgb8(format, width, height, &payload).ok(),
+                convert::to_rgb8(format, width, height, None, &payload).ok(),
                 "{format}"
             );
         }

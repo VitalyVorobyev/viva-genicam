@@ -1,9 +1,10 @@
 //! GVCP control channel server: discovery + GenCP register read/write.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
 use tokio::net::UdpSocket;
@@ -31,6 +32,9 @@ const ACTION_CMD: u16 = 0x0100;
 
 // GVCP ack opcodes
 const DISCOVERY_ACK: u16 = 0x0003;
+/// `PENDING_ACK`: "still working on it, wait this long". Payload: two
+/// reserved bytes, then `time_to_completion` in milliseconds as a `u16`.
+const PENDING_ACK: u16 = 0x0089;
 const READREG_ACK: u16 = 0x0081;
 const WRITEREG_ACK: u16 = 0x0083;
 const READMEM_ACK: u16 = 0x0085;
@@ -60,6 +64,10 @@ pub const FAKE_SERIAL: &str = "FAKE-001";
 /// User-defined name reported in the Discovery ACK.
 pub const FAKE_USER_NAME: &str = "FakeCamera";
 
+/// Subnet mask the fake reports unless told otherwise: loopback's `/8`, the
+/// network every test fake lives on.
+pub const FAKE_SUBNET_MASK: Ipv4Addr = Ipv4Addr::new(255, 0, 0, 0);
+
 /// The per-instance identity a fake reports: the `FAKE_*` constants unless the
 /// builder overrides them. Two fakes with one identity are indistinguishable,
 /// which reproduces #137 but cannot demonstrate its fix.
@@ -69,6 +77,12 @@ pub(crate) struct Identity {
     pub(crate) model: String,
     pub(crate) serial: String,
     pub(crate) user_name: String,
+    /// The address the camera believes it has; `None` reports the one it is
+    /// bound to. A camera on the wrong subnet answers a broadcast all the same,
+    /// with an address the host cannot reach.
+    pub(crate) ip: Option<Ipv4Addr>,
+    pub(crate) subnet_mask: Ipv4Addr,
+    pub(crate) gateway: Ipv4Addr,
 }
 
 impl Default for Identity {
@@ -78,8 +92,21 @@ impl Default for Identity {
             model: FAKE_MODEL.to_string(),
             serial: FAKE_SERIAL.to_string(),
             user_name: FAKE_USER_NAME.to_string(),
+            ip: None,
+            subnet_mask: FAKE_SUBNET_MASK,
+            gateway: Ipv4Addr::UNSPECIFIED,
         }
     }
+}
+
+/// One `DISCOVERY_CMD` the fake received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscoveryRequest {
+    /// Where it came from.
+    pub from: SocketAddr,
+    /// The command's flag byte: `0x01` asks for an acknowledgement, `0x10`
+    /// allows the device to broadcast it.
+    pub flags: u8,
 }
 
 /// Status code for success.
@@ -128,17 +155,33 @@ pub enum RegisterCommandRefusal {
 #[derive(Debug, Default)]
 pub struct CommandCounters {
     counts: std::sync::Mutex<HashMap<(GvcpCommand, u64), u64>>,
-    sequence: std::sync::Mutex<Vec<(GvcpCommand, u64)>>,
+    sequence: std::sync::Mutex<Vec<(GvcpCommand, u64, SocketAddr)>>,
 }
 
 impl CommandCounters {
-    fn record(&self, command: GvcpCommand, addr: u64) {
+    fn record(&self, command: GvcpCommand, addr: u64, peer: SocketAddr) {
         if let Ok(mut counts) = self.counts.lock() {
             *counts.entry((command, addr)).or_default() += 1;
         }
         if let Ok(mut sequence) = self.sequence.lock() {
-            sequence.push((command, addr));
+            sequence.push((command, addr, peer));
         }
+    }
+
+    /// Every register-access command `peer` sent since the last
+    /// [`reset`](Self::reset), in arrival order: what one application did,
+    /// when several talk to the camera.
+    pub fn from(&self, peer: SocketAddr) -> Vec<(GvcpCommand, u64)> {
+        self.sequence
+            .lock()
+            .map(|sequence| {
+                sequence
+                    .iter()
+                    .filter(|(_, _, from)| *from == peer)
+                    .map(|&(command, addr, _)| (command, addr))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Every register-access command received since the last
@@ -147,7 +190,12 @@ impl CommandCounters {
     pub fn sequence(&self) -> Vec<(GvcpCommand, u64)> {
         self.sequence
             .lock()
-            .map(|sequence| sequence.clone())
+            .map(|sequence| {
+                sequence
+                    .iter()
+                    .map(|&(command, addr, _)| (command, addr))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -194,6 +242,13 @@ pub(crate) struct ServerOptions {
     pub retention: Arc<std::sync::Mutex<Retention>>,
     /// What the device did with resend requests.
     pub resend: Arc<ResendCounters>,
+    /// Every `DISCOVERY_CMD` received.
+    pub discoveries: Arc<std::sync::Mutex<Vec<DiscoveryRequest>>>,
+    /// Commands addressing these registers are acknowledged only after the
+    /// delay, preceded by a `PENDING_ACK` once the controller enabled it.
+    pub delayed_acks: Arc<HashMap<u64, Duration>>,
+    /// How often the heartbeat rule has revoked control privilege.
+    pub expiries: Arc<AtomicU64>,
 }
 
 /// Run the GVCP control server loop.
@@ -210,6 +265,9 @@ pub async fn run(
     identity: Identity,
 ) {
     let mut buf = [0u8; 2048];
+    // Delayed commands not yet acknowledged, by sender and request id: a
+    // retry of one is the same command, not a second one to execute.
+    let in_flight: Arc<std::sync::Mutex<HashSet<(SocketAddr, u16)>>> = Arc::default();
     loop {
         let (len, peer) = match socket.recv_from(&mut buf).await {
             Ok(r) => r,
@@ -229,20 +287,22 @@ pub async fn run(
         let _length = u16::from_be_bytes([pkt[4], pkt[5]]);
         let request_id = u16::from_be_bytes([pkt[6], pkt[7]]);
         let payload = &pkt[8..];
-
-        // Register access refreshes the device's heartbeat timer. Discovery and
-        // FORCEIP do not: they are broadcast by any application on the subnet.
-        // The command is still served after an expiry — a real device answers
-        // register reads from a non-controller, it only refuses configuration.
-        if matches!(
+        let register_access = matches!(
             command,
             READREG_CMD | WRITEREG_CMD | READMEM_CMD | WRITEMEM_CMD
-        ) && regs.lock().await.note_register_command()
-        {
+        );
+
+        // Register access from the controller refreshes its heartbeat timer.
+        // Discovery and FORCEIP do not: they are broadcast by any application
+        // on the subnet. The command is still served after an expiry — a real
+        // device answers register reads from a non-controller, it only
+        // refuses configuration.
+        if register_access && regs.lock().await.note_register_command(peer) {
+            options.expiries.fetch_add(1, Ordering::Relaxed);
             warn!(%peer, "heartbeat expired; control privilege released");
         }
 
-        record_command(&options.counters, command, payload);
+        record_command(&options.counters, command, payload, peer);
 
         if matches!(command, READREG_CMD | WRITEREG_CMD)
             && let Some(refusal) = options.refuse_register_commands
@@ -260,53 +320,48 @@ pub async fn run(
             continue;
         }
 
-        match command {
+        let delay = register_access
+            .then(|| first_address(payload))
+            .flatten()
+            .and_then(|addr| options.delayed_acks.get(&addr).copied());
+        if delay.is_some()
+            && in_flight
+                .lock()
+                .is_ok_and(|pending| pending.contains(&(peer, request_id)))
+        {
+            debug!(%peer, request_id, "retry of a command still in progress; not executed again");
+            continue;
+        }
+
+        let acquisition = Acquisition {
+            start: &acq_start_notify,
+            stop: &acq_stop_flag,
+        };
+        let reply = match command {
             DISCOVERY_CMD => {
+                if let Ok(mut seen) = options.discoveries.lock() {
+                    seen.push(DiscoveryRequest { from: peer, flags });
+                }
                 let resp = build_discovery_ack(request_id, bind_ip, &identity);
                 let _ = socket.send_to(&resp, peer).await;
-                debug!(%peer, "discovery response sent");
+                debug!(%peer, flags, "discovery response sent");
+                continue;
             }
             FORCEIP_CMD => {
                 handle_forceip(&socket, peer, request_id, payload, bind_ip, identity.mac).await;
+                continue;
             }
-            READREG_CMD => {
-                handle_readreg(&socket, peer, request_id, payload, &regs).await;
-            }
+            READREG_CMD => handle_readreg(peer, request_id, payload, &regs).await,
             WRITEREG_CMD => {
-                handle_writereg(
-                    &socket,
-                    peer,
-                    request_id,
-                    payload,
-                    bind_ip,
-                    &regs,
-                    Acquisition {
-                        start: &acq_start_notify,
-                        stop: &acq_stop_flag,
-                    },
-                )
-                .await;
+                handle_writereg(peer, request_id, payload, bind_ip, &regs, acquisition).await
             }
-            READMEM_CMD => {
-                handle_readmem(&socket, peer, request_id, payload, &regs).await;
-            }
+            READMEM_CMD => handle_readmem(peer, request_id, payload, &regs).await,
             WRITEMEM_CMD => {
-                handle_writemem(
-                    &socket,
-                    peer,
-                    request_id,
-                    payload,
-                    bind_ip,
-                    &regs,
-                    Acquisition {
-                        start: &acq_start_notify,
-                        stop: &acq_stop_flag,
-                    },
-                )
-                .await;
+                handle_writemem(peer, request_id, payload, bind_ip, &regs, acquisition).await
             }
             ACTION_CMD => {
                 handle_action(&socket, peer, request_id, flags, payload).await;
+                continue;
             }
             // No acknowledgement: the command asks for none, and the answer
             // is the packets themselves, sent from the stream socket.
@@ -320,10 +375,99 @@ pub async fn run(
                     payload,
                 )
                 .await;
+                continue;
             }
             _ => {
                 debug!(command, "unsupported GVCP command");
+                continue;
             }
+        };
+        let Some(reply) = reply else {
+            continue;
+        };
+
+        match delay {
+            None => reply.send(&socket, peer).await,
+            Some(delay) => {
+                if regs.lock().await.pending_ack_enabled() {
+                    let resp = build_pending_ack(request_id, pending_estimate(delay));
+                    let _ = socket.send_to(&resp, peer).await;
+                }
+                if let Ok(mut pending) = in_flight.lock() {
+                    pending.insert((peer, request_id));
+                }
+                let socket = socket.clone();
+                let in_flight = in_flight.clone();
+                debug!(%peer, request_id, ?delay, "acknowledging after a delay");
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Ok(mut pending) = in_flight.lock() {
+                        pending.remove(&(peer, request_id));
+                    }
+                    reply.send(&socket, peer).await;
+                });
+            }
+        }
+    }
+}
+
+/// The time a `PENDING_ACK` asks for: the delay and half again, so the
+/// acknowledgement cannot race the controller's extended deadline.
+fn pending_estimate(delay: Duration) -> u16 {
+    let millis = delay.as_millis().saturating_mul(3) / 2;
+    u16::try_from(millis).unwrap_or(u16::MAX)
+}
+
+/// A `PENDING_ACK` for `request_id`: status 0, opcode 0x0089, length 4, then
+/// two reserved bytes and `time_to_completion` in milliseconds.
+fn build_pending_ack(request_id: u16, millis: u16) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(12);
+    buf.put_u16(STATUS_SUCCESS);
+    buf.put_u16(PENDING_ACK);
+    buf.put_u16(4);
+    buf.put_u16(request_id);
+    buf.put_u16(0);
+    buf.put_u16(millis);
+    buf.to_vec()
+}
+
+/// The first register address a register-access command names.
+fn first_address(payload: &[u8]) -> Option<u64> {
+    let word: [u8; 4] = payload.get(..4)?.try_into().ok()?;
+    Some(u64::from(u32::from_be_bytes(word)))
+}
+
+/// What a register-access command answers, and a test packet to fire after
+/// the acknowledgement.
+struct Reply {
+    ack: Vec<u8>,
+    test_packet: Option<TestPacket>,
+}
+
+/// A fire-test-packet request, captured while the register lock was held.
+struct TestPacket {
+    size: u32,
+    source_ip: Ipv4Addr,
+    dest_ip: Ipv4Addr,
+    dest_port: u16,
+    max_on_wire: Option<u32>,
+}
+
+impl Reply {
+    fn ack(ack: Vec<u8>) -> Option<Self> {
+        Some(Self {
+            ack,
+            test_packet: None,
+        })
+    }
+
+    /// Send the acknowledgement, then the test packet. A real device answers
+    /// the write and then emits the packet, and a controller that waits for
+    /// the ack before listening must not miss it.
+    async fn send(self, socket: &UdpSocket, peer: SocketAddr) {
+        let _ = socket.send_to(&self.ack, peer).await;
+        if let Some(t) = self.test_packet {
+            fire_test_packet(t.size, t.source_ip, t.dest_ip, t.dest_port, t.max_on_wire).await;
         }
     }
 }
@@ -362,19 +506,19 @@ fn build_discovery_ack(request_id: u16, ip: std::net::Ipv4Addr, identity: &Ident
     buf.put_slice(&[0u8; 12]);
 
     // 36  Current IP address
-    buf.put_slice(&ip.octets());
+    buf.put_slice(&identity.ip.unwrap_or(ip).octets());
 
     // 40  Reserved (12 bytes)
     buf.put_slice(&[0u8; 12]);
 
-    // 52  Subnet mask (255.255.255.0)
-    buf.put_slice(&[255, 255, 255, 0]);
+    // 52  Subnet mask
+    buf.put_slice(&identity.subnet_mask.octets());
 
     // 56  Reserved (12 bytes)
     buf.put_slice(&[0u8; 12]);
 
-    // 68  Gateway
-    buf.put_slice(&[0, 0, 0, 0]);
+    // 68  Default gateway
+    buf.put_slice(&identity.gateway.octets());
 
     // Manufacturer name (32 bytes)
     put_fixed_string(&mut buf, FAKE_MANUFACTURER, 32); // 72
@@ -423,17 +567,24 @@ fn build_error_ack(ack_cmd: u16, request_id: u16, status: u16) -> Vec<u8> {
 }
 
 async fn handle_readreg(
-    socket: &UdpSocket,
     peer: SocketAddr,
     request_id: u16,
     payload: &[u8],
     regs: &Mutex<RegisterMap>,
-) {
+) -> Option<Reply> {
     // READREG payload: one or more 4-byte addresses
     if payload.len() < 4 || !payload.len().is_multiple_of(4) {
-        return;
+        return None;
     }
     let store = regs.lock().await;
+    if !store.may_access(peer, false) {
+        debug!(%peer, "READREG refused: another application holds exclusive access");
+        return Reply::ack(build_error_ack(
+            READREG_ACK,
+            request_id,
+            STATUS_ACCESS_DENIED,
+        ));
+    }
     let mut resp_payload = BytesMut::new();
     for chunk in payload.chunks(4) {
         let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
@@ -447,72 +598,97 @@ async fn handle_readreg(
             None
         };
         if let Some(status) = refusal {
-            let resp = build_error_ack(READREG_ACK, request_id, status);
-            let _ = socket.send_to(&resp, peer).await;
             debug!(%peer, addr = format!("0x{addr:x}"), status, "READREG refused");
-            return;
+            return Reply::ack(build_error_ack(READREG_ACK, request_id, status));
         }
         let data = store.read(addr, 4);
         resp_payload.put_slice(&data);
     }
-    let resp = build_ack(READREG_ACK, request_id, &resp_payload);
-    let _ = socket.send_to(&resp, peer).await;
     trace!(%peer, regs = payload.len() / 4, "READREG response");
+    Reply::ack(build_ack(READREG_ACK, request_id, &resp_payload))
+}
+
+/// Apply a write from `peer` of `data` at `addr`, CCP included, or refuse it
+/// with `ACCESS_DENIED` while another application holds control.
+fn write_checked(
+    store: &mut RegisterMap,
+    peer: SocketAddr,
+    addr: u64,
+    data: &[u8],
+    acquisition: Acquisition<'_>,
+) -> Result<(), u16> {
+    if addr == crate::registers::CCP && data.len() == 4 {
+        let value = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        return if store.write_ccp(peer, value) {
+            Ok(())
+        } else {
+            Err(STATUS_ACCESS_DENIED)
+        };
+    }
+    if !store.may_access(peer, true) {
+        return Err(STATUS_ACCESS_DENIED);
+    }
+    store.write(addr, data);
+    store.handle_special_write(addr);
+    check_acquisition(addr, data, acquisition.start, acquisition.stop);
+    Ok(())
+}
+
+/// The test packet the last write asked for, if any, with where it goes.
+fn take_test_packet(store: &mut RegisterMap, source_ip: Ipv4Addr) -> Option<TestPacket> {
+    let size = store.take_pending_test_packet()?;
+    Some(TestPacket {
+        size,
+        source_ip,
+        dest_ip: store.stream_dest_ip(),
+        dest_port: store.stream_dest_port(),
+        max_on_wire: store.max_on_wire(),
+    })
 }
 
 async fn handle_writereg(
-    socket: &UdpSocket,
     peer: SocketAddr,
     request_id: u16,
     payload: &[u8],
     source_ip: std::net::Ipv4Addr,
     regs: &Mutex<RegisterMap>,
     acquisition: Acquisition<'_>,
-) {
+) -> Option<Reply> {
     // WRITEREG payload: pairs of (address: u32, value: u32)
     if payload.len() < 8 || !payload.len().is_multiple_of(8) {
-        return;
+        return None;
     }
-    let (test_packet, dest_ip, dest_port, max_on_wire) = {
-        let mut store = regs.lock().await;
-        for chunk in payload.chunks(8) {
-            let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
-            let value = &chunk[4..8];
-            store.write(addr, value);
-            store.handle_special_write(addr);
-            check_acquisition(addr, value, acquisition.start, acquisition.stop);
+    let mut store = regs.lock().await;
+    for (index, chunk) in payload.chunks(8).enumerate() {
+        let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
+        if let Err(status) = write_checked(&mut store, peer, addr, &chunk[4..8], acquisition) {
+            debug!(%peer, addr = format!("0x{addr:x}"), status, "WRITEREG refused");
+            debug!(%peer, index, "WRITEREG stopped at this register");
+            return Reply::ack(build_error_ack(WRITEREG_ACK, request_id, status));
         }
-        (
-            store.take_pending_test_packet(),
-            store.stream_dest_ip(),
-            store.stream_dest_port(),
-            store.max_on_wire(),
-        )
-    };
-    // WRITEREG ACK includes a 4-byte data index placeholder.
-    let resp = build_ack(WRITEREG_ACK, request_id, &[0, 0, 0, 0]);
-    let _ = socket.send_to(&resp, peer).await;
-
+    }
     // `GevSCPSPacketSize` is a single register, so a controller that writes
     // registers with WRITEREG fires the test packet this way. Serving it only
     // from WRITEMEM would make the probe depend on which command the host
     // happened to choose — silently, since the write itself still succeeds.
-    if let Some(size) = test_packet {
-        fire_test_packet(size, source_ip, dest_ip, dest_port, max_on_wire).await;
-    }
+    let test_packet = take_test_packet(&mut store, source_ip);
     trace!(%peer, "WRITEREG response");
+    // WRITEREG ACK includes a 4-byte data index placeholder.
+    Some(Reply {
+        ack: build_ack(WRITEREG_ACK, request_id, &[0, 0, 0, 0]),
+        test_packet,
+    })
 }
 
 async fn handle_readmem(
-    socket: &UdpSocket,
     peer: SocketAddr,
     request_id: u16,
     payload: &[u8],
     regs: &Mutex<RegisterMap>,
-) {
+) -> Option<Reply> {
     // READMEM payload: address(4) + reserved(2) + count(2)
     if payload.len() < 8 {
-        return;
+        return None;
     }
     let addr = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as u64;
     let count = u16::from_be_bytes([payload[6], payload[7]]) as usize;
@@ -522,21 +698,25 @@ async fn handle_readmem(
     // bare 8-byte ack header; be equally strict so that client bugs are
     // caught by the in-tree fake (regression guard for issue #35).
     if !addr.is_multiple_of(4) || count == 0 || !count.is_multiple_of(4) {
-        let resp = build_error_ack(READMEM_ACK, request_id, STATUS_INVALID_PARAMETER);
-        let _ = socket.send_to(&resp, peer).await;
         debug!(%peer, addr = format!("0x{addr:x}"), count, "READMEM rejected: unaligned");
-        return;
+        return Reply::ack(build_error_ack(
+            READMEM_ACK,
+            request_id,
+            STATUS_INVALID_PARAMETER,
+        ));
     }
 
     let store = regs.lock().await;
     // A write-only register is no more readable through READMEM than through
     // READREG. Serving the stored bytes here is what let a read-modify-write
     // of a WO bitfield pass against the fake and fail on hardware (#135).
-    if store.is_write_only(addr, count) {
-        let resp = build_error_ack(READMEM_ACK, request_id, STATUS_ACCESS_DENIED);
-        let _ = socket.send_to(&resp, peer).await;
-        debug!(%peer, addr = format!("0x{addr:x}"), count, "READMEM refused: write-only");
-        return;
+    if store.is_write_only(addr, count) || !store.may_access(peer, false) {
+        debug!(%peer, addr = format!("0x{addr:x}"), count, "READMEM refused");
+        return Reply::ack(build_error_ack(
+            READMEM_ACK,
+            request_id,
+            STATUS_ACCESS_DENIED,
+        ));
     }
     let data = store.read(addr, count);
 
@@ -544,52 +724,51 @@ async fn handle_readmem(
     let mut resp_payload = BytesMut::with_capacity(4 + data.len());
     resp_payload.put_u32(addr as u32);
     resp_payload.put_slice(&data);
-    let resp = build_ack(READMEM_ACK, request_id, &resp_payload);
-    let _ = socket.send_to(&resp, peer).await;
     trace!(%peer, addr = format!("0x{addr:x}"), count, "READMEM response");
+    Reply::ack(build_ack(READMEM_ACK, request_id, &resp_payload))
 }
 
 async fn handle_writemem(
-    socket: &UdpSocket,
     peer: SocketAddr,
     request_id: u16,
     payload: &[u8],
     source_ip: std::net::Ipv4Addr,
     regs: &Mutex<RegisterMap>,
     acquisition: Acquisition<'_>,
-) {
+) -> Option<Reply> {
     // WRITEMEM payload: address(4) + data(N)
     if payload.len() < 4 {
-        return;
+        return None;
     }
     let addr = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as u64;
     let data = &payload[4..];
-    let (test_packet, dest_ip, dest_port, max_on_wire) = {
-        let mut store = regs.lock().await;
-        store.write(addr, data);
-        store.handle_special_write(addr);
-        check_acquisition(addr, data, acquisition.start, acquisition.stop);
-        (
-            store.take_pending_test_packet(),
-            store.stream_dest_ip(),
-            store.stream_dest_port(),
-            store.max_on_wire(),
-        )
-    };
+    // The same rule as READMEM: a 32-bit aligned address and a whole number
+    // of 32-bit words (TC-32). No device has been seen to enforce it on a
+    // write; the fake does, so a client that relies on a lenient device
+    // fails here first.
+    if !addr.is_multiple_of(4) || data.is_empty() || !data.len().is_multiple_of(4) {
+        debug!(%peer, addr = format!("0x{addr:x}"), len = data.len(), "WRITEMEM rejected: unaligned");
+        return Reply::ack(build_error_ack(
+            WRITEMEM_ACK,
+            request_id,
+            STATUS_INVALID_PARAMETER,
+        ));
+    }
+    let mut store = regs.lock().await;
+    if let Err(status) = write_checked(&mut store, peer, addr, data, acquisition) {
+        debug!(%peer, addr = format!("0x{addr:x}"), status, "WRITEMEM refused");
+        return Reply::ack(build_error_ack(WRITEMEM_ACK, request_id, status));
+    }
+    let test_packet = take_test_packet(&mut store, source_ip);
 
     // WRITEMEM ACK payload: address(4)
     let mut resp_payload = BytesMut::with_capacity(4);
     resp_payload.put_u32(addr as u32);
-    let resp = build_ack(WRITEMEM_ACK, request_id, &resp_payload);
-    let _ = socket.send_to(&resp, peer).await;
-
-    // The acknowledgement goes first: a real device answers the write and then
-    // emits the test packet, and a controller that waits for the ack before
-    // listening must not miss it.
-    if let Some(size) = test_packet {
-        fire_test_packet(size, source_ip, dest_ip, dest_port, max_on_wire).await;
-    }
     trace!(%peer, addr = format!("0x{addr:x}"), len = data.len(), "WRITEMEM response");
+    Some(Reply {
+        ack: build_ack(WRITEMEM_ACK, request_id, &resp_payload),
+        test_packet,
+    })
 }
 
 /// Emit one GVSP test packet of `size` bytes to the configured stream
@@ -743,28 +922,32 @@ async fn handle_forceip(
 }
 
 /// Count a register-access command against every address it names.
-fn record_command(counters: &CommandCounters, command: u16, payload: &[u8]) {
+fn record_command(counters: &CommandCounters, command: u16, payload: &[u8], peer: SocketAddr) {
     let word = |chunk: &[u8]| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
     match command {
         READREG_CMD => {
             for addr in payload.as_chunks::<4>().0 {
-                counters.record(GvcpCommand::ReadReg, word(addr));
+                counters.record(GvcpCommand::ReadReg, word(addr), peer);
             }
         }
         WRITEREG_CMD => {
             for pair in payload.as_chunks::<8>().0 {
-                counters.record(GvcpCommand::WriteReg, word(pair));
+                counters.record(GvcpCommand::WriteReg, word(pair), peer);
             }
         }
-        READMEM_CMD if payload.len() >= 4 => counters.record(GvcpCommand::ReadMem, word(payload)),
-        WRITEMEM_CMD if payload.len() >= 4 => counters.record(GvcpCommand::WriteMem, word(payload)),
+        READMEM_CMD if payload.len() >= 4 => {
+            counters.record(GvcpCommand::ReadMem, word(payload), peer)
+        }
+        WRITEMEM_CMD if payload.len() >= 4 => {
+            counters.record(GvcpCommand::WriteMem, word(payload), peer)
+        }
         _ => {}
     }
 }
 
 /// How a register write starts and stops the GVSP sender.
 #[derive(Clone, Copy)]
-struct Acquisition<'a> {
+pub(crate) struct Acquisition<'a> {
     start: &'a Notify,
     stop: &'a AtomicBool,
 }

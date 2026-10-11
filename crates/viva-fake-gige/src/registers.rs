@@ -67,7 +67,7 @@
 //! | `0x20280`   | 32     | DeviceID (RO)                   | string   |
 
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use crate::gvcp_server::FAKE_MAC;
@@ -105,6 +105,28 @@ pub const CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004;
 pub const CAPABILITY_WRITEMEM: u32 = 0x0000_0002;
 /// Capability bit 31: several registers in one READREG/WRITEREG.
 pub const CAPABILITY_CONCATENATION: u32 = 0x0000_0001;
+/// Capability bit 26: the device can answer a slow command with `PENDING_ACK`.
+/// Mask from Wireshark's `hf_gvcp_capability_pending`.
+pub const CAPABILITY_PENDING_ACK: u32 = 0x0000_0020;
+/// `GVCP Configuration`: what the controller has switched on.
+pub const GVCP_CONFIGURATION: u64 = 0x0954;
+/// Configuration bit 30: `PENDING_ACK` enabled. A device sends one only once
+/// the controller has set it. Mask from Wireshark's
+/// `hf_gvcp_configuration_pending_ack_enable`.
+pub const CONFIGURATION_PENDING_ACK_ENABLE: u32 = 0x0000_0002;
+/// Capability bit 4: the primary application's port and IP are readable at
+/// [`PRIMARY_APPLICATION_PORT`] and [`PRIMARY_APPLICATION_IP`]. Mask from
+/// Wireshark's `hf_gvcp_capability_ccp_application_portip`.
+pub const CAPABILITY_CCP_APPLICATION_PORT_IP: u32 = 0x0800_0000;
+/// The UDP port of the application holding control, in the low half; 0 while
+/// nobody holds it.
+pub const PRIMARY_APPLICATION_PORT: u64 = 0x0A04;
+/// The IPv4 address of the application holding control; 0 while nobody does.
+pub const PRIMARY_APPLICATION_IP: u64 = 0x0A14;
+/// CCP bit 31: exclusive access. No other application may read or write.
+pub const CCP_EXCLUSIVE_ACCESS: u32 = 0x0000_0001;
+/// CCP bit 30: control access. Other applications may still read.
+pub const CCP_CONTROL_ACCESS: u32 = 0x0000_0002;
 pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
 /// `GevTimestampTickFrequencyHigh`: upper 32 bits of the tick frequency.
 pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
@@ -1085,8 +1107,12 @@ pub struct RegisterMap {
     /// `ChunkSelector` values whose `ChunkEnable` is on: a selected feature,
     /// as `EventNotification` is.
     enabled_chunks: HashSet<u32>,
-    /// When a register-access command was last served, for the heartbeat rule.
+    /// When the controller last sent a register-access command, for the
+    /// heartbeat rule.
     last_register_command: Instant,
+    /// The application holding control privilege: the address and port its
+    /// commands come from. `None` while nobody holds it.
+    controller: Option<SocketAddr>,
     /// Whether [`RegisterMap::enforce_heartbeat`] is armed.
     enforce_heartbeat: bool,
     /// Largest `GevSCPSPacketSize` this device accepts, if it clamps at all.
@@ -1186,10 +1212,15 @@ impl RegisterMap {
         regs.insert(CCP, vec![0, 0, 0, 0]);
         regs.insert(
             GVCP_CAPABILITY,
-            (CAPABILITY_PACKET_RESEND | CAPABILITY_WRITEMEM | CAPABILITY_CONCATENATION)
+            (CAPABILITY_CCP_APPLICATION_PORT_IP
+                | CAPABILITY_PENDING_ACK
+                | CAPABILITY_PACKET_RESEND
+                | CAPABILITY_WRITEMEM
+                | CAPABILITY_CONCATENATION)
                 .to_be_bytes()
                 .to_vec(),
         );
+        regs.insert(GVCP_CONFIGURATION, 0u32.to_be_bytes().to_vec());
         regs.insert(HEARTBEAT_TIMEOUT, 3000u32.to_be_bytes().to_vec());
         regs.insert(
             TIMESTAMP_TICK_FREQUENCY_HIGH,
@@ -1320,6 +1351,7 @@ impl RegisterMap {
             enabled_events: HashSet::new(),
             enabled_chunks: HashSet::new(),
             last_register_command: Instant::now(),
+            controller: None,
             enforce_heartbeat: false,
             max_packet_size: None,
             max_on_wire: None,
@@ -1380,29 +1412,106 @@ impl RegisterMap {
         }
     }
 
-    /// Apply the heartbeat rule, and report whether privilege was just revoked.
+    /// Apply the heartbeat rule to a register-access command from `peer`, and
+    /// report whether privilege was just revoked.
     ///
     /// Called for register-access commands only. Discovery and FORCEIP are
     /// broadcast by any application on the subnet, so counting them would let an
     /// unrelated `viva-camctl list` hold another application's privilege open.
-    /// Unlike a real device we do not track *which* peer is the controller —
-    /// there is only ever one in a test.
-    pub fn note_register_command(&mut self) -> bool {
-        let elapsed = self.last_register_command.elapsed();
-        self.last_register_command = Instant::now();
-        if !self.enforce_heartbeat {
-            return false;
+    /// Only the controller's own commands refresh its timer: a monitor reading
+    /// registers keeps nobody's privilege alive.
+    pub fn note_register_command(&mut self, peer: SocketAddr) -> bool {
+        let revoked = self.enforce_heartbeat
+            && self.controller.is_some()
+            && self.heartbeat_expired(self.last_register_command.elapsed());
+        if revoked {
+            self.revoke_control();
         }
+        if self.controller == Some(peer) {
+            self.last_register_command = Instant::now();
+        }
+        revoked
+    }
+
+    fn heartbeat_expired(&self, elapsed: Duration) -> bool {
         let timeout = Duration::from_millis(u64::from(self.heartbeat_timeout_ms()));
-        if timeout.is_zero() || elapsed <= timeout {
+        !timeout.is_zero() && elapsed > timeout
+    }
+
+    /// Give control privilege up on the device side, as a device does when its
+    /// heartbeat expires: CCP reads 0 and nobody is the controller.
+    pub fn revoke_control(&mut self) {
+        self.controller = None;
+        self.regs.insert(CCP, 0u32.to_be_bytes().to_vec());
+    }
+
+    /// The application holding control privilege, if any.
+    pub fn controller(&self) -> Option<SocketAddr> {
+        self.controller
+    }
+
+    /// Whether `peer` may access the device's registers.
+    ///
+    /// While an application holds control, another may still read (it
+    /// monitors) unless the privilege is exclusive, and may not write. While
+    /// nobody holds control every application may do both, as aravis's fake
+    /// camera allows (`arvgvfakecamera.c`); what a real device does then is
+    /// not something we have seen.
+    pub fn may_access(&self, peer: SocketAddr, write: bool) -> bool {
+        match self.controller {
+            None => true,
+            Some(controller) if controller == peer => true,
+            Some(_) if write => false,
+            Some(_) => self.read_u32_be(CCP) & CCP_EXCLUSIVE_ACCESS == 0,
+        }
+    }
+
+    /// A write of `value` to CCP from `peer`, and whether it was accepted.
+    /// Claims control with either access bit set, gives it up with neither.
+    /// Refused while another application holds control: this device offers
+    /// no switchover.
+    pub fn write_ccp(&mut self, peer: SocketAddr, value: u32) -> bool {
+        if self.controller.is_some_and(|controller| controller != peer) {
             return false;
         }
-        let ccp = self.read(CCP, 4);
-        if u32::from_be_bytes([ccp[0], ccp[1], ccp[2], ccp[3]]) == 0 {
-            return false;
+        if value & (CCP_CONTROL_ACCESS | CCP_EXCLUSIVE_ACCESS) != 0 {
+            self.controller = Some(peer);
+            self.last_register_command = Instant::now();
+            self.regs.insert(CCP, value.to_be_bytes().to_vec());
+        } else {
+            self.revoke_control();
         }
-        self.write(CCP, &0u32.to_be_bytes());
         true
+    }
+
+    /// Whether this device answers a slow command with `PENDING_ACK`: it
+    /// says it can (GVCP Capability) and the controller has enabled it (GVCP
+    /// Configuration).
+    pub fn pending_ack_enabled(&self) -> bool {
+        self.read_u32_be(GVCP_CAPABILITY) & CAPABILITY_PENDING_ACK != 0
+            && self.read_u32_be(GVCP_CONFIGURATION) & CONFIGURATION_PENDING_ACK_ENABLE != 0
+    }
+
+    /// Set or clear the `PENDING_ACK` bit of the capability register.
+    pub fn set_pending_ack_supported(&mut self, supported: bool) {
+        let mut caps = self.read_u32_be(GVCP_CAPABILITY);
+        if supported {
+            caps |= CAPABILITY_PENDING_ACK;
+        } else {
+            caps &= !CAPABILITY_PENDING_ACK;
+        }
+        self.regs
+            .insert(GVCP_CAPABILITY, caps.to_be_bytes().to_vec());
+    }
+
+    /// Report `ip`, `mask` and `gateway` as the current IP configuration
+    /// (bootstrap `0x0024`, `0x0034`, `0x0044`), as the Discovery ACK does.
+    pub fn set_network(&mut self, ip: Ipv4Addr, mask: Ipv4Addr, gateway: Ipv4Addr) {
+        self.regs.insert(CURRENT_IP_ADDRESS, ip.octets().to_vec());
+        self.regs
+            .insert(CURRENT_SUBNET_MASK, mask.octets().to_vec());
+        self.regs
+            .insert(CURRENT_DEFAULT_GATEWAY, gateway.octets().to_vec());
     }
 
     /// Report a different `GevHeartbeatTimeout` than the 3 000 ms default.
@@ -1485,6 +1594,18 @@ impl RegisterMap {
                 result.resize(len, 0);
                 return result;
             }
+        }
+
+        // The primary application is whoever holds control right now.
+        if addr == PRIMARY_APPLICATION_PORT || addr == PRIMARY_APPLICATION_IP {
+            let word = match (addr, self.controller) {
+                (PRIMARY_APPLICATION_PORT, Some(owner)) => u32::from(owner.port()),
+                (PRIMARY_APPLICATION_IP, Some(SocketAddr::V4(owner))) => u32::from(*owner.ip()),
+                _ => 0,
+            };
+            let mut result = word.to_be_bytes().to_vec();
+            result.resize(len, 0);
+            return result;
         }
 
         // `EventNotification` reports the selected event, not a stored word.
@@ -1896,16 +2017,57 @@ mod tests {
         assert_eq!(regs.tick_frequency(), 1_000_000_000);
     }
 
-    /// GVCP Capability at 0x0934: packet resend (mask 0x4) on by default,
-    /// and switchable.
+    /// GVCP Capability at 0x0934: the primary application's IP and port
+    /// (mask 0x0800_0000), `PENDING_ACK` (0x20) and packet resend (0x4) on
+    /// by default, resend switchable.
     #[test]
     fn the_capability_register_advertises_packet_resend() {
         let mut regs = map();
-        assert_eq!(regs.read(0x0934, 4), vec![0, 0, 0, 0x07]);
+        assert_eq!(regs.read(0x0934, 4), vec![0x08, 0, 0, 0x27]);
         assert!(regs.packet_resend_supported());
         regs.set_packet_resend(false);
-        assert_eq!(regs.read(0x0934, 4), vec![0, 0, 0, 0x03]);
+        assert_eq!(regs.read(0x0934, 4), vec![0x08, 0, 0, 0x23]);
         assert!(!regs.packet_resend_supported());
+    }
+
+    /// `PENDING_ACK` is sent only when the capability says so *and* the
+    /// controller set bit `0x2` of GVCP Configuration (0x0954).
+    #[test]
+    fn pending_ack_needs_the_capability_and_the_enable_bit() {
+        let mut regs = map();
+        assert!(!regs.pending_ack_enabled(), "off until enabled");
+        regs.write(0x0954, &2u32.to_be_bytes());
+        assert!(regs.pending_ack_enabled());
+        regs.set_pending_ack_supported(false);
+        assert!(!regs.pending_ack_enabled(), "not without the capability");
+    }
+
+    /// CCP belongs to the address and port that claimed it: another may read
+    /// but not write or claim, until the owner writes 0. With the exclusive
+    /// bit, another may not even read.
+    #[test]
+    fn control_belongs_to_the_application_that_claimed_it() {
+        let owner: SocketAddr = "127.0.0.1:50001".parse().unwrap();
+        let other: SocketAddr = "127.0.0.1:50002".parse().unwrap();
+        let mut regs = map();
+        assert!(regs.may_access(other, true), "nobody controls yet");
+        assert!(regs.write_ccp(owner, CCP_CONTROL_ACCESS));
+        assert_eq!(regs.controller(), Some(owner));
+        assert_eq!(
+            regs.read(PRIMARY_APPLICATION_PORT, 4),
+            50001u32.to_be_bytes()
+        );
+        assert_eq!(regs.read(PRIMARY_APPLICATION_IP, 4), [127, 0, 0, 1]);
+        assert!(regs.may_access(other, false));
+        assert!(!regs.may_access(other, true));
+        assert!(!regs.write_ccp(other, CCP_CONTROL_ACCESS));
+        assert!(!regs.write_ccp(other, 0), "only the owner releases");
+        assert!(regs.write_ccp(owner, CCP_CONTROL_ACCESS | CCP_EXCLUSIVE_ACCESS));
+        assert!(!regs.may_access(other, false));
+        assert!(regs.write_ccp(owner, 0));
+        assert_eq!(regs.controller(), None);
+        assert_eq!(regs.read(PRIMARY_APPLICATION_IP, 4), [0, 0, 0, 0]);
+        assert_eq!(regs.read(CCP, 4), vec![0, 0, 0, 0]);
     }
 
     #[test]

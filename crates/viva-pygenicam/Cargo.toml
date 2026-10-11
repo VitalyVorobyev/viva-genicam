@@ -5,7 +5,6 @@ edition = "2021"
 license = "MIT"
 description = "Python bindings for viva-genicam: GenICam camera discovery, control, and streaming"
 repository = "https://github.com/VitalyVorobyev/viva-genicam"
-homepage = "https://github.com/VitalyVorobyev/viva-genicam"
 readme = "README.md"
 rust-version = "1.88"
 publish = false

@@ -806,7 +806,13 @@ impl<T: RegisterIo> Camera<T> {
         Ok(())
     }
 
-    /// Configure the stream channel for multicast delivery.
+    /// Configure the stream channel for multicast delivery: point `GevSCDA`
+    /// at `group` and `GevSCPHostPort` at `port`.
+    ///
+    /// A multicast destination address is all it takes; SFNC has no
+    /// separate enable. Without the SFNC nodes the bootstrap registers are
+    /// written directly. [`Camera::open_stream`] with
+    /// [`StreamOptions::multicast`] does this and starts receiving too.
     pub fn configure_stream_multicast(
         &mut self,
         stream_idx: u32,
@@ -823,7 +829,6 @@ impl<T: RegisterIo> Camera<T> {
         // Precompute node names before taking &mut self.nodemap
         let dest_addr_node = self.find_alias(viva_sfnc::SCP_DEST_ADDR);
         let host_port_node = self.find_alias(viva_sfnc::SCP_HOST_PORT);
-        let mcast_en_node = self.find_alias(viva_sfnc::MULTICAST_ENABLE);
 
         let mut used_sfnc = true;
         self.with_map(|nm, tr| {
@@ -859,10 +864,6 @@ impl<T: RegisterIo> Camera<T> {
             } else {
                 used_sfnc = false;
             }
-
-            if let Some(node) = mcast_en_node {
-                let _ = nm.set_bool(node, true, tr);
-            }
         });
 
         if !used_sfnc {
@@ -872,9 +873,12 @@ impl<T: RegisterIo> Camera<T> {
             self.transport
                 .write(addr_reg, &group.octets())
                 .map_err(|err| GenicamError::transport(format!("write multicast addr: {err}")))?;
+            // GevSCPHostPort is a 32-bit register with the port in its low
+            // half. The two port bytes alone land in the high half (SR-20),
+            // the bug already fixed for GevMCP.
             let port_reg = base + gvcp_consts::STREAM_DESTINATION_PORT;
             self.transport
-                .write(port_reg, &port.to_be_bytes())
+                .write(port_reg, &u32::from(port).to_be_bytes())
                 .map_err(|err| GenicamError::transport(format!("write multicast port: {err}")))?;
             info!(
                 stream_idx,
@@ -933,6 +937,39 @@ pub struct ChunkConfig {
     pub active: bool,
 }
 
+/// Where a GigE session stands with the camera's control channel privilege
+/// (CCP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ControlState {
+    /// This application holds control privilege and keeps it alive.
+    Held,
+    /// Opened read-only ([`GigeRegisterIo::monitor`]): nothing was claimed,
+    /// nothing is written, no heartbeat is sent.
+    Monitor,
+    /// Privilege was lost: CCP reads without control bits — the heartbeat
+    /// expired — or, on a camera that names its primary application, another
+    /// application holds it. Checked by the keepalive and after a write
+    /// refused with `ACCESS_DENIED`. [`GigeRegisterIo::reclaim_control`] asks
+    /// for it again.
+    Lost,
+    /// Given up with [`GigeRegisterIo::release_control`].
+    Released,
+}
+
+/// How [`connect_gige_as`] opens a camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Access {
+    /// Claim control privilege, keep it alive, release it when the camera is
+    /// dropped. Fails while another application holds it.
+    #[default]
+    Control,
+    /// Read only: claim nothing, write nothing, send no heartbeat. Works while
+    /// another application controls the camera; every write is refused.
+    Monitor,
+}
+
 /// Blocking adapter turning an asynchronous [`GigeDevice`] into a [`RegisterIo`]
 /// implementation.
 ///
@@ -962,12 +999,26 @@ pub struct ChunkConfig {
 pub struct GigeRegisterIo {
     handle: tokio::runtime::Handle,
     device: Arc<Mutex<GigeDevice>>,
-    keepalive_stop: Option<tokio::sync::watch::Sender<bool>>,
-    keepalive_task: Option<tokio::task::JoinHandle<()>>,
+    /// Where the session stands with control privilege; the keepalive task
+    /// reports a loss here.
+    control: Arc<tokio::sync::watch::Sender<ControlState>>,
+    keepalive: Mutex<Option<Keepalive>>,
 }
 
+/// The running keepalive task and the signal that stops it.
+struct Keepalive {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// How long dropping a controlling adapter waits for the camera to
+/// acknowledge the release of control privilege. A camera that does not
+/// answer in time times the privilege out on its own.
+const RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+
 impl GigeRegisterIo {
-    /// Create a new adapter using the provided runtime handle and device.
+    /// Create a new adapter using the provided runtime handle and a device
+    /// that holds control privilege ([`GigeDevice::claim_control`]).
     ///
     /// This also spawns the control-channel keepalive on `handle`. A GigE Vision
     /// device revokes control privilege if it receives no GVCP command within
@@ -980,8 +1031,11 @@ impl GigeRegisterIo {
     /// three consumers of this crate had each grown their own copy of the loop —
     /// and why the Python bindings, which had none, hit the failure.
     ///
-    /// The keepalive stops when the adapter is dropped, so privilege is
-    /// maintained for exactly as long as the transport that needs it.
+    /// The keepalive stops when the adapter is dropped, and control privilege
+    /// is released then (CCP ← 0), so the next application — or the next run
+    /// of this one — can claim it at once instead of waiting out the
+    /// heartbeat timeout. Privilege lost meanwhile is reported through
+    /// [`control_state`](Self::control_state).
     /// Dropping the adapter cancels and drains any in-flight keepalive I/O.
     /// The runtime must remain alive until the adapter has been dropped. On a
     /// current-thread runtime the async task is aborted, since blocking on its
@@ -991,15 +1045,85 @@ impl GigeRegisterIo {
         // reply. Let the socket owner send heartbeats during that wait; the
         // background task below covers idle periods and refines this period.
         device.set_inflight_keepalive_period(Some(keepalive_period(None)));
-        let device = Arc::new(Mutex::new(device));
-        let (stop, stopped) = tokio::sync::watch::channel(false);
-        let task = spawn_keepalive(handle.clone(), Arc::downgrade(&device), stopped);
+        let adapter = Self::with_state(handle, device, ControlState::Held);
+        adapter.start_keepalive();
+        adapter
+    }
+
+    /// A read-only adapter: no keepalive, no in-flight probes, and every write
+    /// refused before it reaches the wire. For a camera another application
+    /// controls; see [`Access::Monitor`].
+    pub fn monitor(handle: tokio::runtime::Handle, mut device: GigeDevice) -> Self {
+        device.set_inflight_keepalive_period(None);
+        Self::with_state(handle, device, ControlState::Monitor)
+    }
+
+    fn with_state(handle: tokio::runtime::Handle, device: GigeDevice, state: ControlState) -> Self {
         Self {
             handle,
-            device,
-            keepalive_stop: Some(stop),
-            keepalive_task: Some(task),
+            device: Arc::new(Mutex::new(device)),
+            control: Arc::new(tokio::sync::watch::channel(state).0),
+            keepalive: Mutex::new(None),
         }
+    }
+
+    /// Where this session stands with control privilege.
+    pub fn control_state(&self) -> ControlState {
+        *self.control.borrow()
+    }
+
+    /// Changes of [`control_state`](Self::control_state) as they happen: losing
+    /// privilege is reported here, not only logged.
+    pub fn watch_control(&self) -> tokio::sync::watch::Receiver<ControlState> {
+        self.control.subscribe()
+    }
+
+    /// Ask for control privilege again — after it was lost or released, or
+    /// to turn a monitor into a controller — and keep it alive.
+    ///
+    /// Fails, and changes nothing, while another application holds it.
+    pub fn reclaim_control(&self) -> Result<(), GenicamError> {
+        {
+            let mut device = self.lock_device()?;
+            let fut = async {
+                device.claim_control().await?;
+                if let Err(err) = device.enable_pending_ack().await {
+                    warn!(error = %err, "could not enable PENDING_ACK");
+                }
+                Ok::<_, gige::GigeError>(())
+            };
+            self.block_on(fut)
+                .map_err(|err| GenicamError::transport(format!("claim control: {err}")))?;
+            if device.inflight_keepalive_period().is_none() {
+                device.set_inflight_keepalive_period(Some(keepalive_period(None)));
+            }
+        }
+        self.control.send_replace(ControlState::Held);
+        self.start_keepalive();
+        info!("control channel privilege reclaimed");
+        Ok(())
+    }
+
+    /// Give control privilege up now (CCP ← 0) and stop the keepalive,
+    /// reporting whether the camera acknowledged. Dropping the adapter does
+    /// the same, best effort.
+    ///
+    /// A monitor holds nothing and writes nothing, so for one this does
+    /// nothing.
+    pub fn release_control(&self) -> Result<(), GenicamError> {
+        if self.control_state() == ControlState::Monitor {
+            return Ok(());
+        }
+        self.stop_keepalive();
+        let mut device = self.lock_device()?;
+        let fut = device.release_control();
+        let result = self
+            .block_on(fut)
+            .map_err(|err| GenicamError::transport(format!("release control: {err}")));
+        if result.is_ok() {
+            self.control.send_replace(ControlState::Released);
+        }
+        result
     }
 
     /// Lock the underlying [`GigeDevice`] for direct async operations.
@@ -1017,46 +1141,140 @@ impl GigeRegisterIo {
             .lock()
             .map_err(|_| GenApiError::Io("gige device mutex poisoned".into()))
     }
+
+    /// Spawn the keepalive unless one is running.
+    fn start_keepalive(&self) {
+        let Ok(mut keepalive) = self.keepalive.lock() else {
+            return;
+        };
+        if keepalive.as_ref().is_some_and(|k| !k.task.is_finished()) {
+            return;
+        }
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let task = spawn_keepalive(
+            self.handle.clone(),
+            Arc::downgrade(&self.device),
+            stopped,
+            self.control.clone(),
+        );
+        *keepalive = Some(Keepalive { stop, task });
+    }
+
+    /// Stop the keepalive and wait for its I/O to drain.
+    fn stop_keepalive(&self) {
+        let Some(Keepalive { stop, task }) = self.keepalive.lock().ok().and_then(|mut k| k.take())
+        else {
+            return;
+        };
+        let _ = stop.send(true);
+        if self.handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            // This task cannot progress while its runtime thread is in Drop.
+            // Abort it and synchronize with the blocking operation instead.
+            // Queued operations check cancellation before starting any I/O.
+            task.abort();
+            drop(self.device.lock());
+            return;
+        }
+        // Aborting the async task would detach its spawn_blocking operation,
+        // which can still use Tokio timers. Join both before runtime shutdown.
+        match self.block_on_from_anywhere(task) {
+            Some(Err(error)) => warn!(%error, "control channel keepalive failed during shutdown"),
+            Some(Ok(())) => {}
+            None => warn!("keepalive shutdown thread panicked"),
+        }
+    }
+
+    /// Run `fut` on the adapter's multi-thread runtime from any context,
+    /// a current-thread runtime of the caller's included. `None` if the
+    /// helper thread that has to run it then panicked.
+    fn block_on_from_anywhere<F>(&self, fut: F) -> Option<F::Output>
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(current)
+                if current.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread =>
+            {
+                // The adapter belongs to a different, multi-thread runtime.
+                // block_in_place is unavailable in the caller's runtime.
+                std::thread::scope(|scope| scope.spawn(|| self.handle.block_on(fut)).join()).ok()
+            }
+            Ok(_) => Some(tokio::task::block_in_place(|| self.handle.block_on(fut))),
+            Err(_) => Some(self.handle.block_on(fut)),
+        }
+    }
+
+    /// Release control privilege on the way out, within [`RELEASE_TIMEOUT`].
+    fn release_on_drop(&self) {
+        let Ok(mut device) = self.device.lock() else {
+            return;
+        };
+        if self.handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            // Nothing can wait for the acknowledgement here: send and go.
+            if let Err(error) = device.try_send_release() {
+                debug!(%error, "could not send the control release");
+            }
+            return;
+        }
+        // Built inside the future: a timer needs the runtime's context.
+        let device: &mut GigeDevice = &mut device;
+        let release =
+            async move { tokio::time::timeout(RELEASE_TIMEOUT, device.release_control()).await };
+        match self.block_on_from_anywhere(release) {
+            Some(Ok(Ok(()))) => debug!("control channel privilege released"),
+            Some(Ok(Err(error))) => debug!(%error, "the camera did not take the control release"),
+            Some(Err(_)) => debug!("no answer to the control release; the camera will time it out"),
+            None => debug!("control release thread panicked"),
+        }
+    }
+
+    /// Control was claimed through the raw device ([`Camera::open_stream`]
+    /// does): a session that had lost or released it holds it again.
+    pub(crate) fn note_claimed(&self) {
+        let reclaimed = self.control.send_if_modified(|state| {
+            let lapsed = matches!(state, ControlState::Lost | ControlState::Released);
+            if lapsed {
+                *state = ControlState::Held;
+            }
+            lapsed
+        });
+        if reclaimed {
+            self.start_keepalive();
+        }
+    }
+
+    /// A write the camera refused with `ACCESS_DENIED`: either the register
+    /// refuses it, or this session no longer holds control. Ask the device
+    /// which, and mark control lost only on its answer.
+    fn check_refusal(&self, device: &mut GigeDevice, err: &gige::GigeError) {
+        if !matches!(
+            err,
+            gige::GigeError::Status(gencp::StatusCode::AccessDenied)
+        ) || self.control_state() != ControlState::Held
+        {
+            return;
+        }
+        match self.block_on(device.ping_control_channel()) {
+            Ok(false) => {
+                self.control.send_replace(ControlState::Lost);
+                warn!(
+                    "the camera refused a write with ACCESS_DENIED: control privilege is lost \
+                     (reclaim_control asks for it again)"
+                );
+            }
+            Ok(true) => debug!("ACCESS_DENIED for this register; control is still held"),
+            Err(error) => debug!(%error, "could not check control privilege after ACCESS_DENIED"),
+        }
+    }
 }
 
 impl Drop for GigeRegisterIo {
     fn drop(&mut self) {
-        if let Some(stop) = self.keepalive_stop.take() {
-            let _ = stop.send(true);
-        }
-        if let Some(task) = self.keepalive_task.take() {
-            if self.handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
-                // This task cannot progress while its runtime thread is in Drop.
-                // Abort it and synchronize with the blocking operation instead.
-                // Queued operations check cancellation before starting any I/O.
-                task.abort();
-                drop(self.device.lock());
-                return;
-            }
-            // Aborting the async task would detach its spawn_blocking operation,
-            // which can still use Tokio timers. Join both before runtime shutdown.
-            let joined = match tokio::runtime::Handle::try_current() {
-                Ok(current)
-                    if current.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread =>
-                {
-                    // The adapter belongs to a different, multi-thread runtime.
-                    // block_in_place is unavailable in the caller's runtime.
-                    match std::thread::scope(|scope| {
-                        scope.spawn(|| self.handle.block_on(task)).join()
-                    }) {
-                        Ok(joined) => joined,
-                        Err(_) => {
-                            warn!("keepalive shutdown thread panicked");
-                            return;
-                        }
-                    }
-                }
-                Ok(_) => tokio::task::block_in_place(|| self.handle.block_on(task)),
-                Err(_) => self.handle.block_on(task),
-            };
-            if let Err(error) = joined {
-                warn!(%error, "control channel keepalive failed during shutdown");
-            }
+        let held = self.control_state() == ControlState::Held;
+        self.stop_keepalive();
+        if held {
+            self.release_on_drop();
         }
     }
 }
@@ -1083,10 +1301,18 @@ impl RegisterIo for GigeRegisterIo {
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
+        if self.control_state() == ControlState::Monitor {
+            return Err(GenApiError::Access(format!(
+                "the camera was opened as a read-only monitor, so nothing is written \
+                 (0x{addr:08x}); open it with Access::Control, or reclaim_control, to write"
+            )));
+        }
         let mut device = self.lock()?;
         let fut = device.write_register_or_mem(addr, data);
-        self.block_on(fut)
-            .map_err(|err| GenApiError::Io(err.to_string()))
+        self.block_on(fut).map_err(|err| {
+            self.check_refusal(&mut device, &err);
+            GenApiError::Io(err.to_string())
+        })
     }
 }
 
@@ -1198,6 +1424,7 @@ fn spawn_keepalive(
     handle: tokio::runtime::Handle,
     device: std::sync::Weak<Mutex<GigeDevice>>,
     mut stopped: tokio::sync::watch::Receiver<bool>,
+    control: Arc<tokio::sync::watch::Sender<ControlState>>,
 ) -> tokio::task::JoinHandle<()> {
     handle.clone().spawn(async move {
         let reported = on_blocking_pool(&handle, &device, &mut stopped, |handle, dev, stopped| {
@@ -1208,10 +1435,11 @@ fn spawn_keepalive(
                     result = dev.heartbeat_timeout_ms() => result.map_err(|err| err.to_string()),
                 }
             });
+            // 0 is a device declining to say, read as the assumed window by
+            // the idle keepalive too: the in-flight probes follow the same
+            // reading rather than switching off (TC-26).
             if let Ok(timeout_ms) = reported {
-                dev.set_inflight_keepalive_period(
-                    (timeout_ms != 0).then(|| keepalive_period(Some(timeout_ms))),
-                );
+                dev.set_inflight_keepalive_period(Some(keepalive_period(Some(timeout_ms))));
             }
             reported
         })
@@ -1244,7 +1472,6 @@ fn spawn_keepalive(
         ticker.tick().await;
 
         let mut consecutive_failures: u32 = 0;
-        let mut privilege_seen = false;
         loop {
             tokio::select! {
                 _ = stopped.changed() => return,
@@ -1270,23 +1497,24 @@ fn spawn_keepalive(
                         info!(consecutive_failures, "control channel keepalive recovered");
                     }
                     consecutive_failures = 0;
-                    privilege_seen = true;
-                }
-                Some(Ok(false)) if !privilege_seen => {
-                    // The caller never claimed control. A read-only session is
-                    // legitimate — `viva-camctl xml` is one — and there is no
-                    // privilege to keep alive, so stop rather than warn about it
-                    // every period.
-                    debug!("no control privilege held; keepalive not needed");
-                    return;
                 }
                 Some(Ok(false)) => {
-                    consecutive_failures += 1;
+                    // CCP reads without control bits: the heartbeat expired, or
+                    // the device released us. Nothing is left to keep alive
+                    // until the application reclaims it.
+                    control.send_if_modified(|state| {
+                        let held = *state == ControlState::Held;
+                        if held {
+                            *state = ControlState::Lost;
+                        }
+                        held
+                    });
                     warn!(
-                        consecutive_failures,
-                        "control channel privilege lost; either another application took \
-                         control or an earlier keepalive did not reach the device"
+                        "control channel privilege lost: CCP reads without this application's \
+                         bits, so a heartbeat expired or the camera gave the privilege up; \
+                         reclaim_control asks for it again"
                     );
+                    return;
                 }
                 Some(Err(error)) => {
                     consecutive_failures += 1;
@@ -1297,13 +1525,87 @@ fn spawn_keepalive(
     })
 }
 
+/// Connect to a GigE Vision camera with the given [`Access`], returning the
+/// [`Camera`] and the GenICam XML it was built from.
+///
+/// [`Access::Control`] claims control privilege, switches `PENDING_ACK` on
+/// where GVCP Capability says the camera has it, and keeps the privilege
+/// alive until the camera is dropped, which releases it. It fails while
+/// another application holds control. [`Access::Monitor`] writes nothing at
+/// all, so it works alongside that application.
+pub async fn connect_gige_as(
+    device: &gige::DeviceInfo,
+    access: Access,
+) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
+    info!(%control_addr, ?access, "connecting to GigE Vision camera");
+
+    let mut device = gige::GigeDevice::open(control_addr)
+        .await
+        .map_err(|e| GenicamError::transport(e.to_string()))?;
+
+    if access == Access::Control {
+        // Claim control privilege (required before configuration and streaming).
+        device
+            .claim_control()
+            .await
+            .map_err(|e| GenicamError::transport(e.to_string()))?;
+        match device.enable_pending_ack().await {
+            Ok(enabled) => debug!(enabled, "PENDING_ACK"),
+            Err(err) => {
+                warn!(error = %err, "could not enable PENDING_ACK; slow commands will be retried")
+            }
+        }
+    }
+
+    let control = Arc::new(AsyncMutex::new(device));
+
+    // Fetch and parse the GenApi XML.
+    let fetched = viva_genapi_xml::fetch_and_load_xml({
+        let control = control.clone();
+        move |address, length| {
+            let control = control.clone();
+            async move {
+                let mut dev = control.lock().await;
+                dev.read_mem(address, length)
+                    .await
+                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+            }
+        }
+    })
+    .await
+    .map_err(|e| GenicamError::transport(e.to_string()));
+
+    // Extract the device and create the blocking adapter. It owns the release
+    // of control from here, so a failure below still gives control back.
+    let handle = tokio::runtime::Handle::current();
+    let control_device = Arc::try_unwrap(control)
+        .map_err(|_| GenicamError::transport("control connection still in use"))?
+        .into_inner();
+    let transport = match access {
+        Access::Control => GigeRegisterIo::new(handle, control_device),
+        Access::Monitor => GigeRegisterIo::monitor(handle, control_device),
+    };
+    let xml = fetched?;
+    let nodemap = build_nodemap(&xml)?;
+
+    info!("GigE camera connected successfully");
+    Ok((Camera::new(transport, nodemap), xml))
+}
+
 /// Connect to a GigE Vision camera and return a fully configured [`Camera`].
 ///
 /// This convenience function handles all connection boilerplate:
-/// 1. Opens a GVCP control connection to the device
+/// 1. Opens a GVCP control connection to the device and claims control
 /// 2. Fetches and parses the GenApi XML from the camera
 /// 3. Builds the nodemap
-/// 4. Creates the transport adapter
+/// 4. Creates the transport adapter, which releases control when dropped
+///
+/// [`connect_gige_as`] opens a read-only monitor instead.
 ///
 /// # Example
 ///
@@ -1327,56 +1629,12 @@ pub async fn connect_gige(
 /// GenICam XML string fetched from the device.
 ///
 /// This is useful when the caller needs the XML for purposes beyond node
-/// evaluation (e.g. forwarding it over a network API).
+/// evaluation (e.g. forwarding it over a network API). The same as
+/// [`connect_gige_as`] with [`Access::Control`].
 pub async fn connect_gige_with_xml(
     device: &gige::DeviceInfo,
 ) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
-    use std::net::{IpAddr, SocketAddr};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as AsyncMutex;
-
-    let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
-    info!(%control_addr, "connecting to GigE Vision camera");
-
-    let mut device = gige::GigeDevice::open(control_addr)
-        .await
-        .map_err(|e| GenicamError::transport(e.to_string()))?;
-
-    // Claim control privilege (required before configuration and streaming).
-    device
-        .claim_control()
-        .await
-        .map_err(|e| GenicamError::transport(e.to_string()))?;
-
-    let control = Arc::new(AsyncMutex::new(device));
-
-    // Fetch and parse the GenApi XML.
-    let xml = viva_genapi_xml::fetch_and_load_xml({
-        let control = control.clone();
-        move |address, length| {
-            let control = control.clone();
-            async move {
-                let mut dev = control.lock().await;
-                dev.read_mem(address, length)
-                    .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
-            }
-        }
-    })
-    .await
-    .map_err(|e| GenicamError::transport(e.to_string()))?;
-
-    let nodemap = build_nodemap(&xml)?;
-
-    // Extract the device and create the blocking adapter.
-    let handle = tokio::runtime::Handle::current();
-    let control_device = Arc::try_unwrap(control)
-        .map_err(|_| GenicamError::transport("control connection still in use"))?
-        .into_inner();
-    let transport = GigeRegisterIo::new(handle, control_device);
-
-    info!("GigE camera connected successfully");
-    Ok((Camera::new(transport, nodemap), xml))
+    connect_gige_as(device, Access::Control).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,6 +1833,53 @@ mod tests {
             self.0.lock().unwrap().insert(addr, data.to_vec());
             Ok(())
         }
+    }
+
+    /// API-18 and SR-20: SFNC has no multicast "enable" — a multicast address
+    /// in `GevSCDA` is what makes a stream multicast — and
+    /// `GevSCPSDoNotFragment`, which the alias list used to name first, is
+    /// the don't-fragment bit of `GevSCPSPacketSize`. The destination goes
+    /// through the SFNC nodes, whose real name is `GevSCDA` (25 corpus
+    /// documents; `GevSCPDA` is in none), and the port keeps the register's
+    /// other half.
+    #[test]
+    fn multicast_goes_through_gevscda_and_leaves_do_not_fragment_alone() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Integer Name="GevStreamChannelSelector"><pValue>SelectorReg</pValue></Integer>
+                <IntReg Name="SelectorReg"><Address>0x2000</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+                <Integer Name="GevSCDA"><pValue>ScdaReg</pValue></Integer>
+                <IntReg Name="ScdaReg"><Address>0x0D18</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+                <Integer Name="GevSCPHostPort"><pValue>ScpReg</pValue></Integer>
+                <MaskedIntReg Name="ScpReg"><Address>0x0D00</Address><Length>4</Length><AccessMode>RW</AccessMode><LSB>31</LSB><MSB>16</MSB><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></MaskedIntReg>
+                <Boolean Name="GevSCPSDoNotFragment"><pValue>DfReg</pValue></Boolean>
+                <MaskedIntReg Name="DfReg"><Address>0x0D04</Address><Length>4</Length><AccessMode>RW</AccessMode><LSB>1</LSB><MSB>1</MSB><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></MaskedIntReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MemoryIo::default();
+        io.write(0x0D00, &0xABCD_0000u32.to_be_bytes()).unwrap();
+        io.write(0x0D04, &1500u32.to_be_bytes()).unwrap();
+        let mut camera = Camera::new(io, nodemap);
+
+        let group = Ipv4Addr::new(239, 192, 1, 30);
+        camera
+            .configure_stream_multicast(0, group, 50030)
+            .expect("configure");
+
+        let read = |addr| camera.transport().read(addr, 4).unwrap();
+        assert_eq!(read(0x0D18), group.octets());
+        assert_eq!(
+            read(0x0D00),
+            0xABCD_C36Eu32.to_be_bytes(),
+            "the port, written through GevSCPHostPort, keeps the other half"
+        );
+        assert_eq!(
+            read(0x0D04),
+            1500u32.to_be_bytes(),
+            "the don't-fragment bit is untouched"
+        );
     }
 
     /// `Camera::set` on a feature that is itself a `<Converter>` writes through

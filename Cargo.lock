@@ -3482,6 +3482,7 @@ dependencies = [
  "png",
  "serde",
  "serde_json",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tiff",
  "tokio",

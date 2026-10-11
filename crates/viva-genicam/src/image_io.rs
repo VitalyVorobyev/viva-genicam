@@ -76,6 +76,7 @@ pub fn encode_frame(frame: &Frame, format: ImageFormat) -> Result<Vec<u8>, Image
         frame.pixel_format,
         frame.width,
         frame.height,
+        frame.row_stride(),
         &frame.payload,
     )?;
     encode(&pixels, frame.width, frame.height, format)
@@ -347,7 +348,7 @@ mod tests {
 
     #[test]
     fn colour_can_be_asked_for() {
-        let pixels = viva_pfnc::convert::full_depth(PixelFormat::Mono8, 1, 1, &[9]).unwrap();
+        let pixels = viva_pfnc::convert::full_depth(PixelFormat::Mono8, 1, 1, None, &[9]).unwrap();
         let file = encode(&pixels.into_rgb(), 1, 1, ImageFormat::Png).unwrap();
         assert_eq!(
             read_png(&file),

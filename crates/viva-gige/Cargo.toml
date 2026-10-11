@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "GigE Vision transport: GVCP discovery, GenCP over GVCP, and GVSP"
 readme = "README.md"
@@ -27,13 +26,14 @@ fastrand = "2"
 async-trait = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 
-[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
 ] }
 
 [dev-dependencies]

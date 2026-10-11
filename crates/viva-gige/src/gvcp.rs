@@ -102,6 +102,13 @@ pub mod consts {
     pub const CCP_EXCLUSIVE: u32 = 1 << 0;
     /// Bits of the CCP register that mean "this application is the controller".
     pub const CCP_CONTROLLER_BITS: u32 = CCP_CONTROL | CCP_EXCLUSIVE;
+    /// Primary Application Port: the UDP port of the application holding
+    /// control, in the low half, where GVCP Capability bit `0x0800_0000` says
+    /// the device has it. Wireshark: `GVCP_PRIMARY_APPLICATION_PORT`.
+    pub const PRIMARY_APPLICATION_PORT: u64 = 0x0a04;
+    /// Primary Application IP address. Wireshark:
+    /// `GVCP_PRIMARY_APPLICATION_IP_ADDRESS`.
+    pub const PRIMARY_APPLICATION_IP: u64 = 0x0a14;
 
     /// Heartbeat timeout register (`GevHeartbeatTimeout`), in milliseconds.
     ///
@@ -122,6 +129,16 @@ pub mod consts {
     /// `hf_gvcp_capability_packetresend` masks `0x00000004`; aravis reads the
     /// same bit (`ARV_GVBS_GVCP_CAPABILITY_PACKET_RESEND`, `1 << 2`).
     pub const CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004;
+    /// Capability bit 26 — `PENDING_ACK` supported. Wireshark:
+    /// `hf_gvcp_capability_pending`, mask `0x00000020`.
+    pub const CAPABILITY_PENDING_ACK: u32 = 0x0000_0020;
+    /// GVCP Configuration (`GevGVCPConfiguration`): optional behaviour the
+    /// controller switches on. Wireshark: `GVCP_CONFIGURATION`.
+    pub const GVCP_CONFIGURATION: u64 = 0x0954;
+    /// Configuration bit 30 — `PENDING_ACK` enabled; a device sends one only
+    /// once this is set. Wireshark: `hf_gvcp_configuration_pending_ack_enable`,
+    /// mask `0x00000002`.
+    pub const CONFIGURATION_PENDING_ACK_ENABLE: u32 = 0x0000_0002;
     /// Timestamp tick frequency, high 32 bits (`GevTimestampTickFrequencyHigh`).
     pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
     /// Timestamp tick frequency, low 32 bits (`GevTimestampTickFrequencyLow`).
@@ -377,6 +394,9 @@ pub enum GigeError {
 }
 
 /// Information returned by GVCP discovery packets.
+///
+/// Build one with [`DeviceInfo::from_ip`] and the fields you have
+/// (`DeviceInfo { model, ..DeviceInfo::from_ip(ip) }`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub ip: Ipv4Addr,
@@ -395,6 +415,12 @@ pub struct DeviceInfo {
     /// record discovery did not make. A broadcast meant for this device, such
     /// as [`force_ip`], has to leave from it (`Iface::from_ipv4`).
     pub local_ip: Option<Ipv4Addr>,
+    /// The camera's current subnet mask (Discovery ACK offset 52).
+    pub subnet: Option<Ipv4Addr>,
+    /// The camera's current default gateway (Discovery ACK offset 68).
+    pub gateway: Option<Ipv4Addr>,
+    /// The netmask of the host address in [`local_ip`](Self::local_ip).
+    pub local_netmask: Option<Ipv4Addr>,
 }
 
 impl DeviceInfo {
@@ -412,7 +438,26 @@ impl DeviceInfo {
             serial: None,
             user_name: None,
             local_ip: None,
+            subnet: None,
+            gateway: None,
+            local_netmask: None,
         }
+    }
+
+    /// Whether the camera and the host address that heard it are on one
+    /// subnet, by both masks: the camera's address inside the host's network,
+    /// and the host's inside the camera's. `None` when either side's address
+    /// or mask is unknown.
+    ///
+    /// A camera that answers discovery but fails this is configured for
+    /// another network. It answered a broadcast, but cannot be reached by
+    /// unicast — every connection to it fails — until its address is changed
+    /// (`force_ip`) or the host joins its network.
+    pub fn shares_subnet_with_host(&self) -> Option<bool> {
+        let (camera, camera_mask) = (u32::from(self.ip), u32::from(self.subnet?));
+        let host = u32::from(self.local_ip?);
+        let host_mask = u32::from(self.local_netmask?);
+        Some(camera & host_mask == host & host_mask && host & camera_mask == camera & camera_mask)
     }
 
     /// Format the MAC address as `AA:BB:CC:DD:EE:FF`.
@@ -425,12 +470,54 @@ impl DeviceInfo {
     }
 }
 
-/// Discover GigE Vision devices on the local network by broadcasting a GVCP discovery command.
-pub async fn discover(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeError> {
-    discover_impl(timeout, None, false).await
+/// How [`discover_with`] looks for cameras.
+///
+/// The default: every IPv4 interface but loopback, and acknowledgements
+/// unicast to the host.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveryOptions {
+    interface: Option<String>,
+    include_loopback: bool,
+    allow_broadcast_ack: bool,
 }
 
-/// Discover devices only on the specified interface name.
+impl DiscoveryOptions {
+    /// The defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask on this interface only, by its OS name. A named interface is
+    /// asked even when it is loopback.
+    pub fn interface(mut self, name: impl Into<String>) -> Self {
+        self.interface = Some(name.into());
+        self
+    }
+
+    /// Ask on loopback too, for simulated cameras bound to `127.0.0.1`.
+    pub fn include_loopback(mut self, include: bool) -> Self {
+        self.include_loopback = include;
+        self
+    }
+
+    /// Set the command's *allow broadcast acknowledge* flag (`0x10`): a
+    /// camera that cannot unicast its answer to the host — one configured
+    /// for another subnet, typically — may broadcast it instead (default:
+    /// off).
+    ///
+    /// Off, such a camera may stay silent. On, every listener on the subnet
+    /// receives its answer, which is why it is not the default.
+    pub fn allow_broadcast_ack(mut self, allow: bool) -> Self {
+        self.allow_broadcast_ack = allow;
+        self
+    }
+}
+
+/// Discover GigE Vision devices on the local network by broadcasting a GVCP discovery command.
+pub async fn discover(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeError> {
+    discover_with(timeout, &DiscoveryOptions::new()).await
+}
+
 /// Discover devices only on the specified interface name.
 ///
 /// When a user explicitly names an interface (including loopback like `lo0`),
@@ -440,7 +527,7 @@ pub async fn discover_on_interface(
     timeout: Duration,
     interface: &str,
 ) -> Result<Vec<DeviceInfo>, GigeError> {
-    discover_impl(timeout, Some(interface), true).await
+    discover_with(timeout, &DiscoveryOptions::new().interface(interface)).await
 }
 
 /// Discover devices on all interfaces including loopback.
@@ -448,7 +535,70 @@ pub async fn discover_on_interface(
 /// This is useful for testing with simulated cameras (e.g. `arv-fake-gv-camera`)
 /// bound to `127.0.0.1`.
 pub async fn discover_all(timeout: Duration) -> Result<Vec<DeviceInfo>, GigeError> {
-    discover_impl(timeout, None, true).await
+    discover_with(timeout, &DiscoveryOptions::new().include_loopback(true)).await
+}
+
+/// Discover devices as `options` say.
+///
+/// Each interface asks from a socket bound to its own address, sending to
+/// its subnet-directed broadcast and to the limited broadcast
+/// `255.255.255.255`: only the second reaches a camera configured for
+/// another subnet, which is the camera a user most needs to find.
+pub async fn discover_with(
+    timeout: Duration,
+    options: &DiscoveryOptions,
+) -> Result<Vec<DeviceInfo>, GigeError> {
+    discover_impl(timeout, options).await
+}
+
+/// Ask the camera at `ip` directly: a unicast `DISCOVERY_CMD` to its GVCP
+/// port, for a camera that broadcast discovery does not reach — across a
+/// router, say. `None` when nothing answers within `timeout`.
+pub async fn discover_ip(ip: Ipv4Addr, timeout: Duration) -> Result<Option<DeviceInfo>, GigeError> {
+    let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).await?;
+    socket
+        .connect(SocketAddr::new(IpAddr::V4(ip), consts::PORT))
+        .await?;
+    let local_ip = match socket.local_addr()?.ip() {
+        IpAddr::V4(local) => Some(local),
+        IpAddr::V6(_) => None,
+    };
+    let request_id = 0x0100;
+    let header = GvcpRequestHeader {
+        flags: discovery_flags(false),
+        command: consts::DISCOVERY_COMMAND,
+        length: 0,
+        request_id,
+    };
+    info!(%ip, "sending GVCP discovery by unicast");
+    socket.send(&header.encode(&[])).await?;
+    let mut buffer = vec![0u8; consts::DISCOVERY_BUFFER];
+    let deadline = time::Instant::now() + timeout;
+    loop {
+        let len = match time::timeout_at(deadline, socket.recv(&mut buffer)).await {
+            Err(_) => return Ok(None),
+            Ok(Ok(len)) => len,
+            // Nothing listens at that address: an answer, not a failure.
+            Ok(Err(err)) if is_icmp_error(&err) => return Ok(None),
+            Ok(Err(err)) => return Err(err.into()),
+        };
+        if let Some(mut info) = parse_discovery_ack(&buffer[..len], request_id) {
+            info.local_ip = local_ip;
+            info.local_netmask = local_ip.and_then(netmask_of);
+            return Ok(Some(info));
+        }
+    }
+}
+
+/// The netmask of this host's address `ip`, if an interface has it.
+fn netmask_of(ip: Ipv4Addr) -> Option<Ipv4Addr> {
+    get_if_addrs()
+        .ok()?
+        .into_iter()
+        .find_map(|iface| match iface.addr {
+            IfAddr::V4(v4) if v4.ip == ip => Some(v4.netmask),
+            _ => None,
+        })
 }
 
 /// Send a FORCEIP command to temporarily assign an IP address to a device.
@@ -553,9 +703,9 @@ fn encode_forceip_payload(
 
 async fn discover_impl(
     timeout: Duration,
-    iface_filter: Option<&str>,
-    include_loopback: bool,
+    options: &DiscoveryOptions,
 ) -> Result<Vec<DeviceInfo>, GigeError> {
+    let include_loopback = options.include_loopback || options.interface.is_some();
     let mut interfaces = Vec::new();
     for iface in get_if_addrs()? {
         let IfAddr::V4(v4) = iface.addr else {
@@ -564,20 +714,21 @@ async fn discover_impl(
         if !include_loopback && v4.ip.is_loopback() {
             continue;
         }
-        if let Some(filter) = iface_filter
-            && iface.name != filter
+        if let Some(filter) = &options.interface
+            && iface.name != *filter
         {
             continue;
         }
-        interfaces.push((iface.name, v4));
+        interfaces.push((iface.name, iface.index, v4));
     }
+    let flags = discovery_flags(options.allow_broadcast_ack);
 
     if interfaces.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut join_set = JoinSet::new();
-    for (idx, (name, v4)) in interfaces.into_iter().enumerate() {
+    for (idx, (name, index, v4)) in interfaces.into_iter().enumerate() {
         let request_id = 0x0100u16.wrapping_add(idx as u16);
         let interface_name = name.clone();
         join_set.spawn(async move {
@@ -590,32 +741,34 @@ async fn discover_impl(
                     return Vec::new();
                 }
             };
-            // On loopback, broadcast is not supported on some platforms (macOS).
-            // Send unicast discovery directly to the local address instead.
-            let destination = if v4.ip.is_loopback() {
-                SocketAddr::new(IpAddr::V4(v4.ip), consts::PORT)
-            } else {
+            if !v4.ip.is_loopback() {
                 if let Err(err) = socket.set_broadcast(true) {
                     warn!(%interface_name, local = %v4.ip, error = %err,
                           "skipping interface: SO_BROADCAST failed");
                     return Vec::new();
                 }
-                let broadcast = directed_broadcast(v4.ip, v4.netmask);
-                SocketAddr::new(IpAddr::V4(broadcast), consts::PORT)
-            };
+                bind_to_interface(&socket, index, &interface_name);
+            }
 
             let header = GvcpRequestHeader {
-                flags: CommandFlags::ACK_REQUIRED | CommandFlags::BROADCAST,
+                flags,
                 command: consts::DISCOVERY_COMMAND,
                 length: 0,
                 request_id,
             };
             let packet = header.encode(&[]);
-            info!(%interface_name, local = %v4.ip, dest = %destination, "sending GVCP discovery");
-            trace!(%interface_name, bytes = packet.len(), "GVCP discovery payload size");
-            if let Err(err) = socket.send_to(&packet, destination).await {
-                warn!(%interface_name, dest = %destination, error = %err,
-                      "skipping interface: discovery send failed");
+            let mut sent = 0;
+            for dest in discovery_destinations(v4.ip, v4.netmask) {
+                let destination = SocketAddr::new(IpAddr::V4(dest), consts::PORT);
+                info!(%interface_name, local = %v4.ip, dest = %destination, "sending GVCP discovery");
+                match socket.send_to(&packet, destination).await {
+                    Ok(_) => sent += 1,
+                    Err(err) => warn!(%interface_name, dest = %destination, error = %err,
+                                      "discovery send failed"),
+                }
+            }
+            if sent == 0 {
+                warn!(%interface_name, "skipping interface: no discovery could be sent");
                 return Vec::new();
             }
 
@@ -633,6 +786,13 @@ async fn discover_impl(
                         // broadcast drew an ICMP port-unreachable (#57).
                         let (len, src) = match recv {
                             Ok(v) => v,
+                            // An ICMP reply to one of the broadcasts says
+                            // nothing about the cameras still answering.
+                            Err(err) if is_icmp_error(&err) => {
+                                debug!(%interface_name, error = %err,
+                                       "ignoring an ICMP error on the discovery socket");
+                                continue;
+                            }
                             Err(err) => {
                                 debug!(%interface_name, error = %err,
                                        "discovery receive failed; keeping results so far");
@@ -644,6 +804,7 @@ async fn discover_impl(
                         if let Some(mut info) = parse_discovery_ack(&buffer[..len], request_id) {
                             trace!(ip = %info.ip, mac = %info.mac_string(), "parsed discovery ack");
                             info.local_ip = Some(v4.ip);
+                            info.local_netmask = Some(v4.netmask);
                             responses.push(info);
                         }
                     }
@@ -671,6 +832,64 @@ async fn discover_impl(
     let mut devices: Vec<_> = seen.into_values().collect();
     devices.sort_by_key(|d| d.ip);
     Ok(devices)
+}
+
+/// Where an interface sends `DISCOVERY_CMD`.
+///
+/// On loopback, broadcast is not supported on some platforms (macOS), so the
+/// command goes to the local address itself.
+///
+/// Elsewhere it goes to the subnet-directed broadcast, which routers may
+/// forward, and to the limited broadcast `255.255.255.255`, which reaches
+/// every device on the link whatever its address — the camera configured for
+/// another subnet among them (aravis sends only the latter,
+/// `arvgvinterface.c`). A camera that hears both answers twice; discovery
+/// keeps one record per address and MAC.
+fn discovery_destinations(ip: Ipv4Addr, netmask: Ipv4Addr) -> Vec<Ipv4Addr> {
+    if ip.is_loopback() {
+        return vec![ip];
+    }
+    let directed = directed_broadcast(ip, netmask);
+    if directed == Ipv4Addr::BROADCAST {
+        return vec![directed];
+    }
+    vec![directed, Ipv4Addr::BROADCAST]
+}
+
+/// The flag byte of a `DISCOVERY_CMD`: an acknowledgement asked for, and
+/// *allow broadcast acknowledge* (`0x10`) only when the caller allows it.
+fn discovery_flags(allow_broadcast_ack: bool) -> CommandFlags {
+    if allow_broadcast_ack {
+        CommandFlags::ACK_REQUIRED | CommandFlags::BROADCAST
+    } else {
+        CommandFlags::ACK_REQUIRED
+    }
+}
+
+/// Whether `err` only reflects an ICMP reply to something the socket sent:
+/// `ECONNREFUSED` on Unix, `WSAECONNRESET` on Windows.
+fn is_icmp_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+    )
+}
+
+/// Keep a discovery socket's broadcasts on its own interface.
+///
+/// Linux sends a limited broadcast from the interface owning the socket's
+/// source address. macOS routes it like any other packet — out of the primary
+/// interface — unless the socket is bound to one (`IP_BOUND_IF`).
+fn bind_to_interface(socket: &UdpSocket, index: Option<u32>, name: &str) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let index = index.and_then(std::num::NonZeroU32::new);
+        if let Err(err) = socket2::SockRef::from(socket).bind_device_by_index_v4(index) {
+            debug!(name, error = %err, "IP_BOUND_IF failed; the limited broadcast may leave by another interface");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let _ = (socket, index, name);
 }
 
 /// Derive an IPv4 directed-broadcast address from an interface address and
@@ -794,9 +1013,11 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
     let ip = Ipv4Addr::from(cursor.get_u32()); // 36
 
     // Everything past the IP is optional, so every step from here on has to
-    // tolerate the payload ending. Subnet and gateway are not retained.
-    skip(&mut cursor, 12 + 4); // 40..52 reserved, 52 subnet
-    skip(&mut cursor, 12 + 4); // 56..68 reserved, 68 gateway
+    // tolerate the payload ending.
+    skip(&mut cursor, 12); // 40..52 reserved
+    let subnet = read_ipv4(&mut cursor); // 52
+    skip(&mut cursor, 12); // 56..68 reserved
+    let gateway = read_ipv4(&mut cursor); // 68
 
     // String fields. All optional: a device that truncates the payload still
     // gives us an addressable camera.
@@ -816,7 +1037,15 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
         serial,
         user_name,
         local_ip: None,
+        subnet,
+        gateway,
+        local_netmask: None,
     })
+}
+
+/// Read an IPv4 address, or `None` if the payload ends early.
+fn read_ipv4(cursor: &mut Cursor<&[u8]>) -> Option<Ipv4Addr> {
+    (cursor.remaining() >= 4).then(|| Ipv4Addr::from(cursor.get_u32()))
 }
 
 /// Read a NUL-padded fixed-width string, or `None` if the payload ends early.
@@ -916,6 +1145,78 @@ fn single_register_address(addr: u64, len: usize) -> Option<u32> {
     u32::try_from(addr).ok()
 }
 
+/// GVCP Capability (`0x0934`): which optional commands and behaviours the
+/// device implements, one bit each.
+///
+/// Masks from Wireshark's `hf_gvcp_capability_*` fields; the specification
+/// numbers bits from the most significant, so `0x20` is its bit 26. Only the
+/// bits something here acts on, or a report shows, have a method; the rest
+/// are in [`bits`](Self::bits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GvcpCapability(u32);
+
+impl GvcpCapability {
+    /// The capability word as read.
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    /// The raw word.
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// `PENDING_ACK` can be enabled in GVCP Configuration (`0x20`).
+    pub const fn pending_ack(self) -> bool {
+        self.0 & consts::CAPABILITY_PENDING_ACK != 0
+    }
+
+    /// `PACKETRESEND_CMD` is answered (`0x04`).
+    pub const fn packet_resend(self) -> bool {
+        self.0 & consts::CAPABILITY_PACKET_RESEND != 0
+    }
+
+    /// `WRITEMEM_CMD` is implemented (`0x02`).
+    pub const fn writemem(self) -> bool {
+        self.0 & 0x0000_0002 != 0
+    }
+
+    /// Several registers in one READREG/WRITEREG (`0x01`).
+    pub const fn concatenation(self) -> bool {
+        self.0 & 0x0000_0001 != 0
+    }
+
+    /// `EVENT_CMD` is sent (`0x08`).
+    pub const fn event(self) -> bool {
+        self.0 & 0x0000_0008 != 0
+    }
+
+    /// `EVENTDATA_CMD` is sent (`0x10`).
+    pub const fn event_data(self) -> bool {
+        self.0 & 0x0000_0010 != 0
+    }
+
+    /// `ACTION_CMD` is answered (`0x40`).
+    pub const fn action(self) -> bool {
+        self.0 & 0x0000_0040 != 0
+    }
+
+    /// The heartbeat can be disabled in GVCP Configuration (`0x2000_0000`).
+    pub const fn heartbeat_disable(self) -> bool {
+        self.0 & 0x2000_0000 != 0
+    }
+
+    /// The primary application's IP and port are readable (`0x0800_0000`).
+    pub const fn ccp_application_port_ip(self) -> bool {
+        self.0 & 0x0800_0000 != 0
+    }
+
+    /// Control can be handed over with a switchover key (`0x0020_0000`).
+    pub const fn primary_application_switchover(self) -> bool {
+        self.0 & 0x0020_0000 != 0
+    }
+}
+
 /// GVCP device handle.
 pub struct GigeDevice {
     socket: UdpSocket,
@@ -929,6 +1230,9 @@ pub struct GigeDevice {
     /// READREG/WRITEREG. Set by [`FORCE_READMEM_ENV`] at open, or latched for
     /// the rest of the session once the device refuses a register command.
     memory_access_only: bool,
+    /// Whether the device names its primary application (GVCP Capability
+    /// `0x0800_0000`), read once when first needed.
+    names_primary_application: Option<bool>,
 }
 
 /// Stream negotiation outcome describing the values written to the device.
@@ -981,6 +1285,7 @@ impl GigeDevice {
             request_id: 1,
             rng: Rng::new(),
             memory_access_only,
+            names_primary_application: None,
         })
     }
 
@@ -1009,6 +1314,11 @@ impl GigeDevice {
     /// in-flight requests only; an idle connection still needs a keepalive.
     pub fn set_inflight_keepalive_period(&mut self, period: Option<Duration>) {
         self.inflight_keepalive_period = period.filter(|period| !period.is_zero());
+    }
+
+    /// The in-flight heartbeat period, `None` while they are off.
+    pub fn inflight_keepalive_period(&self) -> Option<Duration> {
+        self.inflight_keepalive_period
     }
 
     /// Send every single-register access as READMEM/WRITEMEM from now on.
@@ -1041,6 +1351,26 @@ impl GigeDevice {
         self.write_u32(consts::CONTROL_CHANNEL_PRIVILEGE, 0).await
     }
 
+    /// Send the release of control privilege (CCP ← 0) without waiting for
+    /// its acknowledgement, and without a runtime to wait on.
+    ///
+    /// For a caller that cannot block — a `Drop` on a current-thread runtime's
+    /// own thread. Best effort: a lost datagram leaves the device to time the
+    /// privilege out. Prefer [`Self::release_control`].
+    pub fn try_send_release(&mut self) -> std::io::Result<()> {
+        let request_id = self.next_request_id();
+        let mut payload = BytesMut::with_capacity(8);
+        payload.put_u32(consts::CONTROL_CHANNEL_PRIVILEGE as u32);
+        payload.put_u32(0);
+        let header = GvcpRequestHeader {
+            flags: CommandFlags::ACK_REQUIRED,
+            command: OpCode::WriteRegister.command_code(),
+            length: payload.len() as u16,
+            request_id,
+        };
+        self.socket.try_send(&header.encode(&payload)).map(drop)
+    }
+
     /// Read `GevHeartbeatTimeout` (milliseconds).
     ///
     /// This is how long the device will keep control privilege granted with no
@@ -1062,14 +1392,55 @@ impl GigeDevice {
     /// Losing privilege is not a transport failure, so it is not an `Err`: the
     /// register read succeeded and the answer is simply "no". `Err` means the
     /// command itself did not complete.
+    ///
+    /// CCP alone cannot tell this application from another that took control
+    /// after an expired heartbeat: both read as controlled. Where GVCP
+    /// Capability says the device names its primary application (bit
+    /// `0x0800_0000`), its IP and port are compared with this socket's too
+    /// (backlog TC-38).
     pub async fn ping_control_channel(&mut self) -> Result<bool, GigeError> {
         let privilege = self.read_u32(consts::CONTROL_CHANNEL_PRIVILEGE).await?;
-        Ok(privilege & consts::CCP_CONTROLLER_BITS != 0)
+        if privilege & consts::CCP_CONTROLLER_BITS == 0 {
+            return Ok(false);
+        }
+        self.primary_application_is_us().await
+    }
+
+    /// Whether the device's primary application is this socket, where the
+    /// device says (`0x0A04` port, `0x0A14` IP); `true` where it does not.
+    async fn primary_application_is_us(&mut self) -> Result<bool, GigeError> {
+        let names_owner = match self.names_primary_application {
+            Some(known) => known,
+            None => {
+                let known = self
+                    .gvcp_capability()
+                    .await
+                    .map(GvcpCapability::ccp_application_port_ip)
+                    .unwrap_or(false);
+                self.names_primary_application = Some(known);
+                known
+            }
+        };
+        if !names_owner {
+            return Ok(true);
+        }
+        let SocketAddr::V4(us) = self.socket.local_addr()? else {
+            return Ok(true);
+        };
+        let port = self.read_u32(consts::PRIMARY_APPLICATION_PORT).await? & 0xFFFF;
+        let ip = Ipv4Addr::from(self.read_u32(consts::PRIMARY_APPLICATION_IP).await?);
+        Ok(port == u32::from(us.port()) && ip == *us.ip())
     }
 
     /// Return the remote GVCP socket address associated with this device.
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote
+    }
+
+    /// The local address and port commands leave from: what the device
+    /// knows this application by.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
     }
 
     fn next_request_id(&mut self) -> u16 {
@@ -1202,12 +1573,22 @@ impl GigeDevice {
     /// One socket reader owns both the active request and its heartbeat replies.
     /// Keep an absolute deadline so unrelated or duplicate ACKs cannot postpone
     /// a timeout, and never resend the active command merely to send a heartbeat.
+    ///
+    /// `committed` says the device already has the command — it answered with
+    /// `PENDING_ACK` — so nothing on the socket may end the wait early: a
+    /// resend could run it twice. An ICMP error after an in-flight heartbeat
+    /// is ignored for the same reason (TC-26): it may be the heartbeat's, and
+    /// the command it interrupts may be executing. Only an error the active
+    /// command alone can have drawn ends the wait, so an absent device still
+    /// fails fast.
     async fn recv_for_request(
         &mut self,
         buf: &mut [u8],
         request_id: u16,
         deadline: time::Instant,
+        committed: bool,
     ) -> AckRecv {
+        let mut tolerate_icmp = committed;
         loop {
             let heartbeat_deadline = self
                 .inflight_keepalive_period
@@ -1221,13 +1602,21 @@ impl GigeDevice {
                         std::future::pending::<()>().await;
                     }
                 } => {
+                    tolerate_icmp = true;
                     if let Err(err) = self.send_inflight_keepalive(request_id).await {
-                        return AckRecv::Io(std::io::Error::other(err));
+                        // The command is still waiting for its answer; a lost
+                        // heartbeat costs at most this period's refresh.
+                        debug!(request_id, error = %err, "in-flight heartbeat not sent; still waiting");
+                        self.last_command_sent = time::Instant::now();
                     }
                 }
                 received = self.socket.recv(buf) => {
                     let len = match received {
                         Ok(len) => len,
+                        Err(err) if tolerate_icmp && is_icmp_error(&err) => {
+                            debug!(request_id, error = %err, "ignoring an ICMP error while the command is pending");
+                            continue;
+                        }
                         Err(err) => return AckRecv::Io(err),
                     };
                     let ack_id = buf.get(..len)
@@ -1260,8 +1649,9 @@ impl GigeDevice {
         let mut wait = self.control_timeout;
         let mut pending_seen = 0usize;
         loop {
+            let deadline = time::Instant::now() + wait;
             match self
-                .recv_for_request(buf, request_id, time::Instant::now() + wait)
+                .recv_for_request(buf, request_id, deadline, pending_seen > 0)
                 .await
             {
                 AckRecv::Received(len) => {
@@ -1492,7 +1882,40 @@ impl GigeDevice {
     ///
     /// Uses GVCP WRITEMEM format: 4-byte address + data bytes.
     /// The acknowledgement carries: 4-byte reserved (index).
+    ///
+    /// GVCP carries whole 32-bit words at 32-bit aligned addresses, as
+    /// READMEM does (#35). A write that starts or ends inside a word — a
+    /// one-byte register, a two-byte one at an odd half-word — goes out as
+    /// the words around it, the bytes it does not cover read from the device
+    /// first, so neighbouring registers keep their values (TC-32). aravis
+    /// pads such a write with whatever its buffer held
+    /// (`arv_gvcp_packet_new_write_memory_cmd`). If the read is refused, the
+    /// write goes out as given, for the device to judge.
     pub async fn write_mem(&mut self, addr: u64, data: &[u8]) -> Result<(), GigeError> {
+        let start = addr & !3;
+        let end = (addr + data.len() as u64).next_multiple_of(4);
+        if data.is_empty() || (start == addr && end == addr + data.len() as u64) {
+            return self.write_mem_words(addr, data).await;
+        }
+        let mut words = match self.read_mem(start, (end - start) as usize).await {
+            Ok(words) => words,
+            Err(err) => {
+                debug!(
+                    addr = format!("0x{addr:08x}"),
+                    len = data.len(),
+                    error = %err,
+                    "cannot read the words around an unaligned write; sending it as given"
+                );
+                return self.write_mem_words(addr, data).await;
+            }
+        };
+        let offset = (addr - start) as usize;
+        words[offset..offset + data.len()].copy_from_slice(data);
+        self.write_mem_words(start, &words).await
+    }
+
+    /// WRITEMEM `data` at `addr` as it is, in chunks of at most 508 bytes.
+    async fn write_mem_words(&mut self, addr: u64, data: &[u8]) -> Result<(), GigeError> {
         /// GVCP WRITEMEM overhead: 4-byte address prefix.
         const GVCP_WRITE_OVERHEAD: usize = 4;
 
@@ -1550,6 +1973,17 @@ impl GigeDevice {
         let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_PORT);
         self.write_u32(addr, u32::from(port)).await?;
         Ok(())
+    }
+
+    /// Read where stream channel `channel` sends: `GevSCDA` and the port in
+    /// the low half of `GevSCPHostPort`. A multicast group here is how a
+    /// camera streams to several hosts at once.
+    pub async fn stream_destination(&mut self, channel: u32) -> Result<(Ipv4Addr, u16), GigeError> {
+        let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_ADDRESS);
+        let ip = Ipv4Addr::from(self.read_u32(addr).await?);
+        let addr = Self::stream_reg(channel, consts::STREAM_DESTINATION_PORT);
+        let port = (self.read_u32(addr).await? & 0xFFFF) as u16;
+        Ok((ip, port))
     }
 
     /// Configure the packet size for the stream channel.
@@ -1620,9 +2054,35 @@ impl GigeDevice {
     }
 
     /// Read GVCP Capability (`0x0934`): which optional commands the device
-    /// implements. [`consts::CAPABILITY_PACKET_RESEND`] is the resend bit.
-    pub async fn gvcp_capability(&mut self) -> Result<u32, GigeError> {
-        self.read_u32(consts::GVCP_CAPABILITY).await
+    /// implements.
+    pub async fn gvcp_capability(&mut self) -> Result<GvcpCapability, GigeError> {
+        self.read_u32(consts::GVCP_CAPABILITY)
+            .await
+            .map(GvcpCapability::from_bits)
+    }
+
+    /// Switch `PENDING_ACK` on, if GVCP Capability says the device has it:
+    /// set its enable bit (`0x2`) in GVCP Configuration (`0x0954`), keeping
+    /// the others. Returns whether it is on.
+    ///
+    /// A device sends `PENDING_ACK` only once enabled. Without it, a command
+    /// that takes longer than the acknowledgement timeout — a flash write, a
+    /// mode change — is retried as though lost, and may run twice. A write,
+    /// so it needs control privilege.
+    pub async fn enable_pending_ack(&mut self) -> Result<bool, GigeError> {
+        if !self.gvcp_capability().await?.pending_ack() {
+            return Ok(false);
+        }
+        let config = self.read_u32(consts::GVCP_CONFIGURATION).await?;
+        if config & consts::CONFIGURATION_PENDING_ACK_ENABLE == 0 {
+            self.write_u32(
+                consts::GVCP_CONFIGURATION,
+                config | consts::CONFIGURATION_PENDING_ACK_ENABLE,
+            )
+            .await?;
+        }
+        debug!(addr = %self.remote, "PENDING_ACK enabled");
+        Ok(true)
     }
 
     /// Read `GevNumberOfStreamChannels` (`0x0904`).
@@ -1803,7 +2263,7 @@ mod tests {
         p[20..24].copy_from_slice(&5u32.to_be_bytes()); // current IP config
         p[36..40].copy_from_slice(&[169, 254, 78, 62]); // current IP
         p[52..56].copy_from_slice(&[255, 255, 0, 0]); // subnet
-        p[68..72].copy_from_slice(&[0, 0, 0, 0]); // gateway
+        p[68..72].copy_from_slice(&[169, 254, 0, 1]); // gateway
         let put =
             |p: &mut [u8], at: usize, s: &str| p[at..at + s.len()].copy_from_slice(s.as_bytes());
         put(&mut p, 72, "JAI Corporation"); // manufacturer
@@ -1830,6 +2290,47 @@ mod tests {
         assert_eq!(info.version.as_deref(), Some("1.2.3"));
         assert_eq!(info.serial.as_deref(), Some("SN-12345"));
         assert_eq!(info.user_name.as_deref(), Some("left-camera"));
+        // TC-31: subnet at 52 and gateway at 68, which a camera on the wrong
+        // network is diagnosed by.
+        assert_eq!(info.subnet, Some(Ipv4Addr::new(255, 255, 0, 0)));
+        assert_eq!(info.gateway, Some(Ipv4Addr::new(169, 254, 0, 1)));
+    }
+
+    /// TC-31: an interface asks its own subnet and the limited broadcast;
+    /// only the second reaches a camera configured for another network.
+    #[test]
+    fn discovery_goes_to_the_subnet_and_to_the_limited_broadcast() {
+        assert_eq!(
+            discovery_destinations(
+                Ipv4Addr::new(192, 168, 1, 5),
+                Ipv4Addr::new(255, 255, 255, 0)
+            ),
+            vec![Ipv4Addr::new(192, 168, 1, 255), Ipv4Addr::BROADCAST]
+        );
+        assert_eq!(
+            discovery_destinations(Ipv4Addr::LOCALHOST, Ipv4Addr::new(255, 0, 0, 0)),
+            vec![Ipv4Addr::LOCALHOST],
+            "loopback is asked by unicast"
+        );
+    }
+
+    /// Subnet and gateway are compared both ways: the camera's address in the
+    /// host's network and the host's in the camera's.
+    #[test]
+    fn a_camera_shares_the_host_subnet_only_by_both_masks() {
+        let mut info = DeviceInfo::from_ip(Ipv4Addr::new(192, 168, 1, 20));
+        assert_eq!(info.shares_subnet_with_host(), None, "nothing known");
+        info.subnet = Some(Ipv4Addr::new(255, 255, 255, 0));
+        info.local_ip = Some(Ipv4Addr::new(192, 168, 1, 5));
+        info.local_netmask = Some(Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(info.shares_subnet_with_host(), Some(true));
+        info.local_ip = Some(Ipv4Addr::new(169, 254, 3, 4));
+        info.local_netmask = Some(Ipv4Addr::new(255, 255, 0, 0));
+        assert_eq!(info.shares_subnet_with_host(), Some(false));
+        // A /16 host holds a /24 camera's address, but the camera cannot
+        // answer outside its /24.
+        info.local_ip = Some(Ipv4Addr::new(192, 168, 9, 5));
+        assert_eq!(info.shares_subnet_with_host(), Some(false));
     }
 
     #[test]
@@ -2021,6 +2522,58 @@ mod tests {
     /// A device that answers `error_replies` commands with `status_raw` and
     /// then, if it is asked again, succeeds. Returns the number of commands it
     /// received, which is what distinguishes "retried" from "reported".
+    /// TC-26: while a `PENDING_ACK`ed write waits, the camera is briefly
+    /// unreachable, so heartbeats draw ICMP port-unreachable and the socket
+    /// reports errors. The write is still pending on the device: it must not
+    /// be sent again, and the wait goes on to its acknowledgement.
+    #[tokio::test]
+    async fn an_unreachable_moment_during_a_pending_wait_does_not_resend_the_command() {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let addr = sock.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (_, peer) = sock.recv_from(&mut buf).await.expect("the write");
+            let request_id = u16::from_be_bytes([buf[6], buf[7]]);
+            sock.send_to(&golden_pending_ack(request_id, 1500), peer)
+                .await
+                .expect("send pending");
+            drop(sock);
+            time::sleep(Duration::from_millis(200)).await;
+            let sock = UdpSocket::bind(addr).await.expect("rebind");
+            // Longer than an attempt's 500 ms timeout: a controller that
+            // gave up waiting on the PENDING_ACK resends within it.
+            let mut resent = 0usize;
+            let listen_until = time::Instant::now() + Duration::from_millis(700);
+            while let Ok(Ok((len, from))) =
+                time::timeout_at(listen_until, sock.recv_from(&mut buf)).await
+            {
+                let opcode = u16::from_be_bytes([buf[2], buf[3]]);
+                let id = u16::from_be_bytes([buf[6], buf[7]]);
+                if opcode == 0x0082 && id == request_id {
+                    resent += 1;
+                } else if opcode == 0x0080 && len >= 12 {
+                    // A heartbeat: answer it, as the device would.
+                    let mut ack = vec![0, 0, 0, 0x81, 0, 4];
+                    ack.extend_from_slice(&id.to_be_bytes());
+                    ack.extend_from_slice(&2u32.to_be_bytes());
+                    sock.send_to(&ack, from).await.expect("heartbeat ack");
+                }
+            }
+            let mut ack = vec![0, 0, 0, 0x83, 0, 4];
+            ack.extend_from_slice(&request_id.to_be_bytes());
+            ack.extend_from_slice(&[0, 0, 0, 0]);
+            sock.send_to(&ack, peer).await.expect("write ack");
+            resent
+        });
+        let mut device = GigeDevice::open(addr).await.expect("open");
+        device.set_inflight_keepalive_period(Some(Duration::from_millis(30)));
+        device
+            .write_register(0x2000, 1)
+            .await
+            .expect("the pending write completes");
+        assert_eq!(server.await.unwrap(), 0, "the pending write was sent again");
+    }
+
     async fn status_device(
         status_raw: u16,
         error_replies: usize,

@@ -31,17 +31,20 @@
 mod gvcp_server;
 
 pub use gvcp_server::{
-    CommandCounters, FAKE_DEVICE_KEY, FAKE_GROUP_KEY, FAKE_GROUP_MASK, FAKE_MAC, FAKE_MANUFACTURER,
-    FAKE_MODEL, FAKE_SERIAL, FAKE_USER_NAME, FAKE_VERSION, GvcpCommand, RegisterCommandRefusal,
+    CommandCounters, DiscoveryRequest, FAKE_DEVICE_KEY, FAKE_GROUP_KEY, FAKE_GROUP_MASK, FAKE_MAC,
+    FAKE_MANUFACTURER, FAKE_MODEL, FAKE_SERIAL, FAKE_SUBNET_MASK, FAKE_USER_NAME, FAKE_VERSION,
+    GvcpCommand, RegisterCommandRefusal,
 };
 pub mod gvsp;
 mod gvsp_sender;
 pub mod registers;
 pub mod resend;
 
-use std::net::Ipv4Addr;
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 pub use gvsp::{PacketScript, ScriptStep};
 pub use resend::ResendStats;
@@ -71,6 +74,8 @@ pub struct FakeCameraBuilder {
     packet_resend: bool,
     resend_retention: usize,
     tick_frequency: Option<u64>,
+    pending_ack: bool,
+    delayed_acks: HashMap<u64, Duration>,
 }
 
 /// PFNC pixel format codes.
@@ -101,6 +106,8 @@ impl Default for FakeCameraBuilder {
             packet_resend: true,
             resend_retention: resend::DEFAULT_RETENTION,
             tick_frequency: None,
+            pending_ack: true,
+            delayed_acks: HashMap::new(),
         }
     }
 }
@@ -311,6 +318,49 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Report `ip` as the camera's current IP address in the Discovery ACK
+    /// and bootstrap `0x0024`, instead of the address it is bound to.
+    ///
+    /// A camera configured for another network still answers a broadcast
+    /// discovery, with an address the host cannot reach; this is that camera.
+    pub fn current_ip(mut self, ip: Ipv4Addr) -> Self {
+        self.identity.ip = Some(ip);
+        self
+    }
+
+    /// Report `mask` as the current subnet mask (default
+    /// [`FAKE_SUBNET_MASK`], loopback's `/8`).
+    pub fn subnet_mask(mut self, mask: Ipv4Addr) -> Self {
+        self.identity.subnet_mask = mask;
+        self
+    }
+
+    /// Report `gateway` as the current default gateway (default `0.0.0.0`).
+    pub fn gateway(mut self, gateway: Ipv4Addr) -> Self {
+        self.identity.gateway = gateway;
+        self
+    }
+
+    /// Say in GVCP Capability (`0x0934`, mask `0x20`) that this device can
+    /// answer a slow command with `PENDING_ACK` (default: on).
+    ///
+    /// It sends one only once the controller sets the enable bit (`0x2`) of
+    /// GVCP Configuration (`0x0954`), as the specification has it.
+    pub fn pending_ack(mut self, supported: bool) -> Self {
+        self.pending_ack = supported;
+        self
+    }
+
+    /// Acknowledge every register-access command that starts at `addr` only
+    /// after `delay`, as a device busy with a flash write or a mode change
+    /// does — first with a `PENDING_ACK` of one and a half times `delay` when
+    /// `PENDING_ACK` is enabled. Other commands are served meanwhile, and a
+    /// retry of the delayed one is not executed again.
+    pub fn delay_ack(mut self, addr: u64, delay: Duration) -> Self {
+        self.delayed_acks.insert(addr, delay);
+        self
+    }
+
     /// Start the fake camera and return a handle.
     pub async fn build(self) -> Result<FakeCamera, std::io::Error> {
         let mut register_map =
@@ -327,6 +377,12 @@ impl FakeCameraBuilder {
         register_map.enforce_heartbeat(self.enforce_heartbeat);
         register_map.set_mac(self.identity.mac);
         register_map.set_packet_resend(self.packet_resend);
+        register_map.set_pending_ack_supported(self.pending_ack);
+        register_map.set_network(
+            self.identity.ip.unwrap_or(self.bind_ip),
+            self.identity.subnet_mask,
+            self.identity.gateway,
+        );
         if let Some(hz) = self.tick_frequency {
             register_map.set_tick_frequency(hz);
         }
@@ -335,6 +391,8 @@ impl FakeCameraBuilder {
         let acq_start = Arc::new(Notify::new());
         let acq_stop_flag = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(CommandCounters::default());
+        let discoveries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let expiries = Arc::new(AtomicU64::new(0));
         let blocks_sent = Arc::new(AtomicU64::new(0));
         let spoofed = Arc::new(AtomicU64::new(0));
         let resends = Arc::new(resend::ResendCounters::default());
@@ -371,6 +429,9 @@ impl FakeCameraBuilder {
                 refuse_register_commands: self.refuse_register_commands,
                 retention: retention.clone(),
                 resend: resends.clone(),
+                discoveries: discoveries.clone(),
+                delayed_acks: Arc::new(self.delayed_acks),
+                expiries: expiries.clone(),
             };
             let identity = self.identity;
             tokio::spawn(async move {
@@ -407,6 +468,8 @@ impl FakeCameraBuilder {
             blocks_sent,
             spoofed,
             resends,
+            discoveries,
+            expiries,
             local_addr,
         })
     }
@@ -424,6 +487,8 @@ pub struct FakeCamera {
     blocks_sent: Arc<AtomicU64>,
     spoofed: Arc<AtomicU64>,
     resends: Arc<resend::ResendCounters>,
+    discoveries: Arc<std::sync::Mutex<Vec<DiscoveryRequest>>>,
+    expiries: Arc<AtomicU64>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -476,6 +541,31 @@ impl FakeCamera {
     /// address.
     pub fn spoofed_packets(&self) -> u64 {
         self.spoofed.load(Ordering::Relaxed)
+    }
+
+    /// The application holding control privilege — the address and port its
+    /// commands come from — or `None`.
+    pub async fn controller(&self) -> Option<SocketAddr> {
+        self.regs.lock().await.controller()
+    }
+
+    /// Give control privilege up on the device side, as a device does when
+    /// the controller's heartbeat expires: CCP reads 0 from then on.
+    pub async fn revoke_control(&self) {
+        self.regs.lock().await.revoke_control();
+    }
+
+    /// How often the heartbeat rule has revoked control privilege.
+    pub fn heartbeat_expiries(&self) -> u64 {
+        self.expiries.load(Ordering::Relaxed)
+    }
+
+    /// Every `DISCOVERY_CMD` this camera received, in arrival order.
+    pub fn discovery_requests(&self) -> Vec<DiscoveryRequest> {
+        self.discoveries
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
     }
 
     /// Read `len` bytes of device state directly, bypassing GVCP.

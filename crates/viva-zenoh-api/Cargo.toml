@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "Message payloads and topic names published by the viva GenICam camera services - plain serde types that do not link Zenoh"
 readme = "README.md"

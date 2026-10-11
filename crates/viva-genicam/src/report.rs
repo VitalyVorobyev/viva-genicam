@@ -232,6 +232,10 @@ fn environment(out: &mut String, request: &ReportRequest) {
     let _ = writeln!(out);
 }
 
+fn opt_ip(ip: Option<std::net::Ipv4Addr>) -> String {
+    ip.map_or_else(|| "-".to_string(), |ip| ip.to_string())
+}
+
 fn interfaces(out: &mut String) {
     let _ = writeln!(out, "## Network interfaces");
     let _ = writeln!(out);
@@ -241,15 +245,10 @@ fn interfaces(out: &mut String) {
          discovery no matter what the OS reports elsewhere (#57)."
     );
     let _ = writeln!(out);
-    // `mtu()` queries the OS on Linux, Windows and macOS and returns 1500
-    // everywhere else. Printing that as though it had been measured would put
-    // a fabricated number in a document whose whole purpose is evidence.
-    let mtu_measured = cfg!(any(
-        target_os = "linux",
-        windows,
-        target_os = "macos",
-        target_os = "ios"
-    ));
+    // `mtu()` says when it assumed rather than measured — on a platform it
+    // cannot query, or when the lookup failed — and the report keeps the
+    // distinction: a fabricated number in a document whose whole purpose is
+    // evidence would mislead.
     match Iface::list() {
         Ok(ifaces) if ifaces.is_empty() => {
             let _ = writeln!(out, "(none reported)");
@@ -266,13 +265,7 @@ fn interfaces(out: &mut String) {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                let mtu = if mtu_measured {
-                    viva_gige::nic::mtu(&iface)
-                        .map(|mtu| mtu.to_string())
-                        .unwrap_or_else(|err| format!("unknown ({err})"))
-                } else {
-                    "assumed".to_string()
-                };
+                let mtu = viva_gige::nic::mtu(&iface).to_string();
                 let _ = writeln!(
                     out,
                     "{:<16} index={:<5} mtu={:<9} ipv4=[{}]",
@@ -280,14 +273,6 @@ fn interfaces(out: &mut String) {
                     iface.index(),
                     mtu,
                     addrs
-                );
-            }
-            if !mtu_measured {
-                let _ = writeln!(
-                    out,
-                    "\nMTU is not queried on {} — the library assumes 1500 and \
-                     cannot select jumbo frames here.",
-                    std::env::consts::OS
                 );
             }
         }
@@ -340,6 +325,21 @@ async fn discovery(
                 let _ = writeln!(out, "     version:      {}", opt(&dev.version));
                 let _ = writeln!(out, "     serial:       {}", opt(&dev.serial));
                 let _ = writeln!(out, "     user name:    {}", opt(&dev.user_name));
+                let _ = writeln!(out, "     subnet:       {}", opt_ip(dev.subnet));
+                let _ = writeln!(out, "     gateway:      {}", opt_ip(dev.gateway));
+                if let (Some(false), Some(host), Some(mask)) = (
+                    dev.shares_subnet_with_host(),
+                    dev.local_ip,
+                    dev.local_netmask,
+                ) {
+                    let _ = writeln!(
+                        out,
+                        "     WARNING:      not on the subnet of {host}/{}, which heard it; \
+                         connections to it will fail until its address or the host's changes \
+                         (viva-camctl set-ip)",
+                        u32::from(mask).leading_ones()
+                    );
+                }
             }
             let _ = writeln!(out);
             devices

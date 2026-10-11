@@ -52,3 +52,17 @@ skips the active transaction's ID if the 16-bit counter wraps.
 - Probes run only inside a receive wait that some caller is already blocked
   on, so they need no shutdown of their own: dropping `GigeRegisterIo`
   cancels the idle task's wait (#162), and with it any probe it would send.
+
+## Amendment — 2026-10-11 (milestone L)
+
+- A heartbeat that cannot be sent is logged and the wait goes on; it no
+  longer ends the wait as a receive error, which had the active command sent
+  again (TC-26). An ICMP error on the socket is ignored likewise once the
+  device has answered `PENDING_ACK` or a heartbeat has been sent in the wait —
+  it may be the heartbeat's, and the command may be executing. Before either,
+  it still ends the wait, so an absent device fails fast.
+- A `GevHeartbeatTimeout` of 0 no longer switches the in-flight probes off;
+  like the idle keepalive they assume a 3 000 ms window.
+- The regression fixture for the facade moved into `viva-fake-gige`
+  (`delay_ack`, `pending_ack`, `enforce_heartbeat`), so the test ships with
+  the package that runs it.

@@ -25,7 +25,7 @@ pub async fn run(
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(ip, index, iface.as_ref(), timeout).await?;
     info!(ip = %device.ip, "opening camera for get");
-    let camera = common::open_camera(&device)
+    let camera = common::open_camera(&device, viva_genicam::Access::Monitor)
         .await
         .context("open camera for get")?;
     let value = camera

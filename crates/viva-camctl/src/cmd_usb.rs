@@ -152,7 +152,13 @@ pub fn run_set(index: Option<usize>, name: String, value: String, json: bool) ->
 // stream-usb
 // ---------------------------------------------------------------------------
 
-pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64) -> Result<()> {
+pub fn run_stream(
+    index: Option<usize>,
+    save: usize,
+    save_format: common::SaveFormat,
+    rgb: bool,
+    duration_s: u64,
+) -> Result<()> {
     let mut camera = open_usb_camera(index)?;
 
     // Read image dimensions from camera features.
@@ -161,10 +167,10 @@ pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64)
     let pf_str = camera
         .get("PixelFormat")
         .unwrap_or_else(|_| "Mono8".to_string());
-    let bpp: usize = PixelFormat::from_name(&pf_str)
-        .bytes_per_pixel()
-        .unwrap_or(1);
-    let payload_size = (width as usize) * (height as usize) * bpp;
+    // Sized from the PFNC code, so a packed format is not undersized.
+    let payload_size = PixelFormat::from_name(&pf_str)
+        .image_bytes(width, height)
+        .unwrap_or(width as usize * height as usize);
 
     info!(
         width,
@@ -221,27 +227,16 @@ pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64)
 
         // Save frames if requested.
         if saved < save {
-            let payload = raw.payload.as_ref();
-            let path = if rgb {
-                let frame = viva_genicam::frame::Frame::new(
-                    raw.payload.clone(),
-                    raw.leader.width,
-                    raw.leader.height,
-                    pixel_format,
-                );
-                let rgb_data = frame
-                    .to_rgb8()
-                    .map_err(|e| anyhow!("RGB conversion: {e}"))?;
-                let path = PathBuf::from(format!("frame_{saved}.ppm"));
-                let encoded = common::encode_ppm(raw.leader.width, raw.leader.height, &rgb_data)?;
-                common::save_image(&encoded, &path)?;
-                path
-            } else {
-                let path = PathBuf::from(format!("frame_{saved}.pgm"));
-                let encoded = common::encode_pgm(raw.leader.width, raw.leader.height, payload)?;
-                common::save_image(&encoded, &path)?;
-                path
-            };
+            let (encoded, ext) = common::encode_frame(
+                pixel_format,
+                raw.leader.width,
+                raw.leader.height,
+                raw.payload.as_ref(),
+                save_format,
+                rgb,
+            )?;
+            let path = PathBuf::from(format!("frame_{saved}.{ext}"));
+            common::save_image(&encoded, &path)?;
             println!("  saved -> {}", path.display());
             saved += 1;
         }

@@ -59,6 +59,8 @@ viva-camctl xml --ip 192.168.0.10 --out camera.xml
 viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --save 2
 viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --auto --save 2
 viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --packet-size 9000 --save 2
+# Save at the camera's bit depth (16-bit PNG or TIFF above 8 bits; PGM/PPM by default)
+viva-camctl stream --ip 192.168.0.10 --iface 192.168.0.5 --save 2 --save-format png
 
 # Event-vision camera: append every EVT block to one file
 viva-camctl stream --ip 192.168.0.10 --save 0 --raw-out capture.evt3 --duration-s 10

@@ -5986,6 +5986,7 @@ dependencies = [
  "thiserror 2.0.21",
  "ts-rs",
  "viva-genapi",
+ "viva-pfnc",
 ]
 
 [[package]]
@@ -5999,6 +6000,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "viva-pfnc",
  "viva-zenoh-api",
  "zenoh",
 ]

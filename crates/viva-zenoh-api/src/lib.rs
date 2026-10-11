@@ -664,8 +664,15 @@ impl AcquisitionStatus {
 // ── Image ────────────────────────────────────────────────────────────────────
 
 /// SFNC pixel format identifiers.
+///
+/// A projection of [`viva_pfnc::PixelFormat`] onto the formats a viewer can
+/// draw, named as SFNC/PFNC name them. [`PixelFormat::to_pfnc`] and the
+/// `From<viva_pfnc::PixelFormat>` impl are the one map between the two, built
+/// from a single table. A format the wire cannot name travels as `Unknown`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+// Y'CbCr variants keep their PFNC spelling (`YUV422_8_UYVY`).
+#[allow(non_camel_case_types)]
 pub enum PixelFormat {
     Mono8,
     Mono10,
@@ -694,37 +701,139 @@ pub enum PixelFormat {
     YCbCr8,
     #[serde(rename = "Coord3D_C16")]
     Coord3dC16,
+    Mono14,
+    Mono10p,
+    Mono12p,
+    Mono10Packed,
+    Mono12Packed,
+    BayerRG10p,
+    BayerGR10p,
+    BayerBG10p,
+    BayerGB10p,
+    BayerRG12p,
+    BayerGR12p,
+    BayerBG12p,
+    BayerGB12p,
+    BayerRG10Packed,
+    BayerGR10Packed,
+    BayerBG10Packed,
+    BayerGB10Packed,
+    BayerRG12Packed,
+    BayerGR12Packed,
+    BayerBG12Packed,
+    BayerGB12Packed,
+    BGRa8,
+    YUV422_8,
+    YUV422_8_UYVY,
+    YCbCr422_8_CbYCrY,
+    YUV411_8_UYYVYY,
+    YUV8_UYV,
+    YCbCr8_CbYCr,
     #[serde(other)]
     Unknown,
 }
 
 impl PixelFormat {
-    /// Bytes per pixel (or fractional for packed/subsampled formats).
+    /// Bytes per pixel, fractional for packed formats: 1.5 for `Mono12p` and
+    /// `Mono12Packed`, 1.25 for `Mono10p`. `Unknown` answers 1.0.
+    ///
+    /// For a payload length use [`viva_pfnc::PixelFormat::image_bytes`] on
+    /// [`PixelFormat::to_pfnc`], which completes a partial packing group.
     pub fn bytes_per_pixel(&self) -> f32 {
-        match self {
-            Self::Mono8 | Self::BayerRG8 | Self::BayerGR8 | Self::BayerBG8 | Self::BayerGB8 => 1.0,
-            Self::Mono10
-            | Self::Mono12
-            | Self::Mono16
-            | Self::BayerRG10
-            | Self::BayerGR10
-            | Self::BayerBG10
-            | Self::BayerGB10
-            | Self::BayerRG12
-            | Self::BayerGR12
-            | Self::BayerBG12
-            | Self::BayerGB12
-            | Self::BayerRG16
-            | Self::BayerGR16
-            | Self::BayerBG16
-            | Self::BayerGB16
-            | Self::Coord3dC16 => 2.0,
-            Self::RGB8 | Self::BGR8 | Self::YCbCr8 => 3.0,
-            Self::RGBa8 => 4.0,
-            Self::YCbCr422_8 => 2.0,
-            Self::Unknown => 1.0,
-        }
+        self.to_pfnc()
+            .and_then(viva_pfnc::PixelFormat::bits_per_pixel)
+            .map_or(1.0, |bits| bits as f32 / 8.0)
     }
+
+    /// The PFNC format this names; `None` for `Unknown`.
+    pub fn to_pfnc(&self) -> Option<viva_pfnc::PixelFormat> {
+        wire_to_pfnc(self)
+    }
+}
+
+impl From<viva_pfnc::PixelFormat> for PixelFormat {
+    /// The wire name of a camera's format, `Unknown` for one the wire has no
+    /// name for.
+    fn from(format: viva_pfnc::PixelFormat) -> Self {
+        pfnc_to_wire(format)
+    }
+}
+
+/// The one table between the wire's names and PFNC's, read in both
+/// directions.
+macro_rules! wire_pfnc_table {
+    ($($wire:ident <=> $pfnc:ident,)*) => {
+        fn wire_to_pfnc(format: &PixelFormat) -> Option<viva_pfnc::PixelFormat> {
+            match format {
+                $(PixelFormat::$wire => Some(viva_pfnc::PixelFormat::$pfnc),)*
+                PixelFormat::Unknown => None,
+            }
+        }
+
+        fn pfnc_to_wire(format: viva_pfnc::PixelFormat) -> PixelFormat {
+            match format {
+                $(viva_pfnc::PixelFormat::$pfnc => PixelFormat::$wire,)*
+                _ => PixelFormat::Unknown,
+            }
+        }
+    };
+}
+
+wire_pfnc_table! {
+    Mono8 <=> Mono8,
+    Mono10 <=> Mono10,
+    Mono12 <=> Mono12,
+    Mono14 <=> Mono14,
+    Mono16 <=> Mono16,
+    Mono10p <=> Mono10p,
+    Mono12p <=> Mono12p,
+    Mono10Packed <=> Mono10Packed,
+    Mono12Packed <=> Mono12Packed,
+    BayerRG8 <=> BayerRG8,
+    BayerGR8 <=> BayerGR8,
+    BayerBG8 <=> BayerBG8,
+    BayerGB8 <=> BayerGB8,
+    BayerRG10 <=> BayerRG10,
+    BayerGR10 <=> BayerGR10,
+    BayerBG10 <=> BayerBG10,
+    BayerGB10 <=> BayerGB10,
+    BayerRG12 <=> BayerRG12,
+    BayerGR12 <=> BayerGR12,
+    BayerBG12 <=> BayerBG12,
+    BayerGB12 <=> BayerGB12,
+    BayerRG16 <=> BayerRG16,
+    BayerGR16 <=> BayerGR16,
+    BayerBG16 <=> BayerBG16,
+    BayerGB16 <=> BayerGB16,
+    BayerRG10p <=> BayerRG10p,
+    BayerGR10p <=> BayerGR10p,
+    BayerBG10p <=> BayerBG10p,
+    BayerGB10p <=> BayerGB10p,
+    BayerRG12p <=> BayerRG12p,
+    BayerGR12p <=> BayerGR12p,
+    BayerBG12p <=> BayerBG12p,
+    BayerGB12p <=> BayerGB12p,
+    BayerRG10Packed <=> BayerRG10Packed,
+    BayerGR10Packed <=> BayerGR10Packed,
+    BayerBG10Packed <=> BayerBG10Packed,
+    BayerGB10Packed <=> BayerGB10Packed,
+    BayerRG12Packed <=> BayerRG12Packed,
+    BayerGR12Packed <=> BayerGR12Packed,
+    BayerBG12Packed <=> BayerBG12Packed,
+    BayerGB12Packed <=> BayerGB12Packed,
+    RGB8 <=> RGB8Packed,
+    BGR8 <=> BGR8Packed,
+    RGBa8 <=> RGBa8,
+    BGRa8 <=> BGRa8,
+    YUV422_8 <=> YUV422_8,
+    YUV422_8_UYVY <=> YUV422_8_UYVY,
+    YCbCr422_8 <=> YCbCr422_8,
+    YCbCr422_8_CbYCrY <=> YCbCr422_8_CbYCrY,
+    YUV411_8_UYYVYY <=> YUV411_8_UYYVYY,
+    YUV8_UYV <=> YUV8_UYV,
+    YCbCr8 <=> YCbCr8,
+    YCbCr8_CbYCr <=> YCbCr8_CbYCr,
+    Coord3dC16 <=> Coord3DC16,
 }
 
 /// Image stream metadata published at acquisition start and on format change.
@@ -1221,5 +1330,199 @@ mod tests {
         assert!(d.ok);
         assert_eq!(d.affected_states.len(), 1);
         assert!(d.affected_states.contains_key("AcquisitionStatus"));
+    }
+
+    /// Every wire variant, by a match with no wildcard: a new variant fails
+    /// to compile here until it is added to the tests below.
+    fn every_wire_format() -> Vec<PixelFormat> {
+        use PixelFormat as W;
+        let all = vec![
+            W::Mono8,
+            W::Mono10,
+            W::Mono12,
+            W::Mono14,
+            W::Mono16,
+            W::Mono10p,
+            W::Mono12p,
+            W::Mono10Packed,
+            W::Mono12Packed,
+            W::BayerRG8,
+            W::BayerGR8,
+            W::BayerBG8,
+            W::BayerGB8,
+            W::BayerRG10,
+            W::BayerGR10,
+            W::BayerBG10,
+            W::BayerGB10,
+            W::BayerRG12,
+            W::BayerGR12,
+            W::BayerBG12,
+            W::BayerGB12,
+            W::BayerRG16,
+            W::BayerGR16,
+            W::BayerBG16,
+            W::BayerGB16,
+            W::BayerRG10p,
+            W::BayerGR10p,
+            W::BayerBG10p,
+            W::BayerGB10p,
+            W::BayerRG12p,
+            W::BayerGR12p,
+            W::BayerBG12p,
+            W::BayerGB12p,
+            W::BayerRG10Packed,
+            W::BayerGR10Packed,
+            W::BayerBG10Packed,
+            W::BayerGB10Packed,
+            W::BayerRG12Packed,
+            W::BayerGR12Packed,
+            W::BayerBG12Packed,
+            W::BayerGB12Packed,
+            W::RGB8,
+            W::BGR8,
+            W::RGBa8,
+            W::BGRa8,
+            W::YUV422_8,
+            W::YUV422_8_UYVY,
+            W::YCbCr422_8,
+            W::YCbCr422_8_CbYCrY,
+            W::YUV411_8_UYYVYY,
+            W::YUV8_UYV,
+            W::YCbCr8,
+            W::YCbCr8_CbYCr,
+            W::Coord3dC16,
+        ];
+        for format in &all {
+            match format {
+                W::Mono8
+                | W::Mono10
+                | W::Mono12
+                | W::Mono14
+                | W::Mono16
+                | W::Mono10p
+                | W::Mono12p
+                | W::Mono10Packed
+                | W::Mono12Packed
+                | W::BayerRG8
+                | W::BayerGR8
+                | W::BayerBG8
+                | W::BayerGB8
+                | W::BayerRG10
+                | W::BayerGR10
+                | W::BayerBG10
+                | W::BayerGB10
+                | W::BayerRG12
+                | W::BayerGR12
+                | W::BayerBG12
+                | W::BayerGB12
+                | W::BayerRG16
+                | W::BayerGR16
+                | W::BayerBG16
+                | W::BayerGB16
+                | W::BayerRG10p
+                | W::BayerGR10p
+                | W::BayerBG10p
+                | W::BayerGB10p
+                | W::BayerRG12p
+                | W::BayerGR12p
+                | W::BayerBG12p
+                | W::BayerGB12p
+                | W::BayerRG10Packed
+                | W::BayerGR10Packed
+                | W::BayerBG10Packed
+                | W::BayerGB10Packed
+                | W::BayerRG12Packed
+                | W::BayerGR12Packed
+                | W::BayerBG12Packed
+                | W::BayerGB12Packed
+                | W::RGB8
+                | W::BGR8
+                | W::RGBa8
+                | W::BGRa8
+                | W::YUV422_8
+                | W::YUV422_8_UYVY
+                | W::YCbCr422_8
+                | W::YCbCr422_8_CbYCrY
+                | W::YUV411_8_UYYVYY
+                | W::YUV8_UYV
+                | W::YCbCr8
+                | W::YCbCr8_CbYCr
+                | W::Coord3dC16
+                | W::Unknown => {}
+            }
+        }
+        all
+    }
+
+    /// The wire names a format by its SFNC/PFNC name, so the PFNC format a
+    /// variant maps to must be the one `viva_pfnc` gives that name.
+    #[test]
+    fn every_wire_format_is_the_pfnc_format_of_its_name() {
+        for format in every_wire_format() {
+            let name = serde_json::to_value(&format).unwrap();
+            let name = name.as_str().unwrap();
+            let named = viva_pfnc::PixelFormat::from_name(name);
+            assert!(
+                !matches!(named, viva_pfnc::PixelFormat::Unknown(_)),
+                "{name} is not a PFNC name"
+            );
+            assert_eq!(format.to_pfnc(), Some(named), "{name}");
+            assert_eq!(PixelFormat::from(named), format, "{name}");
+        }
+        assert_eq!(PixelFormat::Unknown.to_pfnc(), None);
+    }
+
+    /// A camera format the wire cannot name travels as `Unknown`.
+    #[test]
+    fn a_format_the_wire_cannot_name_is_unknown() {
+        for format in [
+            viva_pfnc::PixelFormat::Coord3DABC32f,
+            viva_pfnc::PixelFormat::VendorLucidEvsEvt30,
+            viva_pfnc::PixelFormat::from_code(0x0123_4567),
+        ] {
+            assert_eq!(PixelFormat::from(format), PixelFormat::Unknown);
+        }
+    }
+
+    /// Bits 23-16 of each PFNC code, over eight.
+    #[test]
+    fn bytes_per_pixel_is_fractional_for_packed_formats() {
+        for (format, bytes) in [
+            (PixelFormat::Mono8, 1.0),
+            (PixelFormat::Mono12, 2.0),
+            (PixelFormat::Mono10p, 1.25),
+            (PixelFormat::Mono12p, 1.5),
+            (PixelFormat::Mono12Packed, 1.5),
+            (PixelFormat::BayerGR10Packed, 1.5),
+            (PixelFormat::YUV422_8_UYVY, 2.0),
+            (PixelFormat::YUV411_8_UYYVYY, 1.5),
+            (PixelFormat::RGB8, 3.0),
+            (PixelFormat::BGRa8, 4.0),
+            (PixelFormat::Coord3dC16, 2.0),
+            (PixelFormat::Unknown, 1.0),
+        ] {
+            assert_eq!(format.bytes_per_pixel(), bytes, "{format:?}");
+        }
+    }
+
+    /// The frame header's one-byte codes cover every variant, and the codes
+    /// published before this table grew keep their meaning.
+    #[test]
+    fn every_wire_format_has_its_own_header_code() {
+        let mut seen = std::collections::HashSet::new();
+        for format in every_wire_format() {
+            let code = frame_header::pixel_format_to_u8(&format);
+            assert_ne!(code, 0, "{format:?} has no header code");
+            assert!(seen.insert(code), "{format:?} reuses code {code}");
+            assert_eq!(frame_header::u8_to_pixel_format(code), format);
+        }
+        assert_eq!(
+            frame_header::pixel_format_to_u8(&PixelFormat::Coord3dC16),
+            26
+        );
+        assert_eq!(
+            frame_header::pixel_format_to_u8(&PixelFormat::YCbCr422_8),
+            24
+        );
     }
 }

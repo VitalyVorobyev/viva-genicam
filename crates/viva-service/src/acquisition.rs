@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 use viva_genicam::gige::nic::Iface;
+use viva_genicam::pfnc;
 use viva_genicam::{EvsBlock, EvsFormat, Frame, FrameStream, GenericStreamBlock, StreamBlock};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
@@ -14,7 +15,7 @@ use viva_zenoh_api::{
 use zenoh::Session;
 
 use crate::device::DeviceHandle;
-use crate::pixel_format::{expected_payload_len, pfnc_to_zenoh};
+use crate::pixel_format::expected_payload_len;
 
 /// Run the acquisition control queryable and frame streaming loop.
 pub async fn run(
@@ -354,7 +355,7 @@ impl BlockPublisher {
             self.logged_first_gvsp_frame = true;
         }
 
-        let zenoh_pf = pfnc_to_zenoh(frame.pixel_format);
+        let zenoh_pf = viva_zenoh_api::PixelFormat::from(frame.pixel_format);
         let expected = expected_payload_len(frame.pixel_format, frame.width, frame.height);
 
         if expected.is_none() && !self.logged_unsized_format {
@@ -540,13 +541,12 @@ pub async fn publish_image_meta<D: crate::device::DeviceOps>(
         .await
         .unwrap_or_else(|_| "Mono8".to_string());
 
-    let pixel_format: viva_zenoh_api::PixelFormat =
-        serde_json::from_value(serde_json::Value::String(pf_str))
-            .unwrap_or(viva_zenoh_api::PixelFormat::Mono8);
-
-    let payload_size = (width as u64) * (height as u64) * (pixel_format.bytes_per_pixel() as u64);
-
-    let meta = ImageMeta::new(pixel_format, width, height, payload_size);
+    let payload_size = device
+        .get_feature("PayloadSize")
+        .await
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    let meta = image_meta(width, height, &pf_str, payload_size);
 
     let key = keys::image_meta(device_id);
     if let Ok(payload) = serde_json::to_vec(&meta) {
@@ -558,10 +558,66 @@ pub async fn publish_image_meta<D: crate::device::DeviceOps>(
     }
 }
 
+/// The metadata for a `width × height` stream in the camera's `PixelFormat`
+/// (its enumeration entry name), sized as the camera will send it.
+///
+/// The size is the camera's `PayloadSize` when it has one, since that counts
+/// padding and chunk data; otherwise [`pfnc::PixelFormat::image_bytes`],
+/// exact for packed formats. The name is read by
+/// [`pfnc::PixelFormat::from_name`], which knows the older spellings cameras
+/// use (`YUV422Packed`, `RGB8Packed`); an unknown name is published as
+/// `Unknown`, sized one byte per pixel.
+pub fn image_meta(
+    width: u32,
+    height: u32,
+    pixel_format: &str,
+    payload_size: Option<u64>,
+) -> ImageMeta {
+    let pfnc = pfnc::PixelFormat::from_name(pixel_format);
+    let payload_size = payload_size.filter(|&size| size > 0).unwrap_or_else(|| {
+        pfnc.image_bytes(width, height)
+            .unwrap_or(width as usize * height as usize) as u64
+    });
+    ImageMeta::new(pfnc.into(), width, height, payload_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    /// The `PixelFormat` entry names cameras report (vendor corpus:
+    /// `Mono12Packed` in 28 of 38 documents, `YUV422Packed` and `RGB8Packed`
+    /// in 23), sized from their PFNC code.
+    #[test]
+    fn image_meta_names_and_sizes_the_cameras_format() {
+        use viva_zenoh_api::PixelFormat as W;
+        for (name, format, bytes) in [
+            ("Mono8", W::Mono8, 307_200),
+            ("Mono12", W::Mono12, 614_400),
+            ("Mono12Packed", W::Mono12Packed, 460_800),
+            ("Mono10p", W::Mono10p, 384_000),
+            ("BayerRG12p", W::BayerRG12p, 460_800),
+            ("YUV422Packed", W::YUV422_8_UYVY, 614_400),
+            ("RGB8Packed", W::RGB8, 921_600),
+        ] {
+            let meta = image_meta(640, 480, name, None);
+            assert_eq!(meta.pixel_format, format, "{name}");
+            assert_eq!(meta.payload_size, bytes, "{name}");
+        }
+        // A name nobody knows is not passed off as Mono8.
+        assert_eq!(image_meta(2, 2, "Fancy42", None).pixel_format, W::Unknown);
+    }
+
+    /// The camera's `PayloadSize` is what a frame carries — padding and chunk
+    /// data included — so it wins over the computed size (backlog SVC-05).
+    #[test]
+    fn image_meta_takes_the_cameras_payload_size() {
+        let meta = image_meta(640, 480, "Mono8", Some(307_456));
+        assert_eq!(meta.payload_size, 307_456);
+        // Zero is not a size; fall back to the computed one.
+        assert_eq!(image_meta(640, 480, "Mono8", Some(0)).payload_size, 307_200);
+    }
 
     /// Backlog `SVC-06`. Without `--iface` the receive interface must come
     /// from a route probe, not from looking the *camera's* address up among

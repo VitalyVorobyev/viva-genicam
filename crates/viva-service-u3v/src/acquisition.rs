@@ -6,7 +6,6 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 use viva_service::acquisition::{publish_image_meta, publish_status};
 use viva_service::device::DeviceOps;
-use viva_service::pixel_format::pfnc_to_zenoh;
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{AcquisitionCommand, AcquisitionControlRequest, NodeOpResponse, keys};
 use zenoh::Session;
@@ -145,7 +144,7 @@ async fn handle_start<T: UsbTransfer + Send + 'static>(
                 logged_first = true;
             }
             let header = FrameHeader {
-                pixel_format: pfnc_to_zenoh(frame.pixel_format),
+                pixel_format: frame.pixel_format.into(),
                 width: frame.width,
                 height: frame.height,
                 seq,

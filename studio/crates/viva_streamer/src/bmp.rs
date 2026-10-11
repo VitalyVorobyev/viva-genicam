@@ -4,21 +4,17 @@
 //!
 //! - **8bpp grayscale** (`BmpEncoder::new`): BITMAPFILEHEADER + BITMAPINFOHEADER +
 //!   256-entry grayscale palette + 1-byte-per-pixel data with 4-byte row alignment.
-//!   Used for Mono8 and downscaled Mono10/12/16.
+//!   Used for monochrome formats, normalised to 8 bits.
 //!
 //! - **24bpp RGB** (`BmpEncoder::new_rgb24`): BITMAPFILEHEADER + BITMAPINFOHEADER +
 //!   no palette + 3-bytes-per-pixel BGR data with 4-byte row alignment.
-//!   Used for RGB8, BGR8, RGBa8, and debayered Bayer images.
+//!   Used for every colour format, converted to RGB8.
 //!
 //! Both modes use a *top-down* DIB (negative height in the header) so rows are
 //! written in top-first order without flipping.
 //!
-//! Utility functions for converting other formats to the required pixel buffer:
-//!
-//! - [`mono_u16le_to_gray8_into`]: downscales Mono10/12/16 packed-LE pixels to 8-bit.
-//! - [`debayer_bilinear_into`]: bilinear-interpolated Bayer demosaicing to RGB8.
-//!
-//! [`crate::frame::FrameEncoder`] puts them together for a camera frame.
+//! The pixels come from `viva_pfnc::convert`, which [`crate::frame::FrameEncoder`]
+//! runs on a camera frame first.
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -184,16 +180,6 @@ impl BmpEncoder {
     /// `pixels` must be exactly `width × height × 3` bytes (row-major, R G B order).
     /// The encoder swaps to BGR as required by the BMP format.
     pub fn encode_rgb24(&self, pixels: &[u8]) -> Result<Bytes, BmpError> {
-        self.encode_24(pixels, true)
-    }
-
-    /// Encode a BGR8 pixel buffer as a 24bpp BMP file — BMP's own byte
-    /// order, so the rows are copied as they are.
-    pub fn encode_bgr24(&self, pixels: &[u8]) -> Result<Bytes, BmpError> {
-        self.encode_24(pixels, false)
-    }
-
-    fn encode_24(&self, pixels: &[u8], swap: bool) -> Result<Bytes, BmpError> {
         let expected = (self.width as usize)
             .checked_mul(self.height as usize)
             .ok_or(BmpError::SizeOverflow)?
@@ -216,207 +202,14 @@ impl BmpEncoder {
             for (row, src) in pixels.chunks_exact(row_width_bytes).enumerate() {
                 let dst =
                     &mut image[row * self.row_stride..row * self.row_stride + row_width_bytes];
-                if swap {
-                    let src = src.as_chunks::<3>().0;
-                    for (d, [r, g, b]) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src) {
-                        *d = [*b, *g, *r];
-                    }
-                } else {
-                    dst.copy_from_slice(src);
+                let src = src.as_chunks::<3>().0;
+                for (d, [r, g, b]) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src) {
+                    *d = [*b, *g, *r];
                 }
             }
         }
 
         Ok(Bytes::from(buffer))
-    }
-}
-
-// ── Format conversion utilities ───────────────────────────────────────────────
-
-/// Convert a 2-byte-per-pixel little-endian buffer (Mono10/12/16) to 8-bit gray.
-///
-/// The `src_bits` parameter is the significant bit depth (10, 12, or 16).
-/// Each 16-bit LE sample is right-shifted by `src_bits - 8` to produce a u8.
-///
-/// # Panics
-///
-/// Does not panic; odd-length input is silently truncated (last byte ignored).
-pub fn mono_u16le_to_gray8(pixels: &[u8], src_bits: u8) -> Vec<u8> {
-    let mut out = Vec::new();
-    mono_u16le_to_gray8_into(pixels, src_bits, &mut out);
-    out
-}
-
-/// [`mono_u16le_to_gray8`] into a buffer the caller keeps between frames.
-pub fn mono_u16le_to_gray8_into(pixels: &[u8], src_bits: u8, out: &mut Vec<u8>) {
-    let shift = src_bits.saturating_sub(8);
-    out.clear();
-    out.extend(
-        pixels
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|chunk| (u16::from_le_bytes(*chunk) >> shift) as u8),
-    );
-}
-
-/// Bayer colour filter array pattern.
-///
-/// Names follow the GenICam SFNC convention: the two characters name the
-/// top-left 2×1 pixel pair in the first row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BayerPattern {
-    /// RG / GB — BayerRG in SFNC
-    Rggb,
-    /// GR / BG — BayerGR in SFNC
-    Grbg,
-    /// BG / GR — BayerBG in SFNC
-    Bggr,
-    /// GB / RG — BayerGB in SFNC
-    Gbrg,
-}
-
-/// Bilinear-interpolated Bayer demosaicing.
-///
-/// Returns a packed RGB8 buffer (3 bytes per pixel, R G B, row-major).
-/// Border pixels clamp to the image edge. Input `pixels` must be exactly
-/// `width × height` bytes (1 byte per pixel, raw Bayer mosaic, top row first).
-pub fn debayer_bilinear(pixels: &[u8], width: u32, height: u32, pattern: BayerPattern) -> Vec<u8> {
-    let mut out = Vec::new();
-    debayer_bilinear_into(pixels, width, height, pattern, &mut out);
-    out
-}
-
-/// [`debayer_bilinear`] into a buffer the caller keeps between frames.
-pub fn debayer_bilinear_into(
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    pattern: BayerPattern,
-    out: &mut Vec<u8>,
-) {
-    let w = width as usize;
-    let h = height as usize;
-    out.clear();
-    out.resize(w * h * 3, 0);
-
-    for y in 0..h {
-        for x in 0..w {
-            let xi = x as isize;
-            let yi = y as isize;
-
-            // Clamped pixel accessor.
-            let p = |dx: isize, dy: isize| -> u16 {
-                let cx = (xi + dx).clamp(0, w as isize - 1) as usize;
-                let cy = (yi + dy).clamp(0, h as isize - 1) as usize;
-                pixels[cy * w + cx] as u16
-            };
-
-            let (r, g, b): (u8, u8, u8) = match (pattern, x & 1, y & 1) {
-                // ── RGGB ──────────────────────────────────────────────────
-                (BayerPattern::Rggb, 0, 0) => (
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                ),
-                (BayerPattern::Rggb, 1, 0) => (
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                ),
-                (BayerPattern::Rggb, 0, 1) => (
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                ),
-                (BayerPattern::Rggb, _, _) => (
-                    // (1,1) — B pixel
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    p(0, 0) as u8,
-                ),
-                // ── BGGR ──────────────────────────────────────────────────
-                (BayerPattern::Bggr, 0, 0) => (
-                    // (0,0) — B pixel; R is diagonal
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    p(0, 0) as u8,
-                ),
-                (BayerPattern::Bggr, 1, 0) => (
-                    // (1,0) — G on B-row
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                ),
-                (BayerPattern::Bggr, 0, 1) => (
-                    // (0,1) — G on R-row
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                ),
-                (BayerPattern::Bggr, _, _) => (
-                    // (1,1) — R pixel
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                ),
-                // ── GRBG ──────────────────────────────────────────────────
-                (BayerPattern::Grbg, 0, 0) => (
-                    // (0,0) — G on R-row
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                ),
-                (BayerPattern::Grbg, 1, 0) => (
-                    // (1,0) — R pixel
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                ),
-                (BayerPattern::Grbg, 0, 1) => (
-                    // (0,1) — B pixel
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    p(0, 0) as u8,
-                ),
-                (BayerPattern::Grbg, _, _) => (
-                    // (1,1) — G on B-row
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                ),
-                // ── GBRG ──────────────────────────────────────────────────
-                (BayerPattern::Gbrg, 0, 0) => (
-                    // (0,0) — G on B-row
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                ),
-                (BayerPattern::Gbrg, 1, 0) => (
-                    // (1,0) — B pixel
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    p(0, 0) as u8,
-                ),
-                (BayerPattern::Gbrg, 0, 1) => (
-                    // (0,1) — R pixel
-                    p(0, 0) as u8,
-                    ((p(-1, 0) + p(1, 0) + p(0, -1) + p(0, 1)) / 4) as u8,
-                    ((p(-1, -1) + p(1, -1) + p(-1, 1) + p(1, 1)) / 4) as u8,
-                ),
-                (BayerPattern::Gbrg, _, _) => (
-                    // (1,1) — G on R-row
-                    ((p(-1, 0) + p(1, 0)) / 2) as u8,
-                    p(0, 0) as u8,
-                    ((p(0, -1) + p(0, 1)) / 2) as u8,
-                ),
-            };
-
-            let idx = (y * w + x) * 3;
-            out[idx] = r;
-            out[idx + 1] = g;
-            out[idx + 2] = b;
-        }
     }
 }
 
@@ -521,91 +314,5 @@ mod tests {
         assert_eq!(bytes[offset + 4], 0); // B
         assert_eq!(bytes[offset + 5], 255); // G
         assert_eq!(bytes[offset + 6], 0); // R
-    }
-
-    // ── mono_u16le_to_gray8 ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_mono_u16le_to_gray8_mono16() {
-        // 0xFFFF >> 8 = 0xFF
-        let pixels = [0xFFu8, 0xFF];
-        assert_eq!(mono_u16le_to_gray8(&pixels, 16), vec![0xFF]);
-    }
-
-    #[test]
-    fn test_mono_u16le_to_gray8_mono12() {
-        // 0x0FFF (12-bit max) >> 4 = 0xFF
-        let pixels = [0xFFu8, 0x0F];
-        assert_eq!(mono_u16le_to_gray8(&pixels, 12), vec![0xFF]);
-    }
-
-    #[test]
-    fn test_mono_u16le_to_gray8_mono10() {
-        // 0x03FF (10-bit max) >> 2 = 0xFF
-        let pixels = [0xFFu8, 0x03];
-        assert_eq!(mono_u16le_to_gray8(&pixels, 10), vec![0xFF]);
-    }
-
-    #[test]
-    fn test_mono_u16le_to_gray8_mid_value() {
-        // 0x8000 >> 8 = 0x80
-        let pixels = [0x00u8, 0x80];
-        assert_eq!(mono_u16le_to_gray8(&pixels, 16), vec![0x80]);
-    }
-
-    #[test]
-    fn test_mono_u16le_to_gray8_two_pixels() {
-        let pixels = [0xFF, 0xFF, 0x00, 0x80];
-        assert_eq!(mono_u16le_to_gray8(&pixels, 16), vec![0xFF, 0x80]);
-    }
-
-    // ── debayer_bilinear ────────────────────────────────────────────────────────────
-
-    /// Flat RGGB 2×2 mosaic: top-left R, top-right G, bottom-left G, bottom-right B.
-    /// With a constant-value image (all 200) the output should be all-200 after
-    /// bilinear interpolation.
-    #[test]
-    fn test_debayer_bilinear_rggb_uniform() {
-        let pixels = [200u8; 4];
-        let rgb = debayer_bilinear(&pixels, 2, 2, BayerPattern::Rggb);
-        // All channels should be 200 (or close, due to bilinear clamping at border)
-        assert_eq!(rgb.len(), 12);
-        // All values should be in [195, 205] given that all source pixels are 200
-        for &v in &rgb {
-            assert!((195..=205).contains(&v), "Expected ~200 but got {v}");
-        }
-    }
-
-    #[test]
-    fn test_debayer_bilinear_rggb_2x2_r_at_origin() {
-        // All-zero except R at (0,0) = 200; check that R channel at (0,0) is 200.
-        let pixels = [200u8, 0, 0, 0]; // RGGB: (0,0)=R, (1,0)=G, (0,1)=G, (1,1)=B
-        let rgb = debayer_bilinear(&pixels, 2, 2, BayerPattern::Rggb);
-        // Pixel (0,0): R=200
-        assert_eq!(rgb[0], 200, "R at (0,0)");
-    }
-
-    #[test]
-    fn test_debayer_bilinear_bggr_2x2_b_at_origin() {
-        // All-zero except B at (0,0) for BGGR = 200.
-        let pixels = [200u8, 0, 0, 0]; // BGGR: (0,0)=B, (1,0)=G, (0,1)=G, (1,1)=R
-        let rgb = debayer_bilinear(&pixels, 2, 2, BayerPattern::Bggr);
-        // Pixel (0,0): B channel must be 200.
-        assert_eq!(rgb[2], 200, "B at (0,0) for BGGR");
-        // At the image corner, edge clamping can cause the diagonal R neighbours
-        // to sample the B pixel itself, producing a small R bleed. The bleed
-        // is well below the B value (200).
-        assert!(
-            rgb[0] < 100,
-            "R bleed at corner should be well below B (got {})",
-            rgb[0]
-        );
-    }
-
-    #[test]
-    fn test_debayer_bilinear_output_size() {
-        let pixels = vec![128u8; 6 * 4]; // 6×4
-        let rgb = debayer_bilinear(&pixels, 6, 4, BayerPattern::Rggb);
-        assert_eq!(rgb.len(), 6 * 4 * 3);
     }
 }

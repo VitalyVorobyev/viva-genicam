@@ -44,7 +44,7 @@ arr = frame.to_numpy()
 | BGR8Packed, BayerRG8, BayerGB8, BayerBG8, BayerGR8 | `(H, W, 3)` | `uint8` (auto-demosaiced / reordered) |
 | anything else | `(N,)` raw | `uint8` |
 
-Demosaicing is a simple nearest-neighbour kernel inside the Rust `to_rgb8()` path — fine for preview, not a substitute for an ISP.
+Demosaicing is bilinear interpolation inside the Rust `to_rgb8()` path, the same kernel Viva Studio's viewer uses — fine for preview, not a substitute for an ISP.
 
 ### `to_rgb8()` — always RGB
 
@@ -52,7 +52,11 @@ Demosaicing is a simple nearest-neighbour kernel inside the Rust `to_rgb8()` pat
 rgb = frame.to_rgb8()     # always (H, W, 3) uint8
 ```
 
-Useful when you want one code path regardless of the camera's pixel format.
+Useful when you want one code path regardless of the camera's pixel format. It
+converts monochrome and Bayer at 8 to 16 bits, packed formats such as
+`Mono12p` and `Mono12Packed` included, RGB and BGR with or without alpha, and
+8-bit YUV; samples deeper than 8 bits keep their top eight. Other formats raise
+`UnsupportedPixelFormatError`.
 
 ### Raw bytes
 

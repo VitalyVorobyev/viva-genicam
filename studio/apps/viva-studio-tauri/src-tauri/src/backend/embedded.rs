@@ -25,8 +25,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{info, warn};
 use viva_genicam::Camera;
 use viva_genicam::u3v::discovery::U3vDeviceInfo;
-use viva_streamer::bmp::BayerPattern;
-use viva_streamer::frame::{FrameEncoder, FramePacer, PixelLayout};
+use viva_streamer::frame::{FrameEncoder, FramePacer};
 use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState};
 
 use crate::state::device_state::{DeviceInfo, StreamerInfo};
@@ -725,20 +724,25 @@ async fn run_frame_reader(
         if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
             continue;
         }
-        let Some(layout) = camera_pixel_layout(frame.pixel_format) else {
+        if !FrameEncoder::can_draw(frame.pixel_format) {
             if unsupported != Some(frame.pixel_format) {
                 warn!(pixel_format = ?frame.pixel_format, "Pixel format cannot be drawn; dropping its frames");
                 unsupported = Some(frame.pixel_format);
             }
             continue;
-        };
-        match encoder.encode(layout, frame.width, frame.height, frame.payload.as_ref()) {
+        }
+        match encoder.encode(
+            frame.pixel_format,
+            frame.width,
+            frame.height,
+            frame.payload.as_ref(),
+        ) {
             Ok(bmp) => {
                 // Stored even with no viewer: the next one to connect is sent it.
                 frame_tx.send_replace(bmp);
                 pacer.sent(Instant::now());
             }
-            Err(e) => warn!("BMP encode error: {e}"),
+            Err(e) => warn!("Frame not drawn: {e}"),
         }
     }
     // Wait for the stream to let go of the camera before this task ends: the
@@ -780,31 +784,6 @@ impl StreamInfoTracker {
         self.pixel_format = pixel_format.to_string();
         Some(camera_stream_info(width, height, pixel_format))
     }
-}
-
-/// How a camera's PFNC format is drawn, or `None` if it cannot be.
-fn camera_pixel_layout(format: viva_genicam::pfnc::PixelFormat) -> Option<PixelLayout> {
-    use BayerPattern::{Bggr, Gbrg, Grbg, Rggb};
-    use viva_genicam::pfnc::PixelFormat as P;
-    let bayer = |pattern, bits| PixelLayout::Bayer { pattern, bits };
-    Some(match format {
-        P::Mono8 => PixelLayout::Mono { bits: 8 },
-        P::Mono10 => PixelLayout::Mono { bits: 10 },
-        P::Mono12 => PixelLayout::Mono { bits: 12 },
-        P::Mono14 => PixelLayout::Mono { bits: 14 },
-        P::Mono16 => PixelLayout::Mono { bits: 16 },
-        P::BayerRG8 => bayer(Rggb, 8),
-        P::BayerGR8 => bayer(Grbg, 8),
-        P::BayerBG8 => bayer(Bggr, 8),
-        P::BayerGB8 => bayer(Gbrg, 8),
-        P::BayerRG16 => bayer(Rggb, 16),
-        P::BayerGR16 => bayer(Grbg, 16),
-        P::BayerBG16 => bayer(Bggr, 16),
-        P::BayerGB16 => bayer(Gbrg, 16),
-        P::RGB8Packed => PixelLayout::Rgb8,
-        P::BGR8Packed => PixelLayout::Bgr8,
-        _ => return None,
-    })
 }
 
 // ── Discovery helpers ───────────────────────────────────────────────────────

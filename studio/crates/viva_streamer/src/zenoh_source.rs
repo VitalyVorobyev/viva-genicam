@@ -6,8 +6,8 @@
 //!   `Arc<RwLock<ImageMeta>>` and the stream info the viewer reads.
 //! - **frame subscriber** — receives framed payloads (`16-byte FrameHeader + raw
 //!   pixels`), decodes the inline header, and draws the pixels with
-//!   [`FrameEncoder`] — the same encoder embedded mode uses, which lists the
-//!   formats it can draw ([`PixelLayout::of_wire`]), as often as
+//!   [`FrameEncoder`] — the same encoder embedded mode uses — in the PFNC
+//!   format the wire's names ([`PixelFormat::to_pfnc`]), as often as
 //!   [`FramePacer`] allows.
 
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use viva_zenoh_api::{FrameHeader, ImageMeta, PixelFormat};
 
 use crate::error::StreamerError;
-use crate::frame::{FrameEncoder, FramePacer, PixelLayout};
+use crate::frame::{FrameEncoder, FramePacer};
 
 #[derive(Clone, Debug)]
 pub struct ZenohSourceConfig {
@@ -164,28 +164,13 @@ async fn run_inner(
                     logged_first_raw_frame = true;
                 }
 
-                // Validate pixel data size against the declared format.
-                let bpp = header.pixel_format.bytes_per_pixel();
-                let expected_pixels = match (header.width as usize).checked_mul(header.height as usize) {
-                    Some(n) => n,
-                    None => {
-                        warn!("Dropped frame seq={}: width×height overflows usize", header.seq);
-                        continue;
-                    }
-                };
-                let expected_bytes = (expected_pixels as f32 * bpp) as usize;
-
-                if pixel_data.len() < expected_bytes {
-                    warn!(
-                        "Dropped frame seq={}: pixel data too small (expected {}, got {})",
-                        header.seq, expected_bytes, pixel_data.len()
-                    );
-                    continue;
-                }
-                // Truncate trailing bytes (e.g. GVSP row padding) if payload is oversized.
-                let pixel_data = &pixel_data[..expected_bytes];
-
-                let Some(layout) = PixelLayout::of_wire(&header.pixel_format) else {
+                // The converter checks the payload against the geometry and
+                // ignores trailing bytes (e.g. GVSP padding).
+                let Some(format) = header
+                    .pixel_format
+                    .to_pfnc()
+                    .filter(|format| FrameEncoder::can_draw(*format))
+                else {
                     if unsupported.as_ref() != Some(&header.pixel_format) {
                         warn!(
                             "Pixel format {:?} cannot be drawn; dropping its frames",
@@ -195,10 +180,10 @@ async fn run_inner(
                     }
                     continue;
                 };
-                let frame = match encoder.encode(layout, header.width, header.height, pixel_data) {
+                let frame = match encoder.encode(format, header.width, header.height, pixel_data) {
                     Ok(frame) => frame,
                     Err(err) => {
-                        warn!("BMP encode error for seq={}: {err}", header.seq);
+                        warn!("Dropped frame seq={}: {err}", header.seq);
                         continue;
                     }
                 };

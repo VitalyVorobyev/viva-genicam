@@ -28,6 +28,9 @@ viva-sfnc = { version = "0.8", path = "../viva-sfnc" }
 viva-pfnc = { version = "0.8", path = "../viva-pfnc" }
 viva-gencp = { version = "0.8", path = "../viva-gencp" }
 viva-u3v = { version = "0.8", path = "../viva-u3v", optional = true }
+# `image-io`: frames saved as PNG and TIFF at the camera's bit depth.
+png = { version = "0.18.1", optional = true }
+tiff = { version = "0.11.3", default-features = false, optional = true }
 
 # `cargo fuzz` builds with `--cfg fuzzing`, which compiles the fuzzing entry
 # point in `stream` (CI-09).
@@ -38,6 +41,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 default = []
 u3v = ["viva-u3v"]
 u3v-usb = ["u3v", "viva-u3v/usb"]
+# `image_io`: write frames as 16-bit PNG and TIFF.
+image-io = ["dep:png", "dep:tiff"]
 
 [dev-dependencies]
 viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }

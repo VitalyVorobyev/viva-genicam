@@ -29,8 +29,8 @@ there when you need to reach past it.
 - **`viva-gige`** and **`viva-u3v`** — the two transports.
 - **`viva-gencp`** — the control-protocol message formats both build on.
 
-Around the stack: `viva-pfnc` and `viva-sfnc` name pixel formats and standard
-features; `viva-service` and `viva-service-u3v` serve cameras over
+Around the stack: `viva-pfnc` names pixel formats and converts their pixels,
+`viva-sfnc` names standard features; `viva-service` and `viva-service-u3v` serve cameras over
 [Zenoh](https://zenoh.io) for [Viva Studio](studio.md) and other clients, with
 the messages defined in `viva-zenoh-api`;
 `viva-fake-gige` and `viva-fake-u3v` are cameras that run in your process

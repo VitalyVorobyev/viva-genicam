@@ -113,9 +113,8 @@ Pixel formats, conversion and image files; `viva-pfnc` is the format authority (
 
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
-| PX-01 | No packed formats in `viva-pfnc` | P1 | M | planned | **Milestone P.** `viva_pfnc::PixelFormat` has no `Mono10p`/`Mono12p`, `Mono12Packed`, `Bayer*10p`/`12p`, `Bayer*12Packed` or `YUV422Packed`, though Mono12Packed appears in 28 corpus documents, Bayer\*12Packed in 21, YUV422Packed in 23 and Mono12p in 6. Test against golden vectors from the PFNC tables: Mono12Packed and Mono12p differ in bit order, so a pack/unpack round trip proves nothing |
-| PX-02 | One conversion module, shared by the library and Studio | P1 | L | planned | **Milestone P.** The library's `Frame::to_rgb8` handles Mono8/16, RGB8/BGR8 and Bayer8 (`crates/viva-genicam/src/frame.rs` ~55-67); Studio's encoder (`studio/crates/viva_streamer/src/frame.rs` ~39-63) adds Mono10/12, Bayer10/12/16 and RGBa8. Build one module in the library (unpack to `u16`, demosaic, RGB8) and rebuild Studio's encoder on it; PY-02 uses it too |
-| PX-03 | No 16-bit image save | P2 | M | planned | **Milestone P.** `viva-camctl` writes only 8-bit PGM and PPM (`crates/viva-camctl/src/common.rs` ~189-211). Add 16-bit PNG and TIFF behind a feature, and the formats to `stream --save` |
+| PX-05 | Line or image padding for a width that ends inside a packing group | P2 | S | blocked | **Waiting on hardware.** PFNC 2.4 §6.7 allows either and leaves the choice to the transport standard (GigE Vision, USB3 Vision), whose text we do not have. `viva_pfnc::convert` and `image_bytes` assume image padding; the two agree whenever the width is a multiple of the group (4 pixels for 10p, 2 for 12p, `12Packed` and 4:2:2). Settle with a capture from a camera set to an odd width in a packed format |
+| PX-06 | Formats in the corpus that are not converted | P2 | M | planned | `RGB10Packed`/`RGB12Packed` (8 and 9 corpus documents, codes `0x02300018`/`0x0230001A`, PFNC's unpacked `RGB10`/`RGB12`), `Polarized10p`/`Polarized12p` (2), and Basler's vendor codes `0x810C0001`-`0x810C0004`, which `Basler_piA640_210gm` names `BayerGR12Packed` to `BayerBG12Packed` though their layout is the vendor's to define. `viva_pfnc::convert` reports them `Unsupported` |
 
 ## PY — Python
 
@@ -124,7 +123,7 @@ The `viva-pygenicam` package (`crates/viva-pygenicam`).
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
 | PY-01 | The Python camera and frame classes are `unsendable` | P1 | M | planned | **Milestone Y.** `PyCamera` and `PyFrame` are `#[pyclass(unsendable)]` (`crates/viva-pygenicam/src/camera.rs:70`, `frame.rs:11`), so touching one from a second Python thread panics. The stream side is done: `PyFrameStream` is `Send + Sync` and reads through `next_frame_blocking`. `NodeMap` is not `Sync`, so the camera stays behind the `Mutex` `PyCamera` already holds |
-| PY-02 | `to_numpy` returns flat bytes for 10- to 16-bit formats | P1 | M | planned | **Milestone Y.** `Frame.to_numpy` (`crates/viva-pygenicam/src/frame.rs:84`) returns Mono10/12/14 and Bayer16 as flat `uint8`, and always demosaics Bayer8. Return 2-D `uint16` for 10-, 12- and 16-bit formats with demosaicing opt-in, on PX-02's module |
+| PY-02 | `to_numpy` returns flat bytes for 10- to 16-bit formats | P1 | M | planned | **Milestone Y.** `Frame.to_numpy` (`crates/viva-pygenicam/src/frame.rs:84`) returns Mono10/12/14 and Bayer16 as flat `uint8`, and always demosaics Bayer8. Return 2-D `uint16` for 10-, 12- and 16-bit formats with demosaicing opt-in, on `viva_pfnc::convert` (`unpack_u16`, `full_depth`) |
 | PY-03 | Python lacks most of the Rust facade | P1 | L | planned | **Milestone Y.** Missing: typed get/set, `feature_state`, available enum entries, invalidate, `Frame.chunks`, `Frame.status`/`block_id`, incomplete-frame delivery, events, stream counters, register access, action commands, set-IP, `close` and a context manager, `map_dev_ts`. Most bind work from milestones G to K |
 | PY-04 | Stubs are incomplete and unchecked; `node_info` holds the GIL | P2 | S | planned | **Milestone Y.** `_native.pyi` types `to_numpy` as `Any` (`crates/viva-pygenicam/python/viva_genicam/_native.pyi:32`) and no CI step runs `stubtest`, so the stubs can drift from the module. `node_info` reads the camera without releasing the GIL (`crates/viva-pygenicam/src/camera.rs:326`) |
 
@@ -141,7 +140,6 @@ The `viva-pygenicam` package (`crates/viva-pygenicam`).
 | ID | Task | Priority | Size | Status | Notes |
 |----|------|----------|------|--------|-------|
 | SVC-04 | U3V service is single-device with no lifecycle | P2 | M | planned | **Milestone X.** Takes `devices[0]` once, never re-scans, never publishes disconnect (`crates/viva-service-u3v/src/main.rs`); GigE has a full discovery loop |
-| SVC-05 | `ImageMeta.payload_size` is computed, not read | P2 | S | planned | **Milestone X.** `publish_image_meta` (`crates/viva-service/src/acquisition.rs`) publishes width × height × a whole bytes-per-pixel guess (`PixelFormat::bytes_per_pixel`, 1.0 for anything it does not know), not the camera's `PayloadSize`, which `Camera::open_stream` already reads; wrong for packed formats and chunk data |
 
 ## GT — GenTL producer
 

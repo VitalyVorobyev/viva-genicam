@@ -16,11 +16,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 **Goal**: closing a camera releases it, a camera another application controls can be watched, and losing control is reported. Discovery finds a camera on the wrong subnet and says so.
 **Rows**: TC-28, TC-29, TC-30, TC-31, TC-32, SR-20, SR-08, API-18, TC-25, TC-26.
 
-## P — Pixel formats and image I/O
-
-**Goal**: the packed formats cameras send, one conversion module shared by the library, Python and Studio, and images saved at full bit depth.
-**Rows**: PX-01, PX-02, PX-03.
-
 ## F — Facade: typed and type-gated `Camera`, SFNC helpers, blocking API
 
 **Goal**: common tasks without knowing each vendor's feature names or running an async runtime; GigE-only methods only on GigE cameras.
@@ -44,7 +39,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 ## X — Errors, public surfaces, services
 
 **Goal**: freeze the surface the GenTL producer will wrap: error source chains, per-transport status codes, curated re-exports, one service for both transports.
-**Rows**: API-02, API-03, API-04, API-07, API-10, GA-30, TC-10, TC-16, SVC-04, SVC-05.
+**Rows**: API-02, API-03, API-04, API-07, API-10, GA-30, TC-10, TC-16, SVC-04.
 
 ## T — GenTL producer
 
@@ -70,6 +65,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **SR-24**: whether cameras accept a packet resend request sent from the stream socket rather than the control channel's port; a lossy stream's `-vv` log, or a capture, settles it.
 - **SR-25**: how a camera answers a resend it cannot serve (which status, per packet or per range, or silence), and whether resent packets carry status `0x0100`.
 - **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
+- **PX-05**: line or image padding when a width ends inside a packing group (an odd width in `Mono12p`); needs a capture from such a camera.
 
 ## Studio
 

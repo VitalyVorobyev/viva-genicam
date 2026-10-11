@@ -1051,16 +1051,14 @@ impl crate::Camera<crate::GigeRegisterIo> {
     /// receive engine with the camera's `PayloadSize` and time sync. A camera
     /// without a readable `PayloadSize` still streams: buffers are then sized
     /// from each leader.
-    // The device lock is held across the builder's awaits: `StreamBuilder`
-    // borrows the device, and nothing else may use the control channel while
-    // the stream channel is being configured. The lint resolves at the
-    // enclosing body, so the allow lives here.
     ///
     /// [`StreamOptions::monitor`] instead watches a multicast stream another
     /// application configured, claiming and writing nothing; it is the only
     /// stream a camera opened with [`Access::Monitor`](crate::Access::Monitor)
     /// can open.
-    #[allow(clippy::await_holding_lock)]
+    // The device lock is held for the whole setup, outside the future that
+    // borrows the device: nothing else may use the control channel while the
+    // stream channel is being configured.
     pub fn open_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
         if options.monitor {
             return self.watch_stream(options);
@@ -1075,12 +1073,16 @@ impl crate::Camera<crate::GigeRegisterIo> {
         let payload_size = read_payload_size(self);
         let time_sync = self.time_sync().clone();
         let transport = self.transport();
-        let stream = transport.block_on(async {
-            let mut device = transport.lock_device()?;
+        let mut guard = transport.lock_device()?;
+        let device: &mut GigeDevice = &mut guard;
+        let stream = transport.block_on(async move {
             device
                 .claim_control()
                 .await
                 .map_err(|err| GenicamError::transport(format!("claim control: {err}")))?;
+            // A session that had lost or released control holds it again,
+            // whatever happens to the setup below: the camera says so.
+            transport.note_claimed();
             let iface = match options.iface {
                 Some(iface) => iface,
                 None => {
@@ -1100,7 +1102,7 @@ impl crate::Camera<crate::GigeRegisterIo> {
             // The stream channel is configured through the bootstrap registers,
             // multicast included, and only now that control is held: a device
             // refuses those writes from an application without privilege.
-            let mut builder = StreamBuilder::new(&mut device)
+            let mut builder = StreamBuilder::new(device)
                 .iface(iface)
                 .resend(options.resend);
             builder.packet_size_mode = options.packet_size;
@@ -1115,10 +1117,8 @@ impl crate::Camera<crate::GigeRegisterIo> {
                 builder = builder.destination_port(port);
             }
             builder.build().await
-        })?;
-        // Control was claimed again above, so a session that had lost or
-        // released it holds it once more.
-        transport.note_claimed();
+        })??;
+        drop(guard);
         Ok(FrameStream::start_with(
             stream,
             Some(time_sync),
@@ -1129,51 +1129,57 @@ impl crate::Camera<crate::GigeRegisterIo> {
     /// [`StreamOptions::monitor`]: join the multicast group the camera
     /// already streams to, reading where from its registers. Nothing is
     /// written.
-    #[allow(clippy::await_holding_lock)]
     fn watch_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
         const CHANNEL: u32 = 0;
         let payload_size = read_payload_size(self);
         let time_sync = self.time_sync().clone();
         let transport = self.transport();
-        let (socket, packet_size, group, iface_ip, camera_ip) = transport.block_on(async {
-            let mut device = transport.lock_device()?;
-            let IpAddr::V4(camera_ip) = device.remote_addr().ip() else {
-                return Err(GenicamError::transport("IPv6 cameras are not supported"));
-            };
-            let (group, port) = device.stream_destination(CHANNEL).await.map_err(|err| {
-                GenicamError::transport(format!("read GevSCDA/GevSCPHostPort: {err}"))
-            })?;
-            if !group.is_multicast() || port == 0 {
-                return Err(GenicamError::transport(format!(
-                    "the camera streams to {group}:{port}, not to a multicast group; a monitor \
+        let mut guard = transport.lock_device()?;
+        let device: &mut GigeDevice = &mut guard;
+        let (socket, packet_size, group, iface_ip, camera_ip) =
+            transport.block_on(async move {
+                let IpAddr::V4(camera_ip) = device.remote_addr().ip() else {
+                    return Err(GenicamError::transport("IPv6 cameras are not supported"));
+                };
+                let (group, port) = device.stream_destination(CHANNEL).await.map_err(|err| {
+                    GenicamError::transport(format!("read GevSCDA/GevSCPHostPort: {err}"))
+                })?;
+                if !group.is_multicast() || port == 0 {
+                    return Err(GenicamError::transport(format!(
+                        "the camera streams to {group}:{port}, not to a multicast group; a monitor \
                      can only watch a stream the controlling application sent to one"
-                )));
-            }
-            let packet_size = device
-                .get_stream_packet_size(CHANNEL)
-                .await
-                .map_err(|err| GenicamError::transport(format!("read GevSCPSPacketSize: {err}")))?;
-            let iface = match options.iface {
-                Some(iface) => iface,
-                None => Iface::from_remote_ipv4(camera_ip).map_err(|err| {
-                    GenicamError::transport(format!(
-                        "no local interface routes to {camera_ip}: {err}"
-                    ))
-                })?,
-            };
-            let iface_ip = iface
-                .ipv4()
-                .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
-            let mc = McOptions {
-                rcvbuf_bytes: options.rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
-                ..McOptions::default()
-            };
-            let socket = nic::bind_multicast(&iface, group, port, &mc)
-                .await
-                .map_err(|err| GenicamError::transport(format!("join {group}:{port}: {err}")))?;
-            info!(%group, port, packet_size, "watching the camera's multicast stream");
-            Ok((socket, packet_size, group, iface_ip, camera_ip))
-        })?;
+                    )));
+                }
+                let packet_size = device
+                    .get_stream_packet_size(CHANNEL)
+                    .await
+                    .map_err(|err| {
+                        GenicamError::transport(format!("read GevSCPSPacketSize: {err}"))
+                    })?;
+                let iface = match options.iface {
+                    Some(iface) => iface,
+                    None => Iface::from_remote_ipv4(camera_ip).map_err(|err| {
+                        GenicamError::transport(format!(
+                            "no local interface routes to {camera_ip}: {err}"
+                        ))
+                    })?,
+                };
+                let iface_ip = iface
+                    .ipv4()
+                    .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
+                let mc = McOptions {
+                    rcvbuf_bytes: options.rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
+                    ..McOptions::default()
+                };
+                let socket = nic::bind_multicast(&iface, group, port, &mc)
+                    .await
+                    .map_err(|err| {
+                        GenicamError::transport(format!("join {group}:{port}: {err}"))
+                    })?;
+                info!(%group, port, packet_size, "watching the camera's multicast stream");
+                Ok((socket, packet_size, group, iface_ip, camera_ip))
+            })??;
+        drop(guard);
         let socket = socket
             .into_std()
             .map_err(|err| GenicamError::transport(format!("socket conversion failed: {err}")))?;

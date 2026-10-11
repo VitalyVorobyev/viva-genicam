@@ -42,6 +42,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     let mut meta_builder = NodeMetaBuilder::default();
 
     let mut pvalue = None;
+    let mut value = None;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -52,6 +53,12 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
                     if !target.is_empty() {
                         pvalue = Some(target.to_string());
                     }
+                }
+                // The enumeration's own `<Value>`; an entry's is read with
+                // the entry.
+                TAG_VALUE => {
+                    let text = read_text_start(reader, e)?;
+                    value = Some(parse_i64(&text)?);
                 }
                 "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT | "Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
@@ -120,6 +127,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
         default,
         selected,
         pvalue,
+        value,
         predicates,
     })
 }
@@ -144,6 +152,7 @@ pub fn parse_boolean(
     let mut pvalue = None;
     let mut on_value = None;
     let mut off_value = None;
+    let mut value = None;
     let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -168,6 +177,10 @@ pub fn parse_boolean(
                 "OffValue" => {
                     let text = read_text_start(reader, e)?;
                     off_value = Some(parse_i64(&text)?);
+                }
+                TAG_VALUE => {
+                    let text = read_text_start(reader, e)?;
+                    value = Some(parse_i64(&text)?);
                 }
                 // Shared handling so `<Address>`, `<pAddress>` and
                 // `<pIndex>` all contribute their term.
@@ -338,6 +351,7 @@ pub fn parse_boolean(
         pvalue,
         on_value,
         off_value,
+        value,
         predicates,
     })
 }

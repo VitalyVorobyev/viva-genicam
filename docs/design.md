@@ -76,18 +76,22 @@ abstraction, deliberately *synchronous*
 (see [ADR-0014](adrs/adr0014-sync-registerio-async-adapters.md)).
 Implementations:
 
-- `GigeRegisterIo` — async-to-sync adapter over `GigeDevice` using
-  `block_in_place` + `block_on`; safe to call from both async and sync
-  contexts. Also **owns the control session**: constructing one for a device
+- `GigeRegisterIo` — async-to-sync adapter over `GigeDevice`, callable from
+  any context: a plain thread, a multi-thread runtime (`block_in_place`) or a
+  current-thread one (a scoped thread). A camera opened from a current-thread
+  runtime, or through `viva_genicam::blocking`, carries a one-worker runtime
+  of its own that the adapter shuts down on drop
+  ([ADR-0027](adrs/adr0027-blocking-api-and-transport-runtimes.md)). Also
+  **owns the control session**: constructing one for a device
   that claimed control spawns a task that reads `GevHeartbeatTimeout` and
   refreshes the device's timer at a quarter of it, and dropping one cancels
   and drains its I/O before runtime shutdown, then releases control (CCP ← 0)
-  within 500 ms. The runtime must outlive the transport. Holding the
+  within 500 ms. A runtime the caller lent must outlive the transport. Holding the
   transport is therefore sufficient to hold control privilege — nothing above
   this layer runs a heartbeat. Its `control_state` (`Held`, `Monitor`, `Lost`,
   `Released`, watchable) reports privilege lost to an expired heartbeat, or to
   another application on a camera that names its controller;
-  `reclaim_control` takes it back. A *monitor*
+  `reclaim_control` takes it back. Only a session in `Held` writes. A *monitor*
   (`GigeRegisterIo::monitor`, `Access::Monitor`) claims nothing, sends no
   heartbeat and refuses writes before they reach the wire. While a register operation holds the device
   mutex, the GVCP receive loop itself sends CCP probes and drains their ACKs
@@ -95,6 +99,19 @@ Implementations:
   in-flight waits ([ADR-0023](adrs/adr0023-inflight-gvcp-heartbeats.md)).
 - `MockIo` — in-memory register map for tests.
 - `NullIo` — no-op backend for offline XML browsing (studio, wasm).
+
+**`Camera<T>`** (`viva-genicam`) — a `NodeMap` and a `RegisterIo`. Features
+are read and written by type (`get_integer`, `set_float`, ...) or as text
+(`get`/`set`, for a command line); a category has no value and a command is
+executed, never set. The standard-feature helpers (`set_exposure_time`,
+`set_gain`, `enable_trigger`, `set_roi`, `set_binning`, `set_frame_rate`,
+`load_user_set`, ...) resolve each feature through a table of the names
+cameras declare it under (`StandardFeature`, names in `viva-sfnc`), in the
+vendor corpus's order of prevalence, and report which they used.
+`acquisition_start`/`stop` set and clear `TLParamsLocked`. What only GigE
+Vision has — events, multicast, streams, control privilege — is in
+`impl Camera<GigeRegisterIo>`, so it does not compile against a USB3 Vision
+camera.
 
 **`NodeMap`** (`viva-genapi`) — parsed from GenICam XML, stores nodes by name,
 tracks the dependency graph for cache invalidation. Supports `pValue`

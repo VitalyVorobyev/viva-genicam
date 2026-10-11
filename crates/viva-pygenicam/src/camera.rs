@@ -185,36 +185,44 @@ impl PyCamera {
         })
     }
 
-    fn set_exposure_time_us(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+    /// Write the exposure time through whichever feature the camera has for it —
+    /// microseconds for `ExposureTime`/`ExposureTimeAbs`, device units for `ExposureTimeRaw` — and return that feature's name.
+    fn set_exposure_time(&self, py: Python<'_>, value: f64) -> PyResult<String> {
         py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
-                g.set_exposure_time_us(value).into_py_err()
+                g.set_exposure_time(value)
+                    .map(|f| f.name.to_string())
+                    .into_py_err()
             }
             CameraInner::U3v { camera, .. } => {
                 let mut g = camera
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
-                g.set_exposure_time_us(value).into_py_err()
+                g.set_exposure_time(value)
+                    .map(|f| f.name.to_string())
+                    .into_py_err()
             }
         })
     }
 
-    fn set_gain_db(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+    /// Write the gain through whichever feature the camera has for it —
+    /// dB for `Gain`, device units for `GainRaw` — and return that feature's name.
+    fn set_gain(&self, py: Python<'_>, value: f64) -> PyResult<String> {
         py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
-                g.set_gain_db(value).into_py_err()
+                g.set_gain(value).map(|f| f.name.to_string()).into_py_err()
             }
             CameraInner::U3v { camera, .. } => {
                 let mut g = camera
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
-                g.set_gain_db(value).into_py_err()
+                g.set_gain(value).map(|f| f.name.to_string()).into_py_err()
             }
         })
     }
@@ -238,7 +246,7 @@ impl PyCamera {
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
                 if wait {
-                    match runtime().block_on(g.execute_and_wait(name, timeout)) {
+                    match g.execute_and_wait_blocking(name, timeout) {
                         Ok(()) => Ok(true),
                         Err(GenicamError::CommandNotDone { .. }) => Ok(false),
                         Err(err) => Err(err).into_py_err(),
@@ -252,7 +260,7 @@ impl PyCamera {
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
                 if wait {
-                    match runtime().block_on(g.execute_and_wait(name, timeout)) {
+                    match g.execute_and_wait_blocking(name, timeout) {
                         Ok(()) => Ok(true),
                         Err(GenicamError::CommandNotDone { .. }) => Ok(false),
                         Err(err) => Err(err).into_py_err(),

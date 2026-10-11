@@ -45,8 +45,8 @@ def test_camera_has_expected_methods():
     for attr in (
         "get",
         "set",
-        "set_exposure_time_us",
-        "set_gain_db",
+        "set_exposure_time",
+        "set_gain",
         "nodes",
         "node_info",
         "all_node_info",

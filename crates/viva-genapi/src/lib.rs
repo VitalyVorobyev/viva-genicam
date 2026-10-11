@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn register_reads_and_writes_raw_bytes() {
-        let nodemap = build_register_nodemap();
+        let mut nodemap = build_register_nodemap();
         let payload = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
         let io = MockIo::with_registers(&[(0x2000, payload.clone())]);
 
@@ -370,7 +370,7 @@ mod tests {
     /// the rest of the block — data loss dressed as a convenience.
     #[test]
     fn register_write_of_the_wrong_length_is_refused() {
-        let nodemap = build_register_nodemap();
+        let mut nodemap = build_register_nodemap();
         let io = MockIo::with_registers(&[(0x2000, vec![0u8; 8])]);
 
         let err = nodemap
@@ -1996,14 +1996,13 @@ mod tests {
         }
     }
 
+    /// API-09: entries come in the order the XML declares them, which is the
+    /// order a GUI shows; `GainSelector` declares All, Red, Blue.
     #[test]
-    fn enum_entries_are_sorted() {
-        let nodemap = build_enum_pvalue_nodemap();
-        let entries = nodemap.enum_entries("Mode").expect("entries");
-        assert_eq!(
-            entries,
-            vec!["DynFromReg".to_string(), "Fixed10".to_string()]
-        );
+    fn enum_entries_keep_the_xml_order() {
+        let nodemap = build_nodemap();
+        let entries = nodemap.enum_entries("GainSelector").expect("entries");
+        assert_eq!(entries, ["All", "Red", "Blue"]);
     }
 
     #[test]
@@ -3079,5 +3078,147 @@ mod tests {
             nodemap.invalidated_by("GainDb"),
             ["Gain", "GainDbTimesTwo", "GainRaw"]
         );
+    }
+
+    /// API-09 fixtures: declared units and bounds, a converter read as an
+    /// integer, entries filtered by a predicate, and a floating `<Boolean>`.
+    const ACCESSOR_FIXTURE: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Width">
+                <Address>0x10</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Min>16</Min><Max>4096</Max><Inc>4</Inc><Unit>px</Unit>
+            </Integer>
+            <Float Name="ExposureTime">
+                <Address>0x20</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Min>10.0</Min><Max>1000000.0</Max><Unit>us</Unit>
+            </Float>
+            <Converter Name="FrameRate">
+                <FormulaTo>FROM * 10</FormulaTo>
+                <FormulaFrom>TO / 10</FormulaFrom>
+                <pValue>FrameRateRaw</pValue>
+                <Unit>Hz</Unit>
+                <Slope>Increasing</Slope>
+            </Converter>
+            <IntReg Name="FrameRateRaw">
+                <Address>0x30</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="AlphaAvailable"><Value>1</Value></Integer>
+            <Enumeration Name="Mode">
+                <EnumEntry Name="Zeta"><Value>0</Value></EnumEntry>
+                <EnumEntry Name="Alpha"><pIsAvailable>AlphaAvailable</pIsAvailable><Value>1</Value></EnumEntry>
+                <EnumEntry Name="Mid"><Value>2</Value></EnumEntry>
+                <pValue>ModeReg</pValue>
+            </Enumeration>
+            <IntReg Name="ModeReg">
+                <Address>0x40</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Boolean Name="TLParamsLocked" NameSpace="Standard">
+                <Value>0</Value>
+                <OnValue>1</OnValue>
+                <OffValue>0</OffValue>
+            </Boolean>
+        </RegisterDescription>
+    "#;
+
+    fn accessor_nodemap() -> NodeMap {
+        let model = viva_genapi_xml::parse(ACCESSOR_FIXTURE).expect("parse fixture");
+        NodeMap::try_from_xml(model).expect("build nodemap")
+    }
+
+    /// API-09: the unit and bounds a node declares, typed as the node is.
+    #[test]
+    fn a_node_reports_its_declared_unit_and_bounds() {
+        use crate::Value;
+        let nodemap = accessor_nodemap();
+        let width = nodemap.node("Width").expect("Width");
+        assert_eq!(width.unit(), Some("px"));
+        assert_eq!(width.min(), Some(Value::Int(16)));
+        assert_eq!(width.max(), Some(Value::Int(4096)));
+        assert_eq!(width.inc(), Some(Value::Int(4)));
+
+        let exposure = nodemap.node("ExposureTime").expect("ExposureTime");
+        assert_eq!(exposure.unit(), Some("us"));
+        assert_eq!(exposure.min(), Some(Value::Float(10.0)));
+        assert_eq!(exposure.max(), Some(Value::Float(1_000_000.0)));
+        assert_eq!(exposure.inc(), None);
+
+        let rate = nodemap.node("FrameRate").expect("FrameRate");
+        assert_eq!(rate.unit(), Some("Hz"));
+        assert_eq!(rate.min(), None, "a converter's bounds are its pValue's");
+        assert_eq!(nodemap.node("Mode").expect("Mode").unit(), None);
+    }
+
+    /// API-09: a `<Converter>` reads as an integer too, rounded to the
+    /// nearest, as `get_float` reads an `<IntConverter>`.
+    #[test]
+    fn get_integer_reads_a_converter() {
+        let nodemap = accessor_nodemap();
+        let io = MockIo::with_registers(&[(0x30, 123u32.to_be_bytes().to_vec())]);
+        assert_eq!(nodemap.get_float("FrameRate", &io).expect("float"), 12.3);
+        assert_eq!(nodemap.get_integer("FrameRate", &io).expect("integer"), 12);
+    }
+
+    /// API-09: the entries a predicate leaves keep the XML order too.
+    #[test]
+    fn available_enum_entries_keep_the_xml_order() {
+        let nodemap = accessor_nodemap();
+        let io = MockIo::default();
+        let entries = nodemap
+            .available_enum_entries("Mode", &io)
+            .expect("entries");
+        assert_eq!(entries, ["Zeta", "Alpha", "Mid"]);
+    }
+
+    /// A `<Boolean>` with a `<Value>` and no register is a variable the host
+    /// sets — AVT and Prosilica declare `TLParamsLocked` so (6 corpus
+    /// documents). It reads its start value and holds what was written,
+    /// without touching the device.
+    #[test]
+    fn a_boolean_with_a_value_holds_it_without_a_register() {
+        let mut nodemap = accessor_nodemap();
+        let io = MockIo::default();
+        assert!(!nodemap.get_bool("TLParamsLocked", &io).expect("read"));
+        nodemap
+            .set_bool("TLParamsLocked", true, &io)
+            .expect("write");
+        assert!(nodemap.get_bool("TLParamsLocked", &io).expect("read back"));
+        assert!(io.regs.borrow().is_empty(), "nothing reached the device");
+        assert!(io.reads.borrow().is_empty(), "nothing was read");
+    }
+
+    /// A floating `<Enumeration>`: a `<Value>` and no register, a selector
+    /// the host keeps — AVT's, FLIR's and Prosilica's `GainSelector`, Baumer's
+    /// `TriggerSelector` (33 corpus documents declare at least one). It
+    /// reads its start entry, holds the entry written, and gives formulas
+    /// that entry's value, without touching the device.
+    #[test]
+    fn an_enumeration_with_a_value_holds_it_without_a_register() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Enumeration Name="GainSelector">
+                    <EnumEntry Name="All"><Value>0</Value></EnumEntry>
+                    <EnumEntry Name="Red"><Value>1</Value></EnumEntry>
+                    <Value>0</Value>
+                </Enumeration>
+                <IntSwissKnife Name="GainOffset">
+                    <pVariable Name="S">GainSelector</pVariable>
+                    <Formula>S * 4</Formula>
+                </IntSwissKnife>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let mut nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let io = MockIo::default();
+        assert_eq!(nodemap.get_enum("GainSelector", &io).expect("read"), "All");
+        nodemap.set_enum("GainSelector", "Red", &io).expect("write");
+        assert_eq!(
+            nodemap.get_enum("GainSelector", &io).expect("read back"),
+            "Red"
+        );
+        assert_eq!(nodemap.get_integer("GainOffset", &io).expect("formula"), 4);
+        assert!(io.regs.borrow().is_empty(), "nothing reached the device");
+        assert!(io.reads.borrow().is_empty(), "nothing was read");
     }
 }

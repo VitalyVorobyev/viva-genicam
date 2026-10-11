@@ -3,7 +3,7 @@
 Demonstrates:
   - `camera.get(name)` -- read any feature as a string
   - `camera.set(name, value)` -- set from a string (parsed per node type)
-  - typed helpers `set_exposure_time_us` / `set_gain_db`
+  - typed helpers `set_exposure_time` / `set_gain`
   - `camera.node_info(name)` -- introspection
   - `camera.enum_entries(name)` -- allowed values for enum features
 
@@ -51,12 +51,12 @@ def main() -> None:
 
     if args.exposure is not None:
         print(f"\nSetting ExposureTime = {args.exposure} µs ...")
-        cam.set_exposure_time_us(args.exposure)
+        cam.set_exposure_time(args.exposure)
         print(f"  readback: {cam.get('ExposureTime')}")
 
     if args.gain is not None:
         print(f"\nSetting Gain = {args.gain} dB ...")
-        cam.set_gain_db(args.gain)
+        cam.set_gain(args.gain)
         print(f"  readback: {cam.get('Gain')}")
 
 

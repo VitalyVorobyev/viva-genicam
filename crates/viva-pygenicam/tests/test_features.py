@@ -31,7 +31,7 @@ def test_read_exposure_is_float(camera):
 
 
 def test_set_exposure_via_typed_helper(camera):
-    camera.set_exposure_time_us(7500.0)
+    camera.set_exposure_time(7500.0)
     v = float(camera.get("ExposureTime"))
     assert abs(v - 7500.0) < 1.0
 
@@ -76,7 +76,7 @@ def test_effective_access_reflects_the_device_lock(camera):
 
     # And the write itself is refused locally, naming the lock.
     with pytest.raises(Exception) as excinfo:
-        camera.set_exposure_time_us(10_000.0)
+        camera.set_exposure_time(10_000.0)
     assert "ExposureTime" in str(excinfo.value)
 
     camera.set("ExposureAuto", "Off")

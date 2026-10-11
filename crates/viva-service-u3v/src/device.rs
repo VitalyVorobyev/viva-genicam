@@ -3,7 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use viva_genicam::{Camera, GenicamError, U3vFrameStream, U3vRegisterIo, U3vStreamBuilder};
-use viva_service::device::{DeviceOps, camera_feature_state, camera_invalidated_by};
+use viva_service::device::{
+    DeviceOps, camera_acquisition, camera_execute, camera_feature_state, camera_invalidated_by,
+};
 use viva_u3v::usb::UsbTransfer;
 use viva_zenoh_api::FeatureState;
 
@@ -95,7 +97,15 @@ impl<T: UsbTransfer + 'static> DeviceOps for U3vDeviceHandle<T> {
     }
 
     async fn exec_command(&self, name: &str) -> Result<(), GenicamError> {
-        self.set_feature(name, "1").await
+        camera_execute(&self.camera, name).await
+    }
+
+    async fn acquisition_start(&self) -> Result<(), GenicamError> {
+        camera_acquisition(&self.camera, true).await
+    }
+
+    async fn acquisition_stop(&self) -> Result<(), GenicamError> {
+        camera_acquisition(&self.camera, false).await
     }
 
     /// The same typed NodeMap snapshot GigE serves: real kind, access mode,

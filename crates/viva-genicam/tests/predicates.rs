@@ -216,7 +216,7 @@ async fn writing_a_locked_exposure_time_is_refused_before_the_wire() {
         let cam = camera.clone();
         tokio::task::spawn_blocking(move || {
             let mut cam = cam.lock().unwrap();
-            cam.set_exposure_time_us(10_000.0)
+            cam.set_exposure_time(10_000.0).map(drop)
         })
         .await
         .unwrap()
@@ -229,7 +229,7 @@ async fn writing_a_locked_exposure_time_is_refused_before_the_wire() {
         let cam = camera.clone();
         tokio::task::spawn_blocking(move || {
             let mut cam = cam.lock().unwrap();
-            cam.set_exposure_time_us(10_000.0)
+            cam.set_exposure_time(10_000.0).map(drop)
         })
         .await
         .unwrap()

@@ -12,6 +12,24 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **`Camera::get` on a category and `Camera::set` on a command are errors.**
+  `set` used to execute a command and discard the value; run one with
+  `execute_command` or `execute_and_wait`. Python's `set` raises too. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- **GigE-only methods compile only for a GigE camera**: `configure_events`,
+  `configure_stream_multicast` and `open_event_stream` are on
+  `Camera<GigeRegisterIo>`. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- **`Camera::set_exposure_time_us` and `set_gain_db` are now `set_exposure_time`
+  and `set_gain`** (Python too), because they fall back to `ExposureTimeAbs`,
+  `ExposureTimeRaw` and `GainRaw`, whose units are the feature's own. They
+  return the feature they wrote. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- **`Camera::acquisition_start` sets `TLParamsLocked`** and `acquisition_stop`
+  clears it, so features a camera locks with it — `Width`, `PixelFormat` —
+  refuse writes while acquiring. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- **Enumeration entries come in the XML's order**, not sorted:
+  `NodeMap::enum_entries`, `available_enum_entries`, `FeatureState` and Studio's
+  lists. `NodeMap::set_string` and `set_register` take `&mut self`; the XML
+  model's `Boolean` and `Enum` declarations gain `value`. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+
 - **Dropping a GigE camera releases its control privilege**, waiting at most
   500 ms for the camera to acknowledge, so a reopen no longer waits out the
   heartbeat timeout. `GigeRegisterIo::new` expects a device that holds control
@@ -23,8 +41,8 @@ release opens with what to read before upgrading.
   read-only. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 - **Discovery no longer asks cameras to broadcast their answers.** The
   allow-broadcast-acknowledge flag is opt-in (`DiscoveryOptions`,
-  `viva-camctl list --allow-broadcast-ack`); discovery now also sends to
-  `255.255.255.255`. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+  `viva-camctl list --allow-broadcast-ack`; the diagnostic report always sets
+  it); discovery now also sends to `255.255.255.255`. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 - **`viva_pfnc::convert` takes a row stride**: `unpack_u16`, `to_rgb8`,
   `full_depth` and `Converter::gray8`/`rgb8` gain `row_stride: Option<usize>`;
   `Frame` gains `padding_x` and `row_stride()`. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
@@ -99,6 +117,19 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- `Camera` reads and writes features by type — `get_integer`/`set_integer`,
+  `get_float`, `get_bool`, `get_enum`, `get_string`, `get_register` and their
+  setters — as `NodeMap` does. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- Helpers for the standard features that accept the names older cameras use:
+  exposure and gain (`GainSelector` too), acquisition mode, triggers and the
+  software trigger, region of interest, binning, frame rate, user sets.
+  `Camera::resolve(StandardFeature)` says which feature a camera has; one it
+  lacks is `GenicamError::MissingFeature`, naming every name tried. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- `viva_genicam::blocking` discovers and opens GigE cameras in a program with
+  no async runtime, and `Camera::execute_and_wait_blocking` waits for a
+  command; the camera carries a small runtime of its own. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- `Node::unit`, `min`, `max` and `inc`, and `NodeMap::invalidate_all`. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+
 - Read-only monitors: `connect_gige_as` with `Access::Monitor` claims and
   writes nothing, so it opens a camera another application controls; a write
   is refused with an error naming why. `StreamOptions::monitor()` watches that
@@ -107,7 +138,7 @@ release opens with what to read before upgrading.
 - `GigeRegisterIo::control_state` and `watch_control` report losing control
   privilege — CCP read back without our bits, or, on a camera that names its
   controller, another application holding it — and `reclaim_control` /
-  `release_control` act on it. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+  `release_control` act on it. Only a session that holds control writes. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 - `gige::discover_ip` and `viva-camctl list --ip` ask one camera directly.
   Discovery reads each camera's subnet and gateway; `viva-camctl list` and the
   report flag a camera configured for a subnet the host is not on. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
@@ -200,6 +231,16 @@ release opens with what to read before upgrading.
   ([#192](https://github.com/VitalyVorobyev/viva-genicam/pull/192))
 
 ### Fixed
+
+- A GigE camera opened from a current-thread Tokio runtime panicked on its
+  first register access; it now gets a runtime of its own. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- A `<Boolean>` or `<Enumeration>` with a `<Value>` and no register — AVT's
+  `TLParamsLocked`, the `GainSelector` of AVT, FLIR and Prosilica cameras —
+  could be neither read nor written. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- `NodeMap::get_integer` reads a `<Converter>`, rounded. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
+- Viva Studio's command button and `viva-service`'s execute wait for the
+  camera to report the command finished, so a `UserSetSave` is done when it
+  returns. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
 
 - `Camera::configure_stream_multicast` set the don't-fragment bit
   (`viva_sfnc::MULTICAST_ENABLE` named `GevSCPSDoNotFragment`; SFNC has no

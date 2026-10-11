@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub use gvsp::{PacketScript, ScriptStep};
+pub use registers::XmlProfile;
 pub use resend::ResendStats;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -76,6 +77,7 @@ pub struct FakeCameraBuilder {
     tick_frequency: Option<u64>,
     pending_ack: bool,
     delayed_acks: HashMap<u64, Duration>,
+    profile: registers::XmlProfile,
 }
 
 /// PFNC pixel format codes.
@@ -108,6 +110,7 @@ impl Default for FakeCameraBuilder {
             tick_frequency: None,
             pending_ack: true,
             delayed_acks: HashMap::new(),
+            profile: registers::XmlProfile::default(),
         }
     }
 }
@@ -361,10 +364,21 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Serve this GenApi XML profile (default [`XmlProfile::Sfnc`]).
+    pub fn profile(mut self, profile: registers::XmlProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
     /// Start the fake camera and return a handle.
     pub async fn build(self) -> Result<FakeCamera, std::io::Error> {
-        let mut register_map =
-            registers::RegisterMap::new(self.width, self.height, self.pixel_format, self.zip_xml);
+        let mut register_map = registers::RegisterMap::new(
+            self.width,
+            self.height,
+            self.pixel_format,
+            self.zip_xml,
+            self.profile,
+        );
         if let Some(timeout_ms) = self.heartbeat_timeout_ms {
             register_map.set_heartbeat_timeout_ms(timeout_ms);
         }
@@ -574,6 +588,11 @@ impl FakeCamera {
     /// write actually stored without trusting the client's own read-back.
     pub async fn peek(&self, addr: u64, len: usize) -> Vec<u8> {
         self.regs.lock().await.read(addr, len)
+    }
+
+    /// How many times `TriggerSoftware` was executed, counted by the device.
+    pub async fn software_triggers(&self) -> u64 {
+        self.regs.lock().await.software_triggers()
     }
 
     /// The exposure saved in user set `set` by `UserSetSave`, or `None` if

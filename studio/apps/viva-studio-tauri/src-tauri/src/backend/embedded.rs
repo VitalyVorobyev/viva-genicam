@@ -401,7 +401,7 @@ impl DeviceBackend for EmbeddedBackend {
 
     async fn exec_command(&self, name: &str) -> Result<Vec<String>, String> {
         let name = name.to_string();
-        self.with_camera(move |connected| connected.camera.set(&name, ""))
+        self.with_camera(move |connected| connected.camera.execute(&name))
             .await
     }
 

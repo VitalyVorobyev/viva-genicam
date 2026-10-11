@@ -25,7 +25,7 @@ of the record.
 | [0011](adr0011-pure-rust-genicam-stack.md) | Pure-Rust GenICam Stack | Accepted |
 | [0012](adr0012-layered-crate-architecture.md) | Layered Crate Architecture with a Single Workspace Version | Accepted |
 | [0013](adr0013-fake-camera-first-testing.md) | Fake-Camera-First Testing and the Realism Policy | Accepted |
-| [0014](adr0014-sync-registerio-async-adapters.md) | Synchronous RegisterIo with Async Adapters | Accepted |
+| [0014](adr0014-sync-registerio-async-adapters.md) | Synchronous RegisterIo with Async Adapters | Accepted; adapter runtime amended by 0027 |
 | [0015](adr0015-vendored-libusb-lgpl-notices.md) | Vendored libusb in PyPI Wheels with LGPL Notices | Accepted |
 | [0016](adr0016-cargo-deny-single-gate.md) | cargo-deny as the Single Supply-Chain Gate | Accepted |
 | [0017](adr0017-studio-monorepo-two-workspaces.md) | Studio Monorepo with Two Cargo Workspaces | Accepted; CI trigger amended by 0024 |
@@ -38,6 +38,7 @@ of the record.
 | [0024](adr0024-studio-reference-viewer.md) | Viva Studio is the library's reference viewer | Accepted |
 | [0025](adr0025-gvsp-receive-engine.md) | One GVSP receive engine | Accepted |
 | [0026](adr0026-genapi-ports-chunks-events.md) | Chunk and event data through GenApi ports | Accepted |
+| [0027](adr0027-blocking-api-and-transport-runtimes.md) | The blocking API, and a GigE transport that can own its runtime | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

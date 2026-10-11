@@ -1357,14 +1357,24 @@ impl GigeDevice {
     /// For a caller that cannot block — a `Drop` on a current-thread runtime's
     /// own thread. Best effort: a lost datagram leaves the device to time the
     /// privilege out. Prefer [`Self::release_control`].
+    ///
+    /// Sent as WRITEMEM once the session uses memory access
+    /// ([`Self::memory_access_only`]), as every other register write is: a
+    /// device that refuses WRITEREG would refuse the release too. Both
+    /// commands carry the same eight bytes, the address and then the value.
     pub fn try_send_release(&mut self) -> std::io::Result<()> {
         let request_id = self.next_request_id();
         let mut payload = BytesMut::with_capacity(8);
         payload.put_u32(consts::CONTROL_CHANNEL_PRIVILEGE as u32);
         payload.put_u32(0);
+        let opcode = if self.memory_access_only {
+            OpCode::WriteMem
+        } else {
+            OpCode::WriteRegister
+        };
         let header = GvcpRequestHeader {
             flags: CommandFlags::ACK_REQUIRED,
-            command: OpCode::WriteRegister.command_code(),
+            command: opcode.command_code(),
             length: payload.len() as u16,
             request_id,
         };

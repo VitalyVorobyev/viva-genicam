@@ -77,6 +77,7 @@ pub use viva_sfnc as sfnc;
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub use viva_u3v as u3v;
 
+pub mod blocking;
 pub mod chunks;
 pub mod events;
 pub mod evs;
@@ -85,6 +86,7 @@ pub mod frame;
 #[cfg_attr(docsrs, doc(cfg(feature = "image-io")))]
 pub mod image_io;
 pub mod report;
+mod standard;
 pub mod stream;
 pub mod time;
 
@@ -108,6 +110,7 @@ pub use events::{Event, EventStream};
 pub use evs::{EvsBlock, EvsFormat};
 pub use frame::{Frame, FrameStatus};
 pub use gige::action::{AckSummary, ActionParams};
+pub use standard::{ResolvedFeature, Roi, StandardFeature};
 pub use stream::{
     FrameStream, GenericStreamBlock, ResendPolicy, Stream, StreamBlock, StreamBuilder, StreamDest,
     StreamOptions, StreamStats,
@@ -151,6 +154,14 @@ pub enum GenicamError {
     /// Nothing arrived within the time a blocking call was given.
     #[error("timed out after {0:?}")]
     Timeout(Duration),
+    /// The camera declares none of the names a standard feature goes by.
+    #[error("the camera has no {what}: it declares none of {}", tried.join(", "))]
+    MissingFeature {
+        /// What was looked for, such as `"exposure time"`.
+        what: &'static str,
+        /// Every name tried, in the order tried.
+        tried: &'static [&'static str],
+    },
 }
 
 impl GenicamError {
@@ -170,6 +181,11 @@ impl GenicamError {
 /// XML is not read yet (backlog GA-05). Ten milliseconds keeps a self-clearing
 /// command's latency low at a cost of one register read per poll.
 pub const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long the helpers that wait for a command — the user-set helpers,
+/// among them — give it to finish, and what consumers of this crate wait by
+/// default.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Camera facade combining a nodemap with a transport implementing [`RegisterIo`].
 #[derive(Debug)]
@@ -232,7 +248,77 @@ impl<T: RegisterIo> Camera<T> {
             .map_err(Into::into)
     }
 
-    /// Retrieve a feature value as a string using the nodemap type to format it.
+    /// Read an integer feature: an `<Integer>`, an `<IntConverter>`, an
+    /// integer `<IntSwissKnife>`, or a `<Converter>` rounded to the nearest
+    /// integer. See [`NodeMap::get_integer`].
+    pub fn get_integer(&self, name: &str) -> Result<i64, GenicamError> {
+        Ok(self.nodemap.get_integer(name, &self.transport)?)
+    }
+
+    /// Write an integer feature, within its bounds and increment.
+    pub fn set_integer(&mut self, name: &str, value: i64) -> Result<(), GenicamError> {
+        Ok(self.nodemap.set_integer(name, value, &self.transport)?)
+    }
+
+    /// Read a float feature: a `<Float>`, a `<Converter>`, a float
+    /// `<SwissKnife>`, or an `<IntConverter>`. An `<Integer>` is not a
+    /// float: read it with [`Camera::get_integer`].
+    pub fn get_float(&self, name: &str) -> Result<f64, GenicamError> {
+        Ok(self.nodemap.get_float(name, &self.transport)?)
+    }
+
+    /// Write a float feature, within its bounds.
+    pub fn set_float(&mut self, name: &str, value: f64) -> Result<(), GenicamError> {
+        Ok(self.nodemap.set_float(name, value, &self.transport)?)
+    }
+
+    /// Read a boolean feature.
+    pub fn get_bool(&self, name: &str) -> Result<bool, GenicamError> {
+        Ok(self.nodemap.get_bool(name, &self.transport)?)
+    }
+
+    /// Write a boolean feature.
+    pub fn set_bool(&mut self, name: &str, value: bool) -> Result<(), GenicamError> {
+        Ok(self.nodemap.set_bool(name, value, &self.transport)?)
+    }
+
+    /// Read an enumeration: the name of its current entry.
+    pub fn get_enum(&self, name: &str) -> Result<String, GenicamError> {
+        Ok(self.nodemap.get_enum(name, &self.transport)?)
+    }
+
+    /// Write an enumeration by entry name.
+    pub fn set_enum(&mut self, name: &str, entry: &str) -> Result<(), GenicamError> {
+        Ok(self.nodemap.set_enum(name, entry, &self.transport)?)
+    }
+
+    /// Read a `<StringReg>`.
+    pub fn get_string(&self, name: &str) -> Result<String, GenicamError> {
+        Ok(self.nodemap.get_string(name, &self.transport)?)
+    }
+
+    /// Write a `<StringReg>`, NUL-padded to its length.
+    pub fn set_string(&mut self, name: &str, value: &str) -> Result<(), GenicamError> {
+        Ok(self.nodemap.set_string(name, value, &self.transport)?)
+    }
+
+    /// Read a `<Register>`'s bytes. See [`NodeMap::get_register`].
+    pub fn get_register(&self, name: &str) -> Result<Vec<u8>, GenicamError> {
+        Ok(self.nodemap.get_register(name, &self.transport)?)
+    }
+
+    /// Write a `<Register>`'s bytes, exactly its length. See
+    /// [`NodeMap::set_register`].
+    pub fn set_register(&mut self, name: &str, data: &[u8]) -> Result<(), GenicamError> {
+        Ok(self.nodemap.set_register(name, data, &self.transport)?)
+    }
+
+    /// Read a feature as text, formatted by its type: for a program that
+    /// does not know the type in advance, such as a command line. The typed
+    /// accessors ([`Camera::get_integer`] and the like) read without the
+    /// round trip.
+    ///
+    /// A category has no value and a command none to read: both are errors.
     pub fn get(&self, name: &str) -> Result<String, GenicamError> {
         match self.nodemap.node(name) {
             Some(Node::Integer(_)) => {
@@ -267,18 +353,21 @@ impl<T: RegisterIo> Camera<T> {
                 .nodemap
                 .get_string(name, &self.transport)
                 .map_err(Into::into),
-            Some(Node::Command(_)) => {
-                Err(GenicamError::GenApi(GenApiError::Type(name.to_string())))
-            }
+            Some(Node::Command(_)) => Err(GenicamError::GenApi(GenApiError::Type(format!(
+                "{name} is a command, which has no value; run it with \
+                 Camera::execute_command or execute_and_wait"
+            )))),
             // A `<Register>` is a byte array with no declared interpretation.
             // Rendering it into this `String`-typed API would mean inventing an
             // encoding — hex? base64? — that nothing asked for and no caller
             // could rely on. Raw access goes through
-            // `nodemap().get_register(name, transport)`.
+            // `Camera::get_register`.
             Some(Node::Register(_)) => {
                 Err(GenicamError::GenApi(GenApiError::Type(name.to_string())))
             }
-            Some(Node::Category(_)) => Ok(String::new()),
+            Some(Node::Category(_)) => Err(GenicamError::GenApi(GenApiError::Type(format!(
+                "{name} is a category, which has no value"
+            )))),
             // `Node` is `#[non_exhaustive]`, so a node type added in
             // `viva-genapi` no longer breaks this crate's build. Name the kind
             // rather than returning a bare type error, so the gap is legible
@@ -291,7 +380,12 @@ impl<T: RegisterIo> Camera<T> {
         }
     }
 
-    /// Set a feature value using a string representation.
+    /// Write a feature from text, parsed by its type: the counterpart of
+    /// [`Camera::get`].
+    ///
+    /// A command is not set but executed, with [`Camera::execute_command`] or
+    /// [`Camera::execute_and_wait`]: setting one is an error, and nothing is
+    /// written. So is setting a category.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), GenicamError> {
         match self.nodemap.node(name) {
             // A converter writes through its `<FormulaTo>`: `set_integer` and
@@ -329,12 +423,13 @@ impl<T: RegisterIo> Camera<T> {
                 .nodemap
                 .set_string(name, value, &self.transport)
                 .map_err(Into::into),
-            Some(Node::Command(_)) => self
-                .nodemap
-                .exec_command(name, &self.transport)
-                .map_err(Into::into),
+            Some(Node::Command(_)) => Err(GenApiError::Type(format!(
+                "{name} is a command, which is executed, not set; run it with \
+                 Camera::execute_command or execute_and_wait"
+            ))
+            .into()),
             // See the matching arm in `get`: a byte array has no string form
-            // this API could parse back. Use `nodemap().set_register(...)`.
+            // this API could parse back. Use `Camera::set_register`.
             Some(Node::Register(_)) => Err(GenApiError::Type(name.to_string()).into()),
             Some(Node::Category(_)) => Err(GenApiError::Type(name.to_string()).into()),
             // See the matching arm in `get`.
@@ -342,28 +437,6 @@ impl<T: RegisterIo> Camera<T> {
                 "{name} is a {} node, which Camera::set cannot write from a string",
                 other.kind_name()
             )))),
-            None => Err(GenApiError::NodeNotFound(name.to_string()).into()),
-        }
-    }
-
-    /// Convenience wrapper for exposure time features expressed in microseconds.
-    pub fn set_exposure_time_us(&mut self, value: f64) -> Result<(), GenicamError> {
-        // Use SFNC name directly to avoid cross-crate constant lookup issues in docs
-        self.set_float_feature("ExposureTime", value)
-    }
-
-    /// Convenience wrapper for gain features expressed in decibel.
-    pub fn set_gain_db(&mut self, value: f64) -> Result<(), GenicamError> {
-        self.set_float_feature("Gain", value)
-    }
-
-    fn set_float_feature(&mut self, name: &str, value: f64) -> Result<(), GenicamError> {
-        match self.nodemap.node(name) {
-            Some(Node::Float(_)) => self
-                .nodemap
-                .set_float(name, value, &self.transport)
-                .map_err(Into::into),
-            Some(_) => Err(GenApiError::Type(name.to_string()).into()),
             None => Err(GenApiError::NodeNotFound(name.to_string()).into()),
         }
     }
@@ -534,19 +607,47 @@ impl<T: RegisterIo> Camera<T> {
     ) -> Result<(), GenicamError> {
         self.execute_command(name)?;
         let started = Instant::now();
-        loop {
-            if self.nodemap.is_done(name, &self.transport)? {
-                return Ok(());
-            }
-            let waited = started.elapsed();
-            if waited >= timeout {
-                return Err(GenicamError::CommandNotDone {
-                    name: name.to_string(),
-                    waited,
-                });
-            }
-            sleep(COMMAND_POLL_INTERVAL.min(timeout - waited)).await;
+        while let Some(pause) = self.poll_done(name, started, timeout)? {
+            sleep(pause).await;
         }
+        Ok(())
+    }
+
+    /// [`Camera::execute_and_wait`] on the calling thread, for a program
+    /// without an async runtime; it sleeps between polls.
+    pub fn execute_and_wait_blocking(
+        &mut self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(), GenicamError> {
+        self.execute_command(name)?;
+        let started = Instant::now();
+        while let Some(pause) = self.poll_done(name, started, timeout)? {
+            std::thread::sleep(pause);
+        }
+        Ok(())
+    }
+
+    /// One poll of a command executed at `started`: `None` once it is done,
+    /// else how long to wait before asking again; `CommandNotDone` once
+    /// `timeout` has passed.
+    fn poll_done(
+        &self,
+        name: &str,
+        started: Instant,
+        timeout: Duration,
+    ) -> Result<Option<Duration>, GenicamError> {
+        if self.nodemap.is_done(name, &self.transport)? {
+            return Ok(None);
+        }
+        let waited = started.elapsed();
+        if waited >= timeout {
+            return Err(GenicamError::CommandNotDone {
+                name: name.to_string(),
+                waited,
+            });
+        }
+        Ok(Some(COMMAND_POLL_INTERVAL.min(timeout - waited)))
     }
 
     /// Whether the command `name` has finished: GenICam's `IsDone`.
@@ -558,18 +659,53 @@ impl<T: RegisterIo> Camera<T> {
             .map_err(Into::into)
     }
 
-    /// Trigger acquisition start via the SFNC command feature.
+    /// Start acquisition: set `TLParamsLocked`, then execute
+    /// `AcquisitionStart`.
+    ///
+    /// `TLParamsLocked` is how the transport layer tells the camera's XML a
+    /// stream is running, so that features which would change the payload —
+    /// `Width`, `PixelFormat` — are locked until it stops (33 of the 38
+    /// vendor-corpus documents declare it). A camera without it is started
+    /// all the same; one that refuses it is started with a warning. If the
+    /// start fails, the lock is cleared again.
     pub fn acquisition_start(&mut self) -> Result<(), GenicamError> {
-        self.nodemap
-            .exec_command("AcquisitionStart", &self.transport)
-            .map_err(Into::into)
+        self.lock_transport_parameters(true);
+        let started = self
+            .nodemap
+            .exec_command(viva_sfnc::ACQUISITION_START, &self.transport)
+            .map_err(Into::into);
+        if started.is_err() {
+            self.lock_transport_parameters(false);
+        }
+        started
     }
 
-    /// Trigger acquisition stop via the SFNC command feature.
+    /// Stop acquisition: execute `AcquisitionStop`, then clear
+    /// `TLParamsLocked` — cleared even when the stop fails, so the features
+    /// it locked can be written again.
     pub fn acquisition_stop(&mut self) -> Result<(), GenicamError> {
-        self.nodemap
-            .exec_command("AcquisitionStop", &self.transport)
-            .map_err(Into::into)
+        let stopped = self
+            .nodemap
+            .exec_command(viva_sfnc::ACQUISITION_STOP, &self.transport)
+            .map_err(Into::into);
+        self.lock_transport_parameters(false);
+        stopped
+    }
+
+    /// Write `TLParamsLocked`, an `<Integer>` or a `<Boolean>`, if the
+    /// camera has it; a refusal is logged, not returned.
+    fn lock_transport_parameters(&mut self, locked: bool) {
+        let name = viva_sfnc::TL_PARAMS_LOCKED;
+        let written = match self.nodemap.node(name) {
+            None => return,
+            Some(Node::Boolean(_)) => self.nodemap.set_bool(name, locked, &self.transport),
+            Some(_) => self
+                .nodemap
+                .set_integer(name, i64::from(locked), &self.transport),
+        };
+        if let Err(error) = written {
+            warn!(%error, locked, "could not write TLParamsLocked");
+        }
     }
 
     /// Configure chunk mode and enable the requested selectors.
@@ -692,7 +828,36 @@ impl<T: RegisterIo> Camera<T> {
         names
     }
 
+    fn ensure_chunk_feature(&self, name: &str) -> Result<(), GenicamError> {
+        if self.nodemap.node(name).is_none() {
+            return Err(GenicamError::MissingChunkFeature(name.to_string()));
+        }
+        Ok(())
+    }
+
+    fn find_alias(&self, names: &[&'static str]) -> Option<&'static str> {
+        names
+            .iter()
+            .copied()
+            .find(|name| self.nodemap.node(name).is_some())
+    }
+}
+
+/// What only a GigE Vision camera has: a GVCP message channel for events
+/// and a stream channel that can go to a multicast group. Streams and
+/// control privilege are here too ([`Camera::open_stream`],
+/// [`GigeRegisterIo::control_state`]). A USB3 Vision camera has none of
+/// them, so none of this compiles against one.
+impl Camera<GigeRegisterIo> {
     /// Configure the GVCP message channel and enable delivery of the requested events.
+    ///
+    /// GigE Vision only:
+    ///
+    /// ```compile_fail
+    /// # async fn f(mut camera: viva_genicam::Camera<viva_genicam::genapi::NullIo>) {
+    /// let _ = camera.configure_events(std::net::Ipv4Addr::LOCALHOST, 10020, &[]).await;
+    /// # }
+    /// ```
     pub async fn configure_events(
         &mut self,
         local_ip: Ipv4Addr,
@@ -813,92 +978,32 @@ impl<T: RegisterIo> Camera<T> {
     /// separate enable. Without the SFNC nodes the bootstrap registers are
     /// written directly. [`Camera::open_stream`] with
     /// [`StreamOptions::multicast`] does this and starts receiving too.
+    ///
+    /// GigE Vision only:
+    ///
+    /// ```compile_fail
+    /// # fn f(mut camera: viva_genicam::Camera<viva_genicam::genapi::NullIo>) {
+    /// let _ = camera.configure_stream_multicast(0, std::net::Ipv4Addr::new(239, 0, 0, 1), 5000);
+    /// # }
+    /// ```
     pub fn configure_stream_multicast(
         &mut self,
         stream_idx: u32,
         group: Ipv4Addr,
         port: u16,
     ) -> Result<(), GenicamError> {
-        if (group.octets()[0] & 0xF0) != 0xE0 {
-            return Err(GenicamError::transport(
-                "multicast group must be within 224.0.0.0/4",
-            ));
-        }
-        info!(stream_idx, %group, port, "configuring multicast stream");
-
-        // Precompute node names before taking &mut self.nodemap
-        let dest_addr_node = self.find_alias(viva_sfnc::SCP_DEST_ADDR);
-        let host_port_node = self.find_alias(viva_sfnc::SCP_HOST_PORT);
-
-        let mut used_sfnc = true;
-        self.with_map(|nm, tr| {
-            if nm.node(viva_sfnc::STREAM_CH_SELECTOR).is_some() {
-                if let Err(err) =
-                    nm.set_integer(viva_sfnc::STREAM_CH_SELECTOR, stream_idx as i64, tr)
-                {
-                    warn!(
-                        channel = stream_idx,
-                        error = %err,
-                        "failed to select stream channel via SFNC"
-                    );
-                    used_sfnc = false;
-                }
-            } else {
-                used_sfnc = false;
-            }
-
-            if let Some(node) = dest_addr_node {
-                if let Err(err) = nm.set_integer(node, u32::from(group) as i64, tr) {
-                    warn!(feature = node, error = %err, "failed to write multicast address");
-                    used_sfnc = false;
-                }
-            } else {
-                used_sfnc = false;
-            }
-
-            if let Some(node) = host_port_node {
-                if let Err(err) = nm.set_integer(node, port as i64, tr) {
-                    warn!(feature = node, error = %err, "failed to write multicast port");
-                    used_sfnc = false;
-                }
-            } else {
-                used_sfnc = false;
-            }
-        });
-
-        if !used_sfnc {
-            let base = gvcp_consts::STREAM_CHANNEL_BASE
-                + stream_idx as u64 * gvcp_consts::STREAM_CHANNEL_STRIDE;
-            let addr_reg = base + gvcp_consts::STREAM_DESTINATION_ADDRESS;
-            self.transport
-                .write(addr_reg, &group.octets())
-                .map_err(|err| GenicamError::transport(format!("write multicast addr: {err}")))?;
-            // GevSCPHostPort is a 32-bit register with the port in its low
-            // half. The two port bytes alone land in the high half (SR-20),
-            // the bug already fixed for GevMCP.
-            let port_reg = base + gvcp_consts::STREAM_DESTINATION_PORT;
-            self.transport
-                .write(port_reg, &u32::from(port).to_be_bytes())
-                .map_err(|err| GenicamError::transport(format!("write multicast port: {err}")))?;
-            info!(
-                stream_idx,
-                %group,
-                port,
-                "configured multicast destination via raw registers"
-            );
-        } else {
-            info!(
-                stream_idx,
-                %group,
-                port,
-                "configured multicast destination via SFNC"
-            );
-        }
-
-        Ok(())
+        configure_multicast(self, stream_idx, group, port)
     }
 
     /// Open a GVCP event stream bound to the provided local endpoint.
+    ///
+    /// GigE Vision only:
+    ///
+    /// ```compile_fail
+    /// # async fn f(camera: viva_genicam::Camera<viva_genicam::genapi::NullIo>) {
+    /// let _ = camera.open_event_stream(std::net::Ipv4Addr::LOCALHOST, 10020).await;
+    /// # }
+    /// ```
     pub async fn open_event_stream(
         &self,
         local_ip: Ipv4Addr,
@@ -912,20 +1017,93 @@ impl<T: RegisterIo> Camera<T> {
         };
         Ok(EventStream::new(socket, time_sync))
     }
+}
 
-    fn ensure_chunk_feature(&self, name: &str) -> Result<(), GenicamError> {
-        if self.nodemap.node(name).is_none() {
-            return Err(GenicamError::MissingChunkFeature(name.to_string()));
+/// [`Camera::configure_stream_multicast`], over any register transport so
+/// the register writes can be checked in memory.
+fn configure_multicast<T: RegisterIo>(
+    camera: &mut Camera<T>,
+    stream_idx: u32,
+    group: Ipv4Addr,
+    port: u16,
+) -> Result<(), GenicamError> {
+    if (group.octets()[0] & 0xF0) != 0xE0 {
+        return Err(GenicamError::transport(
+            "multicast group must be within 224.0.0.0/4",
+        ));
+    }
+    info!(stream_idx, %group, port, "configuring multicast stream");
+
+    // Precompute node names before taking &mut camera.nodemap
+    let dest_addr_node = camera.find_alias(viva_sfnc::SCP_DEST_ADDR);
+    let host_port_node = camera.find_alias(viva_sfnc::SCP_HOST_PORT);
+
+    let mut used_sfnc = true;
+    camera.with_map(|nm, tr| {
+        if nm.node(viva_sfnc::STREAM_CH_SELECTOR).is_some() {
+            if let Err(err) = nm.set_integer(viva_sfnc::STREAM_CH_SELECTOR, stream_idx as i64, tr) {
+                warn!(
+                    channel = stream_idx,
+                    error = %err,
+                    "failed to select stream channel via SFNC"
+                );
+                used_sfnc = false;
+            }
+        } else {
+            used_sfnc = false;
         }
-        Ok(())
+
+        if let Some(node) = dest_addr_node {
+            if let Err(err) = nm.set_integer(node, u32::from(group) as i64, tr) {
+                warn!(feature = node, error = %err, "failed to write multicast address");
+                used_sfnc = false;
+            }
+        } else {
+            used_sfnc = false;
+        }
+
+        if let Some(node) = host_port_node {
+            if let Err(err) = nm.set_integer(node, port as i64, tr) {
+                warn!(feature = node, error = %err, "failed to write multicast port");
+                used_sfnc = false;
+            }
+        } else {
+            used_sfnc = false;
+        }
+    });
+
+    if !used_sfnc {
+        let base = gvcp_consts::STREAM_CHANNEL_BASE
+            + stream_idx as u64 * gvcp_consts::STREAM_CHANNEL_STRIDE;
+        let addr_reg = base + gvcp_consts::STREAM_DESTINATION_ADDRESS;
+        camera
+            .transport
+            .write(addr_reg, &group.octets())
+            .map_err(|err| GenicamError::transport(format!("write multicast addr: {err}")))?;
+        // GevSCPHostPort is a 32-bit register with the port in its low
+        // half. The two port bytes alone land in the high half (SR-20),
+        // the bug already fixed for GevMCP.
+        let port_reg = base + gvcp_consts::STREAM_DESTINATION_PORT;
+        camera
+            .transport
+            .write(port_reg, &u32::from(port).to_be_bytes())
+            .map_err(|err| GenicamError::transport(format!("write multicast port: {err}")))?;
+        info!(
+            stream_idx,
+            %group,
+            port,
+            "configured multicast destination via raw registers"
+        );
+    } else {
+        info!(
+            stream_idx,
+            %group,
+            port,
+            "configured multicast destination via SFNC"
+        );
     }
 
-    fn find_alias(&self, names: &[&'static str]) -> Option<&'static str> {
-        names
-            .iter()
-            .copied()
-            .find(|name| self.nodemap.node(name).is_some())
-    }
+    Ok(())
 }
 
 /// Configuration for enabling chunk data via SFNC features.
@@ -938,7 +1116,8 @@ pub struct ChunkConfig {
 }
 
 /// Where a GigE session stands with the camera's control channel privilege
-/// (CCP).
+/// (CCP). Only a session that holds it writes registers: in every other
+/// state a write is refused before it reaches the camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ControlState {
@@ -953,7 +1132,9 @@ pub enum ControlState {
     /// refused with `ACCESS_DENIED`. [`GigeRegisterIo::reclaim_control`] asks
     /// for it again.
     Lost,
-    /// Given up with [`GigeRegisterIo::release_control`].
+    /// Given up with [`GigeRegisterIo::release_control`];
+    /// [`GigeRegisterIo::reclaim_control`] takes it again, and so does
+    /// [`Camera::open_stream`].
     Released,
 }
 
@@ -973,14 +1154,18 @@ pub enum Access {
 /// Blocking adapter turning an asynchronous [`GigeDevice`] into a [`RegisterIo`]
 /// implementation.
 ///
-/// The adapter uses [`tokio::runtime::Handle::block_on`] to synchronously wait
-/// on GVCP register transactions.  When called from within a tokio runtime
-/// context it automatically wraps the call in [`tokio::task::block_in_place`]
-/// so the executor can keep making progress.  This makes it safe to call from
-/// both async and plain synchronous contexts.
+/// The adapter waits on GVCP register transactions from synchronous code,
+/// whatever the caller runs on: a plain thread waits on the transport's
+/// runtime directly; inside a multi-thread runtime the wait goes through
+/// [`tokio::task::block_in_place`] so the executor keeps making progress;
+/// on a current-thread runtime's own thread it moves to a short-lived thread,
+/// since nothing may block that runtime in place.
 ///
-/// **Note:** `block_in_place` requires a multi-thread runtime.  Using a
-/// `current_thread` runtime will still panic.
+/// [`connect_gige`] gives a camera opened from a current-thread runtime a
+/// runtime of its own, as [`blocking::connect`] does for a program with none.
+/// A camera built with [`GigeRegisterIo::new`] over a current-thread
+/// runtime's handle can be used from that runtime's blocking pool, but not
+/// from its own thread, which the socket needs free.
 ///
 /// An access of exactly one aligned 32-bit register goes out as
 /// READREG/WRITEREG, anything else as READMEM/WRITEMEM; see
@@ -1003,6 +1188,10 @@ pub struct GigeRegisterIo {
     /// reports a loss here.
     control: Arc<tokio::sync::watch::Sender<ControlState>>,
     keepalive: Mutex<Option<Keepalive>>,
+    /// The runtime `handle` belongs to, when the transport owns it
+    /// ([`connect_gige`] from a current-thread runtime, [`blocking::connect`]).
+    /// Shut down after control is released, when the transport is dropped.
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 /// The running keepalive task and the signal that stops it.
@@ -1064,7 +1253,14 @@ impl GigeRegisterIo {
             device: Arc::new(Mutex::new(device)),
             control: Arc::new(tokio::sync::watch::channel(state).0),
             keepalive: Mutex::new(None),
+            runtime: None,
         }
+    }
+
+    /// Own the runtime this transport's handle belongs to, and shut it down
+    /// when the transport is dropped.
+    pub(crate) fn adopt_runtime(&mut self, runtime: tokio::runtime::Runtime) {
+        self.runtime = Some(runtime);
     }
 
     /// Where this session stands with control privilege.
@@ -1084,7 +1280,8 @@ impl GigeRegisterIo {
     /// Fails, and changes nothing, while another application holds it.
     pub fn reclaim_control(&self) -> Result<(), GenicamError> {
         {
-            let mut device = self.lock_device()?;
+            let mut guard = self.lock_device()?;
+            let device: &mut GigeDevice = &mut guard;
             let fut = async {
                 device.claim_control().await?;
                 if let Err(err) = device.enable_pending_ack().await {
@@ -1092,7 +1289,7 @@ impl GigeRegisterIo {
                 }
                 Ok::<_, gige::GigeError>(())
             };
-            self.block_on(fut)
+            self.block_on(fut)?
                 .map_err(|err| GenicamError::transport(format!("claim control: {err}")))?;
             if device.inflight_keepalive_period().is_none() {
                 device.set_inflight_keepalive_period(Some(keepalive_period(None)));
@@ -1106,7 +1303,8 @@ impl GigeRegisterIo {
 
     /// Give control privilege up now (CCP ← 0) and stop the keepalive,
     /// reporting whether the camera acknowledged. Dropping the adapter does
-    /// the same, best effort.
+    /// the same, best effort. A release the camera does not take leaves the
+    /// session as it was, keepalive running.
     ///
     /// A monitor holds nothing and writes nothing, so for one this does
     /// nothing.
@@ -1115,13 +1313,22 @@ impl GigeRegisterIo {
             return Ok(());
         }
         self.stop_keepalive();
-        let mut device = self.lock_device()?;
-        let fut = device.release_control();
-        let result = self
-            .block_on(fut)
-            .map_err(|err| GenicamError::transport(format!("release control: {err}")));
-        if result.is_ok() {
-            self.control.send_replace(ControlState::Released);
+        let result = {
+            let mut device = self.lock_device()?;
+            let fut = device.release_control();
+            self.block_on(fut).and_then(|released| {
+                released.map_err(|err| GenicamError::transport(format!("release control: {err}")))
+            })
+        };
+        match result {
+            Ok(()) => {
+                self.control.send_replace(ControlState::Released);
+            }
+            // The camera did not take it: whatever the session held, it still
+            // holds, and the keepalive goes on keeping it — and on finding out
+            // if it is gone.
+            Err(_) if self.control_state() == ControlState::Held => self.start_keepalive(),
+            Err(_) => {}
         }
         result
     }
@@ -1184,25 +1391,13 @@ impl GigeRegisterIo {
         }
     }
 
-    /// Run `fut` on the adapter's multi-thread runtime from any context,
-    /// a current-thread runtime of the caller's included. `None` if the
-    /// helper thread that has to run it then panicked.
+    /// [`Self::block_on`], for shutdown: `None` where it cannot run.
     fn block_on_from_anywhere<F>(&self, fut: F) -> Option<F::Output>
     where
         F: std::future::Future + Send,
         F::Output: Send,
     {
-        match tokio::runtime::Handle::try_current() {
-            Ok(current)
-                if current.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread =>
-            {
-                // The adapter belongs to a different, multi-thread runtime.
-                // block_in_place is unavailable in the caller's runtime.
-                std::thread::scope(|scope| scope.spawn(|| self.handle.block_on(fut)).join()).ok()
-            }
-            Ok(_) => Some(tokio::task::block_in_place(|| self.handle.block_on(fut))),
-            Err(_) => Some(self.handle.block_on(fut)),
-        }
+        self.block_on(fut).ok()
     }
 
     /// Release control privilege on the way out, within [`RELEASE_TIMEOUT`].
@@ -1255,7 +1450,10 @@ impl GigeRegisterIo {
         {
             return;
         }
-        match self.block_on(device.ping_control_channel()) {
+        match self
+            .block_on(device.ping_control_channel())
+            .and_then(|pinged| pinged.map_err(|err| GenicamError::transport(err.to_string())))
+        {
             Ok(false) => {
                 self.control.send_replace(ControlState::Lost);
                 warn!(
@@ -1276,20 +1474,56 @@ impl Drop for GigeRegisterIo {
         if held {
             self.release_on_drop();
         }
+        // Whatever context this runs in, an async one included: shutting
+        // down in the background is the only way that never blocks it.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
 impl GigeRegisterIo {
-    /// Run `fut` to completion on the adapter's runtime from synchronous code:
-    /// inside a multi-thread runtime through `block_in_place`, elsewhere
-    /// directly. The same rule every register access follows.
-    pub(crate) fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| self.handle.block_on(fut))
-        } else {
-            self.handle.block_on(fut)
+    /// Run `fut` to completion on the adapter's runtime from synchronous
+    /// code, in any context: on a plain thread directly; inside a
+    /// multi-thread runtime through `block_in_place`; on a current-thread
+    /// runtime's thread, which nothing may block in place, on a scoped
+    /// thread of its own. The rule every register access follows.
+    ///
+    /// The one case that cannot work is a transport on a current-thread
+    /// runtime used from that runtime's own thread: the runtime drives the
+    /// socket only while that thread is free. From its blocking pool
+    /// (`spawn_blocking`) the access works; from the thread itself Tokio
+    /// refuses it with a panic, rather than a hang. [`connect_gige`] never
+    /// builds such a transport.
+    pub(crate) fn block_on<F>(&self, fut: F) -> Result<F::Output, GenicamError>
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        use tokio::runtime::RuntimeFlavor::CurrentThread;
+        match tokio::runtime::Handle::try_current() {
+            Ok(current)
+                if current.runtime_flavor() == CurrentThread
+                    && self.handle.runtime_flavor() != CurrentThread =>
+            {
+                std::thread::scope(|scope| scope.spawn(|| self.handle.block_on(fut)).join())
+                    .map_err(|_| GenicamError::transport("register access thread panicked"))
+            }
+            Ok(_) => Ok(tokio::task::block_in_place(|| self.handle.block_on(fut))),
+            Err(_) => Ok(self.handle.block_on(fut)),
         }
     }
+}
+
+/// A camera's own runtime, when no runtime the caller has can serve it: one
+/// worker drives its socket, keepalive and timers.
+pub(crate) fn camera_runtime() -> Result<tokio::runtime::Runtime, GenicamError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("viva-gige")
+        .enable_all()
+        .build()
+        .map_err(|err| GenicamError::transport(format!("start the camera's runtime: {err}")))
 }
 
 impl RegisterIo for GigeRegisterIo {
@@ -1297,22 +1531,42 @@ impl RegisterIo for GigeRegisterIo {
         let mut device = self.lock()?;
         let fut = device.read_register_or_mem(addr, len);
         self.block_on(fut)
+            .map_err(|err| GenApiError::Io(err.to_string()))?
             .map_err(|err| GenApiError::Io(err.to_string()))
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
-        if self.control_state() == ControlState::Monitor {
-            return Err(GenApiError::Access(format!(
-                "the camera was opened as a read-only monitor, so nothing is written \
-                 (0x{addr:08x}); open it with Access::Control, or reclaim_control, to write"
-            )));
+        // Only a session that holds control writes: a camera nobody controls
+        // may take a write from anyone, and one that another application
+        // controls refuses it anyway.
+        match self.control_state() {
+            ControlState::Held => {}
+            ControlState::Monitor => {
+                return Err(GenApiError::Access(format!(
+                    "the camera was opened as a read-only monitor, so nothing is written \
+                     (0x{addr:08x}); open it with Access::Control, or reclaim_control, to write"
+                )));
+            }
+            state => {
+                let why = if state == ControlState::Released {
+                    "was released"
+                } else {
+                    "was lost"
+                };
+                return Err(GenApiError::Access(format!(
+                    "control of the camera {why}, so nothing is written (0x{addr:08x}); \
+                     reclaim_control takes it again"
+                )));
+            }
         }
         let mut device = self.lock()?;
         let fut = device.write_register_or_mem(addr, data);
-        self.block_on(fut).map_err(|err| {
-            self.check_refusal(&mut device, &err);
-            GenApiError::Io(err.to_string())
-        })
+        self.block_on(fut)
+            .map_err(|err| GenApiError::Io(err.to_string()))?
+            .map_err(|err| {
+                self.check_refusal(&mut device, &err);
+                GenApiError::Io(err.to_string())
+            })
     }
 }
 
@@ -1533,7 +1787,44 @@ fn spawn_keepalive(
 /// alive until the camera is dropped, which releases it. It fails while
 /// another application holds control. [`Access::Monitor`] writes nothing at
 /// all, so it works alongside that application.
+///
+/// From a current-thread runtime the camera gets a runtime of its own — one
+/// worker thread, shut down when the camera is dropped — since a
+/// current-thread runtime cannot drive the camera's socket while its one
+/// thread waits in a register read.
 pub async fn connect_gige_as(
+    device: &gige::DeviceInfo,
+    access: Access,
+) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
+    use tokio::runtime::RuntimeFlavor::CurrentThread;
+    if tokio::runtime::Handle::current().runtime_flavor() != CurrentThread {
+        return connect_here(device, access).await;
+    }
+    let runtime = camera_runtime()?;
+    let device = device.clone();
+    let opened = match runtime
+        .spawn(async move { connect_here(&device, access).await })
+        .await
+    {
+        Ok(opened) => opened,
+        Err(err) => Err(GenicamError::transport(format!("connect task: {err}"))),
+    };
+    match opened {
+        Ok((mut camera, xml)) => {
+            camera.transport.adopt_runtime(runtime);
+            Ok((camera, xml))
+        }
+        Err(err) => {
+            // Dropping a runtime would block this async context.
+            runtime.shutdown_background();
+            Err(err)
+        }
+    }
+}
+
+/// [`connect_gige_as`] on the runtime it is called from, which must be a
+/// multi-thread one or one other threads drive.
+pub(crate) async fn connect_here(
     device: &gige::DeviceInfo,
     access: Access,
 ) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
@@ -1864,9 +2155,7 @@ mod tests {
         let mut camera = Camera::new(io, nodemap);
 
         let group = Ipv4Addr::new(239, 192, 1, 30);
-        camera
-            .configure_stream_multicast(0, group, 50030)
-            .expect("configure");
+        configure_multicast(&mut camera, 0, group, 50030).expect("configure");
 
         let read = |addr| camera.transport().read(addr, 4).unwrap();
         assert_eq!(read(0x0D18), group.octets());
@@ -2047,5 +2336,230 @@ mod tests {
         // keepalive useless as a liveness check.
         assert_eq!(keepalive_period(Some(40)), MIN_KEEPALIVE_PERIOD);
         assert_eq!(keepalive_period(Some(600_000)), MAX_KEEPALIVE_PERIOD);
+    }
+
+    /// Every kind of feature the typed accessors reach, over registers in
+    /// memory.
+    const TYPED_XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Category Name="Root"><pFeature>Width</pFeature></Category>
+            <Integer Name="Width">
+                <Address>0x10</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Min>1</Min><Max>4096</Max><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </Integer>
+            <Float Name="Gain"><pValue>GainReg</pValue><Min>0</Min><Max>48</Max></Float>
+            <FloatReg Name="GainReg">
+                <Address>0x20</Address><Length>8</Length><AccessMode>RW</AccessMode><Endianess>BigEndian</Endianess>
+            </FloatReg>
+            <Boolean Name="ReverseX"><pValue>ReverseXReg</pValue></Boolean>
+            <IntReg Name="ReverseXReg">
+                <Address>0x30</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Enumeration Name="Mode">
+                <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
+                <EnumEntry Name="On"><Value>1</Value></EnumEntry>
+                <pValue>ModeReg</pValue>
+            </Enumeration>
+            <IntReg Name="ModeReg">
+                <Address>0x40</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <StringReg Name="DeviceUserID">
+                <Address>0x100</Address><Length>16</Length><AccessMode>RW</AccessMode>
+            </StringReg>
+            <Converter Name="FrameRate">
+                <FormulaTo>FROM * 10</FormulaTo>
+                <FormulaFrom>TO / 10</FormulaFrom>
+                <pValue>FrameRateRaw</pValue>
+                <Slope>Increasing</Slope>
+            </Converter>
+            <IntReg Name="FrameRateRaw">
+                <Address>0x50</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Command Name="AcquisitionStart">
+                <pValue>AcquisitionStartReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="AcquisitionStartReg">
+                <Address>0x60</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+
+    fn memory_camera(xml: &str) -> Camera<MemoryIo> {
+        let model = viva_genapi_xml::parse(xml).expect("parse");
+        Camera::new(
+            MemoryIo::default(),
+            NodeMap::try_from_xml(model).expect("build nodemap"),
+        )
+    }
+
+    /// API-05: each kind is read and written as its own type, as `NodeMap`
+    /// does — a converter read as an integer is rounded, not refused because
+    /// its text has a decimal point, and an integer is not a float.
+    #[test]
+    fn typed_accessors_reach_each_kind_as_its_own_type() {
+        let mut camera = memory_camera(TYPED_XML);
+        camera.set_integer("Width", 1024).expect("set Width");
+        assert_eq!(camera.get_integer("Width").expect("Width"), 1024);
+        camera.set_float("Gain", 1.0 / 3.0).expect("set Gain");
+        assert_eq!(camera.get_float("Gain").expect("Gain"), 1.0 / 3.0);
+        camera.set_bool("ReverseX", true).expect("set ReverseX");
+        assert!(camera.get_bool("ReverseX").expect("ReverseX"));
+        camera.set_enum("Mode", "On").expect("set Mode");
+        assert_eq!(camera.get_enum("Mode").expect("Mode"), "On");
+        camera
+            .set_string("DeviceUserID", "left")
+            .expect("set DeviceUserID");
+        assert_eq!(camera.get_string("DeviceUserID").expect("id"), "left");
+
+        camera
+            .transport()
+            .write(0x50, &123u32.to_be_bytes())
+            .expect("raw frame rate");
+        assert_eq!(camera.get_float("FrameRate").expect("float"), 12.3);
+        assert_eq!(camera.get_integer("FrameRate").expect("integer"), 12);
+        assert!(
+            matches!(
+                camera.get_float("Width"),
+                Err(GenicamError::GenApi(GenApiError::Type(_)))
+            ),
+            "an Integer is not read as a float"
+        );
+    }
+
+    /// API-08: a category has no value to read, and a command is executed,
+    /// not set — the value a `set` would have carried was ignored.
+    #[test]
+    fn get_on_a_category_and_set_on_a_command_are_errors() {
+        let mut camera = memory_camera(TYPED_XML);
+        assert!(camera.get("Root").is_err(), "a category has no value");
+        let err = camera
+            .set("AcquisitionStart", "1")
+            .expect_err("a command is executed, not set");
+        assert!(err.to_string().contains("execute_command"), "{err}");
+        assert!(
+            !camera.transport().0.lock().unwrap().contains_key(&0x60),
+            "nothing was written"
+        );
+    }
+
+    /// The names a camera without an SFNC 2 exposure or gain has instead:
+    /// raw integers, and a category named `Gain` that is not the feature.
+    const RAW_XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Category Name="Gain"><pFeature>GainRaw</pFeature></Category>
+            <Integer Name="ExposureTimeRaw">
+                <Address>0x10</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Min>1</Min><Max>100000</Max><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </Integer>
+            <Integer Name="GainRaw">
+                <Address>0x20</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Min>0</Min><Max>1023</Max><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </Integer>
+        </RegisterDescription>
+    "#;
+
+    /// API-14: exposure and gain fall back to the raw integer features, a
+    /// value rounded to the integer it must be, and say which they wrote;
+    /// a category that shares the name `Gain` is passed over.
+    #[test]
+    fn exposure_and_gain_fall_back_to_raw_integers() {
+        let mut camera = memory_camera(RAW_XML);
+        let exposure = camera.set_exposure_time(250.4).expect("exposure");
+        assert_eq!(
+            (exposure.name, exposure.kind),
+            ("ExposureTimeRaw", "Integer")
+        );
+        assert_eq!(
+            camera.transport().read(0x10, 4).unwrap(),
+            250u32.to_be_bytes()
+        );
+        assert_eq!(camera.exposure_time().expect("read back"), 250.0);
+
+        let gain = camera.set_gain(3.0).expect("gain");
+        assert_eq!((gain.name, gain.kind), ("GainRaw", "Integer"));
+        assert_eq!(
+            camera.transport().read(0x20, 4).unwrap(),
+            3u32.to_be_bytes()
+        );
+    }
+
+    /// API-14: a feature the camera has under none of its names is an error
+    /// that lists every name tried.
+    #[test]
+    fn a_feature_the_camera_lacks_names_every_candidate() {
+        let mut camera = memory_camera(TYPED_XML);
+        let err = camera.set_exposure_time(1.0).expect_err("no exposure");
+        assert!(
+            err.to_string()
+                .contains("ExposureTime, ExposureTimeAbs, ExposureTimeRaw"),
+            "{err}"
+        );
+    }
+
+    /// Binning as the Hikrobot MV-CS050-10GC declares it: an enumeration
+    /// whose entry names end in the factor (vertically an integer here).
+    const BINNING_XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Enumeration Name="BinningHorizontal">
+                <EnumEntry Name="BinningHorizontal1"><Value>1</Value></EnumEntry>
+                <EnumEntry Name="BinningHorizontal2"><Value>2</Value></EnumEntry>
+                <EnumEntry Name="BinningHorizontal4"><Value>4</Value></EnumEntry>
+                <pValue>BinningHorizontalReg</pValue>
+            </Enumeration>
+            <IntReg Name="BinningHorizontalReg">
+                <Address>0x10</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="BinningVertical">
+                <Address>0x20</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Min>1</Min><Max>4</Max><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </Integer>
+        </RegisterDescription>
+    "#;
+
+    /// API-14: an enumerated binning is written by the entry whose name ends
+    /// in the factor.
+    #[test]
+    fn binning_by_enumeration_writes_the_entry_naming_the_factor() {
+        let mut camera = memory_camera(BINNING_XML);
+        camera.set_binning(2, 2).expect("binning");
+        assert_eq!(
+            camera.transport().read(0x10, 4).unwrap(),
+            2u32.to_be_bytes()
+        );
+        assert_eq!(
+            camera.transport().read(0x20, 4).unwrap(),
+            2u32.to_be_bytes()
+        );
+        assert_eq!(camera.binning().expect("read back"), (2, 2));
+    }
+
+    /// API-14: SVS's evo4050 declares `BinningHorizontal` as `Off`/`On`,
+    /// which names no factor: refused, with the entries listed, and nothing
+    /// written.
+    #[test]
+    fn binning_by_enumeration_without_factors_is_refused() {
+        let xml = BINNING_XML
+            .replace(
+                r#"<EnumEntry Name="BinningHorizontal1"><Value>1</Value></EnumEntry>"#,
+                r#"<EnumEntry Name="Off"><Value>0</Value></EnumEntry>"#,
+            )
+            .replace(
+                r#"<EnumEntry Name="BinningHorizontal2"><Value>2</Value></EnumEntry>"#,
+                r#"<EnumEntry Name="On"><Value>1</Value></EnumEntry>"#,
+            )
+            .replace(
+                r#"<EnumEntry Name="BinningHorizontal4"><Value>4</Value></EnumEntry>"#,
+                "",
+            );
+        let mut camera = memory_camera(&xml);
+        let err = camera
+            .set_binning(2, 2)
+            .expect_err("Off/On names no factor");
+        assert!(err.to_string().contains("Off, On"), "{err}");
+        assert!(
+            camera.transport().0.lock().unwrap().is_empty(),
+            "nothing was written"
+        );
     }
 }

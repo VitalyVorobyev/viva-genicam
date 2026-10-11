@@ -17,7 +17,7 @@ cams = vg.discover(timeout_ms=500)
 cam = vg.connect_gige(cams[0])
 
 print(cam.get("DeviceModelName"))
-cam.set_exposure_time_us(10_000.0)
+cam.set_exposure_time(10_000.0)
 
 with cam.stream() as frames:
     for frame in frames:

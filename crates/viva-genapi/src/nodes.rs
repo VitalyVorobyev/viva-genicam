@@ -138,6 +138,49 @@ impl Node {
         self.meta().representation
     }
 
+    /// `<Unit>`: the engineering unit an Integer, Float, Converter or
+    /// IntConverter declares, such as `"us"`.
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            Node::Integer(n) => n.unit.as_deref(),
+            Node::Float(n) => n.unit.as_deref(),
+            Node::Converter(n) => n.unit.as_deref(),
+            Node::IntConverter(n) => n.unit.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// `<Min>` as the XML declares it, typed as the node is: an Integer's is
+    /// [`Value::Int`], a Float's [`Value::Float`]. A bound given through
+    /// `<pMin>`, or by the node `<pValue>` delegates to, is the device's to
+    /// say: read it with [`NodeMap::feature_state`](crate::NodeMap::feature_state).
+    pub fn min(&self) -> Option<Value> {
+        match self {
+            Node::Integer(n) => n.min.map(Value::Int),
+            Node::Float(n) => n.min.map(Value::Float),
+            _ => None,
+        }
+    }
+
+    /// `<Max>` as the XML declares it; see [`Node::min`].
+    pub fn max(&self) -> Option<Value> {
+        match self {
+            Node::Integer(n) => n.max.map(Value::Int),
+            Node::Float(n) => n.max.map(Value::Float),
+            _ => None,
+        }
+    }
+
+    /// `<Inc>` as the XML declares it; see [`Node::min`]. Only an Integer
+    /// declares one: a Float's increment is not verified on writing (GenICam
+    /// Standard v2.1.1 §2.8.9) and is not stored.
+    pub fn inc(&self) -> Option<Value> {
+        match self {
+            Node::Integer(n) => n.inc.map(Value::Int),
+            _ => None,
+        }
+    }
+
     /// Return the predicate references (`pIsImplemented`, `pIsAvailable`,
     /// `pIsLocked`) declared on this node.
     pub fn predicates(&self) -> &PredicateRefs {
@@ -291,10 +334,16 @@ pub struct EnumNode {
     /// `<pSelected>`: the features this enumeration selects.
     pub selected: Vec<String>,
     pub providers: Vec<String>,
+    /// `<Value>`: the start value of an enumeration with no register behind
+    /// it — a selector the host keeps, as AVT's `GainSelector` is.
+    pub value: Option<i64>,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     pub(crate) value_cache: RefCell<Option<String>>,
     pub(crate) mapping_cache: RefCell<Option<EnumMapping>>,
+    /// The entry value last written to a floating enumeration. Its state,
+    /// not a cache of the device's: invalidation leaves it alone.
+    pub(crate) floating: RefCell<Option<i64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -328,10 +377,17 @@ pub struct BooleanNode {
     pub on_value: Option<i64>,
     /// Off value for pValue-backed booleans.
     pub off_value: Option<i64>,
+    /// `<Value>`: the start value of a boolean with no register behind it,
+    /// compared with `on_value` — a variable the host sets, as AVT's
+    /// `TLParamsLocked` is.
+    pub value: Option<i64>,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<bool>>,
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
+    /// What was last written to a floating boolean, as its raw value. Its
+    /// state, not a cache of the device's: invalidation leaves it alone.
+    pub(crate) floating: RefCell<Option<i64>>,
 }
 
 /// One variable a formula reads: the identifier it appears as, the node

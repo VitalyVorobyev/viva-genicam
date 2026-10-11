@@ -330,6 +330,38 @@ pub const REG_USER_SET_SAVE: u64 = 0x200b4;
 /// vendor corpus uses.
 pub const REG_SOFTWARE_SIGNAL_PULSE: u64 = 0x200b0;
 
+/// `TriggerSelector`: which trigger `TriggerMode`, `TriggerSource` and
+/// `TriggerSoftware` act on. `FrameStart` is 0, `AcquisitionStart` 1; the
+/// selected value indexes the mode and source registers (`<pIndex>`, as the
+/// Basler acA1600 and Hikrobot documents address theirs).
+pub const REG_TRIGGER_SELECTOR: u64 = 0x200c0;
+/// `TriggerSelector` value of `FrameStart`.
+pub const TRIGGER_FRAME_START: u32 = 0;
+/// `TriggerMode` of the trigger at index `n` lives at `REG_TRIGGER_MODE + 4n`;
+/// `1` is `On`.
+pub const REG_TRIGGER_MODE: u64 = 0x200c4;
+/// `TriggerSource` of the trigger at index `n` lives at
+/// `REG_TRIGGER_SOURCE + 4n`.
+pub const REG_TRIGGER_SOURCE: u64 = 0x200d0;
+/// `TriggerSource` value of `Line1`, the source the fake boots with.
+pub const TRIGGER_SOURCE_LINE1: u32 = 0;
+/// `TriggerSource` value of `Software`.
+pub const TRIGGER_SOURCE_SOFTWARE: u32 = 1;
+/// `TriggerSoftware`: a write starts one frame while the `FrameStart`
+/// trigger is `On` with source `Software`. With the trigger on, the fake
+/// sends no frame without one: the data path is gated, not only the register.
+pub const REG_TRIGGER_SOFTWARE: u64 = 0x200e0;
+/// `BinningHorizontal`, 1 to 4.
+pub const REG_BINNING_HORIZONTAL: u64 = 0x200e4;
+/// `BinningVertical`, 1 to 4.
+pub const REG_BINNING_VERTICAL: u64 = 0x200e8;
+/// `UserSetDefault` (SFNC 2) or, in the legacy profile,
+/// `UserSetDefaultSelector`: the set the camera loads at power-up.
+pub const REG_USER_SET_DEFAULT: u64 = 0x200ec;
+/// `GainRaw` of `GainSelector` entry `n` lives at `REG_GAIN_RAW + 4n`
+/// (legacy profile only).
+pub const REG_GAIN_RAW: u64 = 0x200f0;
+
 /// Registers the XML declares `WO`. Reading any of them is refused with
 /// `ACCESS_DENIED`, as a real device refuses it.
 ///
@@ -343,6 +375,7 @@ pub const WRITE_ONLY_REGISTERS: &[u64] = &[
     REG_USER_SET_LOAD,
     REG_SOFTWARE_SIGNAL_PULSE,
     REG_USER_SET_SAVE,
+    REG_TRIGGER_SOFTWARE,
 ];
 
 /// Limit registers.
@@ -410,6 +443,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>UserSetSelector</pFeature>
     <pFeature>UserSetLoad</pFeature>
     <pFeature>UserSetSave</pFeature>
+    <!-- profile:user-set-default-category --><pFeature>UserSetDefault</pFeature><!-- /profile:user-set-default-category -->
   </Category>
 
   <Category Name="DeviceControl">
@@ -430,6 +464,8 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>Height</pFeature>
     <pFeature>OffsetX</pFeature>
     <pFeature>OffsetY</pFeature>
+    <pFeature>BinningHorizontal</pFeature>
+    <pFeature>BinningVertical</pFeature>
     <pFeature>PixelFormat</pFeature>
   </Category>
 
@@ -439,20 +475,25 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>AcquisitionStart</pFeature>
     <pFeature>AcquisitionStop</pFeature>
     <pFeature>AcquisitionFrameRateEnable</pFeature>
-    <pFeature>AcquisitionFrameRate</pFeature>
-    <pFeature>ExposureTime</pFeature>
+    <!-- profile:frame-rate-category --><pFeature>AcquisitionFrameRate</pFeature><!-- /profile:frame-rate-category -->
+    <!-- profile:exposure-category --><pFeature>ExposureTime</pFeature><!-- /profile:exposure-category -->
     <pFeature>ExposureAuto</pFeature>
+    <pFeature>TriggerSelector</pFeature>
+    <pFeature>TriggerMode</pFeature>
+    <pFeature>TriggerSource</pFeature>
+    <pFeature>TriggerSoftware</pFeature>
   </Category>
 
   <Category Name="AnalogControl">
     <DisplayName>Analog Control</DisplayName>
-    <pFeature>Gain</pFeature>
+    <!-- profile:gain-category --><pFeature>Gain</pFeature><!-- /profile:gain-category -->
     <pFeature>GainAuto</pFeature>
     <pFeature>BlackLevel</pFeature>
   </Category>
 
   <Category Name="TransportLayerControl">
     <DisplayName>Transport Layer Control</DisplayName>
+    <pFeature>TLParamsLocked</pFeature>
     <pFeature>GevTimestampTickFrequency</pFeature>
     <pFeature>GevTimestampValue</pFeature>
     <pFeature>TimestampLatch</pFeature>
@@ -548,16 +589,26 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
 
+  <!-- The ROI shape every corpus document shares: a size's maximum shrinks
+       as its offset grows, and an offset's as the size grows, so the order
+       of writes decides whether a new ROI can be reached at all. The size and
+       format are locked while TLParamsLocked is set (FLIR, Basler, Hikrobot). -->
   <Integer Name="Width" NameSpace="Standard">
     <ToolTip>Width of the image in pixels</ToolTip>
     <Address>0x20000</Address>
     <Length>4</Length>
     <AccessMode>RW</AccessMode>
+    <pIsLocked>TLParamsLocked</pIsLocked>
     <pMin>WidthMin</pMin>
-    <pMax>WidthMax</pMax>
+    <pMax>WidthMaxNow</pMax>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntSwissKnife Name="WidthMaxNow">
+    <pVariable Name="WMAX">WidthMax</pVariable>
+    <pVariable Name="OX">OffsetX</pVariable>
+    <Formula>WMAX - OX</Formula>
+  </IntSwissKnife>
   <IntReg Name="WidthMin"><Address>0x20100</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <IntReg Name="WidthMax"><Address>0x20104</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
@@ -566,11 +617,17 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20004</Address>
     <Length>4</Length>
     <AccessMode>RW</AccessMode>
+    <pIsLocked>TLParamsLocked</pIsLocked>
     <pMin>HeightMin</pMin>
-    <pMax>HeightMax</pMax>
+    <pMax>HeightMaxNow</pMax>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntSwissKnife Name="HeightMaxNow">
+    <pVariable Name="HMAX">HeightMax</pVariable>
+    <pVariable Name="OY">OffsetY</pVariable>
+    <Formula>HMAX - OY</Formula>
+  </IntSwissKnife>
   <IntReg Name="HeightMin"><Address>0x20108</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <IntReg Name="HeightMax"><Address>0x2010c</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
@@ -580,7 +637,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Length>4</Length>
     <AccessMode>RW</AccessMode>
     <Min>0</Min>
-    <Max>4096</Max>
+    <pMax>OffsetXMax</pMax>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
   </Integer>
@@ -591,7 +648,39 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Length>4</Length>
     <AccessMode>RW</AccessMode>
     <Min>0</Min>
-    <Max>4096</Max>
+    <pMax>OffsetYMax</pMax>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </Integer>
+
+  <IntSwissKnife Name="OffsetXMax">
+    <pVariable Name="WMAX">WidthMax</pVariable>
+    <pVariable Name="W">Width</pVariable>
+    <Formula>WMAX - W</Formula>
+  </IntSwissKnife>
+  <IntSwissKnife Name="OffsetYMax">
+    <pVariable Name="HMAX">HeightMax</pVariable>
+    <pVariable Name="H">Height</pVariable>
+    <Formula>HMAX - H</Formula>
+  </IntSwissKnife>
+
+  <Integer Name="BinningHorizontal" NameSpace="Standard">
+    <ToolTip>Pixels combined horizontally</ToolTip>
+    <Address>0x200e4</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <Min>1</Min>
+    <Max>4</Max>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </Integer>
+  <Integer Name="BinningVertical" NameSpace="Standard">
+    <ToolTip>Pixels combined vertically</ToolTip>
+    <Address>0x200e8</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <Min>1</Min>
+    <Max>4</Max>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
   </Integer>
@@ -607,6 +696,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Enumeration Name="PixelFormat" NameSpace="Standard">
     <ToolTip>Format of the pixel data — entries are gated by SensorType</ToolTip>
+    <pIsLocked>TLParamsLocked</pIsLocked>
     <EnumEntry Name="Mono8" NameSpace="Standard">
       <Value>0x01080001</Value>
       <pIsImplemented>PfMono8Avail</pIsImplemented>
@@ -767,6 +857,58 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </IntSwissKnife>
   <IntReg Name="UserSetSaveReg"><Address>0x200b4</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
+  <!-- profile:user-set-default -->
+  <Enumeration Name="UserSetDefault" NameSpace="Standard">
+    <ToolTip>User set loaded at power-up</ToolTip>
+    <EnumEntry Name="Default"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="UserSet1"><Value>1</Value></EnumEntry>
+    <EnumEntry Name="UserSet2"><Value>2</Value></EnumEntry>
+    <pValue>UserSetDefaultReg</pValue>
+  </Enumeration>
+  <!-- /profile:user-set-default -->
+  <IntReg Name="UserSetDefaultReg"><Address>0x200ec</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <!-- Triggers, as the Basler acA1600 and Hikrobot documents shape them: the
+       selector's value indexes the mode and source registers. -->
+  <Enumeration Name="TriggerSelector" NameSpace="Standard">
+    <ToolTip>Trigger that TriggerMode, TriggerSource and TriggerSoftware act on</ToolTip>
+    <EnumEntry Name="FrameStart"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="AcquisitionStart"><Value>1</Value></EnumEntry>
+    <pValue>TriggerSelectorReg</pValue>
+    <pSelected>TriggerMode</pSelected>
+    <pSelected>TriggerSource</pSelected>
+    <pSelected>TriggerSoftware</pSelected>
+  </Enumeration>
+  <IntReg Name="TriggerSelectorReg"><Address>0x200c0</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <Enumeration Name="TriggerMode" NameSpace="Standard">
+    <ToolTip>Whether the selected trigger is active</ToolTip>
+    <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="On"><Value>1</Value></EnumEntry>
+    <pValue>TriggerModeReg</pValue>
+  </Enumeration>
+  <IntReg Name="TriggerModeReg">
+    <Address>0x200c4</Address>
+    <pIndex Offset="4">TriggerSelectorReg</pIndex>
+    <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+  </IntReg>
+  <Enumeration Name="TriggerSource" NameSpace="Standard">
+    <ToolTip>Signal the selected trigger waits for</ToolTip>
+    <EnumEntry Name="Line1"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="Software"><Value>1</Value></EnumEntry>
+    <pValue>TriggerSourceReg</pValue>
+  </Enumeration>
+  <IntReg Name="TriggerSourceReg">
+    <Address>0x200d0</Address>
+    <pIndex Offset="4">TriggerSelectorReg</pIndex>
+    <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+  </IntReg>
+  <Command Name="TriggerSoftware" NameSpace="Standard">
+    <ToolTip>Fire the selected trigger once</ToolTip>
+    <pValue>TriggerSoftwareReg</pValue>
+    <CommandValue>1</CommandValue>
+  </Command>
+  <IntReg Name="TriggerSoftwareReg"><Address>0x200e0</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
   <!-- A write-only register addressed bit by bit. Each entry inherits WO from
        the StructReg, so setting one bit cannot read the register for the
        others: the device refuses the read (backlog GA-31, issue #135). -->
@@ -794,6 +936,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pIsImplemented>FrameRateControlInq_Bit</pIsImplemented>
   </IntReg>
 
+  <!-- profile:frame-rate -->
   <Float Name="AcquisitionFrameRate" NameSpace="Standard">
     <ToolTip>Target frame rate in Hz</ToolTip>
     <Address>0x2002c</Address>
@@ -801,19 +944,24 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <AccessMode>RW</AccessMode>
     <Min>1.0</Min>
     <Max>120.0</Max>
+    <Unit>Hz</Unit>
     <Endianess>BigEndian</Endianess>
     <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
   </Float>
+  <!-- /profile:frame-rate -->
 
+  <!-- profile:exposure -->
   <Float Name="ExposureTime" NameSpace="Standard">
     <ToolTip>Exposure time in microseconds — locked to RO when ExposureAuto is not Off</ToolTip>
     <pValue>ExposureTimeReg</pValue>
+    <Unit>us</Unit>
     <Min>10.0</Min>
     <Max>1000000.0</Max>
     <pIsImplemented>ExposureTime_Imp</pIsImplemented>
     <pIsAvailable>ExposureTime_Avl</pIsAvailable>
     <pIsLocked>ExposureAutoActive</pIsLocked>
   </Float>
+  <!-- /profile:exposure -->
   <!-- The FLIR shape: the register, not the feature, carries <pInvalidator>,
        and it names the command's pValue register rather than the command. So
        executing UserSetLoad writes UserSetLoadReg, which marks this register
@@ -858,6 +1006,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        Analog Control Features
        ════════════════════════════════════════════════════════════════════ -->
 
+  <!-- profile:gain -->
   <Float Name="Gain" NameSpace="Standard">
     <!-- CDATA-wrapped tooltip, as shipped by several vendors: the literal `&`
          and `<` inside are legal here and must survive parsing (issue #45). -->
@@ -870,6 +1019,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
     <pIsLocked>GainAutoActive</pIsLocked>
   </Float>
+  <!-- /profile:gain -->
 
   <Enumeration Name="GainAuto" NameSpace="Standard">
     <ToolTip>Automatic gain control</ToolTip>
@@ -899,6 +1049,19 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <!-- ════════════════════════════════════════════════════════════════════
        Transport Layer Control (Timestamp)
        ════════════════════════════════════════════════════════════════════ -->
+
+  <!-- A variable the host sets while it streams, with no register behind
+       it: FLIR, Basler and Hikrobot declare it so (27 corpus documents use an
+       Integer). -->
+  <!-- profile:tl-params-locked -->
+  <Integer Name="TLParamsLocked">
+    <ToolTip>Indicates whether a live grab is under way</ToolTip>
+    <Visibility>Invisible</Visibility>
+    <Value>0</Value>
+    <Min>0</Min>
+    <Max>1</Max>
+  </Integer>
+  <!-- /profile:tl-params-locked -->
 
   <Integer Name="GevTimestampTickFrequency" NameSpace="Standard">
     <ToolTip>Device timestamp tick frequency in Hz (1 GHz)</ToolTip>
@@ -1087,6 +1250,136 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </RegisterDescription>
 "#;
 
+/// Which GenApi XML the fake serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum XmlProfile {
+    /// [`FAKE_XML`]: SFNC 2 names — `ExposureTime`, `Gain`,
+    /// `AcquisitionFrameRate`, `UserSetDefault` — with `TLParamsLocked` an
+    /// `<Integer>`.
+    #[default]
+    Sfnc,
+    /// The names older cameras use instead, as the Basler acA1600-20gm
+    /// declares them (`Basler_acA1600_20gm.xml` in the vendor corpus):
+    /// `ExposureTimeAbs` with no `ExposureTime`, `GainRaw` (an `<Integer>`
+    /// per `GainSelector` entry) with no `Gain`, `AcquisitionFrameRateAbs`,
+    /// `UserSetDefaultSelector`; and `TLParamsLocked` a `<Boolean>` with a
+    /// `<Value>`, as AVT and Prosilica declare it. Same registers, same
+    /// behaviour.
+    Legacy,
+}
+
+/// The legacy profile's replacement for each `<!-- profile:NAME -->` section
+/// of [`FAKE_XML`].
+const LEGACY_SECTIONS: &[(&str, &str)] = &[
+    ("exposure-category", "<pFeature>ExposureTimeAbs</pFeature>"),
+    (
+        "exposure",
+        r#"<Float Name="ExposureTimeAbs" NameSpace="Standard">
+    <ToolTip>Directly sets the camera's exposure time in microseconds</ToolTip>
+    <pValue>ExposureTimeReg</pValue>
+    <Min>10.0</Min>
+    <Max>1000000.0</Max>
+    <Unit>us</Unit>
+    <pIsLocked>ExposureAutoActive</pIsLocked>
+  </Float>"#,
+    ),
+    (
+        "frame-rate-category",
+        "<pFeature>AcquisitionFrameRateAbs</pFeature>",
+    ),
+    (
+        "frame-rate",
+        r#"<Float Name="AcquisitionFrameRateAbs" NameSpace="Standard">
+    <ToolTip>Acquisition frame rate in frames per second, when enabled</ToolTip>
+    <Address>0x2002c</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <Min>1.0</Min>
+    <Max>120.0</Max>
+    <Unit>Hz</Unit>
+    <Endianess>BigEndian</Endianess>
+    <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
+  </Float>"#,
+    ),
+    (
+        "gain-category",
+        "<pFeature>GainSelector</pFeature><pFeature>GainRaw</pFeature>",
+    ),
+    (
+        "gain",
+        r#"<Enumeration Name="GainSelector" NameSpace="Standard">
+    <ToolTip>Selects the gain control to configure</ToolTip>
+    <EnumEntry Name="All"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="Tap1"><Value>1</Value></EnumEntry>
+    <EnumEntry Name="Tap2"><Value>2</Value></EnumEntry>
+    <pValue>GainSelectorReg</pValue>
+    <pSelected>GainRaw</pSelected>
+  </Enumeration>
+  <IntReg Name="GainSelectorReg"><Address>0x200fc</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <Integer Name="GainRaw" NameSpace="Standard">
+    <ToolTip>Sets the selected gain control in device specific units</ToolTip>
+    <pValue>GainRawReg</pValue>
+    <Min>0</Min>
+    <Max>1023</Max>
+    <pIsLocked>GainAutoActive</pIsLocked>
+  </Integer>
+  <IntReg Name="GainRawReg">
+    <Address>0x200f0</Address>
+    <pIndex Offset="4">GainSelectorReg</pIndex>
+    <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+  </IntReg>"#,
+    ),
+    (
+        "user-set-default-category",
+        "<pFeature>UserSetDefaultSelector</pFeature>",
+    ),
+    (
+        "user-set-default",
+        r#"<Enumeration Name="UserSetDefaultSelector" NameSpace="Standard">
+    <ToolTip>Selects the user set loaded at power-up</ToolTip>
+    <EnumEntry Name="Default"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="UserSet1"><Value>1</Value></EnumEntry>
+    <EnumEntry Name="UserSet2"><Value>2</Value></EnumEntry>
+    <pValue>UserSetDefaultReg</pValue>
+  </Enumeration>"#,
+    ),
+    (
+        "tl-params-locked",
+        r#"<Boolean Name="TLParamsLocked" NameSpace="Standard">
+    <Value>0</Value>
+    <OnValue>1</OnValue>
+    <OffValue>0</OffValue>
+  </Boolean>"#,
+    ),
+];
+
+/// `GainSelector`'s register in the legacy profile.
+pub const REG_GAIN_SELECTOR: u64 = 0x200fc;
+
+/// The GenApi XML a camera with this profile serves.
+pub fn genapi_xml(profile: XmlProfile) -> std::borrow::Cow<'static, str> {
+    match profile {
+        XmlProfile::Sfnc => std::borrow::Cow::Borrowed(FAKE_XML),
+        XmlProfile::Legacy => {
+            let mut xml = FAKE_XML.to_string();
+            for (section, replacement) in LEGACY_SECTIONS {
+                let begin = format!("<!-- profile:{section} -->");
+                let end = format!("<!-- /profile:{section} -->");
+                let start = xml
+                    .find(&begin)
+                    .unwrap_or_else(|| panic!("FAKE_XML has no {begin}"));
+                let stop = xml[start..]
+                    .find(&end)
+                    .map(|at| start + at + end.len())
+                    .unwrap_or_else(|| panic!("FAKE_XML has no {end}"));
+                xml.replace_range(start..stop, replacement);
+            }
+            std::borrow::Cow::Owned(xml)
+        }
+    }
+}
+
 // ── Register Map ────────────────────────────────────────────────────────────
 
 /// Pre-populated register store for the fake camera.
@@ -1143,6 +1436,11 @@ pub struct RegisterMap {
     /// User sets saved by `UserSetSave`, by set number: the registers a
     /// `UserSetLoad` of that set restores.
     user_sets: HashMap<u32, Vec<(u64, Vec<u8>)>>,
+    /// `TriggerSoftware` executions for `FrameStart` not yet turned into a
+    /// frame.
+    pending_frame_triggers: u32,
+    /// Every `TriggerSoftware` execution.
+    software_triggers: u64,
 }
 
 /// Registers a user set holds: the analog-control settings.
@@ -1180,7 +1478,13 @@ impl RegisterMap {
     /// sensible defaults. The GenApi XML is embedded at [`XML_BLOB_BASE`],
     /// served as a ZIP archive when `zip_xml` is set (as many real cameras
     /// do).
-    pub fn new(width: u32, height: u32, pixel_format: u32, zip_xml: bool) -> Self {
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel_format: u32,
+        zip_xml: bool,
+        profile: XmlProfile,
+    ) -> Self {
         let mut regs = HashMap::new();
 
         // ── Bootstrap registers ─────────────────────────────────────────
@@ -1282,6 +1586,26 @@ impl RegisterMap {
         regs.insert(REG_USER_SET_LOAD, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_USER_SET_SAVE, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_SOFTWARE_SIGNAL_PULSE, 0u32.to_be_bytes().to_vec());
+        regs.insert(REG_USER_SET_DEFAULT, 0u32.to_be_bytes().to_vec());
+        // Triggers off, waiting on Line1, for both selector entries.
+        regs.insert(
+            REG_TRIGGER_SELECTOR,
+            TRIGGER_FRAME_START.to_be_bytes().to_vec(),
+        );
+        for index in 0..2u64 {
+            regs.insert(REG_TRIGGER_MODE + 4 * index, 0u32.to_be_bytes().to_vec());
+            regs.insert(
+                REG_TRIGGER_SOURCE + 4 * index,
+                TRIGGER_SOURCE_LINE1.to_be_bytes().to_vec(),
+            );
+        }
+        regs.insert(REG_TRIGGER_SOFTWARE, 0u32.to_be_bytes().to_vec());
+        regs.insert(REG_BINNING_HORIZONTAL, 1u32.to_be_bytes().to_vec());
+        regs.insert(REG_BINNING_VERTICAL, 1u32.to_be_bytes().to_vec());
+        regs.insert(REG_GAIN_SELECTOR, 0u32.to_be_bytes().to_vec());
+        for index in 0..3u64 {
+            regs.insert(REG_GAIN_RAW + 4 * index, 0u32.to_be_bytes().to_vec());
+        }
         regs.insert(REG_ACQ_STOP, vec![0, 0, 0, 0]);
         regs.insert(REG_ACQ_FRAME_RATE, 30.0f32.to_be_bytes().to_vec());
         regs.insert(
@@ -1329,10 +1653,11 @@ impl RegisterMap {
         regs.insert(REG_EVENT_SELECTOR, 5u32.to_be_bytes().to_vec());
 
         // ── XML URL register ────────────────────────────────────────────
+        let xml = genapi_xml(profile);
         let (xml_blob, xml_name) = if zip_xml {
-            (zip_xml_blob(FAKE_XML.as_bytes()), "fake.zip")
+            (zip_xml_blob(xml.as_bytes()), "fake.zip")
         } else {
-            (FAKE_XML.as_bytes().to_vec(), "fake.xml")
+            (xml.as_bytes().to_vec(), "fake.xml")
         };
         let url = format!(
             "Local:{xml_name};{:x};{:x}\0",
@@ -1357,6 +1682,8 @@ impl RegisterMap {
             max_on_wire: None,
             pending_test_packet: None,
             user_sets: HashMap::new(),
+            pending_frame_triggers: 0,
+            software_triggers: 0,
         }
     }
 
@@ -1741,6 +2068,35 @@ impl RegisterMap {
             let set = self.read_u32_be(REG_USER_SET_SAVE);
             self.save_user_set(set);
         }
+        if addr == REG_TRIGGER_SOFTWARE {
+            self.software_triggers += 1;
+            if self.read_u32_be(REG_TRIGGER_SELECTOR) == TRIGGER_FRAME_START {
+                self.pending_frame_triggers += 1;
+            }
+        }
+    }
+
+    /// Whether the next frame may start now. Always, while the `FrameStart`
+    /// trigger is `Off`; once per `TriggerSoftware` while it is `On` with
+    /// source `Software`; never while it waits on a line, which nothing
+    /// drives here.
+    pub fn take_frame_start(&mut self) -> bool {
+        let index = u64::from(TRIGGER_FRAME_START);
+        if self.read_u32_be(REG_TRIGGER_MODE + 4 * index) == 0 {
+            return true;
+        }
+        if self.read_u32_be(REG_TRIGGER_SOURCE + 4 * index) != TRIGGER_SOURCE_SOFTWARE
+            || self.pending_frame_triggers == 0
+        {
+            return false;
+        }
+        self.pending_frame_triggers -= 1;
+        true
+    }
+
+    /// How many times `TriggerSoftware` was executed.
+    pub fn software_triggers(&self) -> u64 {
+        self.software_triggers
     }
 
     fn read_u32_be(&self, addr: u64) -> u32 {
@@ -1924,7 +2280,7 @@ mod tests {
     use super::*;
 
     fn map() -> RegisterMap {
-        RegisterMap::new(64, 48, 0x0108_0001, false)
+        RegisterMap::new(64, 48, 0x0108_0001, false, XmlProfile::Sfnc)
     }
 
     fn select_and_enable(regs: &mut RegisterMap, event: u32, on: bool) {
@@ -2095,5 +2451,32 @@ mod tests {
         assert_eq!(regs.read(REG_EVENT_NOTIFICATION, 4), vec![0, 0, 0, 0]);
         regs.write(REG_EVENT_SELECTOR, &5u32.to_be_bytes());
         assert_eq!(regs.read(REG_EVENT_NOTIFICATION, 4), vec![0, 0, 0, 1]);
+    }
+
+    /// The legacy profile replaces every marked section, so it declares the
+    /// older names and none of the SFNC 2 ones it stands in for.
+    #[test]
+    fn the_legacy_profile_replaces_every_section() {
+        let xml = genapi_xml(XmlProfile::Legacy);
+        assert!(!xml.contains("<!-- profile:"), "a section was left in");
+        for present in [
+            r#"Name="ExposureTimeAbs""#,
+            r#"Name="GainRaw""#,
+            r#"Name="GainSelector""#,
+            r#"Name="AcquisitionFrameRateAbs""#,
+            r#"Name="UserSetDefaultSelector""#,
+            r#"<Boolean Name="TLParamsLocked""#,
+        ] {
+            assert!(xml.contains(present), "missing {present}");
+        }
+        for absent in [
+            r#"<Float Name="ExposureTime""#,
+            r#"<Float Name="Gain""#,
+            r#"<Float Name="AcquisitionFrameRate""#,
+            r#"<Enumeration Name="UserSetDefault""#,
+            "<pFeature>Gain</pFeature>",
+        ] {
+            assert!(!xml.contains(absent), "still declares {absent}");
+        }
     }
 }

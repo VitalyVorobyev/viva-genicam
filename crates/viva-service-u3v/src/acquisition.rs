@@ -164,7 +164,7 @@ async fn handle_start<T: UsbTransfer + Send + 'static>(
     });
 
     // Execute AcquisitionStart on the camera.
-    if let Err(e) = device.exec_command("AcquisitionStart").await {
+    if let Err(e) = device.acquisition_start().await {
         let _ = stop_tx.send(true);
         let _ = handle.await;
         return NodeOpResponse::err(format!("AcquisitionStart failed: {e}"));
@@ -190,7 +190,7 @@ async fn handle_stop<T: UsbTransfer + Send + 'static>(
         let _ = task.await;
     }
 
-    if let Err(e) = device.exec_command("AcquisitionStop").await {
+    if let Err(e) = device.acquisition_stop().await {
         warn!(device_id, error = %e, "AcquisitionStop failed");
     }
 

@@ -70,6 +70,8 @@ cargo test -p viva-genicam --test predicates         # pIsLocked, pIsAvailable, 
 cargo test -p viva-genicam --test register_access    # which GVCP command a register access sends
 cargo test -p viva-genicam --test report             # the diagnostic report every tool writes
 cargo test -p viva-genicam --test gige_session       # control release, monitors, PENDING_ACK, discovery, multicast monitors
+cargo test -p viva-genicam --test facade             # standard-feature helpers, both fake XML profiles (SFNC 2 and older names)
+cargo test -p viva-genicam --test blocking           # the blocking API, and a camera opened from a current-thread runtime
 # Control-channel keepalive, against fixtures that withhold or delay ACKs
 cargo test -p viva-genicam --test heartbeat          # idle keepalive, with a negative control
 cargo test -p viva-genicam --test inflight_keepalive # probes continue while register I/O holds the mutex (against the fake)
@@ -107,7 +109,7 @@ A fix starts with a test that fails without it.
 
 ### Vendor XML corpus
 
-Two further tests parse and evaluate real vendor GenApi documents. The
+Three further tests parse, evaluate and use real vendor GenApi documents. The
 documents are vendor copyright, so they are fetched rather than committed, and
 the tests do nothing when the directory is absent:
 
@@ -115,6 +117,7 @@ the tests do nothing when the directory is absent:
 scripts/fetch-xml-corpus.sh
 cargo test -p viva-genapi-xml --test vendor_corpus -- --nocapture   # parses
 cargo test -p viva-genapi     --test vendor_corpus -- --nocapture   # + evaluates
+cargo test -p viva-genicam    --test sfnc_corpus   -- --nocapture   # + the Camera helpers' features
 ```
 
 `VIVA_GENICAM_XML_CORPUS` points them at another directory — XML dumped from

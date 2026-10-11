@@ -116,3 +116,25 @@ async fn a_report_flags_a_camera_configured_for_another_subnet() {
         assert!(report.contains(expected), "missing {expected:?}:\n{report}");
     }
 }
+
+/// A camera configured for another subnet may be able to answer discovery
+/// only by broadcast, and that is the camera a report most needs to find, so
+/// the report's discovery allows a broadcast acknowledgement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_report_lets_a_camera_answer_discovery_by_broadcast() {
+    /// The discovery command's *allow broadcast acknowledge* flag.
+    const ALLOW_BROADCAST_ACK: u8 = 0x10;
+    let camera = fake().await;
+    let request = ReportRequest {
+        iface: Some("127.0.0.1".parse().expect("selector")),
+        discovery_timeout: Duration::from_millis(300),
+        ..ReportRequest::new("report-test 1.0", ReportTarget::None)
+    };
+    build_report(&request).await;
+    let asked = camera.fake().discovery_requests();
+    assert!(!asked.is_empty(), "the fake heard no discovery");
+    assert!(
+        asked.iter().all(|r| r.flags & ALLOW_BROADCAST_ACK != 0),
+        "{asked:?}"
+    );
+}

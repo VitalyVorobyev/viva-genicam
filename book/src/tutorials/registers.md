@@ -132,8 +132,9 @@ Two things are worth pointing out.
 
 **Values are strings at this boundary.** `Camera::get` returns `String` and
 `Camera::set` takes `&str`; the node's own type decides how that text is parsed
-and encoded. `set_exposure_time_us` and `set_gain_db` are typed conveniences
-over the two most common cases.
+and encoded. `get_integer`, `get_float` and their siblings read and write a
+feature as its own type, and [Common tasks](./common-tasks.md) has the helpers
+for exposure, gain and the rest.
 
 **Feature access is synchronous, including inside `#[tokio::main]`.** The
 register I/O behind it blocks, and `GigeRegisterIo` steps off the async worker

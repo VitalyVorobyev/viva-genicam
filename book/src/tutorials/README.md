@@ -22,11 +22,14 @@ installs the library and the CLI and runs a first discovery.
 2. [Registers & features](./registers.md) — read and write GenApi features
    (e.g. `ExposureTime`), use selectors such as `GainSelector`, and learn when
    you might need raw registers.
-3. [GenApi XML](./genapi-xml.md) — fetch the GenICam XML from a device, inspect
+3. [Common tasks](./common-tasks.md) — exposure, gain, triggers, region of
+   interest, binning, frame rate and user sets, whatever names the camera uses
+   for them; and a program without an async runtime.
+4. [GenApi XML](./genapi-xml.md) — fetch the GenICam XML from a device, inspect
    it, and see how it maps to the NodeMap used by `viva-genapi`.
-4. [Streaming](./streaming.md) — start a GVSP stream, receive frames, read the
+5. [Streaming](./streaming.md) — start a GVSP stream, receive frames, read the
    statistics, and learn which knobs matter for throughput and robustness.
-5. [Testing without hardware](./fake-camera.md) — run everything above against
+6. [Testing without hardware](./fake-camera.md) — run everything above against
    an in-process fake camera, for tests, demos, or before your camera arrives.
 
 You can stop after **Discovery** and **Streaming** if you only need to verify

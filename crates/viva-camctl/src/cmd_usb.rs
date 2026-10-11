@@ -188,7 +188,8 @@ pub fn run_stream(
 
     // Start acquisition.
     drop(device); // Release lock before camera feature access.
-    camera.set("AcquisitionStart", "1")?;
+    // Sets TLParamsLocked too.
+    camera.acquisition_start()?;
 
     let deadline = if duration_s > 0 {
         Some(std::time::Instant::now() + std::time::Duration::from_secs(duration_s))
@@ -246,6 +247,10 @@ pub fn run_stream(
         }
     }
 
+    // Clears TLParamsLocked as well.
+    if let Err(err) = camera.acquisition_stop() {
+        eprintln!("AcquisitionStop failed: {err}");
+    }
     println!(
         "\n{frame_count} frames in {:.2}s ({:.1} fps)",
         t0.elapsed().as_secs_f64(),

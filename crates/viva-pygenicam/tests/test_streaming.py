@@ -94,3 +94,12 @@ def test_ts_host_follows_time_calibrate(camera):
         frame = frames.next_frame(timeout_ms=5000)
         assert frame.ts_host is not None
         assert abs(frame.ts_host - time.time()) < 5
+
+
+def test_packet_delay_and_resend_options(camera):
+    """``packet_delay_ns`` and ``resend`` reach ``open_stream``: a delay the
+    fake converts to its ticks still streams, and so does a stream that never
+    asks for lost packets."""
+    with camera.stream(packet_size=1500, packet_delay_ns=2000, resend=False) as frames:
+        frame = frames.next_frame(timeout_ms=5000)
+        assert frame is not None

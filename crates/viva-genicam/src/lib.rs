@@ -106,8 +106,8 @@ pub use evs::{EvsBlock, EvsFormat};
 pub use frame::{Frame, FrameStatus};
 pub use gige::action::{AckSummary, ActionParams};
 pub use stream::{
-    FrameStream, GenericStreamBlock, Stream, StreamBlock, StreamBuilder, StreamDest, StreamOptions,
-    StreamStats,
+    FrameStream, GenericStreamBlock, ResendPolicy, Stream, StreamBlock, StreamBuilder, StreamDest,
+    StreamOptions, StreamStats,
 };
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]

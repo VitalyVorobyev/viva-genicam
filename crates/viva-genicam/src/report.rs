@@ -142,7 +142,18 @@ const BOOTSTRAP: &[(u64, &str, Fmt)] = &[
     ),
     (0x0900, "GevNumberOfMessageChannels", Fmt::Dec),
     (0x0904, "GevNumberOfStreamChannels", Fmt::Dec),
+    (consts::GVCP_CAPABILITY, "GevGVCPCapability", Fmt::Bits),
     (0x0938, "GevHeartbeatTimeout", Fmt::Dec),
+    (
+        consts::TIMESTAMP_TICK_FREQUENCY_HIGH,
+        "GevTimestampTickFrequencyHigh",
+        Fmt::Dec,
+    ),
+    (
+        consts::TIMESTAMP_TICK_FREQUENCY_LOW,
+        "GevTimestampTickFrequencyLow",
+        Fmt::Dec,
+    ),
     (consts::CONTROL_CHANNEL_PRIVILEGE, "GevCCP", Fmt::Bits),
     (consts::MESSAGE_DESTINATION_PORT, "GevMCP", Fmt::Dec),
     (consts::MESSAGE_DESTINATION_ADDRESS, "GevMCDA", Fmt::Ipv4),
@@ -230,10 +241,15 @@ fn interfaces(out: &mut String) {
          discovery no matter what the OS reports elsewhere (#57)."
     );
     let _ = writeln!(out);
-    // `mtu()` only queries the OS on Linux and returns 1500 everywhere else
-    // (TC-11). Printing that as though it had been measured would put a
-    // fabricated number in a document whose whole purpose is evidence.
-    let mtu_measured = cfg!(target_os = "linux");
+    // `mtu()` queries the OS on Linux, Windows and macOS and returns 1500
+    // everywhere else. Printing that as though it had been measured would put
+    // a fabricated number in a document whose whole purpose is evidence.
+    let mtu_measured = cfg!(any(
+        target_os = "linux",
+        windows,
+        target_os = "macos",
+        target_os = "ios"
+    ));
     match Iface::list() {
         Ok(ifaces) if ifaces.is_empty() => {
             let _ = writeln!(out, "(none reported)");
@@ -270,7 +286,7 @@ fn interfaces(out: &mut String) {
                 let _ = writeln!(
                     out,
                     "\nMTU is not queried on {} — the library assumes 1500 and \
-                     cannot select jumbo frames here (TC-11).",
+                     cannot select jumbo frames here.",
                     std::env::consts::OS
                 );
             }

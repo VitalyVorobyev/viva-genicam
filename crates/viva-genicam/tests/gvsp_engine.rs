@@ -6,7 +6,7 @@
 //! GigE Vision field tables with the fake's own constants (ADR-0019), so the
 //! receiver is checked against an independent reading of the wire.
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
 use viva_fake_gige::gvsp::{BlockSpec, Datagram, block_datagrams, image_size, interleave};
@@ -490,4 +490,335 @@ async fn a_stale_payload_size_still_delivers_whole_frames() {
 fn a_frame_stream_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<FrameStream>();
+}
+
+/// A data stride smaller than ours: the camera believes 500, we believe 576.
+/// Every full packet is short; written at our stride the frame has holes and
+/// shifted data, so it must not be delivered as complete (Codex review of
+/// #194).
+#[tokio::test]
+async fn a_frame_of_short_packets_is_not_complete() {
+    let mut h = Harness::new(576);
+    h.stream.set_deliver_incomplete(true);
+    let mut spec = BlockSpec::image(1, 64, 32, MONO8, 576);
+    spec.packet_size = 500;
+    h.send(&block_datagrams(&spec, &image(64 * 32, 1), &[]));
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("the block closes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert!(!frame.is_complete(), "{:?}", frame.status);
+    let stats = h.settle(|s| s.frames_incomplete == 1);
+    assert_eq!((stats.frames_complete, stats.frames_incomplete), (0, 1));
+    // Packets 1..=4 are short and not the last; packet 5 is the last.
+    assert_eq!(stats.packets_size_mismatch, 4, "{stats:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Packet resend and the camera as the only source (milestone S)
+// ---------------------------------------------------------------------------
+
+/// The camera's control port, as far as resend is concerned: it reads
+/// `PACKETRESEND_CMD`s with the test's own offsets, written out below from
+/// the field table Wireshark's `packet-gvcp.c` dissects, and answers by
+/// sending datagrams from the harness's GVSP sender.
+struct ControlPort {
+    socket: UdpSocket,
+}
+
+/// A `PACKETRESEND_CMD`, as the test reads it.
+#[derive(Debug, PartialEq, Eq)]
+struct Request {
+    channel: u16,
+    block_id: u64,
+    first: u32,
+    last: u32,
+    from: SocketAddr,
+}
+
+impl ControlPort {
+    fn new() -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind control port");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("read timeout");
+        Self { socket }
+    }
+
+    fn addr(&self) -> SocketAddrV4 {
+        match self.socket.local_addr().expect("control address") {
+            SocketAddr::V4(addr) => addr,
+            SocketAddr::V6(_) => unreachable!("bound to IPv4"),
+        }
+    }
+
+    /// The next request within `within`, its raw bytes checked against the
+    /// header every `PACKETRESEND_CMD` carries.
+    fn next(&self, within: Duration) -> Option<(Request, Vec<u8>)> {
+        let deadline = Instant::now() + within;
+        let mut buf = [0u8; 2048];
+        while Instant::now() < deadline {
+            let Ok((len, from)) = self.socket.recv_from(&mut buf) else {
+                continue;
+            };
+            let bytes = buf[..len].to_vec();
+            assert_eq!(bytes[0], 0x42, "GVCP command key");
+            assert_eq!(
+                bytes[1] & 0x01,
+                0,
+                "PACKETRESEND asks for no acknowledgement"
+            );
+            assert_eq!(&bytes[2..4], &[0x00, 0x40], "PACKETRESEND_CMD");
+            assert_ne!(&bytes[6..8], &[0, 0], "request id 0 is not used");
+            let extended = bytes[1] & 0x10 != 0;
+            let length = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+            assert_eq!(length, if extended { 20 } else { 12 });
+            assert_eq!(len, 8 + length);
+            let p = &bytes[8..];
+            let word = |at: usize| u32::from_be_bytes([p[at], p[at + 1], p[at + 2], p[at + 3]]);
+            let request = if extended {
+                Request {
+                    channel: u16::from_be_bytes([p[0], p[1]]),
+                    block_id: u64::from_be_bytes(p[12..20].try_into().unwrap()),
+                    first: word(4),
+                    last: word(8),
+                    from,
+                }
+            } else {
+                Request {
+                    channel: u16::from_be_bytes([p[0], p[1]]),
+                    block_id: u64::from(u16::from_be_bytes([p[2], p[3]])),
+                    first: word(4) & 0x00FF_FFFF,
+                    last: word(8) & 0x00FF_FFFF,
+                    from,
+                }
+            };
+            return Some((request, bytes));
+        }
+        None
+    }
+}
+
+/// A harness whose stream accepts only 127.0.0.1 and asks `control` for
+/// lost packets on stream channel `channel`.
+fn resend_harness(packet_size: u32, channel: u16) -> (Harness, ControlPort) {
+    let mut h = Harness::new(packet_size);
+    let control = ControlPort::new();
+    h.stream.set_source_filter(Some(Ipv4Addr::LOCALHOST));
+    h.stream.enable_resend(control.addr(), channel);
+    (h, control)
+}
+
+/// A lost data packet is asked for once the gap is older than the resend
+/// delay, in the 12-byte standard layout, from the stream socket — and the
+/// frame completes when it is sent again.
+#[tokio::test]
+async fn a_lost_packet_is_asked_for_in_the_standard_layout_and_recovered() {
+    let (mut h, control) = resend_harness(576, 3);
+    let img = image(64 * 32, 3);
+    let datagrams = block_datagrams(&BlockSpec::image(0x0102, 64, 32, MONO8, 576), &img, &[]);
+    let lost = datagrams[2].clone(); // data packet 2
+    let script = PacketScript::new().step(ScriptStep::Drop {
+        block: 0x0102,
+        packet: 2,
+    });
+    h.send(&script.apply(datagrams));
+
+    let (request, bytes) = control.next(WAIT).expect("a resend request");
+    assert_eq!(
+        request,
+        Request {
+            channel: 3,
+            block_id: 0x0102,
+            first: 2,
+            last: 2,
+            from: h.dest,
+        },
+        "asked from the stream socket"
+    );
+    #[rustfmt::skip]
+    assert_eq!(&bytes[8..], &[
+        0x00, 0x03,             // stream channel 3
+        0x01, 0x02,             // block id
+        0x00, 0x00, 0x00, 0x02, // first packet id
+        0x00, 0x00, 0x00, 0x02, // last packet id
+    ]);
+    h.send(&[lost]);
+
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("the frame completes once the packet is resent")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.status, FrameStatus::Complete);
+    assert!(frame.payload.as_ref() == img.as_slice());
+    let stats = h.stream.stats();
+    assert_eq!(
+        (stats.resend_requested, stats.resend_recovered),
+        (1, 1),
+        "{stats:?}"
+    );
+}
+
+/// With extended ids the request is 20 bytes, flag `0x10`: channel, reserved,
+/// 32-bit first and last packet ids, then the 64-bit block id.
+#[tokio::test]
+async fn an_extended_id_request_carries_the_64_bit_block_id() {
+    let (mut h, control) = resend_harness(576, 0);
+    let block = 0x0001_0000_0000_0007u64;
+    let mut spec = BlockSpec::image(block, 64, 32, MONO8, 576);
+    spec.extended_ids = true;
+    let img = image(64 * 32, 4);
+    let datagrams = block_datagrams(&spec, &img, &[]);
+    let lost: Vec<Datagram> = datagrams[2..4].to_vec(); // data packets 2 and 3
+    let script = PacketScript::new()
+        .step(ScriptStep::Drop { block, packet: 2 })
+        .step(ScriptStep::Drop { block, packet: 3 });
+    h.send(&script.apply(datagrams));
+
+    let (request, bytes) = control.next(WAIT).expect("a resend request");
+    assert_eq!(
+        (request.block_id, request.first, request.last),
+        (block, 2, 3)
+    );
+    assert_eq!(bytes[1], 0x10, "extended ids, no acknowledgement");
+    #[rustfmt::skip]
+    assert_eq!(&bytes[8..], &[
+        0x00, 0x00,                                     // stream channel 0
+        0x00, 0x00,                                     // reserved
+        0x00, 0x00, 0x00, 0x02,                         // first packet id
+        0x00, 0x00, 0x00, 0x03,                         // last packet id
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, // block id
+    ]);
+    h.send(&lost);
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("the frame completes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert!(frame.payload.as_ref() == img.as_slice());
+    assert_eq!(h.stream.stats().resend_recovered, 2);
+}
+
+/// A camera that no longer holds the packets says so with a GVSP packet whose
+/// status is `PACKET_UNAVAILABLE` (0x800C): the range is not asked for again,
+/// it counts as unavailable, and the frame closes incomplete.
+#[tokio::test]
+async fn a_range_the_camera_no_longer_holds_is_not_asked_for_again() {
+    let (mut h, control) = resend_harness(576, 0);
+    h.stream.set_deliver_incomplete(true);
+    // Long enough that answering before the first retry is not a race.
+    h.stream
+        .set_resend_retry_interval(Duration::from_millis(60));
+    let script = PacketScript::new().step(ScriptStep::Drop {
+        block: 9,
+        packet: 2,
+    });
+    h.send(&script.apply(block_datagrams(
+        &BlockSpec::image(9, 64, 32, MONO8, 576),
+        &image(64 * 32, 5),
+        &[],
+    )));
+    let (request, _) = control.next(WAIT).expect("a resend request");
+    assert_eq!((request.first, request.last), (2, 2));
+    // Header only: status 0x800C, block 9, payload format, packet id 2.
+    h.send(&[Datagram {
+        block_id: 9,
+        packet_id: 2,
+        kind: viva_fake_gige::gvsp::PacketKind::Payload,
+        bytes: vec![0x80, 0x0C, 0x00, 0x09, 0x03, 0x00, 0x00, 0x02],
+    }]);
+    // Four retry intervals: a stream still asking would have asked again.
+    assert_eq!(
+        control.next(Duration::from_millis(250)),
+        None,
+        "asked again"
+    );
+
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("the frame closes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.status, FrameStatus::Incomplete { missing_packets: 1 });
+    let stats = h.stream.stats();
+    assert_eq!(
+        (
+            stats.resend_requested,
+            stats.resend_recovered,
+            stats.resend_unavailable
+        ),
+        (1, 0, 1),
+        "{stats:?}"
+    );
+}
+
+/// A frame that lost too much is not worth flooding the camera for: at most a
+/// quarter of its packets are asked for, retries included.
+#[tokio::test]
+async fn resend_requests_stop_at_a_quarter_of_the_frame() {
+    let (h, control) = resend_harness(576, 0);
+    // 40 data packets at a 540-byte stride: 42 packets in all, so 11 may be
+    // asked for. Every second data packet is lost: 20 separate ranges.
+    let spec = BlockSpec::image(1, 540, 40, MONO8, 576);
+    let mut script = PacketScript::new();
+    for packet in (2..=40).step_by(2) {
+        script = script.step(ScriptStep::Drop { block: 1, packet });
+    }
+    h.send(&script.apply(block_datagrams(&spec, &image(540 * 40, 6), &[])));
+
+    let mut asked = 0;
+    while let Some((request, _)) = control.next(Duration::from_millis(300)) {
+        asked += request.last - request.first + 1;
+    }
+    assert_eq!(asked, 11, "a quarter of 42, rounded up");
+    assert_eq!(h.stream.stats().resend_requested, 11);
+}
+
+/// An address of this host other than 127.0.0.1: 127.0.0.2 where the whole of
+/// 127/8 is local (Linux, Windows), otherwise the first non-loopback IPv4
+/// address (macOS, whose `lo0` carries only 127.0.0.1).
+fn foreign_source() -> UdpSocket {
+    if let Ok(socket) = UdpSocket::bind("127.0.0.2:0") {
+        return socket;
+    }
+    let addr = viva_genicam::gige::nic::Iface::list()
+        .expect("interfaces")
+        .iter()
+        .flat_map(|iface| iface.all_ipv4().unwrap_or_default())
+        .find(|ip| !ip.is_loopback())
+        .expect("an IPv4 address other than loopback, to send from");
+    UdpSocket::bind(SocketAddr::new(IpAddr::V4(addr), 0)).expect("bind foreign source")
+}
+
+/// GVSP from any address but the camera's is ignored and counted (SR-03):
+/// a stream bound to a port another sender knows is not theirs to fill.
+#[tokio::test]
+async fn datagrams_from_another_address_are_ignored() {
+    let mut h = Harness::new(576);
+    h.stream.set_source_filter(Some(Ipv4Addr::LOCALHOST));
+    let foreign = foreign_source();
+    let intruder = small_block(1);
+    for d in &intruder {
+        foreign.send_to(&d.bytes, h.dest).expect("send");
+    }
+    let stats = h.settle(|s| s.packets_ignored_foreign == intruder.len() as u64);
+    assert_eq!(
+        stats.packets_ignored_foreign,
+        intruder.len() as u64,
+        "{stats:?}"
+    );
+    assert!(matches!(
+        h.stream.next_block_blocking(Duration::from_millis(200)),
+        Err(GenicamError::Timeout(_))
+    ));
+
+    h.send(&small_block(2));
+    let block = h
+        .stream
+        .next_block_blocking(WAIT)
+        .expect("the camera's own block")
+        .expect("stream running");
+    assert_eq!(block.block_id(), 2);
 }

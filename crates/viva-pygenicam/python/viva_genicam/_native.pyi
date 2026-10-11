@@ -62,6 +62,8 @@ class _Camera:
         auto_packet_size: bool,
         multicast: Optional[str],
         destination_port: Optional[int],
+        packet_delay_ns: Optional[int],
+        resend: bool,
     ) -> _FrameStream: ...
 
 def discover_gige(

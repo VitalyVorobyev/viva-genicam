@@ -71,11 +71,13 @@ cam.stream(
     iface="en0",               # NIC override — or "192.168.0.5"
     auto_packet_size=True,     # size packets from the NIC MTU (or packet_size=N)
     multicast="239.255.42.99", # have the camera stream to a multicast group, and join it
-    destination_port=34567,    # fix the streaming UDP port
+    destination_port=34567,    # a fixed UDP port, for a firewall; default: the OS picks one
+    packet_delay_ns=2000,      # GevSCPD, converted to the camera's ticks; default: left alone
+    resend=False,              # never ask for lost packets; default: ask if the camera can
 )
 ```
 
-None of these are required. `iface=` is auto-resolved by subnet match if you omit it; the rest fall back to the camera's defaults.
+None of these are required. `iface=` is auto-resolved by subnet match if you omit it; the rest fall back to the defaults noted above. What packet delay and resend do is in [Streaming → Packet delay](../tutorials/streaming.md#42-packet-delay) and [Packet resend](../tutorials/streaming.md#46-packet-resend).
 
 Packet size has three settings. Omit both arguments and the camera's current
 `GevSCPSPacketSize` is kept. `auto_packet_size=True` sets it from the host

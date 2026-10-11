@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use viva_genicam::evs::{EvsBlock, EvsFormat};
 use viva_genicam::pfnc::PixelFormat;
 use viva_genicam::stream::StreamBlock;
-use viva_genicam::{Frame, StreamOptions};
+use viva_genicam::{Frame, ResendPolicy, StreamOptions};
 
 use viva_gige::nic::IfaceSelector;
 
@@ -22,7 +22,12 @@ pub struct StreamArgs {
     pub iface: Option<IfaceSelector>,
     pub mode: String,
     pub group: Option<Ipv4Addr>,
-    pub port: u16,
+    /// Receive port; `None` lets the operating system pick one.
+    pub port: Option<u16>,
+    /// `GevSCPD` to ask for, in time; `None` leaves it alone.
+    pub packet_delay: Option<Duration>,
+    /// Ask for lost packets when the camera supports it.
+    pub resend: bool,
     /// Explicit GVSP packet size ceiling. Mutually exclusive with [`StreamArgs::auto`].
     pub packet_size: Option<u32>,
     /// Set from NIC MTU then path-probe (ADR-0021). Mutually exclusive with
@@ -50,8 +55,14 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     } else if let Some(size) = args.packet_size {
         options = options.packet_size(size);
     }
-    if args.port != 0 {
-        options = options.destination_port(args.port);
+    if let Some(port) = args.port {
+        options = options.destination_port(port);
+    }
+    if let Some(delay) = args.packet_delay {
+        options = options.packet_delay(delay);
+    }
+    if !args.resend {
+        options = options.resend(ResendPolicy::Off);
     }
     if let StreamMode::Multicast = parse_mode(&args.mode)? {
         let group = args

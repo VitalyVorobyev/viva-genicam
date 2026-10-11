@@ -11,10 +11,11 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, trace, warn};
 
 use crate::gvsp::{
-    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketScript,
-    block_datagrams, image_size, interleave,
+    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketKind,
+    PacketScript, block_datagrams, image_size, interleave,
 };
 use crate::registers::RegisterMap;
+use crate::resend::{Retention, StreamPath};
 
 /// IPv4 header size counted by `GevSCPSPacketSize` per the GigE Vision spec.
 const IPV4_HEADER_SIZE: usize = 20;
@@ -40,6 +41,22 @@ pub(crate) struct SenderOptions {
     pub payload_type: Option<u16>,
     /// Deterministic damage to apply to the stream.
     pub script: PacketScript,
+    /// Also send every block, first and with its image bytes inverted, from a
+    /// socket bound to this address: datagrams a receiver must not accept.
+    pub spoof_source: Option<Ipv4Addr>,
+}
+
+/// State the GVSP sender shares with the rest of the fake.
+#[derive(Debug, Clone)]
+pub(crate) struct SenderShared {
+    /// Blocks produced, including any the script then dropped whole.
+    pub blocks_sent: Arc<AtomicU64>,
+    /// Datagrams sent from the spoofed source.
+    pub spoofed: Arc<AtomicU64>,
+    /// Recent blocks' packets, for resend.
+    pub retention: Arc<std::sync::Mutex<Retention>>,
+    /// The camera's own address: GVSP leaves from it.
+    pub source_ip: Ipv4Addr,
 }
 
 /// Run the GVSP frame sender loop.
@@ -47,26 +64,44 @@ pub(crate) struct SenderOptions {
 /// Waits for `acq_start_notify`, then streams frames until `stop_flag` is set.
 /// Every block built counts in `blocks_sent`, including one the script then
 /// drops whole: that is a block the camera produced and the host never saw.
-pub async fn run(
+pub(crate) async fn run(
     regs: Arc<Mutex<RegisterMap>>,
     acq_start_notify: Arc<Notify>,
     stop_flag: Arc<AtomicBool>,
     fps: u32,
     options: SenderOptions,
-    blocks_sent: Arc<AtomicU64>,
+    shared: SenderShared,
 ) {
+    let SenderShared {
+        blocks_sent,
+        spoofed,
+        retention,
+        source_ip,
+    } = shared;
     loop {
         // Wait for acquisition start.
         acq_start_notify.notified().await;
         info!("GVSP streaming started");
         stop_flag.store(false, Ordering::SeqCst);
 
-        let socket = match UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
+        // GVSP leaves from the camera's own address, as on a real device; a
+        // receiver that accepts only the camera as a source depends on it.
+        let socket = match UdpSocket::bind((source_ip, 0)).await {
+            Ok(s) => Arc::new(s),
             Err(e) => {
                 warn!(error = %e, "failed to bind GVSP socket");
                 continue;
             }
+        };
+        let spoof_socket = match options.spoof_source {
+            Some(addr) => match UdpSocket::bind((addr, 0)).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    warn!(error = %e, %addr, "failed to bind the spoofed GVSP source");
+                    None
+                }
+            },
+            None => None,
         };
 
         let frame_interval = Duration::from_micros(1_000_000 / fps.max(1) as u64);
@@ -133,13 +168,46 @@ pub async fn run(
             };
             block_id = next_block_id(first, options.extended_ids);
             blocks_sent.fetch_add(1, Ordering::Relaxed);
+            // What a resend request is answered from: the block as built, before
+            // the script damages it in flight.
+            let mut spoof = datagrams.clone();
+            if let Ok(mut retention) = retention.lock() {
+                retention.set_path(StreamPath {
+                    socket: socket.clone(),
+                    dest,
+                    max_on_wire: config.max_on_wire,
+                });
+                retention.retain(first, &datagrams);
+            }
             datagrams = options.script.apply(datagrams);
             if options.script.interleaves(first) {
                 let second = block_id;
                 if let Some(next) = build_block(&config, &options, second, clock_origin) {
+                    if let Ok(mut retention) = retention.lock() {
+                        retention.retain(second, &next);
+                    }
+                    spoof.extend(next.iter().cloned());
                     datagrams = interleave(datagrams, options.script.apply(next));
                     block_id = next_block_id(second, options.extended_ids);
                     blocks_sent.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // Datagrams from an address that is not the camera's, sent ahead
+            // of the genuine ones: a receiver that accepted them would build
+            // the frame from inverted bytes and count the camera's own packets
+            // as duplicates.
+            if let Some(spoof_socket) = &spoof_socket {
+                let header_len = if options.extended_ids { 20 } else { 8 };
+                for datagram in &mut spoof {
+                    if datagram.kind == PacketKind::Payload {
+                        for byte in &mut datagram.bytes[header_len..] {
+                            *byte = !*byte;
+                        }
+                    }
+                    if spoof_socket.send_to(&datagram.bytes, dest).await.is_ok() {
+                        spoofed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 

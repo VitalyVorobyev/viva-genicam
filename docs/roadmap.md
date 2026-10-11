@@ -4,12 +4,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
 
-**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. S, C, L and U, like the receive engine already on `main`, are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
-
-## S — Packet resend and stream-channel setup
-
-**Goal**: a lost packet is requested again, in the specification's layout, when the camera supports it. Stream setup stops overwriting the packet delay, binds a port of its own and accepts packets only from the camera.
-**Rows**: SR-04, SR-03, SR-19, SR-21, SR-22, TC-11.
+**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. C, L and U, like the receive engine and packet resend already on `main`, are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
 ## C — Chunks and events through GenApi ports
 
@@ -72,6 +67,8 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture; behind GA-09.
 - **DC-05**: event-vision blocks in Python; their format is known only from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)'s camera.
 - **SR-23**: the receive engine's block-id and packet heuristics (late window, restart on block 1, refusing an oversized data packet); a capture through an AcquisitionStop/Start settles them.
+- **SR-24**: whether cameras accept a packet resend request sent from the stream socket rather than the control channel's port; a lossy stream's `-vv` log, or a capture, settles it.
+- **SR-25**: how a camera answers a resend it cannot serve (which status, per packet or per range, or silence), and whether resent packets carry status `0x0100`.
 - **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
 
 ## Studio

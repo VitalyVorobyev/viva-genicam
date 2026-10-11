@@ -8,7 +8,7 @@ use serde::Serialize;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
-use viva_genicam::{StreamOptions, StreamStats};
+use viva_genicam::{ResendPolicy, StreamOptions, StreamStats};
 
 use viva_gige::nic::IfaceSelector;
 
@@ -21,7 +21,12 @@ pub struct BenchArgs {
     pub iface: Option<IfaceSelector>,
     pub mode: String,
     pub group: Option<Ipv4Addr>,
-    pub port: u16,
+    /// Receive port; `None` lets the operating system pick one.
+    pub port: Option<u16>,
+    /// `GevSCPD` to ask for, in time; `None` leaves it alone.
+    pub packet_delay: Option<Duration>,
+    /// Ask for lost packets when the camera supports it.
+    pub resend: bool,
     pub duration_s: u64,
     pub json_out: Option<PathBuf>,
 }
@@ -37,6 +42,9 @@ struct BenchReport {
     frames_backpressure: u64,
     packets_received: u64,
     packets_missing: u64,
+    resend_requested: u64,
+    resend_recovered: u64,
+    resend_unavailable: u64,
     bytes: u64,
     avg_fps: f64,
     avg_mbps: f64,
@@ -53,6 +61,9 @@ impl BenchReport {
             frames_backpressure: stats.frames_backpressure,
             packets_received: stats.packets_received,
             packets_missing: stats.packets_missing,
+            resend_requested: stats.resend_requested,
+            resend_recovered: stats.resend_recovered,
+            resend_unavailable: stats.resend_unavailable,
             bytes: stats.bytes,
             avg_fps: stats.avg_fps,
             avg_mbps: stats.avg_mbps,
@@ -71,8 +82,14 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
 
     let iface = common::resolve_receive_iface(args.iface.as_ref(), device.ip)?;
     let mut options = StreamOptions::new().iface(iface).auto_packet_size();
-    if args.port != 0 {
-        options = options.destination_port(args.port);
+    if let Some(port) = args.port {
+        options = options.destination_port(port);
+    }
+    if let Some(delay) = args.packet_delay {
+        options = options.packet_delay(delay);
+    }
+    if !args.resend {
+        options = options.resend(ResendPolicy::Off);
     }
     if let StreamMode::Multicast = parse_mode(&args.mode)? {
         let group = args

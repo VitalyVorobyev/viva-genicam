@@ -243,13 +243,17 @@ pub fn save_image(buffer: &[u8], path: &PathBuf) -> Result<()> {
 /// backpressure.
 pub fn print_stream_counters(prefix: &str, stats: &viva_genicam::StreamStats) {
     println!(
-        "{prefix} fps={:.1} Mbps={:.2} complete={} incomplete={} missed={} backpressure={} bytes={}",
+        "{prefix} fps={:.1} Mbps={:.2} complete={} incomplete={} missed={} backpressure={} \
+         resend={}/{}/{} bytes={}",
         stats.avg_fps,
         stats.avg_mbps,
         stats.frames_complete,
         stats.frames_incomplete,
         stats.frames_missed,
         stats.frames_backpressure,
+        stats.resend_requested,
+        stats.resend_recovered,
+        stats.resend_unavailable,
         stats.bytes,
     );
 }

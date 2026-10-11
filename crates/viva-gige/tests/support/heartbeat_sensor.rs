@@ -83,7 +83,7 @@ pub async fn start(
                     payload.extend_from_slice(&value.to_be_bytes());
                     send_ack(&socket, peer, id, opcode, 0, &payload).await;
                     // Late and duplicated heartbeat ACKs must not steal the
-                    // next read/write or packet-resend acknowledgement.
+                    // next read or write acknowledgement.
                     if let Some(ref ack) = last_heartbeat_ack {
                         for _ in 0..5 {
                             socket.send_to(ack, peer).await.unwrap();
@@ -139,10 +139,9 @@ pub async fn start(
                         let privilege: u32 = if observations.expired { 0 } else { 2 };
                         payload.extend_from_slice(&privilege.to_be_bytes());
                         last_heartbeat_ack = Some(send_ack(&socket, peer, id, opcode, 0, &payload).await);
-                    } else if address == NEXT_REGISTER || opcode == 0x0040 {
+                    } else if address == NEXT_REGISTER {
                         let status = if observations.expired { 0x8004 } else { 0 };
-                        let payload = if opcode == 0x0040 { Vec::new() } else { 0u32.to_be_bytes().to_vec() };
-                        send_ack(&socket, peer, id, opcode, status, &payload).await;
+                        send_ack(&socket, peer, id, opcode, status, &0u32.to_be_bytes()).await;
                         // The facade test keeps servicing this socket during
                         // teardown so an idle ping cannot be stranded.
                         return (observations, socket);

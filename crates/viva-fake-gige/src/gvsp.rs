@@ -217,6 +217,18 @@ pub fn trailer(spec: &BlockSpec, packet_id: u32, chunk_data: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// A GVSP packet that is a header and nothing else, carrying `status`: how
+/// the fake answers a resend request it cannot serve. The packet format is
+/// generic payload, the block and packet ids those of the first packet asked
+/// for.
+pub fn header_only(block_id: u64, extended_ids: bool, packet_id: u32, status: u16) -> Vec<u8> {
+    let mut spec = BlockSpec::image(block_id, 0, 0, 0, 0);
+    spec.extended_ids = extended_ids;
+    let mut buf = Vec::with_capacity(spec.header_len());
+    put_header(&mut buf, &spec, status, FORMAT_PAYLOAD, packet_id);
+    buf
+}
+
 /// Every datagram of one block in transmission order: the leader, `image`
 /// split at the block's stride, and the trailer with `trailer_chunks`.
 pub fn block_datagrams(spec: &BlockSpec, image: &[u8], trailer_chunks: &[u8]) -> Vec<Datagram> {
@@ -467,6 +479,19 @@ mod tests {
         assert_eq!(&pkt[8..16], &9u64.to_be_bytes());
         assert_eq!(&pkt[16..20], &[0x00, 0x01, 0x02, 0x03]);
         assert_eq!(&pkt[20..], &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn a_header_only_packet_carries_its_status() {
+        assert_eq!(
+            header_only(0x1234, false, 0x0001_0203, 0x800C),
+            vec![0x80, 0x0C, 0x12, 0x34, 0x03, 0x01, 0x02, 0x03]
+        );
+        let ext = header_only(7, true, 9, 0x800C);
+        assert_eq!(ext.len(), 20);
+        assert_eq!(&ext[..5], &[0x80, 0x0C, 0x00, 0x00, 0x83]);
+        assert_eq!(&ext[8..16], &7u64.to_be_bytes());
+        assert_eq!(&ext[16..20], &9u32.to_be_bytes());
     }
 
     #[test]

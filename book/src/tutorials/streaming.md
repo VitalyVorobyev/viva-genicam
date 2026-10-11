@@ -6,7 +6,7 @@ Goal of this tutorial:
 - Read the statistics the stream reports — and know which of them mean
   something today.
 - Understand the knobs that decide whether streaming is stable: packet size and
-  MTU, packet delay, and where the current implementation stops.
+  MTU, packet delay, and packet resend.
 
 You should already know your camera's IP and the host NIC you reach it on
 ([Discovery](./discovery.md)), and be able to set features
@@ -56,8 +56,8 @@ runs until Ctrl+C.
 Once a second you get a progress line, and a summary at the end:
 
 ```
-[stream] fps=30.0 Mbps=73.73 complete=30 incomplete=0 missed=0 backpressure=0 bytes=9216000
-Summary: fps=30.0 Mbps=73.73 complete=300 incomplete=0 missed=0 backpressure=0 bytes=92160000
+[stream] fps=30.0 Mbps=73.73 complete=30 incomplete=0 missed=0 backpressure=0 resend=0/0/0 bytes=9216000
+Summary: fps=30.0 Mbps=73.73 complete=300 incomplete=0 missed=0 backpressure=0 resend=0/0/0 bytes=92160000
 ```
 
 [§4.3](#43-what-the-statistics-tell-you) says what each counter means.
@@ -66,10 +66,11 @@ If no frames arrive at all:
 
 - Confirm nothing else is already consuming the stream (a vendor viewer holds
   the control channel exclusively).
-- Confirm the host firewall permits inbound UDP on the stream port —
-  `viva-camctl stream` uses `10040` unless you pass `--port`; the library
-  (`Camera::open_stream`, `StreamBuilder`) defaults to `0x5FFF` (24575) unless
-  you pass `destination_port`.
+- Confirm the host firewall permits inbound UDP on the stream port. Each
+  stream gets a free port from the operating system unless you name one with
+  `--port` (`destination_port` in Rust and Python), which is the way to go
+  behind a firewall that admits only known ports — see
+  [Networking → Letting the reply back in](../networking.md#33-letting-the-reply-back-in-firewalld).
 - Confirm the `--iface` interface is one the camera can actually reach.
 
 ### 2.2. Saving frames
@@ -141,9 +142,10 @@ Then the loop. Reassembly, ordering and buffering all stay inside
 ```
 
 Two things to note. `open_stream` does the whole setup through the camera's own
-control channel: it claims control, points the stream channel at this host (or
-a multicast group), negotiates the packet size, binds the socket, and starts the
-receive engine with the camera's `PayloadSize`. And `acquisition_start` /
+control channel: it claims control, binds the socket, points the stream channel
+at it (or at a multicast group), negotiates the packet size, reads whether the
+camera can resend lost packets, and starts the receive engine with the camera's
+`PayloadSize`. And `acquisition_start` /
 `acquisition_stop` are ordinary synchronous calls — see
 [Registers & features](./registers.md#step-3--do-the-same-from-rust).
 
@@ -227,6 +229,15 @@ overruns switch buffers and NIC rings first. A modest delay trades a little
 latency for a lot of stability, and is usually the first thing to try when drops
 appear only at high frame rates.
 
+Opening a stream leaves `GevSCPD` as the camera has it. To set it, give a time:
+
+| CLI | Rust | Python |
+|---|---|---|
+| `--packet-delay-ns 2000` | `StreamOptions::packet_delay(Duration::from_micros(2))` | `packet_delay_ns=2000` |
+
+The library converts it to the camera's ticks at the frequency the camera
+reports, and refuses to open the stream if the camera reports none.
+
 ### 4.3. What the statistics tell you
 
 `FrameStream::stats()` counts every block the camera sent exactly once, when its
@@ -238,19 +249,23 @@ fate is decided:
 | `frames_incomplete` | Closed with packets missing, without a trailer, or with an error status from the camera. |
 | `frames_missed` | Never seen at all: gaps in the block-id sequence. |
 | `frames_backpressure` | Assembled, then discarded because your code did not take them in time. The stream keeps the four newest frames. |
+| `resend_requested` | Lost packets asked for again ([§4.6](#46-packet-resend)), each counted once. |
+| `resend_recovered` | Of those, the ones that arrived. |
+| `resend_unavailable` | Of those, the ones the camera said it no longer has. |
 
 So `frames_complete + frames_incomplete + frames_missed + frames_backpressure`
 is the number of frames the camera sent; `frames_lost()` is everything but the
 first. The packet counters say why: `packets_missing`, `packets_duplicate`, and
 `packets_ignored_*` for what arrived and could not be used (late, out of range,
-malformed, an unsupported payload type, an error status).
-`packets_size_mismatch` above zero means the camera and the host disagree about
-the packet size — retry with `--packet-size 1500`.
+malformed, an unsupported payload type, an error status, or sent from an
+address that is not the camera's). `packets_size_mismatch` above zero means
+the camera and the host disagree about the packet size — retry with
+`--packet-size 1500`. On the command line, `resend=` shows requested,
+recovered and unavailable.
 
 `incomplete` and `missed` point at the network or the camera; `backpressure`
-points at your code. Packet resend is not implemented yet
-([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)), so there
-are no resend counters: a lost packet is a lost frame.
+points at your code. A frame whose lost packets were resent counts as complete,
+so `resend_recovered` is the early warning that the network drops packets.
 
 ### 4.4. Incomplete frames and the block timeout
 
@@ -273,6 +288,34 @@ less than half, it warns once and names the limit to raise —
 burst the size of a frame overflows the socket and the kernel drops packets
 before any counter can see them.
 
+### 4.6. Packet resend
+
+When a packet goes missing, the stream asks the camera to send it again, if the
+camera says it can (bit `0x4` of its GVCP Capability register): a gap in a
+frame's packets that is still open after 2 ms is requested, again every 20 ms
+while it stays open, three times at most, and never more than a quarter of the
+frame's packets in all. A frame that lost more than that is not worth flooding
+the camera for; it closes incomplete. A lost trailer cannot be asked for —
+nothing after it says it is missing.
+
+Requests leave from the stream's own socket for the camera's control port
+(UDP 3956), and the packets come back on the stream. A firewall that admits
+the stream needs nothing more.
+
+| | CLI | Rust | Python |
+|---|---|---|---|
+| Turn it off | `--no-resend` | `StreamOptions::resend(ResendPolicy::Off)` | `resend=False` |
+
+`FrameStream::set_resend_delay`, `set_resend_retry_interval`,
+`set_resend_max_requests` and `set_resend_budget` change the numbers above.
+A multicast stream never asks, nor does one built with
+`FrameStream::from_socket` on a camera another application controls; only
+the controlling application should.
+
+Resend has been tested against the [fake camera](./fake-camera.md) only, so far.
+If a camera of yours misbehaves with it on, `--no-resend` is the workaround, and
+[the report bundle](../reporting.md) is how we fix it.
+
 ---
 
 ## 5. Troubleshooting
@@ -284,7 +327,9 @@ configuration one. A dedicated NIC and switch removes a whole class of cause.
 
 **Discovery and feature access work, but no frames arrive.** Almost always the
 stream port: check the firewall for inbound UDP on it (see
-[2.1](#21-a-basic-stream) for the defaults).
+[2.1](#21-a-basic-stream)). A warning that datagrams arrive only from an
+address that is not the camera's means something else is sending to the
+stream's port; the stream ignores it.
 On Linux with firewalld, this is a separate rule from the GVCP one — see
 [Letting the reply back in](../networking.md#33-letting-the-reply-back-in-firewalld).
 
@@ -309,7 +354,8 @@ You should now be able to:
 - Start a stream from the CLI and from Rust, and save frames or event blocks.
 - Tell from the counters whether frames are lost on the network (`incomplete`,
   `missed`) or in your own code (`backpressure`).
-- Know which knob to reach for first: packet size and MTU, then packet delay.
+- Know which knob to reach for first: packet size and MTU, then packet delay;
+  and read `resend` recoveries as a network that drops packets.
 
 Next: the [Networking Guide](../networking.md) for host and switch
 configuration, or the [viva-gige chapter](../crates/viva-gige.md) for how the

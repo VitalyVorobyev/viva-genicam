@@ -18,6 +18,7 @@ mod assembly;
 #[cfg(fuzzing)]
 mod fuzzing;
 mod receiver;
+mod resend;
 mod stats;
 
 #[cfg(fuzzing)]
@@ -26,7 +27,7 @@ pub use fuzzing::fuzz_assemble;
 
 pub use stats::{StreamStats, StreamStatsAccumulator};
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
@@ -461,6 +462,18 @@ enum PacketSizeMode {
     Explicit(u32),
 }
 
+/// Whether a stream asks the camera to send lost packets again (SR-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ResendPolicy {
+    /// Ask, if the camera's GVCP Capability register (`0x0934`) says it
+    /// supports `PACKETRESEND_CMD`. A multicast stream never asks.
+    #[default]
+    Auto,
+    /// Never ask.
+    Off,
+}
+
 /// Builder for configuring a GVSP stream.
 pub struct StreamBuilder<'a> {
     device: &'a mut GigeDevice,
@@ -469,7 +482,8 @@ pub struct StreamBuilder<'a> {
     rcvbuf_bytes: Option<usize>,
     target_mtu: Option<u32>,
     packet_size_mode: PacketSizeMode,
-    packet_delay: Option<u32>,
+    packet_delay: Option<Duration>,
+    resend: ResendPolicy,
     channel: u32,
     dst_port: u16,
     probe: bool,
@@ -491,6 +505,7 @@ impl<'a> StreamBuilder<'a> {
             target_mtu: None,
             packet_size_mode: PacketSizeMode::Preserve,
             packet_delay: None,
+            resend: ResendPolicy::Auto,
             channel: 0,
             dst_port: 0,
             // On for every policy, Preserve included: the probe only lowers.
@@ -556,13 +571,31 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Override the GVSP inter-packet delay.
-    pub fn packet_delay(mut self, delay: u32) -> Self {
+    /// Have the camera wait `delay` between stream packets: `GevSCPD`,
+    /// written in timestamp ticks at the frequency the camera reports
+    /// (`0x093C`/`0x0940`), rounded to the nearest tick.
+    ///
+    /// Without it `GevSCPD` is left as it is. A camera that reports no tick
+    /// frequency cannot be given a delay in time, and the build fails rather
+    /// than guess a unit.
+    pub fn packet_delay(mut self, delay: Duration) -> Self {
         self.packet_delay = Some(delay);
         self
     }
 
-    /// Configure the UDP port used for streaming (defaults to 0 => device chosen).
+    /// Whether to ask the camera for lost packets (default
+    /// [`ResendPolicy::Auto`]).
+    pub fn resend(mut self, policy: ResendPolicy) -> Self {
+        self.resend = policy;
+        self
+    }
+
+    /// Receive on this UDP port, for a firewall that admits only it.
+    ///
+    /// By default the operating system picks a free port; either way the
+    /// port is written to the camera's `GevSCPHostPort`. The port is the
+    /// stream's alone: it is bound without `SO_REUSEPORT`, so a second
+    /// stream asking for the same one fails to open.
     pub fn destination_port(mut self, port: u16) -> Self {
         self.dst_port = port;
         if let Some(dest) = &mut self.dest {
@@ -609,12 +642,20 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Select the GigE Vision stream channel to configure (defaults to 0).
+    ///
+    /// The build fails for a channel at or beyond the camera's
+    /// `GevNumberOfStreamChannels` (`0x0904`), before anything is written.
     pub fn channel(mut self, channel: u32) -> Self {
         self.channel = channel;
         self
     }
 
     /// Finalise the builder and return a configured [`Stream`].
+    ///
+    /// In order: check the channel exists and that a requested packet delay
+    /// can be converted, bind the socket (port 0 unless one was asked for),
+    /// point the stream channel at it, negotiate the packet size, write
+    /// `GevSCPD` if asked, and read whether the camera supports resend.
     pub async fn build(self) -> Result<Stream, GenicamError> {
         let iface = self
             .iface
@@ -622,27 +663,22 @@ impl<'a> StreamBuilder<'a> {
         let host_ip = iface
             .ipv4()
             .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
-        let default_port = if self.dst_port == 0 {
-            DEFAULT_STREAM_PORT
-        } else {
-            self.dst_port
+        let camera = self.device.remote_addr();
+        let IpAddr::V4(camera_ip) = camera.ip() else {
+            return Err(GenicamError::transport("IPv6 cameras are not supported"));
         };
+
+        // Refusals first, so a refused stream has written nothing.
+        check_stream_channel(self.device, self.channel).await?;
+        let packet_delay = match self.packet_delay {
+            Some(delay) => Some(packet_delay_ticks(self.device, delay).await?),
+            None => None,
+        };
+
         let mut dest = self.dest.unwrap_or(StreamDest::Unicast {
             dst_ip: host_ip,
-            dst_port: default_port,
+            dst_port: self.dst_port,
         });
-        match &mut dest {
-            StreamDest::Unicast { dst_port, .. } => {
-                if *dst_port == 0 {
-                    *dst_port = default_port;
-                }
-            }
-            StreamDest::Multicast { port, .. } => {
-                if *port == 0 {
-                    *port = default_port;
-                }
-            }
-        }
 
         let iface_mtu = nic::mtu(&iface).map_err(|err| GenicamError::transport(err.to_string()))?;
         let mtu = self
@@ -686,27 +722,29 @@ impl<'a> StreamBuilder<'a> {
             )));
         }
 
-        match &dest {
-            StreamDest::Unicast { dst_ip, dst_port } => {
-                info!(%dst_ip, dst_port, channel = self.channel, "configuring unicast stream");
-                self.device
-                    .set_stream_destination(self.channel, *dst_ip, *dst_port)
-                    .await
-                    .map_err(|err| GenicamError::transport(err.to_string()))?;
-            }
-            StreamDest::Multicast { .. } => {
-                info!(
-                    channel = self.channel,
-                    port = dest.port(),
-                    addr = %dest.addr(),
-                    "configuring multicast stream parameters"
-                );
-            }
-        }
-
         // Bind before configuring, so the socket is already listening when the
-        // probe below asks the camera to send to it.
+        // probe below asks the camera to send to it — and so the port the
+        // operating system chose is known (SR-03).
         let socket = Self::bind_socket(&dest, &iface, self.rcvbuf_bytes).await?;
+        let port = socket
+            .local_addr()
+            .map_err(|err| GenicamError::transport(format!("stream socket address: {err}")))?
+            .port();
+        match &mut dest {
+            StreamDest::Unicast { dst_port, .. } => *dst_port = port,
+            StreamDest::Multicast { port: p, .. } => *p = port,
+        }
+        info!(
+            addr = %dest.addr(),
+            port,
+            channel = self.channel,
+            multicast = dest.is_multicast(),
+            "configuring the stream channel"
+        );
+        self.device
+            .set_stream_destination(self.channel, dest.addr(), port)
+            .await
+            .map_err(|err| GenicamError::transport(err.to_string()))?;
 
         let packet_size = if write_camera {
             configure_packet_size(self.device, self.channel, requested).await?
@@ -726,46 +764,42 @@ impl<'a> StreamBuilder<'a> {
             packet_size
         };
 
-        // The delay compensates for a burst of many small packets, so it follows
-        // the size actually in force -- known only now, after a clamp or a probe.
-        // Keying it off the NIC MTU was equivalent while the size was *derived*
-        // from that MTU; under Preserve the two come apart, and a jumbo NIC in
-        // front of a camera holding 1500 is exactly the case that needs spacing.
-        let packet_delay = self.packet_delay.unwrap_or({
-            const DELAY_NS: u32 = 2_000;
-            if packet_size <= 1500 {
-                DELAY_NS / 80
-            } else {
-                0
-            }
-        });
-        self.device
-            .set_stream_packet_delay(self.channel, packet_delay)
-            .await
-            .map_err(|err| GenicamError::transport(err.to_string()))?;
+        // SR-19: `GevSCPD` is the operator's unless the caller asked.
+        if let Some(ticks) = packet_delay {
+            self.device
+                .set_stream_packet_delay(self.channel, ticks)
+                .await
+                .map_err(|err| GenicamError::transport(err.to_string()))?;
+        }
 
-        let source_filter = if dest.is_multicast() {
-            None
-        } else {
-            Some(dest.addr())
+        let resend = match self.resend {
+            ResendPolicy::Off => false,
+            ResendPolicy::Auto if dest.is_multicast() => false,
+            ResendPolicy::Auto => camera_supports_resend(self.device).await,
         };
-        let resend_enabled = !dest.is_multicast();
+        info!(
+            channel = self.channel,
+            resend,
+            "packet resend {}",
+            if resend { "on" } else { "off" }
+        );
 
         let params = StreamParams {
             packet_size,
             packet_delay,
             mtu,
             host: dest.addr(),
-            port: dest.port(),
+            port,
+            channel: self.channel,
+            camera: Some(camera),
         };
 
         let config = StreamConfig {
             dest,
             iface: iface.clone(),
             packet_size: Some(packet_size),
-            packet_delay: Some(packet_delay),
-            source_filter,
-            resend_enabled,
+            packet_delay,
+            source_filter: Some(camera_ip),
         };
 
         Ok(Stream {
@@ -774,6 +808,7 @@ impl<'a> StreamBuilder<'a> {
             params,
             config,
             rcvbuf_bytes: self.rcvbuf_bytes,
+            resend,
         })
     }
 
@@ -814,13 +849,90 @@ impl<'a> StreamBuilder<'a> {
     }
 }
 
-/// Stream port used when the caller names none.
-const DEFAULT_STREAM_PORT: u16 = 0x5FFF;
+/// SR-21: refuse a stream channel the camera does not have.
+///
+/// A count of 0, or one that cannot be read, says nothing usable: channel 0,
+/// which every streaming device has, goes ahead with a warning, and any other
+/// is refused.
+async fn check_stream_channel(device: &mut GigeDevice, channel: u32) -> Result<(), GenicamError> {
+    let count = match device.stream_channel_count().await {
+        Ok(0) => {
+            warn!("the camera reports 0 stream channels (GevNumberOfStreamChannels)");
+            None
+        }
+        Ok(count) => Some(count),
+        Err(err) => {
+            warn!(error = %err, "could not read GevNumberOfStreamChannels");
+            None
+        }
+    };
+    match count {
+        Some(count) if channel >= count => Err(GenicamError::transport(format!(
+            "the camera has {count} stream channel(s) (GevNumberOfStreamChannels); stream \
+             channel {channel} does not exist"
+        ))),
+        None if channel > 0 => Err(GenicamError::transport(format!(
+            "the camera does not say how many stream channels it has; only stream channel 0 \
+             can be configured, not {channel}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// SR-19: `delay` in the camera's timestamp ticks, the unit of `GevSCPD`.
+async fn packet_delay_ticks(device: &mut GigeDevice, delay: Duration) -> Result<u32, GenicamError> {
+    if delay.is_zero() {
+        return Ok(0);
+    }
+    let hz = device.timestamp_tick_frequency().await.map_err(|err| {
+        GenicamError::transport(format!(
+            "cannot set a packet delay: reading the timestamp tick frequency (0x093C/0x0940), \
+             the unit of GevSCPD, failed: {err}"
+        ))
+    })?;
+    delay_in_ticks(delay, hz)
+}
+
+/// `delay` at `hz` ticks a second, rounded to the nearest tick and never 0
+/// for a delay that is not.
+fn delay_in_ticks(delay: Duration, hz: u64) -> Result<u32, GenicamError> {
+    if hz == 0 {
+        return Err(GenicamError::transport(
+            "cannot set a packet delay: the camera reports a timestamp tick frequency of 0, \
+             so GevSCPD has no unit to convert to",
+        ));
+    }
+    let ticks = (delay.as_nanos() * u128::from(hz) + 500_000_000) / 1_000_000_000;
+    let ticks = if ticks == 0 && !delay.is_zero() {
+        1
+    } else {
+        ticks
+    };
+    u32::try_from(ticks).map_err(|_| {
+        GenicamError::transport(format!(
+            "a packet delay of {delay:?} is {ticks} ticks at {hz} Hz, more than GevSCPD holds"
+        ))
+    })
+}
+
+/// Whether the GVCP Capability register says the camera answers
+/// `PACKETRESEND_CMD`. Unreadable counts as no.
+async fn camera_supports_resend(device: &mut GigeDevice) -> bool {
+    match device.gvcp_capability().await {
+        Ok(caps) => caps & viva_gige::gvcp::consts::CAPABILITY_PACKET_RESEND != 0,
+        Err(err) => {
+            debug!(error = %err, "could not read GVCP Capability; packet resend stays off");
+            false
+        }
+    }
+}
 
 /// How [`Camera::open_stream`](crate::Camera::open_stream) sets up a GigE
 /// stream. The defaults: the interface the operating system routes to the
-/// camera, unicast, the camera's own packet size (path-probed, ADR-0021), and
-/// a receive buffer the engine sizes from the frame.
+/// camera, unicast to a port the operating system picks, the camera's own
+/// packet size (path-probed, ADR-0021) and packet delay, packet resend when
+/// the camera supports it, and a receive buffer the engine sizes from the
+/// frame.
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
     iface: Option<Iface>,
@@ -828,6 +940,8 @@ pub struct StreamOptions {
     multicast: Option<Ipv4Addr>,
     destination_port: Option<u16>,
     rcvbuf_bytes: Option<usize>,
+    packet_delay: Option<Duration>,
+    resend: ResendPolicy,
 }
 
 impl StreamOptions {
@@ -862,9 +976,25 @@ impl StreamOptions {
         self
     }
 
-    /// Receive on this UDP port (default 0x5FFF).
+    /// Receive on this UDP port, for a firewall that admits only it
+    /// ([`StreamBuilder::destination_port`]). By default the operating system
+    /// picks a free one.
     pub fn destination_port(mut self, port: u16) -> Self {
         self.destination_port = Some(port);
+        self
+    }
+
+    /// Have the camera wait `delay` between packets
+    /// ([`StreamBuilder::packet_delay`]). By default `GevSCPD` is left alone.
+    pub fn packet_delay(mut self, delay: Duration) -> Self {
+        self.packet_delay = Some(delay);
+        self
+    }
+
+    /// Whether to ask the camera for lost packets (default
+    /// [`ResendPolicy::Auto`]).
+    pub fn resend(mut self, policy: ResendPolicy) -> Self {
+        self.resend = policy;
         self
     }
 
@@ -880,21 +1010,18 @@ impl crate::Camera<crate::GigeRegisterIo> {
     /// Open a GVSP stream from this camera, ready for `acquisition_start`.
     ///
     /// The one recipe every consumer uses (API-17): claim control (again, if
-    /// it was released), point the stream channel at this host — or at a
-    /// multicast group — negotiate the packet size, bind the socket, and start
-    /// the receive engine with the camera's `PayloadSize` and time sync. A
-    /// camera without a readable `PayloadSize` still streams: buffers are then
-    /// sized from each leader.
+    /// it was released) before anything is written, bind the socket, point
+    /// the stream channel at it — or at a multicast group — negotiate the
+    /// packet size, read whether the camera supports resend, and start the
+    /// receive engine with the camera's `PayloadSize` and time sync. A camera
+    /// without a readable `PayloadSize` still streams: buffers are then sized
+    /// from each leader.
     // The device lock is held across the builder's awaits: `StreamBuilder`
     // borrows the device, and nothing else may use the control channel while
     // the stream channel is being configured. The lint resolves at the
     // enclosing body, so the allow lives here.
     #[allow(clippy::await_holding_lock)]
     pub fn open_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
-        let port = options.destination_port.unwrap_or(DEFAULT_STREAM_PORT);
-        if let Some(group) = options.multicast {
-            self.configure_stream_multicast(0, group, port)?;
-        }
         let payload_size = read_payload_size(self);
         let time_sync = self.time_sync().clone();
         let transport = self.transport();
@@ -920,15 +1047,23 @@ impl crate::Camera<crate::GigeRegisterIo> {
                     })?
                 }
             };
-            let mut builder = StreamBuilder::new(&mut device).iface(iface);
+            // The stream channel is configured through the bootstrap registers,
+            // multicast included, and only now that control is held: a device
+            // refuses those writes from an application without privilege.
+            let mut builder = StreamBuilder::new(&mut device)
+                .iface(iface)
+                .resend(options.resend);
             builder.packet_size_mode = options.packet_size;
+            builder.packet_delay = options.packet_delay;
             if let Some(bytes) = options.rcvbuf_bytes {
                 builder = builder.rcvbuf_bytes(bytes);
             }
             if let Some(group) = options.multicast {
                 builder = builder.multicast(Some(group));
             }
-            builder = builder.destination_port(port);
+            if let Some(port) = options.destination_port {
+                builder = builder.destination_port(port);
+            }
             builder.build().await
         })?;
         Ok(FrameStream::start_with(
@@ -967,6 +1102,8 @@ pub struct Stream {
     config: StreamConfig,
     /// `SO_RCVBUF` the caller chose, which the engine leaves alone.
     rcvbuf_bytes: Option<usize>,
+    /// Whether the stream asks the camera for lost packets.
+    resend: bool,
 }
 
 impl Stream {
@@ -988,6 +1125,11 @@ impl Stream {
     /// Immutable view of the stream configuration.
     pub fn config(&self) -> &StreamConfig {
         &self.config
+    }
+
+    /// Whether the stream will ask the camera for lost packets.
+    pub fn resend_enabled(&self) -> bool {
+        self.resend
     }
 }
 
@@ -1057,9 +1199,18 @@ impl FrameStream {
             params,
             config,
             rcvbuf_bytes,
+            resend,
         } = stream;
+        let source_filter = config.source_filter;
         let mut frames = Self::idle(stats, params, Some(config), time_sync);
         frames.shared.set_payload_size(payload_size);
+        frames.shared.set_source_filter(source_filter);
+        if resend
+            && let Some(SocketAddr::V4(camera)) = params.camera
+            && let Ok(channel) = u16::try_from(params.channel)
+        {
+            frames.shared.set_resend_target(Some((camera, channel)));
+        }
         match socket.into_std() {
             Ok(socket) => frames.start(socket, rcvbuf_bytes),
             Err(err) => frames
@@ -1077,6 +1228,13 @@ impl FrameStream {
     /// `packet_size` is the camera's `GevSCPSPacketSize`, which fixes where
     /// each packet's bytes belong. [`config`](Self::config) is `None` for such
     /// a stream.
+    ///
+    /// Such a stream accepts datagrams from any address until
+    /// [`set_source_filter`](Self::set_source_filter) names the camera, and
+    /// never asks for lost packets unless
+    /// [`enable_resend`](Self::enable_resend) is called. A host that only
+    /// monitors a stream must not ask: it does not control the camera, and its
+    /// requests would add traffic to a stream another application configured.
     pub fn from_socket(
         socket: std::net::UdpSocket,
         packet_size: u32,
@@ -1095,10 +1253,12 @@ impl FrameStream {
         };
         let params = StreamParams {
             packet_size,
-            packet_delay: 0,
+            packet_delay: None,
             mtu: packet_size,
             host,
             port: local.port(),
+            channel: 0,
+            camera: None,
         };
         let mut frames = Self::idle(StreamStatsAccumulator::new(), params, None, None);
         frames.start(socket, None);
@@ -1164,6 +1324,70 @@ impl FrameStream {
     /// counted in [`StreamStats::frames_incomplete`] either way.
     pub fn set_deliver_incomplete(&mut self, deliver: bool) {
         self.shared.set_deliver_incomplete(deliver);
+    }
+
+    /// Accept GVSP only from `camera`; `None` accepts any source.
+    ///
+    /// A stream from [`StreamBuilder`] or
+    /// [`Camera::open_stream`](crate::Camera::open_stream) accepts only the
+    /// camera's own address. Datagrams from anywhere else are ignored and
+    /// counted in [`StreamStats::packets_ignored_foreign`]; a camera that
+    /// sends its stream from another address than the one it answers GVCP on
+    /// needs `None`.
+    pub fn set_source_filter(&mut self, camera: Option<Ipv4Addr>) {
+        self.shared.set_source_filter(camera);
+    }
+
+    /// The only address GVSP is accepted from, if any.
+    pub fn source_filter(&self) -> Option<Ipv4Addr> {
+        self.shared.source_filter()
+    }
+
+    /// Ask the camera at `camera` (its GVCP address, normally port 3956) to
+    /// send lost packets of stream channel `channel` again.
+    ///
+    /// [`Camera::open_stream`](crate::Camera::open_stream) does this when the
+    /// camera's capability register says it supports packet resend. Call it
+    /// yourself only for a stream this application controls, on a camera
+    /// that supports resend.
+    pub fn enable_resend(&mut self, camera: std::net::SocketAddrV4, channel: u16) {
+        self.shared.set_resend_target(Some((camera, channel)));
+    }
+
+    /// Stop asking for lost packets.
+    pub fn disable_resend(&mut self) {
+        self.shared.set_resend_target(None);
+    }
+
+    /// Whether the stream asks the camera for lost packets.
+    pub fn resend_enabled(&self) -> bool {
+        self.shared.resend_target().is_some()
+    }
+
+    /// How old a gap in a block's packets must be before it is asked for
+    /// (default 2 ms), so a packet that was only overtaken is not.
+    pub fn set_resend_delay(&mut self, delay: Duration) {
+        self.shared.set_resend_delay(delay);
+    }
+
+    /// How long to wait for a resent packet before asking again (default
+    /// 20 ms).
+    pub fn set_resend_retry_interval(&mut self, interval: Duration) {
+        self.shared.set_resend_retry_interval(interval);
+    }
+
+    /// How many times one range of packets is asked for, the first request
+    /// included (default 3).
+    pub fn set_resend_max_requests(&mut self, requests: u32) {
+        self.shared.set_resend_max_requests(requests);
+    }
+
+    /// The share of a block's packets its requests may ask for, retries
+    /// included (default 0.25, rounded up). A block that lost more is not
+    /// worth flooding the camera for; it closes incomplete.
+    pub fn set_resend_budget(&mut self, share: f64) {
+        let share = if share.is_nan() { 0.0 } else { share };
+        self.shared.set_resend_budget(share.clamp(0.0, 1.0));
     }
 
     /// Update or set the time synchronization model for timestamp mapping.
@@ -1640,6 +1864,26 @@ mod tests {
         assert!(payload_size_is_absent(&missing));
         assert!(!payload_size_is_absent(&refused));
         assert!(!payload_size_is_absent(&failed));
+    }
+
+    /// SR-19: a delay in time becomes `GevSCPD` ticks at the camera's
+    /// frequency, rounded to the nearest tick; no frequency, no conversion.
+    #[test]
+    fn a_packet_delay_is_converted_to_ticks() {
+        let us = Duration::from_micros;
+        assert_eq!(delay_in_ticks(us(10), 125_000_000).unwrap(), 1250);
+        assert_eq!(delay_in_ticks(us(10), 1_000_000_000).unwrap(), 10_000);
+        // 12 ns at 125 MHz is 1.5 ticks; 3 ns is 0.375, which is still not 0.
+        assert_eq!(
+            delay_in_ticks(Duration::from_nanos(12), 125_000_000).unwrap(),
+            2
+        );
+        assert_eq!(
+            delay_in_ticks(Duration::from_nanos(3), 125_000_000).unwrap(),
+            1
+        );
+        assert!(delay_in_ticks(us(10), 0).is_err());
+        assert!(delay_in_ticks(Duration::from_secs(10), 1_000_000_000).is_err());
     }
 
     #[test]

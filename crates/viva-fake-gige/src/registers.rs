@@ -16,7 +16,10 @@
 //! | `0x0900`    | 4      | GevNumberOfMessageChannels (RO) | u32 BE   |
 //! | `0x0904`    | 4      | GevNumberOfStreamChannels (RO)  | u32 BE   |
 //! | `0x0a00`    | 4      | CCP (Control Channel Privilege) | u32 BE   |
+//! | `0x0934`    | 4      | GVCP Capability (RO)            | u32 BE   |
 //! | `0x0938`    | 4      | Heartbeat Timeout               | u32 BE   |
+//! | `0x093c`    | 4      | Timestamp tick frequency, high  | u32 BE   |
+//! | `0x0940`    | 4      | Timestamp tick frequency, low   | u32 BE   |
 //! | `0x0b00`    | 4      | GevMCP (message channel port)   | u32 BE   |
 //! | `0x0b10`    | 4      | GevMCDA (message channel addr)  | u32 BE   |
 //! | `0x0d00+`   | varies | Stream Channel 0 registers      | u32 BE   |
@@ -93,6 +96,15 @@ pub const PERSISTENT_IP_ADDRESS: u64 = 0x064C;
 pub const PERSISTENT_SUBNET_MASK: u64 = 0x065C;
 pub const PERSISTENT_DEFAULT_GATEWAY: u64 = 0x066C;
 pub const CCP: u64 = 0x0a00;
+/// `GVCP Capability`: which optional commands the device implements.
+pub const GVCP_CAPABILITY: u64 = 0x0934;
+/// Capability bit 29, counted from the MSB as bit 0: `PACKETRESEND_CMD`
+/// supported. Mask from Wireshark's `hf_gvcp_capability_packetresend`.
+pub const CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004;
+/// Capability bit 30: `WRITEMEM_CMD` supported.
+pub const CAPABILITY_WRITEMEM: u32 = 0x0000_0002;
+/// Capability bit 31: several registers in one READREG/WRITEREG.
+pub const CAPABILITY_CONCATENATION: u32 = 0x0000_0001;
 pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
 /// `GevTimestampTickFrequencyHigh`: upper 32 bits of the tick frequency.
 pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
@@ -1052,6 +1064,12 @@ impl RegisterMap {
         regs.insert(NUMBER_OF_MESSAGE_CHANNELS, 1u32.to_be_bytes().to_vec());
         regs.insert(NUMBER_OF_STREAM_CHANNELS, 1u32.to_be_bytes().to_vec());
         regs.insert(CCP, vec![0, 0, 0, 0]);
+        regs.insert(
+            GVCP_CAPABILITY,
+            (CAPABILITY_PACKET_RESEND | CAPABILITY_WRITEMEM | CAPABILITY_CONCATENATION)
+                .to_be_bytes()
+                .to_vec(),
+        );
         regs.insert(HEARTBEAT_TIMEOUT, 3000u32.to_be_bytes().to_vec());
         regs.insert(
             TIMESTAMP_TICK_FREQUENCY_HIGH,
@@ -1283,6 +1301,37 @@ impl RegisterMap {
         self.regs
             .insert(DEVICE_MAC_HIGH, high.to_be_bytes().to_vec());
         self.regs.insert(DEVICE_MAC_LOW, low.to_be_bytes().to_vec());
+    }
+
+    /// Report `hz` as the timestamp tick frequency, the unit of `GevSCPD`.
+    /// `0` is what a device without a timestamp clock reports.
+    pub fn set_tick_frequency(&mut self, hz: u64) {
+        self.regs.insert(
+            TIMESTAMP_TICK_FREQUENCY_HIGH,
+            ((hz >> 32) as u32).to_be_bytes().to_vec(),
+        );
+        self.regs.insert(
+            TIMESTAMP_TICK_FREQUENCY_LOW,
+            (hz as u32).to_be_bytes().to_vec(),
+        );
+    }
+
+    /// Set or clear the `PACKETRESEND_CMD` bit of the capability register.
+    pub fn set_packet_resend(&mut self, supported: bool) {
+        let mut caps = self.read_u32_be(GVCP_CAPABILITY);
+        if supported {
+            caps |= CAPABILITY_PACKET_RESEND;
+        } else {
+            caps &= !CAPABILITY_PACKET_RESEND;
+        }
+        self.regs
+            .insert(GVCP_CAPABILITY, caps.to_be_bytes().to_vec());
+    }
+
+    /// Whether the capability register says this device answers
+    /// `PACKETRESEND_CMD`.
+    pub fn packet_resend_supported(&self) -> bool {
+        self.read_u32_be(GVCP_CAPABILITY) & CAPABILITY_PACKET_RESEND != 0
     }
 
     /// The heartbeat window this device reports, in milliseconds.
@@ -1676,6 +1725,26 @@ mod tests {
             1_000_000_000u32.to_be_bytes().to_vec()
         );
         assert_eq!(regs.tick_frequency(), 1_000_000_000);
+    }
+
+    /// GVCP Capability at 0x0934: packet resend (mask 0x4) on by default,
+    /// and switchable.
+    #[test]
+    fn the_capability_register_advertises_packet_resend() {
+        let mut regs = map();
+        assert_eq!(regs.read(0x0934, 4), vec![0, 0, 0, 0x07]);
+        assert!(regs.packet_resend_supported());
+        regs.set_packet_resend(false);
+        assert_eq!(regs.read(0x0934, 4), vec![0, 0, 0, 0x03]);
+        assert!(!regs.packet_resend_supported());
+    }
+
+    #[test]
+    fn the_tick_frequency_can_be_changed() {
+        let mut regs = map();
+        regs.set_tick_frequency(125_000_000);
+        assert_eq!(regs.tick_frequency(), 125_000_000);
+        assert_eq!(regs.read(0x0940, 4), 125_000_000u32.to_be_bytes().to_vec());
     }
 
     #[test]

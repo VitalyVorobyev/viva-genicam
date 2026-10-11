@@ -72,8 +72,12 @@ module:
   - the reusable bitmap is sized `ceil(payload / stride)`, bounded by the
     buffer whatever a trailer claims;
   - out-of-range packets are ignored and counted; a data packet longer than the
-    stride is refused (written, it would overlap its neighbour) and a short one
-    before the last is counted, each logged once with the observed size;
+    stride is refused (written, it would overlap its neighbour), and a short one
+    shown not to be the last is taken back out — its bit cleared, its bytes
+    zeroed — so the frame closes `Incomplete` rather than `Complete` with shifted
+    data (Codex review of #194). Its block is still counted once, as
+    incomplete, and the packet in `packets_missing` as well as
+    `packets_size_mismatch`; each kind is logged once with the observed size;
   - the **block timeout counts from the last packet**, default 100 ms
     (`set_block_timeout`, which replaces `set_frame_timeout`). The newest block
     does not time out while its leader is all it has.
@@ -92,7 +96,8 @@ module:
 - **Counters** are atomics, written by the receive thread and the queue. Each
   block is counted once, when its fate is decided, so that
   `sent = complete + incomplete + missed + backpressure + unsupported`.
-  Counters nothing can increment are gone; resend counters arrive with resend.
+  Counters nothing can increment are gone; the resend counters arrived with
+  resend (below).
   `StreamStats` lives with the engine in `viva-genicam`, and only the engine
   can record: the accumulator's recorders are crate-private.
 - **One way in.** `Camera::open_stream(StreamOptions)` claims control,
@@ -106,6 +111,52 @@ module:
   `SO_RCVBUF`, reads back what was granted (halving Linux's doubled report), and
   warns once if it is under half, naming `net.core.rmem_max` or
   `kern.ipc.maxsockbuf`. A size the caller set explicitly is left alone.
+
+### Resend and the source
+
+Added in milestone S (backlog SR-04, SR-03, SR-22):
+
+- **Only the camera is a source.** A stream opened on a camera accepts
+  datagrams from the camera's own address and ignores the rest, counted in
+  `packets_ignored_foreign`; `FrameStream::set_source_filter(None)` lifts it.
+  The socket is bound to a port of its own (port 0 unless the caller names
+  one) without `SO_REUSEPORT`, so two streams on one host no longer share a
+  port and split each other's datagrams.
+- **Gaps, not timers per packet.** Each block in flight keeps a list of gaps:
+  a packet beyond the next one expected opens one covering every id in
+  between, and an arrival inside a gap splits it (`stream/resend.rs`, no
+  socket, no clock). A gap is asked for once it is 2 ms old — a packet only
+  overtaken fills it first — as one request for the whole run, then every
+  20 ms while it stays open, three requests at most. A block's requests,
+  retries included, stop at a quarter of its packets (rounded up). The
+  numbers are `FrameStream` setters. A lost trailer is never asked for:
+  nothing after it says it is missing. A refused or short packet counts as
+  arrived — the camera would send the same bytes again.
+- **The request** is `PACKETRESEND_CMD` in the layout Wireshark dissects — 12
+  bytes, or 20 with extended ids (flag `0x10`) — with no acknowledgement
+  asked, sent by the receive thread **from the stream socket** to the camera's
+  GVCP address. A failed send never ends the stream; a `WSAECONNRESET` from it,
+  like one from a read, is not even logged above debug (SR-22).
+- **When to ask.** `ResendPolicy::Auto` (the default) asks only when bit `0x4`
+  of GVCP Capability (`0x0934`) is set, read once at open; a multicast stream
+  and one from `FrameStream::from_socket` never ask unless told to
+  (`enable_resend`) — a host that only watches must not.
+- **Answers.** A camera that cannot resend says so with a bare GVSP header
+  whose status names why, which the engine reads before parsing anything else
+  and counts as an error-status packet. `0x800C` (`PACKET_UNAVAILABLE`) and
+  `0x8012` (`PACKET_REMOVED_FROM_MEMORY`) close the gap containing the packet
+  id; `0x8011` (`..._AND_PREVIOUS_...`) also stops the earlier gaps; `0x8010`
+  (`NOT_YET_AVAILABLE`) and `0x8014` (`TEMPORARILY_UNAVAILABLE`) leave the gap
+  to its retries. Status names are Wireshark's.
+- **Counters.** `resend_requested` counts each packet asked for once, however
+  many requests it took; then at most once more, in `resend_recovered` if it
+  arrived or `resend_unavailable` if the camera said so. A frame whose lost
+  packets came back is `Complete`.
+
+The fake camera answers `PACKETRESEND_CMD` from its own reading of the field
+table: it keeps the last four blocks as built, before scripted loss, sends the
+packets again from its stream socket, and answers a block it no longer holds
+with one header-only `0x800C` packet for the range.
 
 Packet parsing and assembly are fuzzed (`fuzz/`, a short run per target in
 CI): every byte of a GVSP datagram is remote input.
@@ -131,12 +182,25 @@ reading of the wire, aravis agrees with it, and that is corroboration only
   `ARV_GV_STREAM_DISCARD_LATE_FRAME_THRESHOLD`, `_check_frame_completion`;
 - the payload-type masks `0x3fff` and `0x4000`.
 
+For resend, aravis likewise sends the request from the stream socket without
+asking for an acknowledgement, checks the same capability bit, waits before a
+first request (`initial-packet-timeout`) and caps requests at a share of the
+frame (`packet-request-ratio`), and stops a frame's requests on `0x800C`,
+`0x8011` and `0x8012`. Its standard-id request writes the block id as the whole
+first word, so its channel half is always 0; ours follows Wireshark's field
+table and carries the channel.
+
 Where we depart from aravis, deliberately: frames missed are counted per
 skipped id (aravis counts gap events); a return to block id 1 is a restart
 for a leader (aravis treats a short backward jump as late, which would
 discard the first blocks after a quick AcquisitionStop/Start); an oversized data packet is
-refused (aravis writes it and truncates at the buffer end). None of these has
-been checked against hardware.
+refused (aravis writes it and truncates at the buffer end); a resend request is
+retried a fixed number of times (aravis retries until the frame's ratio or its
+retention runs out) and stops for one range on "unavailable" (aravis stops the
+whole frame). None of these has been checked against hardware, and neither has
+anything about resend: whether cameras accept a request from a port other than
+the control channel's, and how they answer one they cannot serve, are open
+(backlog).
 
 ## Consequences
 

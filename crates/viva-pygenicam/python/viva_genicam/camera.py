@@ -165,6 +165,8 @@ class Camera:
         auto_packet_size: bool = False,
         multicast: Optional[str] = None,
         destination_port: Optional[int] = None,
+        packet_delay_ns: Optional[int] = None,
+        resend: bool = True,
     ) -> FrameStream:
         """Open a frame stream (context-manager yielding ``Frame`` objects).
 
@@ -176,11 +178,25 @@ class Camera:
         Packet size: default leaves the camera's ``GevSCPSPacketSize`` alone;
         ``auto_packet_size=True`` sets it from the NIC MTU and path-probes;
         ``packet_size=N`` writes an explicit ceiling. Pass at most one of
-        ``auto_packet_size`` and ``packet_size``. GigE-only parameters are
-        ignored for U3V cameras.
+        ``auto_packet_size`` and ``packet_size``.
+
+        ``destination_port`` receives on a fixed UDP port, for a firewall that
+        admits only it; by default the OS picks a free one.
+        ``packet_delay_ns`` has the camera wait that long between packets
+        (``GevSCPD``, converted to its timestamp ticks); by default the camera's
+        own value is left alone. ``resend=False`` never asks the camera to send
+        lost packets again; by default it is asked when it supports resend.
+
+        GigE-only parameters are ignored for U3V cameras.
         """
         native = self._native.open_stream(
-            iface, packet_size, auto_packet_size, multicast, destination_port
+            iface,
+            packet_size,
+            auto_packet_size,
+            multicast,
+            destination_port,
+            packet_delay_ns,
+            resend,
         )
         return FrameStream(native, self)
 

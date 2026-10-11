@@ -10,7 +10,7 @@ how the crates layer, in [design.md](design.md).
 | **GenApi** | The camera's XML self-description: typed feature nodes, their registers, formulas (`SwissKnife`, `Converter`), selectors and `pValue` delegation | `viva-genapi-xml` parses it; `viva-genapi` builds the node map and evaluates it |
 | **GenCP** | Register-map access: `READMEM`/`WRITEMEM`, `PENDING_ACK`, events, request ids, status codes, and the ABRM at address 0 | `viva-gencp` (vocabulary); `viva-u3v` (framing) |
 | **GVCP** | GigE Vision control: discovery, register and memory access, events, action commands; cameras listen on UDP 3956 | `viva-gencp` (opcodes, headers); `viva-gige` |
-| **GVSP** | GigE Vision streaming: image transfer in UDP packets, reassembled by the host | `viva-gige`; known gaps, packet resend among them, in [#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191) |
+| **GVSP** | GigE Vision streaming: image transfer in UDP packets, reassembled by the host, which may ask for lost ones again (`PACKETRESEND_CMD`, a GVCP command) | `viva-gige` (packets, the resend request); `viva-genicam` (the receive engine); known gaps in [#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191) |
 | **USB3 Vision** | GenCP over USB bulk endpoints, plus a streaming interface; discovery by USB enumeration | `viva-u3v` |
 | **SFNC** | Standard feature names (`ExposureTime`, not `Exposure`) | `viva-sfnc` |
 | **PFNC** | Pixel-format codes (`Mono8` is `0x01080001`) | `viva-pfnc`, the single authority for codes and layouts |

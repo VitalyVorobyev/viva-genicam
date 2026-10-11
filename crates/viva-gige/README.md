@@ -12,11 +12,11 @@ Implements the networking building blocks for communicating with GigE Vision cam
 
 - **GVCP discovery** -- directed-broadcast device discovery on selected network interfaces
 - **Register I/O** -- read/write device registers and memory over GVCP, with retry and backoff
-- **GVSP** -- zero-copy packet parsing (standard and extended-ID headers), chunk parsing; `viva-genicam`'s receive engine assembles the frames. Packet resend is not requested yet ([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191))
+- **GVSP** -- zero-copy packet parsing (standard and extended-ID headers), chunk parsing, the `PACKETRESEND_CMD` encoder; `viva-genicam`'s receive engine assembles the frames and asks for lost packets
 - **Multicast** -- IGMP join for multicast stream reception
 - **Events** -- GVCP message channel for asynchronous camera events
 - **Action commands** -- broadcast-triggered synchronized acquisition
-- **Packet size** -- interface MTU lookup, GVSP test-packet requests and `GevSCPSPacketSize` read/write. The `viva-genicam` stream builder keeps the camera's packet size by default; sizing from the interface MTU is opt-in
+- **Packet size** -- interface MTU lookup (Linux, Windows, macOS), GVSP test-packet requests and `GevSCPSPacketSize` read/write. The `viva-genicam` stream builder keeps the camera's packet size by default; sizing from the interface MTU is opt-in
 - **macOS / Linux / Windows** -- cross-platform async UDP with `tokio`
 
 ## Usage

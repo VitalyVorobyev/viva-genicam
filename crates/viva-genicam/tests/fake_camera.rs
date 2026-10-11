@@ -576,9 +576,19 @@ async fn setup_stream_with(
     customize: impl for<'a> FnOnce(viva_genicam::StreamBuilder<'a>) -> viva_genicam::StreamBuilder<'a>,
 ) -> (viva_genicam::FrameStream, Camera<GigeRegisterIo>) {
     use std::net::{IpAddr, SocketAddr};
-
     let control_addr = SocketAddr::new(IpAddr::V4(device_info.ip), gige::GVCP_PORT);
+    try_setup_stream_at(control_addr, packet_size, customize)
+        .await
+        .expect("build stream")
+}
 
+/// As [`setup_stream_with`], for the camera answering GVCP at `control_addr`,
+/// returning the builder's error instead of panicking on it.
+async fn try_setup_stream_at(
+    control_addr: std::net::SocketAddr,
+    packet_size: Option<u32>,
+    customize: impl for<'a> FnOnce(viva_genicam::StreamBuilder<'a>) -> viva_genicam::StreamBuilder<'a>,
+) -> Result<(viva_genicam::FrameStream, Camera<GigeRegisterIo>), viva_genicam::GenicamError> {
     // Fetch XML via a temporary connection.
     let xml = viva_genapi_xml::fetch_and_load_xml({
         let addr = control_addr;
@@ -617,13 +627,13 @@ async fn setup_stream_with(
     } else {
         builder = builder.auto_packet_size();
     }
-    let stream = customize(builder).build().await.expect("build stream");
+    let stream = customize(builder).build().await?;
     let frame_stream = viva_genicam::FrameStream::new(stream, None);
 
     let handle = tokio::runtime::Handle::current();
     let transport = GigeRegisterIo::new(handle, device);
 
-    (frame_stream, Camera::new(transport, nodemap))
+    Ok((frame_stream, Camera::new(transport, nodemap)))
 }
 
 /// A camera that clamps `GevSCPSPacketSize` must be followed, not assumed —
@@ -642,11 +652,11 @@ async fn setup_stream_with(
 /// ADR-0019 failure mode — a fake and a client agreeing only with each other —
 /// and it is why `max_packet_size` exists.
 ///
-/// The cap is deliberately **below** 1 500 rather than at it. `nic::mtu` probes
-/// only on Linux and Windows and returns a hardcoded 1 500 elsewhere (TC-11),
-/// so a 1 500-byte cap would leave request and cap equal on macOS and the test
-/// would pass without ever exercising the clamp — verified by re-running it with
-/// the read-back disabled, where a 1 500 cap still passed.
+/// The cap is deliberately **below** 1 500 rather than at it. `nic::mtu` used to
+/// return a hardcoded 1 500 on macOS, where a 1 500-byte cap left request and
+/// cap equal and the test passed without ever exercising the clamp — verified
+/// then by re-running it with the read-back disabled. Wherever the MTU falls
+/// back to 1 500 that still holds.
 #[tokio::test]
 async fn test_clamped_packet_size_is_followed_not_assumed() {
     const CAMERA_MAX: u32 = 1000;
@@ -794,10 +804,9 @@ fn captured_warnings() -> &'static LogCapture {
 #[tokio::test]
 async fn test_probe_finds_a_path_ceiling_the_device_does_not_report() {
     const PATH_CEILING: u32 = 9198;
-    // The reporter's host MTU. Requested explicitly rather than via `None`,
-    // because `nic::mtu` probes only on Linux and Windows and returns a
-    // hardcoded 1500 elsewhere (TC-11) — on macOS the auto path would ask for
-    // 1500, which is below the probe floor, and the test would assert nothing.
+    // The reporter's host MTU, requested explicitly rather than via `None`:
+    // the auto path would ask for whatever loopback's MTU is on the runner
+    // (65 535 after clamping on Linux, 16 384 on macOS), not the reporter's.
     const HOST_MTU: u32 = 16114;
 
     let _cam = common::TestCamera::start_with(|b| b.max_on_wire(PATH_CEILING)).await;
@@ -2008,8 +2017,10 @@ async fn test_extended_id_stream_assembles_at_its_own_stride() {
 async fn test_a_paced_frame_longer_than_the_block_timeout_completes() {
     let _cam = common::TestCamera::start().await;
     let device_info = discover_fake().await;
-    let (mut frame_stream, camera) =
-        setup_stream_with(&device_info, Some(1500), |b| b.packet_delay(1_500_000)).await;
+    let (mut frame_stream, camera) = setup_stream_with(&device_info, Some(1500), |b| {
+        b.packet_delay(Duration::from_micros(1500))
+    })
+    .await;
     let camera = Arc::new(Mutex::new(camera));
 
     // The tick frequency the pacing is converted with, read over the wire.
@@ -2055,8 +2066,13 @@ async fn test_every_block_the_fake_sends_is_accounted_for() {
         .step(ScriptStep::TrailerBeforeLastPayload { block: 7 })
         .step(ScriptStep::RepeatLeader { block: 8, after: 4 })
         .step(ScriptStep::Interleave { block: 9 });
+    // Without resend, so block 2 stays incomplete; the same identity under
+    // resend is `test_every_block_is_accounted_for_under_resend`.
     let cam = common::TestCamera::start_with(move |b| {
-        b.width(256).height(64).packet_script(script.clone())
+        b.width(256)
+            .height(64)
+            .packet_script(script.clone())
+            .packet_resend(false)
     })
     .await;
     let device_info = discover_fake().await;
@@ -2123,4 +2139,345 @@ async fn test_an_extended_chunk_payload_type_reaches_the_frame() {
     let frame = next_frame_within(&mut frame_stream, "an 0x4001 frame").await;
     stop_acquisition(&camera).await;
     assert_eq!(frame.payload_type, 0x4001);
+}
+
+// ---------------------------------------------------------------------------
+// Packet resend and stream-channel setup (milestone S)
+// ---------------------------------------------------------------------------
+
+/// Frames until block `last` has been delivered, keyed by block id.
+async fn frames_through(
+    frame_stream: &mut viva_genicam::FrameStream,
+    last: u64,
+) -> std::collections::BTreeMap<u64, viva_genicam::Frame> {
+    let mut frames = std::collections::BTreeMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !frames.contains_key(&last) {
+        let frame = tokio::time::timeout_at(deadline, frame_stream.next_frame())
+            .await
+            .unwrap_or_else(|_| panic!("block {last} never arrived; got {:?}", frames.keys()))
+            .expect("stream error")
+            .expect("stream ended");
+        frames.insert(frame.block_id, frame);
+    }
+    frames
+}
+
+/// SR-04: the fake drops packets in flight — a leader, a last data packet, a
+/// run of three — and keeps them; the stream asks for each, in the
+/// specification's layout, and every frame completes.
+#[tokio::test]
+async fn test_resend_recovers_every_scripted_drop() {
+    use viva_fake_gige::{PacketScript, ScriptStep};
+    // 640 × 480 Mono8 at 1500: 210 data packets a frame.
+    let script = PacketScript::new()
+        .step(ScriptStep::Drop {
+            block: 2,
+            packet: 5,
+        })
+        .step(ScriptStep::Drop {
+            block: 3,
+            packet: 0,
+        })
+        .step(ScriptStep::Drop {
+            block: 3,
+            packet: 210,
+        })
+        .step(ScriptStep::Drop {
+            block: 4,
+            packet: 50,
+        })
+        .step(ScriptStep::Drop {
+            block: 4,
+            packet: 51,
+        })
+        .step(ScriptStep::Drop {
+            block: 4,
+            packet: 52,
+        });
+    let cam = common::TestCamera::start_with(move |b| b.packet_script(script.clone())).await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    assert!(frame_stream.resend_enabled(), "the fake advertises resend");
+    start_acquisition(&camera).await;
+    let frames = frames_through(&mut frame_stream, 5).await;
+    stop_acquisition(&camera).await;
+
+    for block in 1..=5 {
+        let frame = frames
+            .get(&block)
+            .unwrap_or_else(|| panic!("block {block} was not delivered"));
+        assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+        assert_eq!(frame.payload.len(), 640 * 480);
+    }
+    let stats = frame_stream.stats();
+    assert_eq!(stats.frames_incomplete, 0, "{stats:?}");
+    assert_eq!(
+        (stats.resend_requested, stats.resend_recovered),
+        (6, 6),
+        "{stats:?}"
+    );
+    let device = cam.fake().resends();
+    // One request per range: block 2's packet, block 3's two, block 4's run.
+    assert!(device.requests >= 4, "{device:?}");
+    assert!(device.packets_resent >= 6, "{device:?}");
+}
+
+/// A camera whose capability register lacks packet resend is never asked,
+/// and a lost packet leaves its frame incomplete.
+#[tokio::test]
+async fn test_without_the_capability_nothing_is_asked() {
+    use viva_fake_gige::{PacketScript, ScriptStep};
+    let script = PacketScript::new().step(ScriptStep::Drop {
+        block: 2,
+        packet: 5,
+    });
+    let cam = common::TestCamera::start_with(move |b| {
+        b.packet_script(script.clone()).packet_resend(false)
+    })
+    .await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    assert!(!frame_stream.resend_enabled());
+    start_acquisition(&camera).await;
+    let frames = frames_through(&mut frame_stream, 3).await;
+    stop_acquisition(&camera).await;
+    assert!(!frames.contains_key(&2), "block 2 lost a packet");
+    let stats = frame_stream.stats();
+    assert_eq!(stats.frames_incomplete, 1, "{stats:?}");
+    assert_eq!(stats.resend_requested, 0, "{stats:?}");
+    assert_eq!(cam.fake().resends().requests, 0);
+}
+
+/// The identity holds with resend at work: every block the fake produced is
+/// complete, missed or dropped to backpressure, and the lost packets all came
+/// back.
+#[tokio::test]
+async fn test_every_block_is_accounted_for_under_resend() {
+    use viva_fake_gige::{PacketScript, ScriptStep};
+    let script = PacketScript::new()
+        .step(ScriptStep::Drop {
+            block: 2,
+            packet: 5,
+        })
+        .step(ScriptStep::DropBlock { block: 4 })
+        .step(ScriptStep::Duplicate {
+            block: 5,
+            packet: 3,
+        })
+        .step(ScriptStep::Drop {
+            block: 6,
+            packet: 1,
+        })
+        .step(ScriptStep::Delay {
+            block: 6,
+            packet: 2,
+            by: 10,
+        })
+        .step(ScriptStep::Drop {
+            block: 7,
+            packet: 0,
+        })
+        .step(ScriptStep::Interleave { block: 9 })
+        .step(ScriptStep::Drop {
+            block: 9,
+            packet: 4,
+        });
+    let cam = common::TestCamera::start_with(move |b| {
+        b.width(256).height(64).packet_script(script.clone())
+    })
+    .await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    start_acquisition(&camera).await;
+    let mut delivered = 0u64;
+    while delivered < 12 {
+        next_frame_within(&mut frame_stream, "a frame").await;
+        delivered += 1;
+    }
+    stop_acquisition(&camera).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(Some(_)) = frame_stream.next_block_blocking(Duration::from_millis(50)) {}
+
+    let sent = cam.fake().blocks_sent();
+    let stats = frame_stream.stats();
+    assert_eq!(
+        stats.frames_complete
+            + stats.frames_incomplete
+            + stats.frames_missed
+            + stats.frames_backpressure
+            + stats.frames_unsupported,
+        sent,
+        "{stats:?}"
+    );
+    assert_eq!(
+        stats.frames_incomplete, 0,
+        "every lost packet was resent: {stats:?}"
+    );
+    assert_eq!(
+        stats.frames_missed, 1,
+        "block 4 was dropped whole: {stats:?}"
+    );
+    assert_eq!(
+        (stats.resend_requested, stats.resend_recovered),
+        (4, 4),
+        "{stats:?}"
+    );
+}
+
+/// SR-03: two streams on one host each get their own camera's frames. Both
+/// used to bind port 0x5FFF with `SO_REUSEPORT` and split the datagrams.
+#[tokio::test]
+async fn test_two_streams_on_one_host_receive_their_own_frames() {
+    let _first = common::TestCamera::start_with(|b| b.width(64).height(32)).await;
+    let second = viva_fake_gige::FakeCamera::builder()
+        .bind_ip([127, 0, 0, 1].into())
+        .port(0)
+        .width(128)
+        .height(16)
+        .fps(30)
+        .build()
+        .await
+        .expect("second fake");
+    let first_addr: std::net::SocketAddr = ([127, 0, 0, 1], gige::GVCP_PORT).into();
+    let (mut stream_a, camera_a) = try_setup_stream_at(first_addr, Some(1500), |b| b)
+        .await
+        .expect("first stream");
+    let (mut stream_b, camera_b) = try_setup_stream_at(second.local_addr(), Some(1500), |b| b)
+        .await
+        .expect("second stream");
+    assert_ne!(stream_a.params().port, stream_b.params().port);
+    let camera_a = Arc::new(Mutex::new(camera_a));
+    let camera_b = Arc::new(Mutex::new(camera_b));
+    start_acquisition(&camera_a).await;
+    start_acquisition(&camera_b).await;
+    for _ in 0..3 {
+        let a = next_frame_within(&mut stream_a, "the first camera's frame").await;
+        let b = next_frame_within(&mut stream_b, "the second camera's frame").await;
+        assert_eq!(
+            (a.width, a.height),
+            (64, 32),
+            "stream A got another camera's frame"
+        );
+        assert_eq!(
+            (b.width, b.height),
+            (128, 16),
+            "stream B got another camera's frame"
+        );
+    }
+    stop_acquisition(&camera_a).await;
+    stop_acquisition(&camera_b).await;
+    second.stop().await;
+}
+
+/// SR-03: valid GVSP from an address that is not the camera's is ignored and
+/// counted, however well formed.
+#[tokio::test]
+async fn test_gvsp_from_another_address_is_ignored() {
+    let foreign = foreign_ipv4();
+    let cam =
+        common::TestCamera::start_with(move |b| b.width(256).height(64).spoof_source(foreign))
+            .await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    start_acquisition(&camera).await;
+    for _ in 0..3 {
+        let frame = next_frame_within(&mut frame_stream, "a frame").await;
+        assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+    }
+    stop_acquisition(&camera).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stats = frame_stream.stats();
+    let spoofed = cam.fake().spoofed_packets();
+    assert!(spoofed > 0);
+    assert_eq!(stats.packets_ignored_foreign, spoofed, "{stats:?}");
+    // Assembled, the spoofed copy would complete each block first and make
+    // the camera's own packets late.
+    assert_eq!(
+        stats.packets_duplicate + stats.packets_ignored_late,
+        0,
+        "{stats:?}"
+    );
+}
+
+/// An address of this host other than 127.0.0.1: 127.0.0.2 where the whole of
+/// 127/8 is local (Linux, Windows), otherwise the first non-loopback IPv4
+/// address (macOS, whose `lo0` carries only 127.0.0.1).
+fn foreign_ipv4() -> std::net::Ipv4Addr {
+    let alias = std::net::Ipv4Addr::new(127, 0, 0, 2);
+    if std::net::UdpSocket::bind((alias, 0)).is_ok() {
+        return alias;
+    }
+    gige::nic::Iface::list()
+        .expect("interfaces")
+        .iter()
+        .flat_map(|iface| iface.all_ipv4().unwrap_or_default())
+        .find(|ip| !ip.is_loopback())
+        .expect("an IPv4 address other than loopback, to send from")
+}
+
+/// SR-19: `GevSCPD` is the operator's. Opening a stream without asking for a
+/// delay leaves it as it was; 0.8 wrote `2000 / 80` over it at every start.
+#[tokio::test]
+async fn test_gevscpd_is_left_alone_unless_asked() {
+    let cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let control: std::net::SocketAddr = (device_info.ip, gige::GVCP_PORT).into();
+    let mut device = gige::GigeDevice::open(control).await.expect("open");
+    device.claim_control().await.expect("claim");
+    device
+        .write_register(0x0d08, 777)
+        .await
+        .expect("operator's GevSCPD");
+    drop(device);
+
+    let (_frame_stream, _camera) = setup_stream(&device_info).await;
+    let scpd = cam.fake().peek(0x0d08, 4).await;
+    assert_eq!(u32::from_be_bytes(scpd.try_into().unwrap()), 777);
+}
+
+/// SR-19: a delay asked for in time is written in timestamp ticks, at the
+/// frequency the camera reports (125 MHz here: 8 ns a tick).
+#[tokio::test]
+async fn test_a_packet_delay_is_written_in_ticks() {
+    let cam = common::TestCamera::start_with(|b| b.tick_frequency(125_000_000)).await;
+    let device_info = discover_fake().await;
+    let (frame_stream, _camera) = setup_stream_with(&device_info, Some(1500), |b| {
+        b.packet_delay(Duration::from_micros(10))
+    })
+    .await;
+    let scpd = cam.fake().peek(0x0d08, 4).await;
+    assert_eq!(u32::from_be_bytes(scpd.try_into().unwrap()), 1250);
+    assert_eq!(frame_stream.params().packet_delay, Some(1250));
+}
+
+/// SR-19: without a tick frequency a delay cannot be converted, and guessing
+/// a unit is what 0.8 did; the stream is refused instead.
+#[tokio::test]
+async fn test_a_packet_delay_without_a_tick_frequency_is_refused() {
+    let cam = common::TestCamera::start_with(|b| b.tick_frequency(0)).await;
+    let device_info = discover_fake().await;
+    let control: std::net::SocketAddr = (device_info.ip, gige::GVCP_PORT).into();
+    let result = try_setup_stream_at(control, Some(1500), |b| {
+        b.packet_delay(Duration::from_micros(10))
+    })
+    .await;
+    let err = result.err().expect("refused");
+    assert!(err.to_string().contains("tick frequency"), "{err}");
+    let scpd = cam.fake().peek(0x0d08, 4).await;
+    assert_eq!(scpd, vec![0, 0, 0, 0], "nothing written");
+}
+
+/// SR-21: the fake has one stream channel; configuring channel 1 is refused
+/// before anything is written to it.
+#[tokio::test]
+async fn test_a_stream_channel_the_camera_lacks_is_refused() {
+    let cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let control: std::net::SocketAddr = (device_info.ip, gige::GVCP_PORT).into();
+    let result = try_setup_stream_at(control, Some(1500), |b| b.channel(1)).await;
+    let err = result.err().expect("refused");
+    assert!(err.to_string().contains("stream channel"), "{err}");
+    // Channel 1's host port stays unwritten.
+    assert_eq!(cam.fake().peek(0x0d40, 4).await, vec![0, 0, 0, 0]);
 }

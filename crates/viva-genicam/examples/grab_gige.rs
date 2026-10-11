@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tracing::warn;
+use viva_genicam::StreamStats;
 use viva_genicam::gige::nic::{Iface, IfaceSelector};
-use viva_genicam::gige::stats::StreamStats;
 use viva_genicam::pfnc::PixelFormat;
-use viva_genicam::{Frame, FrameStream, StreamBuilder, connect_gige};
+use viva_genicam::{Frame, StreamOptions, connect_gige};
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -133,29 +133,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Connect to camera (fetches XML, builds nodemap).
     let mut camera = connect_gige(&device).await?;
 
-    // Configure stream.
-    let mut stream_device = viva_genicam::gige::GigeDevice::open(std::net::SocketAddr::new(
-        std::net::IpAddr::V4(device.ip),
-        viva_genicam::gige::GVCP_PORT,
-    ))
-    .await?;
-    let mut builder = StreamBuilder::new(&mut stream_device).iface(iface.clone());
+    // Open the stream: destination, packet size, socket, and a receive engine
+    // sized by the camera's PayloadSize.
+    let mut options = StreamOptions::new().iface(iface.clone());
     if let Some(group) = args.multicast {
-        builder = builder.multicast(Some(group));
+        options = options.multicast(group);
     }
     if let Some(port) = args.port {
-        builder = builder.destination_port(port);
+        options = options.destination_port(port);
     }
-    if let Some(size) = args.packet_size {
-        builder = builder.packet_size(size);
-    } else {
-        builder = builder.auto_packet_size();
-    }
-    let stream = builder.build().await?;
-
-    // Create high-level frame stream (handles packet reassembly automatically).
-    let time_sync = camera.time_sync().clone();
-    let mut frame_stream = FrameStream::new(stream, Some(time_sync));
+    options = match args.packet_size {
+        Some(size) => options.packet_size(size),
+        None => options.auto_packet_size(),
+    };
+    let mut frame_stream = camera.open_stream(options)?;
 
     // Start acquisition.
     camera.acquisition_start()?;
@@ -167,8 +158,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut save_remaining = args.save;
 
     // ANCHOR: frame_loop
-    // `next_frame` yields a fully reassembled frame; packet-level bookkeeping
-    // stays inside `FrameStream`. `None` means the stream ended.
+    // `next_frame` yields a complete frame; reassembly runs on the stream's
+    // own receive thread, and `stats` counts every block the camera sent.
+    // `None` means the stream ended.
     while let Some(frame) = frame_stream.next_frame().await? {
         frame_index += 1;
         print_frame_info(frame_index, &frame);
@@ -271,7 +263,12 @@ fn print_overlay(stats: &StreamStats) {
         .map(|ms| format!("{ms:.2} ms"))
         .unwrap_or_else(|| "n/a".to_string());
     println!(
-        "[stats] fps={:.1} Mbps={:.2} drops={} resends={} latency={}",
-        stats.avg_fps, stats.avg_mbps, stats.drops, stats.resends, latency
+        "[stats] fps={:.1} Mbps={:.2} incomplete={} missed={} backpressure={} latency={}",
+        stats.avg_fps,
+        stats.avg_mbps,
+        stats.frames_incomplete,
+        stats.frames_missed,
+        stats.frames_backpressure,
+        latency
     );
 }

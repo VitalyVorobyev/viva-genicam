@@ -6,14 +6,11 @@
 //! like systems without additional privileges. Platform specific code paths are
 //! gated via conditional compilation and otherwise fall back to sane defaults.
 
-use std::collections::VecDeque;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
-use std::sync::Mutex;
 
-use bytes::BytesMut;
 use if_addrs::IfAddr;
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use tokio::net::UdpSocket;
@@ -26,6 +23,81 @@ use tracing::warn;
 /// custom value. The number mirrors what many operating systems allow without
 /// requiring elevated privileges.
 pub const DEFAULT_RCVBUF_BYTES: usize = 4 << 20; // 4 MiB
+
+/// A socket receive buffer: what was asked for and what the kernel granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecvBuffer {
+    /// Bytes requested with `SO_RCVBUF`.
+    pub requested: usize,
+    /// Bytes the kernel holds for datagrams, read back after the request.
+    ///
+    /// Linux reports twice what it will queue — it doubles the request for
+    /// bookkeeping, `socket(7)` — so the read-back is halved there to compare
+    /// like with like.
+    pub granted: usize,
+}
+
+impl RecvBuffer {
+    /// Whether the kernel granted less than half of the request — the point at
+    /// which a burst the size of a frame no longer fits and the overflow is
+    /// dropped by the kernel, where no counter of ours can see it.
+    pub fn is_short(&self) -> bool {
+        self.granted < self.requested / 2
+    }
+
+    /// The system limit that capped the request, by name, for the warning.
+    pub fn limit_hint() -> &'static str {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            "raise net.core.rmem_max (sysctl -w net.core.rmem_max=<bytes>)"
+        } else if cfg!(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )) {
+            "raise kern.ipc.maxsockbuf (sysctl -w kern.ipc.maxsockbuf=<bytes>)"
+        } else {
+            "raise the system's socket receive-buffer limit"
+        }
+    }
+}
+
+/// Request `requested` bytes of `SO_RCVBUF` and read back what was granted.
+///
+/// An oversized request is normally capped silently — Linux at
+/// `net.core.rmem_max`, macOS at a limit derived from `kern.ipc.maxsockbuf` —
+/// which is why the granted size is read back rather than assumed. Should a
+/// system refuse instead (`ENOBUFS`), the request is retried at half the size
+/// down to 64 KiB, so the socket still gets the largest buffer allowed and a
+/// read-back that says how far short of the request it is.
+fn request_recv_buffer(socket: SockRef<'_>, requested: usize) -> io::Result<RecvBuffer> {
+    const FLOOR: usize = 64 * 1024;
+    let mut ask = requested;
+    loop {
+        match socket.set_recv_buffer_size(ask) {
+            Ok(()) => break,
+            Err(_) if ask > FLOOR => ask /= 2,
+            Err(err) => return Err(err),
+        }
+    }
+    let reported = socket.recv_buffer_size()?;
+    let granted = if cfg!(any(target_os = "linux", target_os = "android")) {
+        reported / 2
+    } else {
+        reported
+    };
+    Ok(RecvBuffer { requested, granted })
+}
+
+/// Size a stream socket's receive buffer and report what the kernel granted.
+///
+/// The caller decides what a shortfall means; [`RecvBuffer::is_short`] and
+/// [`RecvBuffer::limit_hint`] say whether to warn and what to raise.
+pub fn set_recv_buffer(socket: &StdUdpSocket, requested: usize) -> io::Result<RecvBuffer> {
+    request_recv_buffer(SockRef::from(socket), requested)
+}
 
 /// Maximum length for interface names. On Linux this matches `IFNAMSIZ - 1`
 /// (15). On Windows, interface names are GUIDs like
@@ -486,11 +558,11 @@ pub async fn bind_udp(
     #[cfg(all(unix, not(target_os = "solaris")))]
     socket.set_reuse_port(true)?;
 
-    socket.set_recv_buffer_size(recv_buffer)?;
-    let actual_recv_buffer = socket.recv_buffer_size()?;
+    let granted = request_recv_buffer(SockRef::from(&socket), recv_buffer)?;
     debug!(
-        requested_recv_buffer = recv_buffer,
-        actual_recv_buffer, "configured GVSP receive buffer"
+        requested_recv_buffer = granted.requested,
+        granted_recv_buffer = granted.granted,
+        "configured GVSP receive buffer"
     );
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -546,7 +618,12 @@ pub async fn bind_multicast(
         socket.set_reuse_port(true)?;
     }
 
-    socket.set_recv_buffer_size(opts.rcvbuf_bytes)?;
+    let granted = request_recv_buffer(SockRef::from(&socket), opts.rcvbuf_bytes)?;
+    debug!(
+        requested_recv_buffer = granted.requested,
+        granted_recv_buffer = granted.granted,
+        "configured multicast GVSP receive buffer"
+    );
     socket.set_multicast_loop_v4(opts.loopback)?;
     socket.set_multicast_ttl_v4(opts.ttl)?;
     socket.set_multicast_if_v4(&iface_addr)?;
@@ -571,44 +648,6 @@ pub fn join_multicast(sock: &UdpSocket, group: Ipv4Addr, iface: &Iface) -> io::R
     let iface_addr = iface.ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED);
     socket.join_multicast_v4(&group, &iface_addr)?;
     Ok(())
-}
-
-/// Simple lock-free pool for reusable buffers backing frame assembly.
-#[derive(Debug)]
-pub struct BufferPool {
-    buffers: Mutex<VecDeque<BytesMut>>,
-    size: usize,
-}
-
-impl BufferPool {
-    /// Create a pool with the given capacity and buffer size.
-    pub fn new(capacity: usize, size: usize) -> Self {
-        let mut buffers = VecDeque::with_capacity(capacity);
-        for _ in 0..capacity {
-            buffers.push_back(BytesMut::with_capacity(size));
-        }
-        Self {
-            buffers: Mutex::new(buffers),
-            size,
-        }
-    }
-
-    /// Acquire a buffer from the pool.
-    pub fn acquire(&self) -> Option<BytesMut> {
-        self.buffers
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.pop_front())
-    }
-
-    /// Return a buffer to the pool.
-    pub fn release(&self, mut buffer: BytesMut) {
-        buffer.truncate(0);
-        buffer.reserve(self.size);
-        if let Ok(mut guard) = self.buffers.lock() {
-            guard.push_back(buffer);
-        }
-    }
 }
 
 /// Helper returning the default bind address for discovery convenience.
@@ -758,13 +797,18 @@ mod tests {
     }
 
     #[test]
-    fn buffer_pool_recycles() {
-        let pool = BufferPool::new(2, 1024);
-        let mut buf = pool.acquire().expect("buffer");
-        buf.extend_from_slice(&[1, 2, 3]);
-        pool.release(buf);
-        let buf2 = pool.acquire().expect("buffer");
-        assert!(buf2.is_empty());
-        assert!(buf2.capacity() >= 1024);
+    fn the_granted_receive_buffer_is_read_back() {
+        let socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind");
+        let small = set_recv_buffer(&socket, 64 * 1024).expect("set");
+        assert_eq!(small.requested, 64 * 1024);
+        assert!(small.granted > 0);
+        // An absurd request is capped (or, refused, retried smaller); either way it
+        // must come back reported as short rather than silently believed.
+        // (Windows treats the value as a hint and reports it back as set.)
+        #[cfg(unix)]
+        {
+            let huge = set_recv_buffer(&socket, 1 << 30).expect("falls back, not fails");
+            assert!(huge.is_short(), "{huge:?}");
+        }
     }
 }

@@ -14,11 +14,11 @@ bytes. Applications normally reach it through `viva-genicam`.
 | Module | Contents |
 |---|---|
 | `gvcp` | `discover`, `discover_on_interface`, `discover_all`, `force_ip`, `DeviceInfo`, `GigeDevice`, `GigeError` |
-| `gvsp` | Packet parsing, frame reassembly, `StreamDest`, `StreamConfig`, chunk extraction |
+| `gvsp` | Zero-copy packet parsing, `StreamDest`, `StreamConfig`, chunk extraction |
 | `nic` | `Iface` — interface enumeration and selection |
 | `action` | `send_action`, `ActionParams`, `AckSummary` |
 | `message` | The event/message channel |
-| `stats` | `StreamStats` and its accumulator |
+| `stats` | Event, action and time-sync counters (stream counters live with the receive engine in `viva-genicam`) |
 | `time` | `TimeSync` — device ticks to host time |
 
 ---
@@ -148,20 +148,26 @@ consistent — see `TimeSync` below.
 
 ## Streaming (GVSP)
 
-The receiver negotiates stream parameters on the control channel, then receives
-UDP packets and reassembles frames by block ID.
+This crate parses GVSP: `gvsp::parse_packet_ref` reads one datagram without
+copying it — the standard 8-byte header or the 20-byte extended-ID one, and the
+payload type as all 16 bits, so `0x4001` (image with extended chunks) keeps its
+chunk bit. The receive engine in `viva-genicam` assembles the blocks, on a
+thread of its own per stream, with up to three blocks in flight and a timeout
+counted from each block's last packet
+([ADR-0025](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0025-gvsp-receive-engine.md)).
 
-Application code builds streams through `viva-genicam`, not this crate
-directly:
+Application code opens streams through `viva-genicam`, not this crate directly:
 
 ```rust,ignore
 {{#include ../../../crates/viva-genicam/examples/grab_gige.rs:stream}}
 ```
 
-`StreamBuilder` (in `viva_genicam::stream`) exposes `iface`, `dest`,
-`target_mtu`, `auto_packet_size`, `packet_size`, `probe`, `packet_delay`,
-`destination_port`, `multicast`, `rcvbuf_bytes` and `channel`. `FrameStream`
-wraps the result and yields whole frames.
+`Camera::open_stream` takes a `StreamOptions` (`iface`, `packet_size`,
+`auto_packet_size`, `multicast`, `destination_port`, `rcvbuf_bytes`). The
+lower-level `StreamBuilder` (in `viva_genicam::stream`) adds `dest`,
+`target_mtu`, `probe`, `packet_delay` and `channel`, for a stream built on a
+`GigeDevice` of your own; `FrameStream::new` then starts the receive engine on
+it.
 
 ### Packet size and MTU
 
@@ -194,9 +200,9 @@ belong to this layer:
 
 ### Resend
 
-The resend building blocks live here — `ResendPlanner`, `coalesce_missing`,
-`GigeDevice::request_resend` — but no stream requests a resend yet
-([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)).
+No stream requests a packet resend yet
+([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)); a lost
+packet is a lost frame.
 
 ### Chunk data
 
@@ -207,9 +213,10 @@ what it does not recognise; `viva_genicam::ChunkMap` maps the known ones
 
 ### Statistics
 
-`StreamStats` carries `frames`, `bytes`, `drops`, `packets`, `avg_fps`,
-`avg_mbps`, `avg_latency_ms` and the elapsed window. The resend counters stay
-at zero for the reason above.
+A stream's counters are `viva_genicam::StreamStats`: every block counted once as
+complete, incomplete, missed (a block-id gap) or dropped to backpressure, plus
+what became of the packets — see
+[Streaming → What the statistics tell you](../tutorials/streaming.md#43-what-the-statistics-tell-you).
 
 ---
 
@@ -245,7 +252,8 @@ covered in [Networking → Windows](../networking.md#22-windows).
 **Linux.** With firewalld, GVCP replies arrive from source port 3956 and the
 GVSP port needs its own rule — see
 [Letting the reply back in](../networking.md#33-letting-the-reply-back-in-firewalld).
-`net.core.rmem_max` caps how far `rcvbuf_bytes` can go.
+`net.core.rmem_max` caps the socket receive buffer; the stream warns when it
+gets less than half of what it asked for.
 
 **Link-local.** GigE Vision cameras fall back to `169.254.0.0/16` when no DHCP
 server answers. That works, but the host needs an address in the same range and

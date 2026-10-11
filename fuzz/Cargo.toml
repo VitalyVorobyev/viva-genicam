@@ -1,0 +1,38 @@
+# Fuzz targets for GVSP parsing and block assembly (CI-09).
+#
+#   cargo install cargo-fuzz          # needs a nightly toolchain
+#   cargo +nightly fuzz run gvsp_parse
+#   cargo +nightly fuzz run gvsp_assemble
+#
+# Outside the library workspace, so its nightly-only build never touches the
+# root lockfile or `cargo test --workspace`.
+[package]
+name = "viva-genicam-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+viva-genicam = { path = "../crates/viva-genicam" }
+viva-gige = { path = "../crates/viva-gige" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "gvsp_parse"
+path = "fuzz_targets/gvsp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gvsp_assemble"
+path = "fuzz_targets/gvsp_assemble.rs"
+test = false
+doc = false
+bench = false

@@ -321,7 +321,7 @@ All components in the path must agree:
 The host NIC MTU is **not** the path MTU. A jumbo-capable NIC behind a switch
 with a smaller frame limit still lets both ends *configure* a large
 `GevSCPSPacketSize`; the switch then drops the oversized GVSP datagrams and the
-stream shows `frames=0`. When in doubt, cap the size with
+stream shows `complete=0`. When in doubt, cap the size with
 `viva-camctl stream --packet-size 9000` (or lower) rather than trusting the NIC
 alone. How the library chooses and verifies the packet size is covered in
 [Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-and-mtu).
@@ -389,7 +389,7 @@ Practical tips:
 
 Monitor:
 
-- Per-camera statistics: drops and throughput.
+- Per-camera statistics: incomplete and missed frames, and throughput.
 - Host CPU usage.
 - Switch port statistics if your hardware exposes them.
 
@@ -428,8 +428,15 @@ causes there are specific and the fixes are two commands. If none of this
 helps, the camera itself is the evidence we need: see
 [Reporting a camera we can't open](./reporting.md).
 
-### 8.2. Streaming is unstable (drops)
+### 8.2. Streaming is unstable (frames lost)
 
+- Read the counters first. `incomplete` or `missed` climbing is the network or
+  the camera; `backpressure` climbing is the application not taking frames fast
+  enough — no network change will help it
+  ([what each counter means](tutorials/streaming.md#43-what-the-statistics-tell-you)).
+- A warning that the kernel granted a small GVSP receive buffer means bursts
+  overflow the socket before the stream sees them: raise the limit it names
+  (`net.core.rmem_max`, `kern.ipc.maxsockbuf`).
 - Check packet size against the path MTU; see [§4.2](#42-enabling-jumbo-frames).
 - For high data rates, enable jumbo frames end to end (camera, switch, NIC).
 - Reduce stress: lower the frame rate or ROI, or increase the inter-packet

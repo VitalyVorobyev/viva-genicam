@@ -10,7 +10,7 @@ itself? The developer documentation lives in the repository — see
 [Developing viva-genicam](developers.md).
 
 ## What works today
-- **GigE Vision**: GVCP discovery, GVSP streaming with frame reassembly, events, action commands, chunk parsing, FORCEIP, persistent IP configuration.
+- **GigE Vision**: GVCP discovery; GVSP streaming on a receive thread per stream, tolerant of reordered, repeated and extended-ID packets, with every frame's fate counted; events, action commands, chunk parsing, FORCEIP, persistent IP configuration. Lost packets are not requested again yet ([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)).
 - **USB3 Vision**: device discovery, GenCP register I/O, bulk-endpoint streaming, async frame iterator — see [Status](#status).
 - **GenApi**: NodeMap with the standard node types (Integer, Float, Enumeration, Boolean, Command, Category, String, Register, SwissKnife, Converter, IntConverter), pValue delegation, selectors, runtime access predicates (`pIsLocked`, `pIsAvailable`, `pIsImplemented`), node metadata and visibility filtering.
 - **CLI** (`viva-camctl`): discovery, feature get/set, command execution, streaming (including raw event-vision capture), events, chunks, benchmarks, IP configuration, XML dump, and a diagnostic report bundle.

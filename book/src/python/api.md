@@ -65,7 +65,9 @@ class Camera:
     def all_node_info(self) -> list[NodeInfo]: ...
     def categories(self) -> dict[str, list[str]]: ...
 
-    def execute(self, name: str, *, wait: bool = True, timeout: float = 5.0) -> None: ...
+    # True once the camera reports completion; False with a RuntimeWarning if it
+    # does not within `timeout` (the command was still sent); False with wait=False.
+    def execute(self, name: str, *, wait: bool = True, timeout: float = 5.0) -> bool: ...
     def acquisition_start(self) -> None: ...
     def acquisition_stop(self) -> None: ...
 
@@ -189,7 +191,8 @@ Everything the bindings raise deliberately inherits from `GenicamError`, so one
 `except vg.GenicamError:` covers it.
 
 It does **not** cover a `pyo3_runtime.PanicException`, which is what you get if
-a `Camera`, `Frame` or `FrameStream` is used from a thread other than the one
-that created it (they are pyo3 `unsendable` types), or if the Rust layer panics.
+a `Camera` or `Frame` is used from a thread other than the one that created it
+(they are pyo3 `unsendable` types; a `FrameStream` is not), or if the Rust layer
+panics.
 `PanicException` subclasses `BaseException`, so `except Exception:` misses it
 too — see [Control & introspection](control.md#error-model).

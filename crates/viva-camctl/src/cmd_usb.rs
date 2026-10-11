@@ -223,15 +223,12 @@ pub fn run_stream(index: Option<usize>, save: usize, rgb: bool, duration_s: u64)
         if saved < save {
             let payload = raw.payload.as_ref();
             let path = if rgb {
-                let frame = viva_genicam::frame::Frame {
-                    payload: raw.payload.clone(),
-                    width: raw.leader.width,
-                    height: raw.leader.height,
+                let frame = viva_genicam::frame::Frame::new(
+                    raw.payload.clone(),
+                    raw.leader.width,
+                    raw.leader.height,
                     pixel_format,
-                    chunks: None,
-                    ts_dev: None,
-                    ts_host: None,
-                };
+                );
                 let rgb_data = frame
                     .to_rgb8()
                     .map_err(|e| anyhow!("RGB conversion: {e}"))?;

@@ -715,11 +715,10 @@ async fn run_frame_reader(
         frames_since_status += 1;
         let elapsed = last_status.elapsed();
         if elapsed >= STATUS_INTERVAL {
-            events.send(&AcquisitionStatus {
-                active: true,
-                fps: Some(frames_since_status as f32 / elapsed.as_secs_f32()),
-                dropped: frame_stream.dropped(),
-            });
+            events.send(&AcquisitionStatus::active(
+                Some(frames_since_status as f32 / elapsed.as_secs_f32()),
+                frame_stream.dropped(),
+            ));
             last_status = Instant::now();
             frames_since_status = 0;
         }

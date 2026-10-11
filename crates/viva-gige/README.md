@@ -12,7 +12,7 @@ Implements the networking building blocks for communicating with GigE Vision cam
 
 - **GVCP discovery** -- directed-broadcast device discovery on selected network interfaces
 - **Register I/O** -- read/write device registers and memory over GVCP, with retry and backoff
-- **GVSP streaming** -- packet parsing, frame reassembly, chunk parsing, backpressure. Packet resend has building blocks here but is not requested yet ([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191))
+- **GVSP** -- zero-copy packet parsing (standard and extended-ID headers), chunk parsing; `viva-genicam`'s receive engine assembles the frames. Packet resend is not requested yet ([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191))
 - **Multicast** -- IGMP join for multicast stream reception
 - **Events** -- GVCP message channel for asynchronous camera events
 - **Action commands** -- broadcast-triggered synchronized acquisition

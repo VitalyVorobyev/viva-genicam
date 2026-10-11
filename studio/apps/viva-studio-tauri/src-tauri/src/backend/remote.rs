@@ -523,10 +523,8 @@ impl DeviceBackend for RemoteBackend {
     ) -> Result<HashMap<String, FeatureState>, String> {
         let session = self.session()?;
         let device_id = self.device_id().await?;
-        let payload = serde_json::to_vec(&BulkReadRequest {
-            names: names.to_vec(),
-        })
-        .map_err(|e| e.to_string())?;
+        let payload =
+            serde_json::to_vec(&BulkReadRequest::new(names.to_vec())).map_err(|e| e.to_string())?;
         query(&session, &keys::nodes_bulk_state(&device_id), Some(payload)).await
     }
 
@@ -537,10 +535,8 @@ impl DeviceBackend for RemoteBackend {
     ) -> Result<Vec<String>, String> {
         let session = self.session()?;
         let device_id = self.device_id().await?;
-        let payload = serde_json::to_vec(&NodeSetRequest {
-            value: value.clone(),
-        })
-        .map_err(|e| e.to_string())?;
+        let payload =
+            serde_json::to_vec(&NodeSetRequest::new(value.clone())).map_err(|e| e.to_string())?;
         let resp: NodeOpResponse =
             query(&session, &keys::node_set(&device_id, name), Some(payload)).await?;
         if resp.ok {
@@ -640,10 +636,8 @@ impl DeviceBackend for RemoteBackend {
 
         // Let the subscription's interest reach the service's peer first.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let start = AcquisitionControlRequest {
-            packet_size: options.packet_size,
-            ..AcquisitionControlRequest::new(AcquisitionCommand::Start)
-        };
+        let mut start = AcquisitionControlRequest::new(AcquisitionCommand::Start);
+        start.packet_size = options.packet_size;
         if let Err(e) = self.send_acquisition(start).await {
             self.stop_streamer().await;
             return Err(e);
@@ -681,7 +675,7 @@ impl DeviceBackend for RemoteBackend {
         match self.device_id().await {
             Ok(device_id) => {
                 let session = self.session()?;
-                let payload = serde_json::to_vec(&DeviceReportRequest { include_xml })
+                let payload = serde_json::to_vec(&DeviceReportRequest::new(include_xml))
                     .map_err(|e| e.to_string())?;
                 let key = keys::report(&device_id);
                 let response: DeviceReportResponse =
@@ -900,9 +894,7 @@ mod tests {
             let stand_in = tauri::async_runtime::spawn(async move {
                 let query = slow.recv_async().await.unwrap();
                 tokio::time::sleep(Duration::from_secs(6)).await;
-                let response = viva_zenoh_api::DeviceReportResponse {
-                    report: "written slowly".to_string(),
-                };
+                let response = viva_zenoh_api::DeviceReportResponse::new("written slowly");
                 let payload = serde_json::to_vec(&response).unwrap();
                 query
                     .reply(query.key_expr().clone(), payload)

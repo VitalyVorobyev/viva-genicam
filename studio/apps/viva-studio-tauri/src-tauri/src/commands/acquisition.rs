@@ -11,10 +11,10 @@ use crate::state::device_state::StreamerInfo;
 use crate::state::events::Events;
 
 fn status(active: bool) -> AcquisitionStatus {
-    AcquisitionStatus {
-        active,
-        fps: None,
-        dropped: 0,
+    if active {
+        AcquisitionStatus::active(None, 0)
+    } else {
+        AcquisitionStatus::inactive()
     }
 }
 

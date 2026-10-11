@@ -22,8 +22,11 @@ You should already know your camera's IP and the host NIC you reach it on
    channel** — a leader, the payload packets, and a trailer per frame.
 3. The host reassembles them into frames and reports statistics.
 
-`viva-gige` owns packet handling; `viva-genicam` presents `StreamBuilder` and
-`FrameStream` on top; `viva-camctl stream` is a thin CLI over that.
+`viva-gige` parses the packets. In `viva-genicam`, `Camera::open_stream` sets
+the stream up and returns a `FrameStream`, whose receive engine reads the socket
+on a thread of its own — whether or not your code is asking for a frame at that
+moment — and hands you whole frames. `viva-camctl stream` is a thin CLI over
+that.
 
 Note that the stream channel is UDP to a **different port** than the control
 channel, and that the camera chooses when to send. A firewall that permits GVCP
@@ -53,18 +56,20 @@ runs until Ctrl+C.
 Once a second you get a progress line, and a summary at the end:
 
 ```
-[stream] fps=30.0 Mbps=73.73 frames=30 drops=0 resends=0
-Summary: frames=300 bytes=92160000 drops=0 resends=0 avg_fps=30.0 avg_mbps=73.73
+[stream] fps=30.0 Mbps=73.73 complete=30 incomplete=0 missed=0 backpressure=0 bytes=9216000
+Summary: fps=30.0 Mbps=73.73 complete=300 incomplete=0 missed=0 backpressure=0 bytes=92160000
 ```
+
+[§4.3](#43-what-the-statistics-tell-you) says what each counter means.
 
 If no frames arrive at all:
 
 - Confirm nothing else is already consuming the stream (a vendor viewer holds
   the control channel exclusively).
 - Confirm the host firewall permits inbound UDP on the stream port —
-  `viva-camctl stream` uses `10040` unless you pass `--port`; the library's
-  `StreamBuilder` defaults to `0x5FFF` (24575) unless you call
-  `destination_port`.
+  `viva-camctl stream` uses `10040` unless you pass `--port`; the library
+  (`Camera::open_stream`, `StreamBuilder`) defaults to `0x5FFF` (24575) unless
+  you pass `destination_port`.
 - Confirm the `--iface` interface is one the camera can actually reach.
 
 ### 2.2. Saving frames
@@ -122,23 +127,31 @@ It saves `--save N` frames (default 1) and stops. Unless you pass
 `--packet-size`, it opts into automatic packet sizing — see
 [§4.1](#41-packet-size-and-mtu).
 
-Setup — connect, build the stream, start acquisition:
+Setup — connect, open the stream, start acquisition:
 
 ```rust,ignore
 {{#include ../../../crates/viva-genicam/examples/grab_gige.rs:stream}}
 ```
 
-Then the loop. Packet reassembly, ordering and buffering all stay inside
+Then the loop. Reassembly, ordering and buffering all stay inside
 `FrameStream`; what you get is whole frames:
 
 ```rust,ignore
 {{#include ../../../crates/viva-genicam/examples/grab_gige.rs:frame_loop}}
 ```
 
-Two things to note. The stream is built on a **second** `GigeDevice` rather than
-the one inside `Camera`, because stream setup writes to the same device while
-the camera holds it. And `acquisition_start` / `acquisition_stop` are ordinary
-synchronous calls — see [Registers & features](./registers.md#step-3--do-the-same-from-rust).
+Two things to note. `open_stream` does the whole setup through the camera's own
+control channel: it claims control, points the stream channel at this host (or
+a multicast group), negotiates the packet size, binds the socket, and starts the
+receive engine with the camera's `PayloadSize`. And `acquisition_start` /
+`acquisition_stop` are ordinary synchronous calls — see
+[Registers & features](./registers.md#step-3--do-the-same-from-rust).
+
+Every frame carries its `block_id` and a `status`. By default a stream delivers
+only `FrameStatus::Complete` frames; see
+[§4.4](#44-incomplete-frames-and-the-block-timeout) to receive the others.
+Code without an async runtime can call `next_frame_blocking(timeout)` instead of
+`next_frame().await`.
 
 No camera? The [fake camera](./fake-camera.md) streams over loopback:
 
@@ -173,8 +186,8 @@ streams up to **16114**).
 | Policy | CLI | Rust | Python | Starting size |
 |---|---|---|---|---|
 | Preserve (default) | — | — | — | The camera's current `GevSCPSPacketSize`, never raised |
-| Auto | `--auto` | `StreamBuilder::auto_packet_size()` | `auto_packet_size=True` | Derived from the host NIC's MTU |
-| Explicit | `--packet-size N` | `StreamBuilder::packet_size(n)` | `packet_size=N` | `N`, used as a ceiling |
+| Auto | `--auto` | `StreamOptions::auto_packet_size()` | `auto_packet_size=True` | Derived from the host NIC's MTU |
+| Explicit | `--packet-size N` | `StreamOptions::packet_size(n)` | `packet_size=N` | `N`, used as a ceiling |
 
 Auto and explicit are mutually exclusive. The default leaves a camera that is
 already configured for a narrower path alone; the reasoning is in
@@ -214,19 +227,58 @@ overruns switch buffers and NIC rings first. A modest delay trades a little
 latency for a lot of stability, and is usually the first thing to try when drops
 appear only at high frame rates.
 
-### 4.3. What the statistics do and do not tell you
+### 4.3. What the statistics tell you
 
-`drops` counts frames that arrived incomplete. That number is real, and it is
-the one to watch. `resends` (and `resend_ranges` on `StreamStats`) stays at 0
-until packet resend lands
-([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)), so
-`resends=0` says nothing about the health of your network.
+`FrameStream::stats()` counts every block the camera sent exactly once, when its
+fate is decided:
+
+| Counter | Meaning |
+|---|---|
+| `frames_complete` | Delivered to you with every packet present. |
+| `frames_incomplete` | Closed with packets missing, without a trailer, or with an error status from the camera. |
+| `frames_missed` | Never seen at all: gaps in the block-id sequence. |
+| `frames_backpressure` | Assembled, then discarded because your code did not take them in time. The stream keeps the four newest frames. |
+
+So `frames_complete + frames_incomplete + frames_missed + frames_backpressure`
+is the number of frames the camera sent; `frames_lost()` is everything but the
+first. The packet counters say why: `packets_missing`, `packets_duplicate`, and
+`packets_ignored_*` for what arrived and could not be used (late, out of range,
+malformed, an unsupported payload type, an error status).
+`packets_size_mismatch` above zero means the camera and the host disagree about
+the packet size — retry with `--packet-size 1500`.
+
+`incomplete` and `missed` point at the network or the camera; `backpressure`
+points at your code. Packet resend is not implemented yet
+([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)), so there
+are no resend counters: a lost packet is a lost frame.
+
+### 4.4. Incomplete frames and the block timeout
+
+A block closes as incomplete when nothing has arrived for it for the **block
+timeout**, 100 ms by default, counted from its *last* packet: a large frame on
+a slow or paced link takes as long as it takes, and only silence ends it.
+`FrameStream::set_block_timeout` changes it.
+
+Incomplete frames are counted and, by default, not delivered.
+`set_deliver_incomplete(true)` hands them over too, with a `status` that says
+what happened — `Incomplete { missing_packets }`, `TrailerMissing` or
+`DeviceStatus(code)` — and zeros where the lost packets' bytes belong.
+
+### 4.5. The socket receive buffer
+
+The receive engine asks the operating system for a receive buffer of twice the
+frame size (at least 4 MiB) and reads back what it got. If the system grants
+less than half, it warns once and names the limit to raise —
+`net.core.rmem_max` on Linux, `kern.ipc.maxsockbuf` on macOS. Below that, a
+burst the size of a frame overflows the socket and the kernel drops packets
+before any counter can see them.
 
 ---
 
 ## 5. Troubleshooting
 
-**Drops spike immediately.** Check MTU and packet size alignment first, then
+**Frames go missing immediately** (`incomplete` or `missed` climbing). Check
+MTU and packet size alignment first, then
 lower the frame rate or ROI to confirm it is a bandwidth problem rather than a
 configuration one. A dedicated NIC and switch removes a whole class of cause.
 
@@ -255,7 +307,8 @@ vendor's viewer on the same cabling. If it still makes no sense,
 You should now be able to:
 
 - Start a stream from the CLI and from Rust, and save frames or event blocks.
-- Read `drops` as the meaningful reliability signal.
+- Tell from the counters whether frames are lost on the network (`incomplete`,
+  `missed`) or in your own code (`backpressure`).
 - Know which knob to reach for first: packet size and MTU, then packet delay.
 
 Next: the [Networking Guide](../networking.md) for host and switch

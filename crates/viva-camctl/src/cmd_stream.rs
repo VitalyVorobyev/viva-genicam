@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use viva_genicam::evs::{EvsBlock, EvsFormat};
 use viva_genicam::pfnc::PixelFormat;
 use viva_genicam::stream::StreamBlock;
-use viva_genicam::{Frame, FrameStream, StreamBuilder, StreamDest};
+use viva_genicam::{Frame, StreamOptions};
 
 use viva_gige::nic::IfaceSelector;
 
@@ -35,12 +35,6 @@ pub struct StreamArgs {
     pub duration_s: u64,
 }
 
-// `await_holding_lock` resolves its lint level at the enclosing coroutine body,
-// so a statement-scoped `#[allow]` on the `let stream = { … }` below has no
-// effect and the attribute has to live here. The single offending guard is
-// documented at the point it is taken; nothing else in this function holds a
-// lock across an await.
-#[allow(clippy::await_holding_lock)]
 pub async fn run(args: StreamArgs) -> Result<()> {
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(args.ip, args.index, args.iface.as_ref(), timeout).await?;
@@ -50,77 +44,26 @@ pub async fn run(args: StreamArgs) -> Result<()> {
         .context("open camera for stream")?;
 
     let iface = common::resolve_receive_iface(args.iface.as_ref(), device.ip)?;
-    let host_ip = iface
-        .ipv4()
-        .ok_or_else(|| anyhow!("interface {} has no IPv4 address", iface.name()))?;
-    let mode = parse_mode(&args.mode)?;
-
-    if let StreamMode::Multicast = mode {
+    let mut options = StreamOptions::new().iface(iface);
+    if args.auto {
+        options = options.auto_packet_size();
+    } else if let Some(size) = args.packet_size {
+        options = options.packet_size(size);
+    }
+    if args.port != 0 {
+        options = options.destination_port(args.port);
+    }
+    if let StreamMode::Multicast = parse_mode(&args.mode)? {
         let group = args
             .group
             .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
-        camera
-            .configure_stream_multicast(0, group, args.port)
-            .context("configure multicast destination")?;
+        options = options.multicast(group);
     }
-
-    let dest = match mode {
-        StreamMode::Unicast => StreamDest::Unicast {
-            dst_ip: host_ip,
-            dst_port: args.port,
-        },
-        StreamMode::Multicast => {
-            let group = args
-                .group
-                .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
-            StreamDest::Multicast {
-                group,
-                port: args.port,
-                loopback: false,
-                ttl: 1,
-            }
-        }
-    };
-    // Negotiate the stream through the camera's existing GVCP handle so control
-    // privilege, stream configuration, and acquisition commands all come from
-    // the same application endpoint. This scope also releases the device lock
-    // before the higher-level Camera API is used again below.
-    //
-    // The guard must span the builder's awaits (StreamBuilder borrows the
-    // locked device), and nothing else contends this mutex until streaming
-    // starts, so holding it across the awaits cannot deadlock here. The
-    // `await_holding_lock` allow this needs is on the function; see there.
-    let stream = {
-        let mut stream_device = camera
-            .transport()
-            .lock_device()
-            .context("access camera control channel for stream configuration")?;
-        stream_device
-            .claim_control()
-            .await
-            .context("claim camera control for stream configuration")?;
-
-        let mut builder = StreamBuilder::new(&mut stream_device)
-            .iface(iface.clone())
-            .dest(dest)
-            .rcvbuf_bytes(64 << 20);
-        if args.auto {
-            builder = builder.auto_packet_size();
-        } else if let Some(size) = args.packet_size {
-            builder = builder.packet_size(size);
-        }
-        if args.port != 0 {
-            builder = builder.destination_port(args.port);
-        }
-        builder.build().await.context("negotiate stream")?
-    };
-
-    // Keep the CLI at the completed-frame boundary. FrameStream owns the receive
-    // buffer, platform-specific packet reception, GVSP reassembly, chunk parsing,
-    // and completed-frame statistics.
-    let mut frame_stream = FrameStream::new(stream, None);
-    // This is a shared snapshot handle; FrameStream records each completed frame
-    // exactly once, so the CLI must not call record_frame() again.
+    // One recipe for every consumer: claim control, configure the stream
+    // channel, negotiate the packet size, and start the receive engine with
+    // the camera's PayloadSize. The engine owns reception, reassembly, chunk
+    // parsing and the counters.
+    let mut frame_stream = camera.open_stream(options).context("open stream")?;
     let stats = frame_stream.stats_handle();
 
     if let Err(err) = camera.set("TLParamsLocked", "1") {
@@ -164,15 +107,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                 // No keepalive here: `GigeRegisterIo` runs one for as long as it
                 // exists, so the control channel survives a stream that sends no
                 // GVCP traffic of its own.
-                let snapshot = stats.snapshot();
-                println!(
-                    "[stream] fps={:.1} Mbps={:.2} frames={} drops={} resends={}",
-                    snapshot.avg_fps,
-                    snapshot.avg_mbps,
-                    snapshot.frames,
-                    snapshot.drops,
-                    snapshot.resends,
-                );
+                common::print_stream_counters("[stream]", &stats.snapshot());
             }
             _ = &mut ctrl_c => {
                 info!("received ctrl-c; stopping stream");
@@ -243,16 +178,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     if interrupted {
         println!("Stream interrupted by user.");
     }
-    let summary = stats.snapshot();
-    println!(
-        "Summary: frames={} bytes={} drops={} resends={} avg_fps={:.1} avg_mbps={:.2}",
-        summary.frames,
-        summary.bytes,
-        summary.drops,
-        summary.resends,
-        summary.avg_fps,
-        summary.avg_mbps,
-    );
+    common::print_stream_counters("Summary:", &stats.snapshot());
 
     Ok(())
 }

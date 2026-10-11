@@ -2,7 +2,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, BytesMut};
@@ -10,22 +10,16 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, trace, warn};
 
+use crate::gvsp::{
+    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketScript,
+    block_datagrams, image_size, interleave,
+};
 use crate::registers::RegisterMap;
 
-/// GVSP header size in bytes.
-const GVSP_HEADER_SIZE: usize = 8;
 /// IPv4 header size counted by `GevSCPSPacketSize` per the GigE Vision spec.
 const IPV4_HEADER_SIZE: usize = 20;
 /// UDP header size counted by `GevSCPSPacketSize` per the GigE Vision spec.
 const UDP_HEADER_SIZE: usize = 8;
-/// Bytes of a GVSP data packet that are not image payload. `GevSCPSPacketSize`
-/// includes the IP, UDP, and GVSP headers, so a conforming camera must chunk
-/// image data into `SCPS - 36`-byte pieces (mirrors the receiver in
-/// `viva-genicam::stream`).
-const GVSP_PACKET_OVERHEAD: usize = IPV4_HEADER_SIZE + UDP_HEADER_SIZE + GVSP_HEADER_SIZE;
-
-/// Payload type for image data.
-const PAYLOAD_IMAGE: u16 = 0x0001;
 
 /// GVCP command message key byte.
 const GVCP_CMD_KEY: u8 = 0x42;
@@ -36,14 +30,30 @@ const GEV_EVENT_START_OF_TRANSFER: u16 = 0x0005;
 /// Size of one 16-bit-block-id event entry.
 const EVENT_ENTRY_LEN: u16 = 16;
 
+/// Stream options set on the builder rather than through registers.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SenderOptions {
+    /// Send 20-byte extended-ID headers with 64-bit block ids.
+    pub extended_ids: bool,
+    /// Payload type for the leader and trailer; `None` is image, or image
+    /// with extended chunk data while chunk mode is active.
+    pub payload_type: Option<u16>,
+    /// Deterministic damage to apply to the stream.
+    pub script: PacketScript,
+}
+
 /// Run the GVSP frame sender loop.
 ///
 /// Waits for `acq_start_notify`, then streams frames until `stop_flag` is set.
+/// Every block built counts in `blocks_sent`, including one the script then
+/// drops whole: that is a block the camera produced and the host never saw.
 pub async fn run(
     regs: Arc<Mutex<RegisterMap>>,
     acq_start_notify: Arc<Notify>,
     stop_flag: Arc<AtomicBool>,
     fps: u32,
+    options: SenderOptions,
+    blocks_sent: Arc<AtomicU64>,
 ) {
     loop {
         // Wait for acquisition start.
@@ -60,7 +70,7 @@ pub async fn run(
         };
 
         let frame_interval = Duration::from_micros(1_000_000 / fps.max(1) as u64);
-        let mut block_id: u16 = 1;
+        let mut block_id: u64 = 1;
         let mut request_id: u16 = 1;
         // Device clock: nanoseconds since acquisition start (1 GHz tick rate).
         let clock_origin = Instant::now();
@@ -72,19 +82,7 @@ pub async fn run(
                 break;
             }
 
-            // Read current stream destination and config from registers.
-            let (
-                dest_ip,
-                dest_port,
-                packet_size,
-                width,
-                height,
-                pixel_format,
-                chunk_active,
-                exposure_time,
-                event_dest,
-                max_on_wire,
-            ) = {
+            let config = {
                 let store = regs.lock().await;
                 // A real camera emits the event when EventNotification is On
                 // for *this* event and the message channel has a destination.
@@ -101,49 +99,61 @@ pub async fn run(
                 } else {
                     None
                 };
-                (
-                    store.stream_dest_ip(),
-                    store.stream_dest_port(),
-                    store.stream_packet_size(),
-                    store.width(),
-                    store.height(),
-                    store.pixel_format_code(),
-                    store.chunk_mode_active(),
-                    store.exposure_time(),
+                FrameConfig {
+                    dest_ip: store.stream_dest_ip(),
+                    dest_port: store.stream_dest_port(),
+                    packet_size: store.stream_packet_size(),
+                    packet_delay: packet_delay(
+                        store.stream_packet_delay_ticks(),
+                        store.tick_frequency(),
+                    ),
+                    width: store.width(),
+                    height: store.height(),
+                    pixel_format: store.pixel_format_code(),
+                    chunk_active: store.chunk_mode_active(),
+                    exposure_time: store.exposure_time(),
                     event_dest,
-                    store.max_on_wire(),
-                )
+                    max_on_wire: store.max_on_wire(),
+                }
             };
 
-            if dest_port == 0 || dest_ip == Ipv4Addr::UNSPECIFIED {
+            if config.dest_port == 0 || config.dest_ip == Ipv4Addr::UNSPECIFIED {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
+            let dest = SocketAddr::new(std::net::IpAddr::V4(config.dest_ip), config.dest_port);
 
-            let dest = SocketAddr::new(std::net::IpAddr::V4(dest_ip), dest_port);
-            let payload_per_packet = (packet_size as usize).saturating_sub(GVSP_PACKET_OVERHEAD);
-            if payload_per_packet == 0 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
+            let first = block_id;
+            let mut datagrams = match build_block(&config, &options, first, clock_origin) {
+                Some(datagrams) => datagrams,
+                None => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            block_id = next_block_id(first, options.extended_ids);
+            blocks_sent.fetch_add(1, Ordering::Relaxed);
+            datagrams = options.script.apply(datagrams);
+            if options.script.interleaves(first) {
+                let second = block_id;
+                if let Some(next) = build_block(&config, &options, second, clock_origin) {
+                    datagrams = interleave(datagrams, options.script.apply(next));
+                    block_id = next_block_id(second, options.extended_ids);
+                    blocks_sent.fetch_add(1, Ordering::Relaxed);
+                }
             }
-
-            // Compute bytes per pixel from pixel format code.
-            let bpp: u32 = if pixel_format == 0x02180014 { 3 } else { 1 }; // RGB8 : Mono8
-            let image_size = (width * height * bpp) as usize;
-
-            // Generate animated test pattern.
-            let image =
-                generate_test_pattern(width as usize, height as usize, bpp as usize, block_id);
-
-            // Device timestamp: nanoseconds since acquisition start.
-            let timestamp = clock_origin.elapsed().as_nanos() as u64;
 
             // GEV_EVENT_START_OF_TRANSFER precedes the leader, as on a real
             // device: the controller learns a block is starting before its
             // first GVSP packet arrives.
-            if let Some(event_dest) = event_dest {
-                let event =
-                    build_event(request_id, GEV_EVENT_START_OF_TRANSFER, block_id, timestamp);
+            if let Some(event_dest) = config.event_dest {
+                let timestamp = clock_origin.elapsed().as_nanos() as u64;
+                let event = build_event(
+                    request_id,
+                    GEV_EVENT_START_OF_TRANSFER,
+                    first as u16,
+                    timestamp,
+                );
                 let _ = socket.send_to(&event, event_dest).await;
                 request_id = request_id.wrapping_add(1);
                 if request_id == 0 {
@@ -151,51 +161,117 @@ pub async fn run(
                 }
             }
 
-            // Send leader packet (packet_id = 0).
-            let leader = build_leader(block_id, width, height, pixel_format, timestamp);
-            send_on_wire(&socket, &leader, dest, max_on_wire).await;
-
-            // Send payload packets.
-            let mut packet_id: u16 = 1;
-            let mut offset = 0;
+            // GevSCPD spaces consecutive packets. Sleeping per packet would be
+            // bound by the timer's millisecond granularity, so each packet has
+            // a due time on a schedule from the first, and the sender sleeps
+            // only once it is a millisecond or more ahead of it.
+            let started = Instant::now();
             let mut dropped = 0usize;
-            while offset < image_size {
-                let end = (offset + payload_per_packet).min(image_size);
-                let pkt = build_payload(block_id, packet_id, &image[offset..end]);
-                if !send_on_wire(&socket, &pkt, dest, max_on_wire).await {
+            let total = datagrams.len();
+            for (index, datagram) in datagrams.iter().enumerate() {
+                if !config.packet_delay.is_zero() {
+                    let due = started + config.packet_delay * index as u32;
+                    let now = Instant::now();
+                    if due > now + Duration::from_millis(1) {
+                        tokio::time::sleep(due - now).await;
+                    }
+                }
+                if !send_on_wire(&socket, &datagram.bytes, dest, config.max_on_wire).await {
                     dropped += 1;
                 }
-                packet_id += 1;
-                offset = end;
             }
-
-            // Send trailer packet (with optional chunk data).
-            let chunk_data = if chunk_active {
-                build_chunk_data(timestamp, exposure_time)
-            } else {
-                Vec::new()
-            };
-            let trailer = build_trailer(block_id, packet_id, height, &chunk_data);
-            send_on_wire(&socket, &trailer, dest, max_on_wire).await;
 
             if dropped > 0 {
                 debug!(
-                    block_id,
+                    block_id = first,
                     dropped,
-                    packet_size,
-                    max_on_wire,
-                    "payload packets exceeded the path ceiling and were dropped in flight"
+                    packet_size = config.packet_size,
+                    max_on_wire = config.max_on_wire,
+                    "packets exceeded the path ceiling and were dropped in flight"
                 );
             }
-            trace!(block_id, packets = packet_id + 1, %dest, "frame sent");
-            block_id = block_id.wrapping_add(1);
-            if block_id == 0 {
-                block_id = 1;
-            }
+            trace!(block_id = first, packets = total, %dest, "frame sent");
 
             tokio::time::sleep(frame_interval).await;
         }
     }
+}
+
+/// Register state read once per frame.
+struct FrameConfig {
+    dest_ip: Ipv4Addr,
+    dest_port: u16,
+    packet_size: u32,
+    packet_delay: Duration,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    chunk_active: bool,
+    exposure_time: f64,
+    event_dest: Option<SocketAddr>,
+    max_on_wire: Option<u32>,
+}
+
+/// `GevSCPD` counts timestamp ticks, not nanoseconds: convert with the tick
+/// frequency the device reports at bootstrap 0x093C/0x0940.
+fn packet_delay(ticks: u32, tick_frequency: u64) -> Duration {
+    if ticks == 0 || tick_frequency == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_nanos((ticks as u128 * 1_000_000_000 / tick_frequency as u128) as u64)
+}
+
+/// The block after `id`: 16-bit ids wrap from 65535 to 1, skipping 0.
+fn next_block_id(id: u64, extended_ids: bool) -> u64 {
+    if extended_ids {
+        return id.wrapping_add(1).max(1);
+    }
+    let next = (id as u16).wrapping_add(1);
+    if next == 0 { 1 } else { next as u64 }
+}
+
+/// Build one block's datagrams from the current register state, or `None`
+/// when the packet size leaves no room for data.
+fn build_block(
+    config: &FrameConfig,
+    options: &SenderOptions,
+    block_id: u64,
+    clock_origin: Instant,
+) -> Option<Vec<Datagram>> {
+    let payload_type = options.payload_type.unwrap_or(if config.chunk_active {
+        PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK
+    } else {
+        PAYLOAD_TYPE_IMAGE
+    });
+    let spec = BlockSpec {
+        block_id,
+        packet_size: config.packet_size,
+        extended_ids: options.extended_ids,
+        payload_type,
+        pixel_format: config.pixel_format,
+        width: config.width,
+        height: config.height,
+        // Device timestamp: nanoseconds since acquisition start.
+        timestamp: clock_origin.elapsed().as_nanos() as u64,
+        trailer_status: 0,
+        size_y: config.height,
+    };
+    if spec.payload_stride() == 0 {
+        return None;
+    }
+    let size = image_size(config.pixel_format, config.width, config.height);
+    let image = generate_test_pattern(
+        config.width as usize,
+        config.height as usize,
+        size,
+        block_id as u16,
+    );
+    let chunk_data = if config.chunk_active {
+        build_chunk_data(spec.timestamp, config.exposure_time)
+    } else {
+        Vec::new()
+    };
+    Some(block_datagrams(&spec, &image, &chunk_data))
 }
 
 /// Send one GVSP datagram, unless a configured path ceiling would have
@@ -227,12 +303,22 @@ async fn send_on_wire(
     socket.send_to(packet, dest).await.is_ok()
 }
 
-/// Generate a test pattern that animates across frames.
+/// Generate a test pattern of `size` bytes that animates across frames.
 ///
 /// Mono8: concentric rings radiating from center, shifting with each frame.
 /// RGB8: colorful plasma-like pattern with animated hue rotation.
-fn generate_test_pattern(width: usize, height: usize, bpp: usize, frame: u16) -> Vec<u8> {
-    let size = width * height * bpp;
+/// Any other size (16-bit, packed): a byte ramp, so every packet differs.
+fn generate_test_pattern(width: usize, height: usize, size: usize, frame: u16) -> Vec<u8> {
+    let pixels = width * height;
+    let bpp = if size == pixels {
+        1
+    } else if size == pixels * 3 {
+        3
+    } else {
+        return (0..size)
+            .map(|i| (i as u32).wrapping_mul(7).wrapping_add(frame as u32) as u8)
+            .collect();
+    };
     let mut data = vec![0u8; size];
     let cx = width as f32 / 2.0;
     let cy = height as f32 / 2.0;
@@ -290,57 +376,6 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
-/// Build a GVSP leader packet.
-fn build_leader(
-    block_id: u16,
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    timestamp: u64,
-) -> Vec<u8> {
-    // GVSP header (8 bytes) + leader payload (36 bytes)
-    let mut buf = BytesMut::with_capacity(44);
-
-    // GVSP header
-    buf.put_u16(0); // status = success
-    buf.put_u16(block_id); // block_id
-    buf.put_u8(0x01); // packet_format: leader
-    buf.put_u8(0); // packet_id high byte
-    buf.put_u16(0); // packet_id = 0 for leader
-
-    // Leader payload
-    buf.put_u16(0); // reserved
-    buf.put_u16(PAYLOAD_IMAGE); // payload_type
-    buf.put_u64(timestamp); // timestamp
-    buf.put_u32(pixel_format); // pixel_format
-    buf.put_u32(width); // size_x
-    buf.put_u32(height); // size_y
-    buf.put_u32(0); // offset_x
-    buf.put_u32(0); // offset_y
-    buf.put_u16(0); // padding_x
-    buf.put_u16(0); // padding_y
-
-    buf.to_vec()
-}
-
-/// Build a GVSP payload packet.
-fn build_payload(block_id: u16, packet_id: u16, data: &[u8]) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(GVSP_HEADER_SIZE + data.len());
-
-    // GVSP header
-    buf.put_u16(0); // status
-    buf.put_u16(block_id); // block_id
-    buf.put_u8(0x03); // packet_format: payload
-    // packet_id as 3 bytes big-endian (u24): [bits 23:16, bits 15:8, bits 7:0]
-    buf.put_u8(0); // bits 23:16 (always 0 for u16 packet_id)
-    buf.put_u8((packet_id >> 8) as u8); // bits 15:8
-    buf.put_u8(packet_id as u8); // bits 7:0
-
-    buf.put_slice(data);
-    buf.to_vec()
-}
-
-/// Build a GVSP trailer packet with optional chunk data.
 /// Build a GVCP `EVENT_CMD` carrying one event.
 ///
 /// Written out from the GigE Vision field table, not from the client parser:
@@ -361,39 +396,6 @@ fn build_event(request_id: u16, event_id: u16, block_id: u16, timestamp: u64) ->
     buf.put_u16(0); // stream channel index
     buf.put_u16(block_id);
     buf.put_u64(timestamp);
-    buf.to_vec()
-}
-
-/// `size_y` is the number of lines the block actually delivered, not a
-/// placeholder. It used to be hardcoded to zero: the parser read the field from
-/// the right offset and got a wrong value, and no test noticed because none
-/// asserted it (backlog `TC-04`). It is the only field that tells a receiver
-/// the true height of a variable-height block, which is how a linescan or
-/// profile-scanner frame reports how much it sent.
-fn build_trailer(block_id: u16, packet_id: u16, size_y: u32, chunk_data: &[u8]) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(16 + chunk_data.len());
-
-    // GVSP header
-    buf.put_u16(0); // status
-    buf.put_u16(block_id); // block_id
-    buf.put_u8(0x02); // packet_format: trailer
-    // packet_id as 3 bytes big-endian (u24)
-    buf.put_u8(0);
-    buf.put_u8((packet_id >> 8) as u8);
-    buf.put_u8(packet_id as u8);
-
-    // Trailer payload
-    buf.put_u16(0); // reserved/status
-    if chunk_data.is_empty() {
-        buf.put_u16(PAYLOAD_IMAGE); // payload_type
-    } else {
-        buf.put_u16(0x4001); // payload_type: image + chunk
-    }
-    buf.put_u32(size_y);
-
-    // Append chunk data blocks
-    buf.put_slice(chunk_data);
-
     buf.to_vec()
 }
 

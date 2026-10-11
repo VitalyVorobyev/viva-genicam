@@ -171,12 +171,12 @@ mod tests {
     use viva_zenoh_api::{ImageMeta, PixelFormat};
 
     fn make_meta(pixel_format: PixelFormat, width: u32, height: u32) -> ImageMeta {
-        ImageMeta {
+        ImageMeta::new(
             pixel_format,
             width,
             height,
-            payload_size: (width as u64) * (height as u64),
-        }
+            (width as u64) * (height as u64),
+        )
     }
 
     #[test]

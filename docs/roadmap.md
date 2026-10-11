@@ -4,12 +4,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
 
-**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. R, S, C, L and U are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
-
-## R — One GVSP receive engine
-
-**Goal**: one receive thread and one assembler on every OS, replacing the two in the library and the four in tools and examples. Frames time out from their last packet, extended IDs land where they belong, a `Frame` says whether it is complete, and the counters account for every block the camera sent.
-**Rows**: SR-13, SR-14, SR-15, SR-16, SR-17, SR-18, SR-07, SR-09, SR-12, TC-05, API-01, API-13, API-17, CI-09, and the stream side of PY-01.
+**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. S, C, L and U, like the receive engine already on `main`, are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
 ## S — Packet resend and stream-channel setup
 
@@ -54,7 +49,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 ## X — Errors, public surfaces, services
 
 **Goal**: freeze the surface the GenTL producer will wrap: error source chains, per-transport status codes, curated re-exports, one service for both transports.
-**Rows**: API-02, API-03, API-04, API-07, API-10, GA-30, TC-10, TC-16, SVC-04.
+**Rows**: API-02, API-03, API-04, API-07, API-10, GA-30, TC-10, TC-16, SVC-04, SVC-05.
 
 ## T — GenTL producer
 
@@ -75,7 +70,8 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.
 - **DC-03**: `Scan3d*` scale, offset and invalid value; one capture ([#93](https://github.com/VitalyVorobyev/viva-genicam/pull/93)) is the only evidence of what a 3D device sends.
 - **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture; behind GA-09.
-- **DC-05**: event-vision blocks in Python; their format is known only from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)'s camera. R removes the Windows receiver its test targets.
+- **DC-05**: event-vision blocks in Python; their format is known only from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)'s camera.
+- **SR-23**: the receive engine's block-id and packet heuristics (late window, restart on block 1, refusing an oversized data packet); a capture through an AcquisitionStop/Start settles them.
 - **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
 
 ## Studio

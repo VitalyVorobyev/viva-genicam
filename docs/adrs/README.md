@@ -36,6 +36,7 @@ of the record.
 | [0022](adr0022-integer-register-decoding.md) | Reinterpret Full-Width Unsigned Registers Rather Than Refuse Them | Accepted |
 | [0023](adr0023-inflight-gvcp-heartbeats.md) | Heartbeats during GVCP acknowledgement waits | Proposed |
 | [0024](adr0024-studio-reference-viewer.md) | Viva Studio is the library's reference viewer | Accepted |
+| [0025](adr0025-gvsp-receive-engine.md) | One GVSP receive engine | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

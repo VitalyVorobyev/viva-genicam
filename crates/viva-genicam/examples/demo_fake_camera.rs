@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use viva_fake_gige::FakeCamera;
 use viva_genicam::gige;
-use viva_genicam::{Camera, GigeRegisterIo, connect_gige_with_xml};
+use viva_genicam::{StreamOptions, connect_gige_with_xml};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,34 +92,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 6. Stream frames ────────────────────────────────────────────────────
     println!("Streaming 5 frames ...");
 
-    // Open a separate control connection for streaming (CCP-holding).
-    use std::net::{IpAddr, SocketAddr};
-    let control_addr = SocketAddr::new(IpAddr::V4(dev_info.ip), gige::GVCP_PORT);
-    let mut device = gige::GigeDevice::open(control_addr).await?;
-    device.claim_control().await?;
-
+    // The camera's own control channel configures the stream.
     let iface_name = if cfg!(target_os = "macos") {
         "lo0"
     } else {
         "lo"
     };
     let iface = gige::nic::Iface::from_system(iface_name)?;
-    let stream = viva_genicam::StreamBuilder::new(&mut device)
-        .iface(iface)
-        // Force the multi-packet path: loopback would otherwise hand us a
-        // jumbo MTU and a frame this size would fit in a couple of packets.
-        .packet_size(1500)
-        .build()
-        .await?;
-    let mut frame_stream = viva_genicam::FrameStream::new(stream, None);
+    let mut frame_stream = camera.open_stream(
+        StreamOptions::new()
+            .iface(iface)
+            // Force the multi-packet path: loopback would otherwise hand us a
+            // jumbo MTU and a frame this size would fit in a couple of packets.
+            .packet_size(1500),
+    )?;
 
-    // Wrap device into Camera for acquisition commands.
-    let handle = tokio::runtime::Handle::current();
-    let transport = GigeRegisterIo::new(handle, device);
-    let nodemap = viva_genicam::genapi::NodeMap::try_from_xml(viva_genapi_xml::parse(&xml)?)?;
-    let mut cam = Camera::new(transport, nodemap);
-
-    cam.acquisition_start()?;
+    camera.acquisition_start()?;
 
     for i in 0..5 {
         let frame = tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
@@ -143,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    cam.acquisition_stop()?;
+    camera.acquisition_stop()?;
     println!("\nDemo complete. All operations succeeded without hardware.");
 
     Ok(())

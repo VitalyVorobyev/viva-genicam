@@ -24,7 +24,7 @@ pub async fn run(
     };
     info!(device_id, key, "XML queryable ready");
 
-    let response = DeviceXmlResponse { xml };
+    let response = DeviceXmlResponse::new(xml);
 
     loop {
         tokio::select! {

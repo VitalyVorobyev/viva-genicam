@@ -1,17 +1,14 @@
 use std::fs::File;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use bytes::BytesMut;
 use serde::Serialize;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
-use viva_genicam::gige::gvsp::{self, GvspPacket};
-use viva_genicam::pfnc::PixelFormat;
-use viva_genicam::{Frame, StreamBuilder, StreamDest, parse_chunk_bytes};
+use viva_genicam::{StreamOptions, StreamStats};
 
 use viva_gige::nic::IfaceSelector;
 
@@ -29,25 +26,39 @@ pub struct BenchArgs {
     pub json_out: Option<PathBuf>,
 }
 
+/// The benchmark's result, as the receive engine counted it: every block the
+/// camera sent is complete, incomplete, missed or dropped to backpressure.
 #[derive(Debug, Serialize)]
 struct BenchReport {
     duration_s: u64,
-    frames: u64,
+    frames_complete: u64,
+    frames_incomplete: u64,
+    frames_missed: u64,
+    frames_backpressure: u64,
+    packets_received: u64,
+    packets_missing: u64,
     bytes: u64,
     avg_fps: f64,
     avg_mbps: f64,
-    drops: u64,
-    resends: u64,
     mode: String,
 }
 
-struct BlockState {
-    block_id: u64,
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    timestamp: u64,
-    payload: BytesMut,
+impl BenchReport {
+    fn new(stats: &StreamStats, duration: Duration, mode: &str) -> Self {
+        Self {
+            duration_s: duration.as_secs(),
+            frames_complete: stats.frames_complete,
+            frames_incomplete: stats.frames_incomplete,
+            frames_missed: stats.frames_missed,
+            frames_backpressure: stats.frames_backpressure,
+            packets_received: stats.packets_received,
+            packets_missing: stats.packets_missing,
+            bytes: stats.bytes,
+            avg_fps: stats.avg_fps,
+            avg_mbps: stats.avg_mbps,
+            mode: mode.to_string(),
+        }
+    }
 }
 
 pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
@@ -57,51 +68,22 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
     let mut camera = common::open_camera(&device)
         .await
         .context("open camera for bench")?;
-    let mut stream_device = common::open_control(&device)
-        .await
-        .context("open control channel for bench")?;
 
     let iface = common::resolve_receive_iface(args.iface.as_ref(), device.ip)?;
-    let host_ip = iface
-        .ipv4()
-        .ok_or_else(|| anyhow!("interface {} has no IPv4 address", iface.name()))?;
-    let mode = parse_mode(&args.mode)?;
-
-    if let StreamMode::Multicast = mode {
+    let mut options = StreamOptions::new().iface(iface).auto_packet_size();
+    if args.port != 0 {
+        options = options.destination_port(args.port);
+    }
+    if let StreamMode::Multicast = parse_mode(&args.mode)? {
         let group = args
             .group
             .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
-        camera
-            .configure_stream_multicast(0, group, args.port)
-            .context("configure multicast destination")?;
+        options = options.multicast(group);
     }
-
-    let mut builder = StreamBuilder::new(&mut stream_device).iface(iface.clone());
-    let dest = match mode {
-        StreamMode::Unicast => StreamDest::Unicast {
-            dst_ip: host_ip,
-            dst_port: args.port,
-        },
-        StreamMode::Multicast => {
-            let group = args
-                .group
-                .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
-            StreamDest::Multicast {
-                group,
-                port: args.port,
-                loopback: false,
-                ttl: 1,
-            }
-        }
-    };
-    builder = builder.dest(dest);
-    builder = builder.auto_packet_size();
-    let stream = builder.build().await.context("negotiate stream")?;
+    // The receive engine counts every block; the benchmark only reads it.
+    let mut frames = camera.open_stream(options).context("open stream")?;
 
     camera.acquisition_start().context("start acquisition")?;
-    let mut recv_buffer = vec![0u8; (stream.params().packet_size as usize + 64).max(4096)];
-    let stats = stream.stats_handle();
-    let mut state: Option<BlockState> = None;
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     let mut ticker = time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -116,83 +98,20 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
         }
 
         tokio::select! {
-            _ = ticker.tick() => {
-                let snapshot = stream.stats();
-                println!(
-                    "[bench] fps={:.1} Mbps={:.2} frames={} drops={} resends={}",
-                    snapshot.avg_fps,
-                    snapshot.avg_mbps,
-                    snapshot.frames,
-                    snapshot.drops,
-                    snapshot.resends,
-                );
-            }
+            _ = ticker.tick() => common::print_stream_counters("[bench]", &frames.stats()),
             _ = &mut ctrl_c => {
                 info!("received ctrl-c; stopping bench early");
                 interrupted = true;
                 break;
             }
-            recv = stream.socket().expect("UDP socket").recv_from(&mut recv_buffer) => {
-                let (len, _) = match recv {
-                    Ok(result) => result,
-                    Err(err) => {
-                        warn!(error = %err, "socket receive failed");
-                        stats.record_drop();
-                        continue;
-                    }
-                };
-                let packet = match gvsp::parse_packet(&recv_buffer[..len]) {
-                    Ok(packet) => packet,
-                    Err(err) => {
-                        warn!(error = %err, "discarding malformed GVSP packet");
-                        continue;
-                    }
-                };
-                match packet {
-                    GvspPacket::Leader { block_id, width, height, pixel_format, timestamp, .. } => {
-                        state = Some(BlockState {
-                            block_id,
-                            width,
-                            height,
-                            pixel_format: PixelFormat::from_code(pixel_format),
-                            timestamp,
-                            payload: BytesMut::new(),
-                        });
-                    }
-                    GvspPacket::Payload { block_id, data, .. } => {
-                        if let Some(active) = state.as_mut()
-                            && active.block_id == block_id {
-                                active.payload.extend_from_slice(data.as_ref());
-                            }
-                    }
-                    GvspPacket::Trailer { block_id, status, chunk_data, .. } => {
-                        let Some(active) = state.take() else { continue };
-                        if active.block_id != block_id {
-                            continue;
-                        }
-                        if status != 0 {
-                            warn!(block_id, status, "trailer reported non-zero status");
-                        }
-                        if !chunk_data.is_empty()
-                            && let Err(err) = parse_chunk_bytes(chunk_data.as_ref()) {
-                                warn!(block_id, error = %err, "failed to decode chunk payload");
-                            }
-                        let frame = Frame {
-                            payload: active.payload.freeze(),
-                            width: active.width,
-                            height: active.height,
-                            pixel_format: active.pixel_format,
-                            chunks: None,
-                            ts_dev: Some(active.timestamp),
-                            ts_host: camera.map_dev_ts(active.timestamp),
-                        };
-                        let latency = frame
-                            .host_time()
-                            .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                        stats.record_frame(frame.payload.len(), latency);
-                    }
+            block = frames.next_block() => match block {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(err) => {
+                    warn!(error = %err, "stream failed");
+                    break;
                 }
-            }
+            },
         }
     }
 
@@ -201,27 +120,9 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
         println!("Benchmark interrupted by user.");
     }
 
-    let snapshot = stream.stats();
-    println!(
-        "Summary: frames={} bytes={} drops={} resends={} avg_fps={:.1} avg_mbps={:.2}",
-        snapshot.frames,
-        snapshot.bytes,
-        snapshot.drops,
-        snapshot.resends,
-        snapshot.avg_fps,
-        snapshot.avg_mbps,
-    );
-
-    let report = BenchReport {
-        duration_s: duration.as_secs(),
-        frames: snapshot.frames,
-        bytes: snapshot.bytes,
-        avg_fps: snapshot.avg_fps,
-        avg_mbps: snapshot.avg_mbps,
-        drops: snapshot.drops,
-        resends: snapshot.resends,
-        mode: args.mode.clone(),
-    };
+    let stats = frames.stats();
+    common::print_stream_counters("Summary:", &stats);
+    let report = BenchReport::new(&stats, duration, &args.mode);
 
     if let Some(path) = args.json_out.as_ref() {
         let file = File::create(path).with_context(|| format!("create {}", path.display()))?;

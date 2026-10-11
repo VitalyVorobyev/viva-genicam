@@ -196,3 +196,41 @@ jobs:
       - name: Cargo check (viva-genapi-xml without default features)
         if: ${{ !cancelled() }}
         run: cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml --no-default-features
+
+  # GVSP datagrams are remote input: a camera, or anything else on the link,
+  # decides every byte the receive engine parses (CI-09). A short run per
+  # target on each pull request catches a panic the scripted tests did not
+  # think of; longer campaigns run locally (`fuzz/Cargo.toml` says how).
+  fuzz:
+    name: fuzz (GVSP)
+    runs-on: ubuntu-latest
+    env:
+      # The prebuilt cargo-fuzz is a musl binary and defaults to its own
+      # target, where AddressSanitizer refuses a statically linked libc.
+      FUZZ_TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust (nightly, which cargo-fuzz needs)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Build the fuzz targets
+        run: cargo fuzz build --target "$FUZZ_TARGET"
+
+      - name: Fuzz GVSP parsing for 60 s
+        run: cargo fuzz run --target "$FUZZ_TARGET" gvsp_parse -- -max_total_time=60
+
+      - name: Fuzz block assembly for 60 s
+        if: ${{ !cancelled() }}
+        run: cargo fuzz run --target "$FUZZ_TARGET" gvsp_assemble -- -max_total_time=60

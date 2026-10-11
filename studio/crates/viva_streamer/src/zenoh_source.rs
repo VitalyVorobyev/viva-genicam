@@ -239,12 +239,7 @@ mod tests {
             meta_key: format!("{key}/meta"),
             fps_limit: None,
         };
-        let meta = ImageMeta {
-            pixel_format: PixelFormat::Mono8,
-            width: 2,
-            height: 2,
-            payload_size: 4,
-        };
+        let meta = ImageMeta::new(PixelFormat::Mono8, 2, 2, 4);
         let (frame_tx, _) = watch::channel(Bytes::new());
         let (info_tx, _) = watch::channel(crate::ws::StreamInfo::from_image_meta(&meta));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

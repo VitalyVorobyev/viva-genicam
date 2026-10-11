@@ -472,7 +472,7 @@ async fn e2e_write_reply_names_what_it_invalidated() {
         let session = session.clone();
         let key = keys::node_set(&device_id, name);
         async move {
-            let payload = serde_json::to_vec(&viva_zenoh_api::NodeSetRequest { value }).unwrap();
+            let payload = serde_json::to_vec(&viva_zenoh_api::NodeSetRequest::new(value)).unwrap();
             let replies = session
                 .get(&key)
                 .payload(payload)
@@ -529,7 +529,7 @@ async fn e2e_report_describes_the_served_camera() {
     let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let request = viva_zenoh_api::DeviceReportRequest { include_xml: false };
+    let request = viva_zenoh_api::DeviceReportRequest::new(false);
     let replies = session
         .get(keys::report(&device_id))
         .payload(serde_json::to_vec(&request).unwrap())

@@ -8,13 +8,13 @@ This is the flow from issue #121: select a user set, then load it.
     cam.set("UserSetSelector", "Default")
     cam.execute("UserSetLoad")
 
-Note that ``cam.set("UserSetLoad", "1")`` does the same thing — ``set``
-dispatches Command nodes and discards the value. It works, but it reads like a
-write and the value is meaningless, so prefer ``execute``.
+``execute`` writes the value the camera's XML names for the command and waits
+until the camera reports it finished (GenICam's ``IsDone``), for up to
+``timeout`` seconds; ``wait=False`` returns once the write is acknowledged.
 
-GenICam's ``pIsDone`` polling is not implemented, so ``execute`` returns when
-the register write is acknowledged, not when the camera has finished acting on
-it. If a following read returns a pre-command value, sleep briefly and re-read.
+``cam.set("UserSetLoad", "1")`` also executes the command, without waiting —
+``set`` dispatches Command nodes and discards the value. It reads like a write
+and the value is meaningless, so prefer ``execute``.
 
 Usage:
     python execute_command.py                          # list Command features

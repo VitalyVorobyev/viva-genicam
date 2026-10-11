@@ -127,18 +127,32 @@ Some features are *actions*, not values — `UserSetLoad`, `TimestampLatch`,
 `execute` runs it:
 
 ```python
-cam.set("UserSetSelector", "Default")
-cam.execute("UserSetLoad")            # restore the camera's default settings
+cam.set("UserSetSelector", "UserSet1")
+cam.execute("UserSetLoad")            # load user set 1, and wait until it is loaded
 ```
 
-Commands carry no value; the camera acts on the write itself. `cam.get()` on a
-Command raises, and there is nothing to read back.
+Commands carry no value of their own; the camera's XML says what executing one
+writes. Often it is a constant. Sometimes it is another feature's value: on a
+Hikrobot MV-CS050, `UserSetSave` and `UserSetLoad` write the selected set's
+number, so the set you select is the set that is saved or loaded. `cam.get()`
+on a Command raises, and there is nothing to read back.
 
-Three things worth knowing:
+`execute` **waits until the camera reports the command finished** — GenICam's
+`IsDone` — for up to `timeout` seconds (5 by default), and raises
+`GenicamError` if it has not finished by then; the command was still sent.
+Most commands write a write-only register and count as finished as soon as the
+write is acknowledged. A self-clearing one is polled until it clears.
+`execute(name, wait=False)` returns once the write is acknowledged.
 
-- `cam.set("UserSetLoad", "1")` does the same thing — `set` dispatches
-  Command nodes and discards the value. Prefer `execute`; it says what it
-  does.
+A command can be refused before anything is sent: Hikrobot's `UserSetSave`
+is unavailable while `Default` is selected, and `execute` raises
+`GenApiError` rather than writing.
+
+Two more things worth knowing:
+
+- `cam.set("UserSetLoad", "1")` also executes the command, without waiting —
+  `set` dispatches Command nodes and discards the value. Prefer `execute`; it
+  says what it does.
 - **A read after the command returns the new value when the camera's XML says
   it should.** A register may declare `<pInvalidator>` nodes: "when this one
   changes, my cached value is stale". The FLIR Blackfly S BFS-PGE-31S4C-C names
@@ -153,11 +167,8 @@ Three things worth knowing:
   `<PollingTime>`, which are not honoured yet, so such a read can still be
   stale.
 
-- **Separately**, GenICam's `pIsDone` polling is **not implemented**. `execute`
-  returns when the register write is acknowledged, not when the camera has
-  finished acting on it. That one a short sleep *does* help with.
-
-From the command line:
+From the command line, which waits the same way (`--wait-ms` bounds it,
+`--no-wait` skips it):
 
 ```bash
 viva-camctl execute --name UserSetLoad --ip <CAMERA-IP>

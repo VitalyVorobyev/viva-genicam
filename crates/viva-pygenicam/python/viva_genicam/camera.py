@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Optional
 
 from . import _native
@@ -95,8 +96,8 @@ class Camera:
 
     # ── control ──────────────────────────────────────────────────────────
 
-    def execute(self, name: str) -> None:
-        """Execute a ``Command`` feature.
+    def execute(self, name: str, *, wait: bool = True, timeout: float = 5.0) -> bool:
+        """Execute a ``Command`` feature and wait until the camera has finished.
 
         ``node_info(name).kind == "Command"`` identifies one. Commands have no
         value: the camera acts on the write itself.
@@ -104,21 +105,35 @@ class Camera:
         >>> cam.set("UserSetSelector", "Default")
         >>> cam.execute("UserSetLoad")
 
-        ``set(name, "1")`` does the same thing and always did, which is how
-        this gap went unnoticed (issue #121) — but it reads like a write and
-        the value it takes is discarded, so prefer ``execute``.
+        GenICam asks applications to wait for a command to complete before
+        relying on its effect, by polling its ``IsDone``. ``execute`` does that
+        for up to ``timeout`` seconds and returns ``True`` once the camera
+        reports the command finished. If it has not by then, ``execute`` warns
+        (``RuntimeWarning``) and returns ``False``: the command was still sent.
+        Most commands write a write-only register and are done as soon as the
+        write is acknowledged; a self-clearing one is waited on.
+        ``wait=False`` returns ``False`` once the write is acknowledged,
+        without asking.
+
+        ``set(name, "1")`` also executes a command, without waiting — it reads
+        like a write and the value it takes is discarded, so prefer
+        ``execute``.
 
         Reads after the command re-read the camera for every feature whose
         register names the command's register in ``<pInvalidator>`` — FLIR's
         XML does this for ``ExposureTime`` after ``UserSetLoad``, for example.
         A feature with no such link keeps its cached value; reconnect to read
         it back.
-
-        **``pIsDone`` polling is not implemented**, so this returns once the
-        register write is acknowledged rather than once the camera has
-        finished acting on it. A short sleep helps with this.
         """
-        self._native.execute(name)
+        done = self._native.execute(name, wait, timeout)
+        if wait and not done:
+            warnings.warn(
+                f"{name} was executed, but the camera did not report completion "
+                f"within {timeout} s",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return done
 
     def acquisition_start(self) -> None:
         self._native.acquisition_start()

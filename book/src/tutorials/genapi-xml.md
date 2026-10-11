@@ -115,9 +115,11 @@ be fast and to survive schema extensions that are not implemented yet.
 
 - Feature name and type (Integer, Float, Enumeration, Boolean, Command,
   Category, SwissKnife, Converter, …).
-- Addressing: fixed, selector-based, or indirect through `pAddress`.
+- Addressing: the sum of `<Address>`, `<pAddress>` and `<pIndex>` terms.
 - Access mode, bitfield layout and byte order.
-- Selector relationships and expression text.
+- Limits — `Min`/`Max`/`Inc`, or the `pMin`/`pMax`/`pInc` nodes that supply
+  them at run time; a limit the XML leaves out is `None`, not `i64::MIN`.
+- Selector relationships (`<pSelected>`, on the selector) and expression text.
 
 ### Skipped nodes
 

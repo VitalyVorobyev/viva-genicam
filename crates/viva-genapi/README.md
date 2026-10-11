@@ -15,7 +15,9 @@ Turns a parsed `XmlModel` into a live `NodeMap` that can read and write camera f
 - **SwissKnife** -- full expression evaluator (arithmetic, comparisons, ternary, logical, bitwise, math functions)
 - **pValue delegation** -- Integer, Float, Enum, Boolean, and Command nodes delegate to backing registers
 - **Converter / IntConverter** -- formula-based conversions in both directions, so converted features are writable
-- **Selector support** -- address switching for features like `GainSelector`
+- **Selectors** -- `<pSelected>` on a selector names the features it selects; writing `GainSelector` re-reads `Gain`
+- **Limits** -- `Min`/`Max`/`Inc` and the device-reported `pMin`/`pMax`/`pInc` bind every write, including through `pValue`; converters report theirs through `<Slope>`
+- **Commands** -- `exec_command()` writes `<CommandValue>` or the `<pCommandValue>` node's value; `is_done()` is GenICam's `IsDone`
 - **Access predicates** -- `pIsImplemented`, `pIsAvailable` and `pIsLocked` evaluated at runtime; a locked feature is refused before the write is sent
 - **Skipped nodes** -- a construct the engine cannot build lands in `NodeMap::skipped()` instead of failing the document
 - **NullIo** -- offline XML browsing without a camera

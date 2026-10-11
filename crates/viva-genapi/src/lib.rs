@@ -49,24 +49,26 @@ mod tests {
                 <Scale>1/1000</Scale>
             </Float>
             <Enumeration Name="GainSelector">
-                <Address>0x300</Address>
-                <Length>2</Length>
-                <AccessMode>RW</AccessMode>
                 <EnumEntry Name="All" Value="0" />
                 <EnumEntry Name="Red" Value="1" />
                 <EnumEntry Name="Blue" Value="2" />
+                <pValue>GainSelectorReg</pValue>
+                <pSelected>Gain</pSelected>
             </Enumeration>
+            <IntReg Name="GainSelectorReg">
+                <Address>0x300</Address>
+                <Length>2</Length>
+                <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
             <Integer Name="Gain">
+                <Address>0x310</Address>
+                <pIndex Offset="4">GainSelectorReg</pIndex>
                 <Length>2</Length>
                 <AccessMode>RW</AccessMode>
                 <Min>0</Min>
                 <Max>48</Max>
-                <pSelected>GainSelector</pSelected>
-                <Selected>All</Selected>
-                <Address>0x310</Address>
-                <Selected>Red</Selected>
-                <Address>0x314</Address>
-                <Selected>Blue</Selected>
             </Integer>
             <Boolean Name="GammaEnable">
                 <Address>0x400</Address>
@@ -76,6 +78,7 @@ mod tests {
             <Command Name="AcquisitionStart">
                 <Address>0x500</Address>
                 <Length>4</Length>
+                <CommandValue>1</CommandValue>
             </Command>
         </RegisterDescription>
     "#;
@@ -1029,82 +1032,41 @@ mod tests {
         assert_eq!(raw_back, 75_000);
     }
 
+    /// A selector readdresses the feature it selects through `<pIndex>`, the
+    /// standard way (GenICam Standard v2.1.1 §2.8.4), and writing it drops
+    /// the feature's cached reading.
     #[test]
-    fn selector_address_switching() {
+    fn selector_writes_readdress_the_selected_feature() {
         let mut nodemap = build_nodemap();
         let io = MockIo::with_registers(&[
-            (
-                0x300,
-                i64_to_bytes("GainSelector", 0, 2, Sign::Signed, ByteOrder::Big).unwrap(),
-            ),
-            (
-                0x310,
-                i64_to_bytes("Gain", 10, 2, Sign::Signed, ByteOrder::Big).unwrap(),
-            ),
-            (
-                0x314,
-                i64_to_bytes("Gain", 24, 2, Sign::Signed, ByteOrder::Big).unwrap(),
-            ),
+            (0x300, 0u16.to_be_bytes().to_vec()),
+            (0x310, 10u16.to_be_bytes().to_vec()),
+            (0x314, 24u16.to_be_bytes().to_vec()),
         ]);
 
-        let gain_all = nodemap.get_integer("Gain", &io).expect("gain for All");
-        assert_eq!(gain_all, 10);
+        assert_eq!(nodemap.get_integer("Gain", &io).expect("All"), 10);
         assert_eq!(io.read_count(0x310), 1);
         assert_eq!(io.read_count(0x314), 0);
 
-        io.write(
-            0x314,
-            &i64_to_bytes("Gain", 32, 2, Sign::Signed, ByteOrder::Big).unwrap(),
-        )
-        .expect("update red gain");
         nodemap
             .set_enum("GainSelector", "Red", &io)
-            .expect("set selector to red");
-        let gain_red = nodemap.get_integer("Gain", &io).expect("gain for Red");
-        assert_eq!(gain_red, 32);
-        assert_eq!(
-            io.read_count(0x310),
-            1,
-            "previous address should not be reread"
-        );
+            .expect("select Red");
+        assert_eq!(nodemap.get_integer("Gain", &io).expect("Red"), 24);
+        assert_eq!(io.read_count(0x310), 1, "the old address is not reread");
         assert_eq!(io.read_count(0x314), 1);
+        assert_eq!(nodemap.get_integer("Gain", &io).expect("cached"), 24);
+        assert_eq!(io.read_count(0x314), 1, "a second read is cached");
 
-        let gain_red_cached = nodemap.get_integer("Gain", &io).expect("cached red");
-        assert_eq!(gain_red_cached, 32);
-        assert_eq!(io.read_count(0x314), 1, "selector cache should be reused");
-
-        nodemap
-            .set_enum("GainSelector", "Blue", &io)
-            .expect("set selector to blue");
-        let err = nodemap.get_integer("Gain", &io).unwrap_err();
-        match err {
-            GenApiError::Unavailable(msg) => {
-                assert!(msg.contains("GainSelector=Blue"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-        assert_eq!(
-            io.read_count(0x314),
-            1,
-            "no read expected for missing mapping"
-        );
-
-        io.write(
-            0x310,
-            &i64_to_bytes("Gain", 12, 2, Sign::Signed, ByteOrder::Big).unwrap(),
-        )
-        .expect("update all gain");
+        io.write(0x310, &12u16.to_be_bytes())
+            .expect("device-side change");
         nodemap
             .set_enum("GainSelector", "All", &io)
-            .expect("restore selector to all");
-        let gain_all_updated = nodemap
-            .get_integer("Gain", &io)
-            .expect("gain for All again");
-        assert_eq!(gain_all_updated, 12);
+            .expect("select All");
+        assert_eq!(nodemap.get_integer("Gain", &io).expect("All again"), 12);
         assert_eq!(
             io.read_count(0x310),
             2,
-            "address switch should invalidate cache"
+            "the selector write invalidated Gain"
         );
     }
 
@@ -1156,6 +1118,7 @@ mod tests {
                 <Command Name="DirectCommand">
                     <Address>0x500</Address>
                     <Length>4</Length>
+                    <CommandValue>1</CommandValue>
                 </Command>
                 <IntReg Name="UnrelatedReg">
                     <Address>0x700</Address>
@@ -3044,7 +3007,10 @@ mod tests {
     #[test]
     fn invalidated_by_follows_selectors_and_the_value_chain() {
         let nodemap = build_nodemap();
-        assert_eq!(nodemap.invalidated_by("GainSelector"), ["Gain"]);
+        assert_eq!(
+            nodemap.invalidated_by("GainSelector"),
+            ["Gain", "GainSelectorReg"]
+        );
         assert!(nodemap.invalidated_by("Width").is_empty());
         assert!(nodemap.invalidated_by("Nope").is_empty());
 

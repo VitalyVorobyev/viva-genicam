@@ -4,13 +4,12 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
-    TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX,
+    NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB,
+    TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX, TAG_P_SELECTED,
     TAG_VALUE, handle_addressing_empty, handle_addressing_start, handle_invalidator_start,
-    handle_p_selected_empty, handle_p_selected_start, handle_predicate_start,
-    handle_selected_empty, handle_selected_start,
+    handle_p_selected_start, handle_predicate_start,
 };
-use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
+use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
     attribute_value, attribute_value_required, parse_f64, parse_i64, parse_scale, parse_u64,
     read_text_start, skip_element,
@@ -43,10 +42,11 @@ pub fn parse_integer(
     let mut pvalue = None;
     let mut p_max = None;
     let mut p_min = None;
+    let mut p_inc = None;
     let mut static_value: Option<i64> = None;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
-    let mut selector_state = SelectorState::default();
+    let mut selected = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -77,6 +77,13 @@ pub fn parse_integer(
                         p_min = Some(target.to_string());
                     }
                 }
+                "pInc" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        p_inc = Some(target.to_string());
+                    }
+                }
                 TAG_VALUE => {
                     let text = read_text_start(reader, e)?;
                     static_value = Some(parse_i64(&text)?);
@@ -105,7 +112,7 @@ pub fn parse_integer(
                         let len = u32::try_from(value).map_err(|_| {
                             XmlError::Invalid(format!("length out of range for node {name}"))
                         })?;
-                        addressing.apply_length(len);
+                        addressing.set_length(len);
                     }
                 }
                 "Sign" => {
@@ -177,11 +184,8 @@ pub fn parse_integer(
                         byte_order = Some(order);
                     }
                 }
-                "pSelected" => {
-                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
-                }
-                "Selected" => {
-                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
+                TAG_P_SELECTED => {
+                    handle_p_selected_start(reader, e, &mut selected)?;
                 }
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)?
@@ -194,9 +198,6 @@ pub fn parse_integer(
                 }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
-                "pSelected" => {
-                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
-                }
                 TAG_P_ADDRESS => {
                     handle_addressing_empty(e, &mut addressing)?;
                 }
@@ -243,9 +244,6 @@ pub fn parse_integer(
                         byte_order = Some(order);
                     }
                 }
-                "Selected" => {
-                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
-                }
                 _ => {}
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
@@ -260,25 +258,16 @@ pub fn parse_integer(
         buf.clear();
     }
 
-    // Min/Max are optional per GenICam standard; use full-range defaults.
-    let min = min.unwrap_or(i64::MIN);
-    let max = max.unwrap_or(i64::MAX);
-
     // Addressing is optional: nodes may delegate via pValue, have a static
     // Value, or appear as pure UI features without register backing.
     let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
-        let lengths = addressing_lengths(&addr);
-        let len = lengths
-            .first()
-            .copied()
-            .ok_or_else(|| XmlError::Invalid(format!("no length for Integer node {name}")))?;
-        let bf = bitfield.finish(&name, &lengths)?;
+        let len = addr.byte_len();
+        let bf = bitfield.finish(&name, len)?;
         (Some(addr), len, bf)
     } else {
         // No register backing (pValue delegation, static Value, etc.)
-        (None, 4, bitfield.finish(&name, &[4]).ok().flatten())
+        (None, 4, bitfield.finish(&name, 4).ok().flatten())
     };
-    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Integer {
         name,
@@ -293,11 +282,11 @@ pub fn parse_integer(
         bitfield,
         sign,
         byte_order: byte_order.unwrap_or(ByteOrder::Big),
-        selectors,
-        selected_if,
+        selected,
         pvalue,
         p_max,
         p_min,
+        p_inc,
         value: static_value,
         predicates,
         invalidators,
@@ -336,10 +325,11 @@ pub fn parse_float(
     let mut scale_den: Option<i64> = None;
     let mut offset = None;
     let mut pvalue = None;
+    let mut p_min = None;
+    let mut p_max = None;
     let mut byte_order: Option<ByteOrder> = None;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
-    let mut selector_state = SelectorState::default();
     let mut meta_builder = NodeMetaBuilder::default();
     let mut buf = Vec::new();
 
@@ -351,6 +341,20 @@ pub fn parse_float(
                     let target = text.trim();
                     if !target.is_empty() {
                         pvalue = Some(target.to_string());
+                    }
+                }
+                "pMin" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        p_min = Some(target.to_string());
+                    }
+                }
+                "pMax" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        p_max = Some(target.to_string());
                     }
                 }
                 "Address" | TAG_P_ADDRESS | TAG_P_INDEX | "Length" => {
@@ -401,12 +405,6 @@ pub fn parse_float(
                         byte_order = Some(order);
                     }
                 }
-                "pSelected" => {
-                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
-                }
-                "Selected" => {
-                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
-                }
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)?
                         || handle_invalidator_start(reader, e, &mut invalidators)?
@@ -417,18 +415,11 @@ pub fn parse_float(
                     }
                 }
             },
-            Ok(Event::Empty(ref e)) => match e.name().as_ref() {
-                "pSelected" => {
-                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
-                }
-                TAG_P_ADDRESS => {
+            Ok(Event::Empty(ref e)) => {
+                if e.name().as_ref() == TAG_P_ADDRESS {
                     handle_addressing_empty(e, &mut addressing)?;
                 }
-                "Selected" => {
-                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
-                }
-                _ => {}
-            },
+            }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!("unterminated Float node {name}")));
@@ -439,8 +430,6 @@ pub fn parse_float(
         buf.clear();
     }
 
-    let min = min.unwrap_or(f64::MIN);
-    let max = max.unwrap_or(f64::MAX);
     let scale = match (scale_num, scale_den) {
         (Some(num), Some(den)) if den != 0 => Some((num, den)),
         (None, None) => None,
@@ -449,7 +438,6 @@ pub fn parse_float(
     };
 
     let addressing = addressing.finalize(&name, Some(8)).ok();
-    let (selectors, selected_if) = selector_state.into_parts();
 
     let has_scale_or_offset = scale.is_some() || offset.is_some();
     let length = addressing.as_ref().and_then(addressing_primary_length);
@@ -472,9 +460,9 @@ pub fn parse_float(
         unit,
         scale,
         offset,
-        selectors,
-        selected_if,
         pvalue,
+        p_min,
+        p_max,
         encoding,
         byte_order,
         predicates,
@@ -482,13 +470,13 @@ pub fn parse_float(
     })
 }
 
-/// Return the payload length of an [`Addressing`] value when it is single-valued.
+/// Return the payload length of an [`Addressing`] value at a fixed address.
 ///
-/// Returns `None` for `Indirect` addressing (still single-valued but we'd
-/// rather opt out of the auto-detection — pointer-backed `<Float>` nodes with
-/// no `<Scale>`/`<Offset>` are almost always scaled-integer registers on real
+/// Returns `None` for an address with a runtime-resolved term: we'd rather
+/// opt out of the auto-detection — pointer-backed `<Float>` nodes with no
+/// `<Scale>`/`<Offset>` are almost always scaled-integer registers on real
 /// cameras, and silently decoding their bytes as IEEE 754 would corrupt the
-/// value) or for `BySelector` whose branches disagree on length.
+/// value.
 fn addressing_primary_length(addr: &crate::Addressing) -> Option<u32> {
     match addr {
         // A runtime-resolved address says nothing about the payload encoding,
@@ -497,14 +485,5 @@ fn addressing_primary_length(addr: &crate::Addressing) -> Option<u32> {
             .iter()
             .all(|term| matches!(term, crate::AddressTerm::Fixed(_)))
             .then_some(*len),
-        crate::Addressing::BySelector { map, .. } => {
-            let mut iter = map.iter().map(|(_, (_, len))| *len);
-            let first = iter.next()?;
-            if iter.all(|l| l == first) {
-                Some(first)
-            } else {
-                None
-            }
-        }
     }
 }

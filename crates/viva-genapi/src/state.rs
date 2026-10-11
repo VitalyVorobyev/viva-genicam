@@ -10,9 +10,12 @@
 //!
 //! [ADR-0010]: https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/adrs/adr0010-feature-state-contract.md
 
-use tracing::warn;
+use std::collections::HashSet;
+
+use tracing::{debug, warn};
 use viva_genapi_xml::AccessMode;
 
+use crate::nodemap::Limit;
 use crate::nodes::Node;
 use crate::{GenApiError, NodeMap, RegisterIo, SkOutput};
 
@@ -38,9 +41,10 @@ pub struct FeatureState {
     /// `pIsAvailable` and selector gating: whether the feature can be used in
     /// the device's current state.
     pub is_available: bool,
-    /// Current bounds of an Integer or Float feature; `None` when either
-    /// bound is unknown — not declared, or declared through a `<pMin>` or
-    /// `<pMax>` that could not be read.
+    /// Current bounds of an Integer, Float or converter feature; `None` when
+    /// either bound is unknown — not declared, or declared through a `<pMin>`
+    /// or `<pMax>` that could not be read. A converter's are its `<pValue>`'s
+    /// mapped through `<FormulaFrom>` and `<Slope>`.
     pub range: Option<ValueRange>,
     /// The entries an Enumeration accepts now, after their own
     /// `pIsImplemented`/`pIsAvailable`.
@@ -74,8 +78,8 @@ pub enum FeatureValue {
     /// copying the payload into every snapshot would be a poor trade for a
     /// value nothing renders. Read it with [`NodeMap::get_register`].
     Register {
-        /// Declared length in bytes; `None` when it depends on a selector.
-        len: Option<u32>,
+        /// Declared length in bytes.
+        len: u32,
     },
 }
 
@@ -148,37 +152,75 @@ impl NodeMap {
             FeatureValue::None
         };
 
-        // The parser stands in `i64::MIN`/`i64::MAX` and `f64::MIN`/`f64::MAX`
-        // for a bound the XML does not declare. A range built on one is no
-        // range, so none is reported, as the wire contract requires.
+        // A bound is reported only when something declares it: a `<Min>`,
+        // a `<pMin>`, or one of those on the node `<pValue>` delegates to. A
+        // feature that cannot be used now is not read, so only its own
+        // constants are; a pointer that cannot be read leaves them too.
         let (range, unit) = match node {
             Node::Integer(n) => {
-                // `<pMin>`/`<pMax>` defer the bounds to the device. A failed
-                // read, or a feature that cannot be used now, leaves the
-                // static bound in place.
-                let resolve = |p: Option<&str>, fallback: i64| {
-                    p.filter(|_| usable)
-                        .and_then(|p| self.get_integer(p, io).ok())
-                        .unwrap_or(fallback)
+                let bound = |which: Limit, declared: Option<i64>| -> Option<i64> {
+                    if !usable {
+                        return declared;
+                    }
+                    match self.limit(name, which, io, &mut HashSet::new()) {
+                        Ok(value) => value.map(|v| v.as_i64()),
+                        Err(e) => {
+                            warn!(%name, error = %e, ?which, "reading a bound failed");
+                            declared
+                        }
+                    }
                 };
-                let (min, max) = (
-                    resolve(n.p_min.as_deref(), n.min),
-                    resolve(n.p_max.as_deref(), n.max),
+                let (min, max, inc) = (
+                    bound(Limit::Min, n.min),
+                    bound(Limit::Max, n.max),
+                    bound(Limit::Inc, n.inc),
                 );
-                let range = (min != i64::MIN && max != i64::MAX).then(|| ValueRange {
-                    min: min as f64,
-                    max: max as f64,
-                    inc: n.inc.map(|i| i as f64),
-                });
+                let range = match (min, max) {
+                    (Some(min), Some(max)) => Some(ValueRange {
+                        min: min as f64,
+                        max: max as f64,
+                        inc: inc.map(|i| i as f64),
+                    }),
+                    _ => None,
+                };
                 (range, n.unit.clone())
             }
-            Node::Float(n) => {
-                let range = (n.min != f64::MIN && n.max != f64::MAX).then_some(ValueRange {
-                    min: n.min,
-                    max: n.max,
-                    inc: None,
-                });
-                (range, n.unit.clone())
+            Node::Float(_) | Node::Converter(_) | Node::IntConverter(_) => {
+                let (declared_min, declared_max, unit) = match node {
+                    Node::Float(n) => (n.min, n.max, n.unit.clone()),
+                    _ => (None, None, None),
+                };
+                let is_converter = !matches!(node, Node::Float(_));
+                let bound = |which: Limit, declared: Option<f64>| -> Option<f64> {
+                    if !usable {
+                        return declared;
+                    }
+                    match self.limit(name, which, io, &mut HashSet::new()) {
+                        Ok(value) => value.map(|v| v.as_f64()),
+                        // A converter's formula need not be defined at its
+                        // raw bounds (`1 / TO` at 0); that is no fault.
+                        Err(e) if is_converter => {
+                            debug!(%name, error = %e, ?which, "converter bound undefined");
+                            declared
+                        }
+                        Err(e) => {
+                            warn!(%name, error = %e, ?which, "reading a bound failed");
+                            declared
+                        }
+                    }
+                };
+                let range = match (
+                    bound(Limit::Min, declared_min),
+                    bound(Limit::Max, declared_max),
+                ) {
+                    (Some(min), Some(max)) => Some(ValueRange {
+                        min,
+                        max,
+                        inc: None,
+                    }),
+                    _ => None,
+                };
+                (range, unit)
             }
             _ => (None, None),
         };

@@ -36,7 +36,7 @@ pub fn parse_register(
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, "Name")?;
-    let mut addressing = AddressingBuilder::new(&name);
+    let mut addressing = AddressingBuilder::default();
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
@@ -136,14 +136,12 @@ mod tests {
     fn terms(addressing: &Addressing) -> &[AddressTerm] {
         match addressing {
             Addressing::Sum { terms, .. } => terms,
-            other => panic!("expected Addressing::Sum, got {other:?}"),
         }
     }
 
     fn len_of(addressing: &Addressing) -> u32 {
         match addressing {
             Addressing::Sum { len, .. } => *len,
-            other => panic!("expected Addressing::Sum, got {other:?}"),
         }
     }
 

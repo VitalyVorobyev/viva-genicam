@@ -63,6 +63,19 @@ jobs:
             exit 1
           fi
 
+      - name: Changelog series file for the workspace version
+        # release.yml packs changelog/<major>.<minor>.md into every CLI archive
+        # and fails on a tag if it is missing; check it on every pull request
+        # instead, where a version bump is reviewed.
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERIES="$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"$/\1/p' Cargo.toml | head -1)"
+          test -n "$SERIES"
+          if [ ! -f "changelog/${SERIES}.md" ]; then
+            echo "::error::changelog/${SERIES}.md is missing for workspace version series ${SERIES}"; exit 1
+          fi
+
   build:
     strategy:
       fail-fast: false

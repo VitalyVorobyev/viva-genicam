@@ -5,13 +5,12 @@ use quick_xml::events::{BytesStart, Event};
 use tracing::warn;
 
 use super::{
-    NodeMetaBuilder, SelectorState, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS,
-    TAG_ENDIANNESS, TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS,
-    TAG_P_INDEX, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
-    handle_p_selected_empty, handle_p_selected_start, handle_predicate_start,
-    handle_selected_empty, handle_selected_start,
+    NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS,
+    TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX,
+    TAG_P_SELECTED, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
+    handle_p_selected_start, handle_predicate_start,
 };
-use crate::builders::{AddressingBuilder, BitfieldBuilder, addressing_lengths};
+use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
@@ -36,7 +35,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     let mut entries = Vec::new();
     let mut default = None;
     let mut predicates = PredicateRefs::default();
-    let mut selector_state = SelectorState::default();
+    let mut selected = Vec::new();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -66,11 +65,8 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
                     let entry = parse_enum_entry(reader, e.clone())?;
                     entries.push(entry);
                 }
-                "pSelected" => {
-                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
-                }
-                "Selected" => {
-                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
+                TAG_P_SELECTED => {
+                    handle_p_selected_start(reader, e, &mut selected)?;
                 }
                 "pValueDefault" => {
                     let text = read_text_start(reader, e)?;
@@ -87,19 +83,11 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
                     }
                 }
             },
-            Ok(Event::Empty(ref e)) => match e.name().as_ref() {
-                "EnumEntry" => {
-                    let entry = parse_enum_entry_empty(e)?;
-                    entries.push(entry);
+            Ok(Event::Empty(ref e)) => {
+                if e.name().as_ref() == "EnumEntry" {
+                    entries.push(parse_enum_entry_empty(e)?);
                 }
-                "pSelected" => {
-                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
-                }
-                "Selected" => {
-                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
-                }
-                _ => {}
-            },
+            }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::Invalid(format!(
@@ -121,7 +109,6 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     // Addressing is optional: nodes may delegate via pValue, or may exist
     // as pure selectors without direct register backing.
     let addressing = addressing.finalize(&name, Some(4)).ok();
-    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Enum {
         name,
@@ -130,8 +117,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
         access,
         entries,
         default,
-        selectors,
-        selected_if,
+        selected,
         pvalue,
         predicates,
     })
@@ -158,7 +144,6 @@ pub fn parse_boolean(
     let mut on_value = None;
     let mut off_value = None;
     let mut predicates = PredicateRefs::default();
-    let mut selector_state = SelectorState::default();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -207,7 +192,7 @@ pub fn parse_boolean(
                         let len = u32::try_from(value).map_err(|_| {
                             XmlError::Invalid(format!("length out of range for node {name}"))
                         })?;
-                        addressing.apply_length(len);
+                        addressing.set_length(len);
                     }
                 }
                 "AccessMode" => {
@@ -251,12 +236,6 @@ pub fn parse_boolean(
                         bitfield.note_byte_order(order);
                     }
                 }
-                "pSelected" => {
-                    handle_p_selected_start(reader, e, &mut addressing, &mut selector_state)?;
-                }
-                "Selected" => {
-                    handle_selected_start(reader, e, &name, &mut addressing, &mut selector_state)?;
-                }
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
@@ -266,9 +245,6 @@ pub fn parse_boolean(
                 }
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
-                "pSelected" => {
-                    handle_p_selected_empty(e, &mut addressing, &mut selector_state)?;
-                }
                 TAG_P_ADDRESS => {
                     handle_addressing_empty(e, &mut addressing)?;
                 }
@@ -314,9 +290,6 @@ pub fn parse_boolean(
                         bitfield.note_byte_order(order);
                     }
                 }
-                "Selected" => {
-                    handle_selected_empty(e, &name, &mut addressing, &mut selector_state)?;
-                }
                 _ => {}
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
@@ -334,12 +307,8 @@ pub fn parse_boolean(
     // Addressing is optional: nodes may delegate via pValue or appear as
     // pure UI features without register backing.
     let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
-        let lengths = addressing_lengths(&addr);
-        let len = lengths
-            .first()
-            .copied()
-            .ok_or_else(|| XmlError::Invalid(format!("no length for Boolean node {name}")))?;
-        let bf = match bitfield.finish(&name, &lengths)? {
+        let len = addr.byte_len();
+        let bf = match bitfield.finish(&name, len)? {
             Some(field) => Some(field),
             None if len == 1 => Some(BitField {
                 bit_offset: 0,
@@ -357,7 +326,6 @@ pub fn parse_boolean(
         // No register backing (pValue delegation).
         (None, 4, None)
     };
-    let (selectors, selected_if) = selector_state.into_parts();
 
     Ok(NodeDecl::Boolean {
         name,
@@ -366,8 +334,6 @@ pub fn parse_boolean(
         len,
         access,
         bitfield,
-        selectors,
-        selected_if,
         pvalue,
         on_value,
         off_value,

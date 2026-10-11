@@ -21,27 +21,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_mock() -> Result<(), Box<dyn Error>> {
+    // The standard selector shape (GenICam Standard v2.1.1 §2.8.4): the
+    // selector names what it selects in `<pSelected>`, and the selected
+    // feature's address steps through `<pIndex>` on the selector's register.
     const XML: &str = r#"
         <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="2" SchemaSubMinorVersion="3">
             <Enumeration Name="GainSelector">
-                <Address>0x300</Address>
-                <Length>2</Length>
-                <AccessMode>RW</AccessMode>
                 <EnumEntry Name="All" Value="0" />
                 <EnumEntry Name="Red" Value="1" />
                 <EnumEntry Name="Blue" Value="2" />
+                <pValue>GainSelectorReg</pValue>
+                <pSelected>Gain</pSelected>
             </Enumeration>
+            <IntReg Name="GainSelectorReg">
+                <Address>0x300</Address>
+                <Length>2</Length>
+                <AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
             <Integer Name="Gain">
+                <Address>0x310</Address>
+                <pIndex Offset="4">GainSelectorReg</pIndex>
                 <Length>2</Length>
                 <AccessMode>RW</AccessMode>
                 <Min>0</Min>
                 <Max>48</Max>
-                <pSelected>GainSelector</pSelected>
-                <Selected>All</Selected>
-                <Address>0x310</Address>
-                <Selected>Red</Selected>
-                <Address>0x314</Address>
-                <Selected>Blue</Selected>
             </Integer>
         </RegisterDescription>
     "#;
@@ -52,6 +57,7 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
         (0x300, vec![0, 0]),
         (0x310, vec![0, 12]),
         (0x314, vec![0, 28]),
+        (0x318, vec![0, 31]),
     ]);
     let mut camera = Camera::new(transport, nodemap);
 
@@ -64,13 +70,7 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
             camera.set(sfnc::GAIN_SELECTOR, selector)?;
         }
         println!("\nSelector -> {}", camera.get(sfnc::GAIN_SELECTOR)?);
-        match camera.get(sfnc::GAIN) {
-            Ok(value) => println!("Gain ({selector}) -> {value}"),
-            Err(GenicamError::GenApi(GenApiError::Unavailable(msg))) => {
-                println!("Gain unavailable: {msg}");
-            }
-            Err(err) => return Err(err.into()),
-        }
+        println!("Gain ({selector}) -> {}", camera.get(sfnc::GAIN)?);
     }
 
     Ok(())
@@ -136,6 +136,9 @@ fn run_real() -> Result<(), Box<dyn Error>> {
 }
 
 fn print_gain_addressing(nodemap: &NodeMap) {
+    if let Some(Node::Enum(selector)) = nodemap.node(sfnc::GAIN_SELECTOR) {
+        println!("GainSelector selects {:?}", selector.selected);
+    }
     if let Some(Node::Integer(node)) = nodemap.node(sfnc::GAIN) {
         match &node.addressing {
             Some(Addressing::Sum { terms, len }) => {
@@ -151,12 +154,6 @@ fn print_gain_addressing(nodemap: &NodeMap) {
                             println!("  + {node} * {offset:?}")
                         }
                     }
-                }
-            }
-            Some(Addressing::BySelector { selector, map }) => {
-                println!("Gain addresses by selector {selector}:");
-                for (value, (addr, len)) in map {
-                    println!("  {value:>8} -> 0x{addr:08X} ({} bytes)", len);
                 }
             }
             None => {

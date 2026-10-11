@@ -43,6 +43,7 @@
     <DisplayName>Trigger Software</DisplayName>
     <Address>0x0400</Address>
     <Length>4</Length>
+    <CommandValue>1</CommandValue>
   </Command>
   <SwissKnife Name="MagicCalc">
     <DisplayName>Magic Calc</DisplayName>

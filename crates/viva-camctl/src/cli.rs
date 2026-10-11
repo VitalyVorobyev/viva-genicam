@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
@@ -105,7 +106,8 @@ pub enum Cmd {
         #[arg(long)]
         value: String,
     },
-    /// Execute a GenApi Command feature (e.g. `UserSetLoad`)
+    /// Execute a GenApi Command feature (e.g. `UserSetLoad`) and wait until
+    /// the camera reports it finished
     Execute {
         #[arg(long)]
         ip: Option<Ipv4Addr>,
@@ -113,6 +115,14 @@ pub enum Cmd {
         index: Option<usize>,
         #[arg(long)]
         name: String,
+        /// How long to wait for the camera to report the command finished
+        /// (GenICam `IsDone`)
+        #[arg(long, default_value_t = 5000)]
+        wait_ms: u64,
+        /// Return once the write is acknowledged, without waiting for the
+        /// command to finish
+        #[arg(long, conflicts_with = "wait_ms")]
+        no_wait: bool,
     },
     /// Start GVSP stream (uni-/multicast)
     Stream {
@@ -330,7 +340,16 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             name,
             value,
         } => cmd_set::run(ip, index, name, value, iface, json).await?,
-        Cmd::Execute { ip, index, name } => cmd_execute::run(ip, index, name, iface, json).await?,
+        Cmd::Execute {
+            ip,
+            index,
+            name,
+            wait_ms,
+            no_wait,
+        } => {
+            let wait = (!no_wait).then(|| Duration::from_millis(wait_ms));
+            cmd_execute::run(ip, index, name, wait, iface, json).await?
+        }
         Cmd::Stream {
             ip,
             index,

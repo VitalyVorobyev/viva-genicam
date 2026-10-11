@@ -361,6 +361,13 @@ impl FakeCamera {
         self.regs.lock().await.read(addr, len)
     }
 
+    /// The exposure saved in user set `set` by `UserSetSave`, or `None` if
+    /// nothing has been saved there. Read past the protocol, like
+    /// [`FakeCamera::peek`].
+    pub async fn saved_exposure(&self, set: u32) -> Option<f64> {
+        self.regs.lock().await.saved_exposure(set)
+    }
+
     /// Stop the fake camera and wait for its background tasks to exit.
     ///
     /// Awaiting the `JoinHandle`s after `abort()` ensures the tokio tasks have

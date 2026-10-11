@@ -5,6 +5,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use if_addrs::{get_if_addrs, IfAddr};
 use pyo3::prelude::*;
@@ -12,7 +13,8 @@ use pyo3::types::{PyDict, PyList};
 
 use viva_genicam::gige::nic::{Iface, IfaceSelector};
 use viva_genicam::{
-    connect_gige_with_xml, connect_u3v_with_xml, Camera, GigeRegisterIo, U3vRegisterIo,
+    connect_gige_with_xml, connect_u3v_with_xml, Camera, GenicamError, GigeRegisterIo,
+    U3vRegisterIo,
 };
 use viva_u3v::usb::RusbTransfer;
 
@@ -211,26 +213,47 @@ impl PyCamera {
         })
     }
 
-    /// Execute a `<Command>` node.
+    /// Execute a `<Command>` node, and by default wait until the camera
+    /// reports it finished.
     ///
     /// Exposed because there was no verb for it (issue #121): `set(name, "1")`
     /// already dispatched commands and ignored the value, which is neither
     /// discoverable nor documented. Named `execute` to match
     /// `Camera::execute_command` in the Rust API and the `execute` key the
-    /// service and Studio already use.
-    fn execute(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+    /// service and Studio already use. Waiting is `Camera::execute_and_wait`:
+    /// GenICam asks applications to poll `IsDone` after every execute.
+    #[pyo3(signature = (name, wait=true, timeout_s=5.0))]
+    fn execute(&self, py: Python<'_>, name: &str, wait: bool, timeout_s: f64) -> PyResult<bool> {
+        let timeout = Duration::try_from_secs_f64(timeout_s)
+            .map_err(|_| parse_error("timeout must be a non-negative number of seconds"))?;
         py.detach(|| match &self.inner {
             CameraInner::Gige { camera, .. } => {
                 let mut g = camera
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
-                g.execute_command(name).into_py_err()
+                if wait {
+                    match runtime().block_on(g.execute_and_wait(name, timeout)) {
+                        Ok(()) => Ok(true),
+                        Err(GenicamError::CommandNotDone { .. }) => Ok(false),
+                        Err(err) => Err(err).into_py_err(),
+                    }
+                } else {
+                    g.execute_command(name).into_py_err().map(|()| false)
+                }
             }
             CameraInner::U3v { camera, .. } => {
                 let mut g = camera
                     .lock()
                     .map_err(|_| parse_error("camera mutex poisoned"))?;
-                g.execute_command(name).into_py_err()
+                if wait {
+                    match runtime().block_on(g.execute_and_wait(name, timeout)) {
+                        Ok(()) => Ok(true),
+                        Err(GenicamError::CommandNotDone { .. }) => Ok(false),
+                        Err(err) => Err(err).into_py_err(),
+                    }
+                } else {
+                    g.execute_command(name).into_py_err().map(|()| false)
+                }
             }
         })
     }

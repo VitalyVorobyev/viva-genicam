@@ -320,3 +320,94 @@ async fn execute_command_through_pvalue_changes_device_state() {
         "Camera::get should re-read ExposureTime after UserSetLoad, not answer from a stale cache"
     );
 }
+
+async fn execute(
+    camera: &Arc<Mutex<Camera<GigeRegisterIo>>>,
+    name: &'static str,
+) -> Result<(), viva_genicam::GenicamError> {
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || cam.lock().unwrap().execute_command(name))
+        .await
+        .unwrap()
+}
+
+/// GA-35: `UserSetSave` writes the value its `<pCommandValue>` names — the
+/// selected set's index, as on the Hikrobot MV-CS050-10GC the fake copies —
+/// and the camera saves into *that* set.
+///
+/// Asserted on the device, past the protocol: writing a constant `1` with
+/// `UserSet2` selected also returns `Ok`, and on the camera overwrites user
+/// set 1 instead.
+#[tokio::test]
+async fn user_set_save_saves_into_the_selected_set() {
+    let cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    set_feature(&camera, "UserSetSelector", "UserSet2".into()).await;
+    set_feature(&camera, "ExposureTime", "12345.0".into()).await;
+    execute(&camera, "UserSetSave")
+        .await
+        .expect("UserSetSave with UserSet2 selected");
+
+    assert_eq!(cam.fake().saved_exposure(2).await, Some(12345.0));
+    assert_eq!(
+        cam.fake().saved_exposure(1).await,
+        None,
+        "user set 1 must not have been touched"
+    );
+}
+
+/// GA-35: `UserSetLoad` loads the selected set. Two sets hold different
+/// exposures, so loading one cannot pass by landing on the other.
+#[tokio::test]
+async fn user_set_load_restores_the_selected_set() {
+    let _cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    for (set, exposure) in [("UserSet1", "1111.0"), ("UserSet2", "2222.0")] {
+        set_feature(&camera, "UserSetSelector", set.into()).await;
+        set_feature(&camera, "ExposureTime", exposure.into()).await;
+        execute(&camera, "UserSetSave").await.expect("save");
+    }
+    set_feature(&camera, "ExposureTime", "777.0".into()).await;
+
+    set_feature(&camera, "UserSetSelector", "UserSet1".into()).await;
+    execute(&camera, "UserSetLoad").await.expect("load");
+    let reported: f64 = get_feature(&camera, "ExposureTime")
+        .await
+        .parse()
+        .expect("a float");
+    assert_eq!(reported, 1111.0, "UserSet1's exposure, read back");
+}
+
+/// GA-10: `UserSetSave`'s own `<pIsAvailable>` makes it unavailable while
+/// `Default` is selected (`Hikrobot_MV-CS050-10GC.xml:23039`), and the refusal
+/// is local: nothing reaches the save register.
+#[tokio::test]
+async fn user_set_save_is_refused_while_default_is_selected() {
+    let cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+
+    set_feature(&camera, "UserSetSelector", "Default".into()).await;
+    let err = execute(&camera, "UserSetSave")
+        .await
+        .expect_err("Default cannot be saved");
+    assert!(
+        matches!(
+            err,
+            viva_genicam::GenicamError::GenApi(viva_genapi::GenApiError::Unavailable(_))
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        cam.fake().commands().at(
+            viva_fake_gige::GvcpCommand::WriteReg,
+            viva_fake_gige::registers::REG_USER_SET_SAVE
+        ),
+        0,
+        "the refused command must not be written"
+    );
+    for set in [1, 2] {
+        assert_eq!(cam.fake().saved_exposure(set).await, None, "set {set}");
+    }
+}

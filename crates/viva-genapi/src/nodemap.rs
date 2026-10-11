@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
-    AccessMode, AddressTerm, Addressing, ByteOrder, EnumEntryDecl, EnumValueSrc, FloatEncoding,
-    FormulaBindings, IndexOffset, NodeDecl, PredicateRefs, Sign, SkippedNode, Visibility, XmlModel,
+    AccessMode, AddressTerm, Addressing, ByteOrder, CommandValueSrc, EnumEntryDecl, EnumValueSrc,
+    FloatEncoding, FormulaBindings, IndexOffset, NodeDecl, PredicateRefs, Sign, SkippedNode, Slope,
+    Visibility, XmlModel,
 };
 
 use crate::bitops::{extract, insert};
@@ -81,6 +82,30 @@ fn register_invalidator_dependencies(
     }
 }
 
+/// Record each feature `selector` names in `<pSelected>` as stale whenever
+/// `selector` changes.
+///
+/// GenICam Standard v2.1.1 §2.8.4 puts `<pSelected>` on the selector, naming
+/// features that "will show a different value depending on the value of
+/// selector node" — so the edge runs selector → selected. Reading it the other
+/// way round made the selected feature a provider of its selector, which
+/// invalidated the selector on a feature write and left the feature stale on a
+/// selector write (backlog GA-03). The registers behind each selected feature
+/// are linked too, once the whole map exists: see
+/// [`NodeMap::link_selected_values`].
+fn register_selection_dependencies(
+    dependents: &mut HashMap<String, Vec<String>>,
+    selector: &str,
+    selected: &[String],
+) {
+    let list = dependents.entry(selector.to_string()).or_default();
+    for feature in selected {
+        if !list.contains(feature) {
+            list.push(feature.clone());
+        }
+    }
+}
+
 fn ensure_readable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
     if matches!(access, AccessMode::WO) {
         return Err(GenApiError::Access(name.to_string()));
@@ -128,6 +153,28 @@ fn ensure_device_port(name: &str, port: Option<&str>) -> Result<(), GenApiError>
              non-device ports are not routed yet (GA-12)"
         ))),
     }
+}
+
+/// A restriction parameter of a numeric node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Limit {
+    /// `<Min>` / `<pMin>`.
+    Min,
+    /// `<Max>` / `<pMax>`.
+    Max,
+    /// `<Inc>` / `<pInc>`.
+    Inc,
+}
+
+/// The read direction of a `<Converter>` or `<IntConverter>`, as
+/// [`NodeMap::converter_limit`] needs it.
+struct FromFormula<'a> {
+    name: &'a str,
+    ast: &'a SkAst,
+    vars: &'a [FormulaVar],
+    p_value: &'a str,
+    slope: Slope,
+    mode: EvalMode,
 }
 
 fn ensure_writable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
@@ -336,7 +383,44 @@ impl NodeMap {
             generation: Cell::new(0),
         };
         map.command_targets = map.find_command_targets();
+        map.link_selected_values();
         Ok(map)
+    }
+
+    /// Extend each selector's `<pSelected>` edges to the nodes its selected
+    /// features take their values from.
+    ///
+    /// A selected feature usually caches nothing itself: it delegates through
+    /// `<pValue>` to a register, and the register holds the reading.
+    /// Invalidating only the front node would leave that reading in place for
+    /// the next read to answer from. The chain is only known once every node
+    /// exists, hence a pass after the build.
+    fn link_selected_values(&mut self) {
+        let mut links: Vec<(String, String)> = Vec::new();
+        for node in self.nodes.values() {
+            let selected = match node {
+                Node::Integer(n) => &n.selected,
+                Node::Enum(n) => &n.selected,
+                _ => continue,
+            };
+            for feature in selected {
+                // A selected command shows no value; its register holds a
+                // trigger, and linking it would only make every selector write
+                // invalidate whatever names that register.
+                if matches!(self.nodes.get(feature.as_str()), Some(Node::Command(_))) {
+                    continue;
+                }
+                for link in self.value_chain(feature).into_iter().skip(1) {
+                    links.push((node.name().to_string(), link.to_string()));
+                }
+            }
+        }
+        for (selector, link) in links {
+            let list = self.dependents.entry(selector).or_default();
+            if !list.contains(&link) {
+                list.push(link);
+            }
+        }
     }
 
     /// Declarations this camera has that we do not expose.
@@ -374,10 +458,9 @@ impl NodeMap {
         }
         let node = self.get_integer_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
-        // Return static value if present.
-        if let Some(v) = node.value {
-            return Ok(v);
+        // A floating integer: what was written, else its start value.
+        if let Some(start) = node.value {
+            return Ok(node.floating.borrow().unwrap_or(start));
         }
         // Delegate to pValue node if present.
         if let Some(ref pv) = node.pvalue {
@@ -425,7 +508,21 @@ impl NodeMap {
         }
         let node = self.get_integer_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
+        // Before any `<pValue>` forward: the front node's own restrictions
+        // bind the write even when the register behind it declares none
+        // (backlog GA-37).
+        self.ensure_integer_in_range(name, value, io)?;
+        let node = self.get_integer_node(name)?;
+        // GenICam Standard v2.1.1 §2.8.5: an integer with a `<Value>` is "a
+        // 'floating' variable that can be set by the user to any value
+        // allowed by the restriction parameters". It has no register; the
+        // value lives here.
+        if node.value.is_some() {
+            debug!(node = %name, value, "write floating integer");
+            node.floating.replace(Some(value));
+            self.invalidate_dependents(name);
+            return Ok(());
+        }
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             return self.set_integer(&pv, value, io);
@@ -435,15 +532,6 @@ impl NodeMap {
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
-        if value < node.min || value > node.max {
-            return Err(GenApiError::Range(name.to_string()));
-        }
-        if let Some(inc) = node.inc
-            && inc != 0
-            && (value - node.min) % inc != 0
-        {
-            return Err(GenApiError::Range(name.to_string()));
-        }
         if let Some(bitfield) = node.bitfield {
             let encoded = encode_bitfield_value(
                 name,
@@ -504,7 +592,6 @@ impl NodeMap {
         }
         let node = self.get_float_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             return self.get_float(&pv, io);
@@ -556,7 +643,11 @@ impl NodeMap {
         }
         let node = self.get_float_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
+        // As for integers: bound the write before forwarding it (GA-37). A
+        // float's increment "is not verified on writing" (GenICam Standard
+        // v2.1.1 §2.8.9).
+        self.ensure_float_in_range(name, value, io)?;
+        let node = self.get_float_node(name)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             return self.set_float(&pv, value, io);
@@ -566,9 +657,6 @@ impl NodeMap {
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
         let (address, len) = self.resolve_address(name, addressing, io)?;
-        if value < node.min || value > node.max {
-            return Err(GenApiError::Range(name.to_string()));
-        }
         let bytes = match node.encoding {
             FloatEncoding::Ieee754 => {
                 let bytes = encode_ieee754(name, value, len, node.byte_order)?;
@@ -595,7 +683,6 @@ impl NodeMap {
     pub fn get_enum(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_enum_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
         // When pValue is set, read the integer from the delegate node.
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
@@ -638,7 +725,6 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         let node = self.get_enum_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             let entry_decl = node
@@ -718,29 +804,19 @@ impl NodeMap {
         }
     }
 
-    /// Evaluate `pIsAvailable` plus selector gating for `name`.
+    /// Evaluate `pIsAvailable` for `name`.
     ///
-    /// Returns `false` when the feature is not implemented, when
-    /// `pIsAvailable` evaluates to zero, or when any `selected_if` rule is
-    /// violated by the current selector value. Callers that want pure XML
-    /// gating without selector checks should use [`NodeMap::is_implemented`]
-    /// instead.
+    /// Returns `false` when the feature is not implemented or when
+    /// `pIsAvailable` evaluates to zero.
     pub fn is_available(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
         if !self.is_implemented(name, io)? {
             return Ok(false);
         }
         let prefs = self.predicate_refs(name)?;
-        if let Some(provider) = &prefs.p_is_available
-            && !self.eval_predicate_ref(name, provider, io)?
-        {
-            return Ok(false);
+        match &prefs.p_is_available {
+            Some(provider) => self.eval_predicate_ref(name, provider, io),
+            None => Ok(true),
         }
-        let selected_if = self
-            .nodes
-            .get(name)
-            .and_then(Self::selected_if_slice)
-            .unwrap_or(&[]);
-        self.selectors_allow(selected_if, io)
     }
 
     /// Refuse a write the device's current state does not permit.
@@ -979,41 +1055,10 @@ impl NodeMap {
         Ok(value != 0.0)
     }
 
-    /// Non-erroring cousin of [`NodeMap::ensure_selectors`] — returns `Ok(false)`
-    /// when a selector gating rule rejects the current state, rather than
-    /// converting that into a [`GenApiError::Unavailable`].
-    fn selectors_allow(
-        &self,
-        rules: &[(String, Vec<String>)],
-        io: &dyn RegisterIo,
-    ) -> Result<bool, GenApiError> {
-        for (selector, allowed) in rules {
-            if allowed.is_empty() {
-                continue;
-            }
-            let current = self.get_selector_value(selector, io)?;
-            if !allowed.iter().any(|v| v == &current) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn selected_if_slice(node: &Node) -> Option<&[(String, Vec<String>)]> {
-        match node {
-            Node::Integer(n) => Some(&n.selected_if),
-            Node::Float(n) => Some(&n.selected_if),
-            Node::Enum(n) => Some(&n.selected_if),
-            Node::Boolean(n) => Some(&n.selected_if),
-            _ => None,
-        }
-    }
-
     /// Read a boolean feature.
     pub fn get_bool(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
         let node = self.get_bool_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             let raw = self.get_integer(&pv, io)?;
@@ -1052,7 +1097,6 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         let node = self.get_bool_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        self.ensure_selectors(name, &node.selected_if, io)?;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             let on = node.on_value.unwrap_or(1);
@@ -1083,19 +1127,29 @@ impl NodeMap {
         Ok(())
     }
 
-    /// Execute a command feature by writing a value to the command register.
+    /// Execute a command feature by writing its command value.
+    ///
+    /// GenICam Standard v2.1.1 §2.8.8: the value — `<CommandValue>`, or the
+    /// node `<pCommandValue>` names, read now — "is written into a node which
+    /// is referenced to by a pValue element". The command's own guards apply
+    /// first, whichever way it reaches its register: an imposed `RO`, its
+    /// `pIsImplemented`/`pIsAvailable` and its `pIsLocked` (backlog GA-10).
+    /// Hikrobot's `UserSetSave` is unavailable while `Default` is selected,
+    /// and the register it writes declares nothing of the kind.
+    ///
+    /// Returns once the write is acknowledged. A device may still be acting on
+    /// it: poll [`NodeMap::is_done`] for completion.
     pub fn exec_command(&mut self, name: &str, io: &dyn RegisterIo) -> Result<(), GenApiError> {
+        self.get_command_node(name)?;
+        self.ensure_writable_now(name, &AccessMode::RW, io)?;
         let node = self.get_command_node(name)?;
-        // An imposed `RO` forbids the command's write, wherever it goes.
-        self.ensure_not_imposed(name, AccessMode::RO)?;
-        // Determine the value to write and the target.
-        let cmd_value = node.command_value.unwrap_or(1);
+        let value = self.command_value(node, io)?;
 
-        if let Some(ref pv) = node.pvalue {
-            // Delegate to the pValue node.
-            let pv = pv.clone();
-            debug!(node = %name, "execute command via pValue");
-            return self.set_integer(&pv, cmd_value, io);
+        if let Some(pv) = node.pvalue.clone() {
+            debug!(node = %name, value, "execute command via pValue");
+            self.set_integer(&pv, value, io)?;
+            self.invalidate_dependents(name);
+            return Ok(());
         }
 
         let address = node
@@ -1106,14 +1160,75 @@ impl NodeMap {
                 "command node {name} has zero length"
             )));
         }
-        let data = i64_to_bytes(name, cmd_value, node.len, Sign::Signed, ByteOrder::Big)?;
-        debug!(node = %name, "execute command");
+        let data = i64_to_bytes(name, value, node.len, Sign::Signed, ByteOrder::Big)?;
+        debug!(node = %name, value, "execute command");
         io.write(address, &data).map_err(|err| match err {
             GenApiError::Io(_) => err,
             other => other,
         })?;
         self.invalidate_dependents(name);
         Ok(())
+    }
+
+    /// Whether the command `name` has finished: GenICam's `ICommand::IsDone`.
+    ///
+    /// GenICam Standard v2.1.1 §2.8.8: "IsDone reads the value back and
+    /// returns false as long as return value equals the command value. If the
+    /// node is WriteOnly IsDone always returns true", and it "always read the
+    /// device register regardless of the state of the caches". Applications
+    /// "should always wait for the command completion by calling IsDone
+    /// immediately after the Execute", because "the state of other nodes can
+    /// depend on the completion of the Command".
+    ///
+    /// So a command whose register path is write-only — a `WO` node along its
+    /// `<pValue>` chain, or an `<ImposedAccessMode>WO` on the command itself
+    /// — is done at once, and nothing is read. Otherwise the register is read
+    /// from the device, past every cache, and compared with the command value.
+    /// When it differs, the command has finished and everything depending on
+    /// it is invalidated, so values read while it ran are read again.
+    ///
+    /// A direct-address command (a `<Command>` with its own `<Address>`, an
+    /// extension no vendor document uses) declares no access mode and is
+    /// treated as write-only.
+    pub fn is_done(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
+        let node = self.get_command_node(name)?;
+        let Some(target) = node.pvalue.as_deref() else {
+            return Ok(true);
+        };
+        if self.imposed_access(name) == Some(AccessMode::WO) || self.is_write_only(target) {
+            return Ok(true);
+        }
+        let expected = self.command_value(node, io)?;
+        let chain = self.value_chain(target);
+        for link in &chain {
+            if let Some(node) = self.nodes.get(*link) {
+                node.invalidate_cache();
+            }
+        }
+        let current = self.get_integer(target, io)?;
+        let done = current != expected;
+        trace!(node = %name, current, expected, done, "command IsDone");
+        if done {
+            self.invalidate_dependents(name);
+            for link in chain {
+                self.invalidate_dependents(link);
+            }
+        }
+        Ok(done)
+    }
+
+    /// The value executing `node` writes, read now when it comes from
+    /// `<pCommandValue>`.
+    fn command_value(&self, node: &CommandNode, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
+        match &node.command_value {
+            CommandValueSrc::Literal(value) => Ok(*value),
+            CommandValueSrc::FromNode(provider) => {
+                let mut stack = HashSet::new();
+                stack.insert(node.name.clone());
+                let value = self.resolve_value(provider, io, &mut stack)?;
+                sk_to_i64(provider, value)
+            }
+        }
     }
 
     fn get_integer_node(&self, name: &str) -> Result<&IntegerNode, GenApiError> {
@@ -1154,26 +1269,6 @@ impl NodeMap {
             Some(_) => Err(GenApiError::Type(name.to_string())),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
-    }
-
-    fn ensure_selectors(
-        &self,
-        node_name: &str,
-        rules: &[(String, Vec<String>)],
-        io: &dyn RegisterIo,
-    ) -> Result<(), GenApiError> {
-        for (selector, allowed) in rules {
-            if allowed.is_empty() {
-                continue;
-            }
-            let current = self.get_selector_value(selector, io)?;
-            if !allowed.iter().any(|value| value == &current) {
-                return Err(GenApiError::Unavailable(format!(
-                    "node '{node_name}' unavailable for selector '{selector}={current}'"
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn lookup_enum_entry(
@@ -1270,13 +1365,12 @@ impl NodeMap {
     /// callers that need raw register I/O through [`RegisterIo`] — a
     /// file-transfer buffer, for instance, whose address the XML supplies
     /// through `<pAddress>` and which no typed accessor covers. Address
-    /// terms, `<pIndex>` scaling and selector blocks resolve exactly as they
-    /// do for `get_integer` and friends, so a caller does not have to
-    /// reimplement GenICam addressing.
+    /// terms and `<pIndex>` scaling resolve exactly as they do for
+    /// `get_integer` and friends, so a caller does not have to reimplement
+    /// GenICam addressing.
     ///
     /// Returns [`GenApiError::Unavailable`] for a node that has no addressing
-    /// of its own because it delegates through `<pValue>`, and for a
-    /// selector-mapped node whose current selector value has no block.
+    /// of its own because it delegates through `<pValue>`.
     pub fn register_address(
         &self,
         name: &str,
@@ -1324,26 +1418,6 @@ impl NodeMap {
                 }
                 Ok((address, *len))
             }
-            Addressing::BySelector { selector, map } => {
-                let value = self.get_selector_value(selector, io)?;
-                if let Some((_, (address, len))) = map.iter().find(|(name, _)| name == &value) {
-                    let addr = *address;
-                    let len = *len;
-                    debug!(
-                        node = %node_name,
-                        selector = %selector,
-                        value = %value,
-                        address = format_args!("0x{addr:X}"),
-                        len,
-                        "resolve address via selector"
-                    );
-                    Ok((addr, len))
-                } else {
-                    Err(GenApiError::Unavailable(format!(
-                        "node '{node_name}' unavailable for selector '{selector}={value}'"
-                    )))
-                }
-            }
         }
     }
 
@@ -1379,22 +1453,6 @@ impl NodeMap {
                 };
                 Ok(index.wrapping_mul(stride))
             }
-        }
-    }
-
-    fn get_selector_value(
-        &self,
-        selector: &str,
-        io: &dyn RegisterIo,
-    ) -> Result<String, GenApiError> {
-        match self.nodes.get(selector) {
-            Some(Node::Enum(_)) => self.get_enum(selector, io),
-            Some(Node::Boolean(_)) => Ok(self.get_bool(selector, io)?.to_string()),
-            Some(Node::Integer(_)) => Ok(self.get_integer(selector, io)?.to_string()),
-            Some(_) => Err(GenApiError::Parse(format!(
-                "selector {selector} has unsupported type"
-            ))),
-            None => Err(GenApiError::NodeNotFound(selector.to_string())),
         }
     }
 
@@ -1542,14 +1600,11 @@ impl NodeMap {
 
     /// Resolve `.Min`, `.Max` or `.Inc` of a formula variable's node.
     ///
-    /// `<pMin>` / `<pMax>` win over a static bound. A node that declares no
-    /// bound of its own but delegates through `<pValue>` takes the bound of
-    /// the node it delegates to: an `<Integer>` fronting an `<IntReg>` would
-    /// otherwise report the `i64::MIN` / `i64::MAX` placeholders that stand
-    /// in for "not declared". That delegation rule is our reading; the
-    /// standard defines the extensions but not this case. An undeclared
-    /// integer increment is 1. A `<Float>` has no increment in this model,
-    /// so `.Inc` on one is an evaluation error rather than a guess.
+    /// The bound in force comes from [`NodeMap::limit`]. Where nothing
+    /// declares one, the GenICam Standard v2.1.1 §3.2 defaults apply: the
+    /// integer's whole range and an increment of 1, or the largest and
+    /// smallest double. A `<Float>` has no increment in this model, so `.Inc`
+    /// on one is an evaluation error rather than a guess.
     fn resolve_limit(
         &self,
         formula: &str,
@@ -1558,66 +1613,308 @@ impl NodeMap {
         io: &dyn RegisterIo,
         stack: &mut HashSet<String>,
     ) -> Result<SkValue, GenApiError> {
-        let mut current = var.provider.as_str();
+        let which = match attr {
+            VarAttr::Min => Limit::Min,
+            VarAttr::Max => Limit::Max,
+            _ => Limit::Inc,
+        };
+        let provider = var.provider.as_str();
+        let integral = match self.nodes.get(provider) {
+            Some(Node::Integer(_) | Node::IntConverter(_)) => true,
+            Some(Node::Float(_) | Node::Converter(_)) => false,
+            Some(other) => {
+                return Err(GenApiError::ExprEval {
+                    name: formula.to_string(),
+                    msg: format!(
+                        "{}: {} {provider} has no minimum, maximum or increment",
+                        var.name,
+                        other.kind_name()
+                    ),
+                });
+            }
+            None => return Err(GenApiError::NodeNotFound(provider.to_string())),
+        };
+        let limit = self
+            .limit(provider, which, io, stack)
+            .map_err(|err| match err {
+                GenApiError::ExprEval { msg, .. } if msg.starts_with("cyclic") => {
+                    GenApiError::ExprEval {
+                        name: formula.to_string(),
+                        msg: format!("{}: {msg}", var.name),
+                    }
+                }
+                other => other,
+            })?;
+        match (limit, integral) {
+            (Some(value), true) => sk_to_i64(provider, value).map(SkValue::Int),
+            (Some(value), false) => Ok(SkValue::Float(value.as_f64())),
+            (None, true) => Ok(SkValue::Int(match which {
+                Limit::Min => i64::MIN,
+                Limit::Max => i64::MAX,
+                Limit::Inc => 1,
+            })),
+            (None, false) => match which {
+                Limit::Min => Ok(SkValue::Float(f64::MIN)),
+                Limit::Max => Ok(SkValue::Float(f64::MAX)),
+                Limit::Inc => Err(GenApiError::ExprEval {
+                    name: formula.to_string(),
+                    msg: format!("{}: Float {provider} declares no increment", var.name),
+                }),
+            },
+        }
+    }
+
+    /// The restriction parameter `which` of the numeric node `name` in force
+    /// now, or `None` when nothing along the way declares one.
+    ///
+    /// GenICam Standard v2.1.1 §2.8.5 has an `<Integer>` merge its value and
+    /// its "Minimum, Maximum, Increment ... from different sources": constants
+    /// in `<Min>`/`<Max>`/`<Inc>`, or "pointers to other IInteger nodes" in
+    /// `<pMin>`/`<pMax>`/`<pInc>`; §2.8.9 gives a `<Float>` the same (without
+    /// an increment we track). A pointer wins over a constant. A node that
+    /// declares neither takes the bound of the node its `<pValue>` names —
+    /// otherwise SFNC `Width`, an `<Integer>` over an `<IntReg>`, would have
+    /// none. That delegation is our reading; the standard does not spell it
+    /// out. A `<Converter>` or `<IntConverter>` maps its `<pValue>`'s bounds
+    /// through `<FormulaFrom>` as its `<Slope>` says (backlog GA-07).
+    pub(crate) fn limit(
+        &self,
+        name: &str,
+        which: Limit,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<Option<SkValue>, GenApiError> {
+        let mut current = name;
         let mut visited = HashSet::new();
         loop {
             if !visited.insert(current) {
                 return Err(GenApiError::ExprEval {
-                    name: formula.to_string(),
-                    msg: format!("{}: cyclic <pValue> chain at {current}", var.name),
+                    name: name.to_string(),
+                    msg: format!("cyclic <pValue> chain at {current}"),
                 });
             }
-            match self.nodes.get(current) {
+            let next = match self.nodes.get(current) {
                 Some(Node::Integer(node)) => {
-                    let (pointer, declared) = match attr {
-                        VarAttr::Min => (node.p_min.as_deref(), Some(node.min)),
-                        VarAttr::Max => (node.p_max.as_deref(), Some(node.max)),
-                        _ => (None, node.inc),
+                    let (pointer, declared) = match which {
+                        Limit::Min => (node.p_min.as_deref(), node.min),
+                        Limit::Max => (node.p_max.as_deref(), node.max),
+                        Limit::Inc => (node.p_inc.as_deref(), node.inc),
                     };
                     if let Some(pointer) = pointer {
-                        return self.resolve_value(pointer, io, stack);
+                        let value = self.resolve_value(pointer, io, stack)?;
+                        return sk_to_i64(pointer, value).map(|v| Some(SkValue::Int(v)));
                     }
-                    let undeclared = match attr {
-                        VarAttr::Min => node.min == i64::MIN,
-                        VarAttr::Max => node.max == i64::MAX,
-                        _ => node.inc.is_none(),
-                    };
-                    if undeclared && let Some(pvalue) = node.pvalue.as_deref() {
-                        current = pvalue;
-                        continue;
+                    if let Some(value) = declared {
+                        return Ok(Some(SkValue::Int(value)));
                     }
-                    return Ok(SkValue::Int(declared.unwrap_or(1)));
+                    node.pvalue.as_deref()
                 }
                 Some(Node::Float(node)) => {
-                    let (declared, undeclared) = match attr {
-                        VarAttr::Min => (Some(node.min), node.min == f64::MIN),
-                        VarAttr::Max => (Some(node.max), node.max == f64::MAX),
-                        _ => (None, true),
+                    let (pointer, declared) = match which {
+                        Limit::Min => (node.p_min.as_deref(), node.min),
+                        Limit::Max => (node.p_max.as_deref(), node.max),
+                        Limit::Inc => return Ok(None),
                     };
-                    if undeclared && let Some(pvalue) = node.pvalue.as_deref() {
-                        current = pvalue;
-                        continue;
+                    if let Some(pointer) = pointer {
+                        let value = self.resolve_value(pointer, io, stack)?;
+                        return Ok(Some(SkValue::Float(value.as_f64())));
                     }
-                    return declared
-                        .map(SkValue::Float)
-                        .ok_or_else(|| GenApiError::ExprEval {
-                            name: formula.to_string(),
-                            msg: format!("{}: Float {current} declares no increment", var.name),
-                        });
+                    if let Some(value) = declared {
+                        return Ok(Some(SkValue::Float(value)));
+                    }
+                    node.pvalue.as_deref()
                 }
-                Some(other) => {
-                    return Err(GenApiError::ExprEval {
-                        name: formula.to_string(),
-                        msg: format!(
-                            "{}: {} {current} has no minimum, maximum or increment",
-                            var.name,
-                            other.kind_name()
-                        ),
-                    });
+                Some(Node::Converter(node)) => {
+                    let formula = FromFormula {
+                        name: &node.name,
+                        ast: &node.ast_from,
+                        vars: &node.vars_from,
+                        p_value: &node.p_value,
+                        slope: node.slope,
+                        mode: eval_mode(node.output),
+                    };
+                    return self.converter_limit(&formula, which, io, stack);
                 }
+                Some(Node::IntConverter(node)) => {
+                    // "The increment of an IntConvertor is always 1" (§2.8.13),
+                    // which is what an undeclared increment means anyway.
+                    let formula = FromFormula {
+                        name: &node.name,
+                        ast: &node.ast_from,
+                        vars: &node.vars_from,
+                        p_value: &node.p_value,
+                        slope: node.slope,
+                        mode: EvalMode::Integer,
+                    };
+                    return self.converter_limit(&formula, which, io, stack);
+                }
+                Some(_) => None,
                 None => return Err(GenApiError::NodeNotFound(current.to_string())),
+            };
+            match next {
+                Some(next) => current = next,
+                None => return Ok(None),
             }
         }
+    }
+
+    /// A converter's minimum or maximum: its `<pValue>`'s bounds mapped
+    /// through `<FormulaFrom>`.
+    ///
+    /// GenICam Standard v2.1.1 §2.8.13 names four slopes. `Increasing` keeps
+    /// the order, `Decreasing` swaps it — the raw maximum becomes the
+    /// feature's minimum — and `Varying` means "the full number range is
+    /// used", so there is no bound. `Automatic`, the §3.2 default, is
+    /// "determined ... by probing the function": we evaluate it at both raw
+    /// bounds and take the smaller and the larger, which is exact for the
+    /// monotonic formulas the other three values describe.
+    fn converter_limit(
+        &self,
+        formula: &FromFormula<'_>,
+        which: Limit,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<Option<SkValue>, GenApiError> {
+        if which == Limit::Inc {
+            return Ok(None);
+        }
+        if !stack.insert(formula.name.to_string()) {
+            stack.remove(formula.name);
+            return Err(GenApiError::ExprEval {
+                name: formula.name.to_string(),
+                msg: "cyclic dependency".into(),
+            });
+        }
+        let result = self.converter_limit_unguarded(formula, which, io, stack);
+        stack.remove(formula.name);
+        result
+    }
+
+    fn converter_limit_unguarded(
+        &self,
+        formula: &FromFormula<'_>,
+        which: Limit,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<Option<SkValue>, GenApiError> {
+        let raw_which = match (formula.slope, which) {
+            (Slope::Varying, _) => return Ok(None),
+            (Slope::Decreasing, Limit::Min) => Limit::Max,
+            (Slope::Decreasing, Limit::Max) => Limit::Min,
+            (Slope::Increasing | Slope::Decreasing, other) => other,
+            (Slope::Automatic, _) => {
+                let low = self.limit(formula.p_value, Limit::Min, io, stack)?;
+                let high = self.limit(formula.p_value, Limit::Max, io, stack)?;
+                let (Some(low), Some(high)) = (low, high) else {
+                    return Ok(None);
+                };
+                let (a, b) = (
+                    self.eval_from(formula, low, io, stack)?,
+                    self.eval_from(formula, high, io, stack)?,
+                );
+                let (small, large) = if a.as_f64() <= b.as_f64() {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                return Ok(Some(if which == Limit::Min { small } else { large }));
+            }
+        };
+        match self.limit(formula.p_value, raw_which, io, stack)? {
+            Some(raw) => self.eval_from(formula, raw, io, stack).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// `<FormulaFrom>` evaluated with `TO` bound to `raw`.
+    fn eval_from(
+        &self,
+        formula: &FromFormula<'_>,
+        raw: SkValue,
+        io: &dyn RegisterIo,
+        stack: &mut HashSet<String>,
+    ) -> Result<SkValue, GenApiError> {
+        self.eval_formula(
+            formula.name,
+            formula.ast,
+            formula.vars,
+            &[("TO", raw)],
+            formula.mode,
+            io,
+            stack,
+        )
+    }
+
+    /// Refuse an integer write outside the restriction parameters in force.
+    ///
+    /// `value` must lie in `[Min, Max]` and be `Min` plus a whole number of
+    /// `Inc` steps (GenICam Standard v2.1.1 §2.8.5). An undeclared minimum
+    /// counts the steps from 0.
+    fn ensure_integer_in_range(
+        &self,
+        name: &str,
+        value: i64,
+        io: &dyn RegisterIo,
+    ) -> Result<(), GenApiError> {
+        let mut stack = HashSet::new();
+        let mut bound = |which| -> Result<Option<i64>, GenApiError> {
+            self.limit(name, which, io, &mut stack)?
+                .map(|v| sk_to_i64(name, v))
+                .transpose()
+        };
+        let (min, max, inc) = (bound(Limit::Min)?, bound(Limit::Max)?, bound(Limit::Inc)?);
+        if let Some(min) = min
+            && value < min
+        {
+            return Err(GenApiError::Range(format!(
+                "{name}: {value} is below the minimum {min}"
+            )));
+        }
+        if let Some(max) = max
+            && value > max
+        {
+            return Err(GenApiError::Range(format!(
+                "{name}: {value} is above the maximum {max}"
+            )));
+        }
+        if let Some(inc) = inc
+            && inc > 1
+        {
+            let base = min.unwrap_or(0);
+            if (i128::from(value) - i128::from(base)) % i128::from(inc) != 0 {
+                return Err(GenApiError::Range(format!(
+                    "{name}: {value} is not {base} plus a multiple of {inc}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a float write outside `[Min, Max]` in force.
+    fn ensure_float_in_range(
+        &self,
+        name: &str,
+        value: f64,
+        io: &dyn RegisterIo,
+    ) -> Result<(), GenApiError> {
+        let mut stack = HashSet::new();
+        let min = self.limit(name, Limit::Min, io, &mut stack)?;
+        let max = self.limit(name, Limit::Max, io, &mut stack)?;
+        if let Some(min) = min.map(SkValue::as_f64)
+            && value < min
+        {
+            return Err(GenApiError::Range(format!(
+                "{name}: {value} is below the minimum {min}"
+            )));
+        }
+        if let Some(max) = max.map(SkValue::as_f64)
+            && value > max
+        {
+            return Err(GenApiError::Range(format!(
+                "{name}: {value} is above the maximum {max}"
+            )));
+        }
+        Ok(())
     }
 
     fn resolve_numeric(
@@ -2030,11 +2327,11 @@ fn build_node(
             bitfield,
             sign,
             byte_order,
-            selectors,
-            selected_if,
+            selected,
             pvalue,
             p_max,
             p_min,
+            p_inc,
             value,
             predicates,
             invalidators,
@@ -2042,21 +2339,13 @@ fn build_node(
             if let Some(ref addr) = addressing {
                 register_addressing_dependency(dependents, &name, addr);
             }
-            if let Some(ref pv) = pvalue {
-                dependents.entry(pv.clone()).or_default().push(name.clone());
-            }
-            if let Some(ref pm) = p_max {
-                dependents.entry(pm.clone()).or_default().push(name.clone());
-            }
-            if let Some(ref pm) = p_min {
-                dependents.entry(pm.clone()).or_default().push(name.clone());
-            }
-            for (selector, _) in &selected_if {
+            for provider in [&pvalue, &p_min, &p_max, &p_inc].into_iter().flatten() {
                 dependents
-                    .entry(selector.clone())
+                    .entry(provider.clone())
                     .or_default()
                     .push(name.clone());
             }
+            register_selection_dependencies(dependents, &name, &selected);
             register_predicate_dependencies(dependents, &name, &predicates);
             register_invalidator_dependencies(dependents, &name, &invalidators);
             let node = IntegerNode {
@@ -2072,15 +2361,16 @@ fn build_node(
                 bitfield,
                 sign,
                 byte_order,
-                selectors,
-                selected_if,
+                selected,
                 pvalue,
                 p_max,
                 p_min,
+                p_inc,
                 value,
                 predicates,
                 cache: std::cell::RefCell::new(None),
                 raw_cache: std::cell::RefCell::new(None),
+                floating: std::cell::RefCell::new(None),
             };
             Ok((name, Node::Integer(node)))
         }
@@ -2094,9 +2384,9 @@ fn build_node(
             unit,
             scale,
             offset,
-            selectors,
-            selected_if,
             pvalue,
+            p_min,
+            p_max,
             encoding,
             byte_order,
             predicates,
@@ -2105,12 +2395,9 @@ fn build_node(
             if let Some(ref addr) = addressing {
                 register_addressing_dependency(dependents, &name, addr);
             }
-            if let Some(ref pv) = pvalue {
-                dependents.entry(pv.clone()).or_default().push(name.clone());
-            }
-            for (selector, _) in &selected_if {
+            for provider in [&pvalue, &p_min, &p_max].into_iter().flatten() {
                 dependents
-                    .entry(selector.clone())
+                    .entry(provider.clone())
                     .or_default()
                     .push(name.clone());
             }
@@ -2126,9 +2413,9 @@ fn build_node(
                 unit,
                 scale,
                 offset,
-                selectors,
-                selected_if,
                 pvalue,
+                p_min,
+                p_max,
                 encoding,
                 byte_order,
                 predicates,
@@ -2143,8 +2430,7 @@ fn build_node(
             access,
             entries,
             default,
-            selectors,
-            selected_if,
+            selected,
             pvalue,
             predicates,
         } => {
@@ -2154,12 +2440,7 @@ fn build_node(
             if let Some(ref pv) = pvalue {
                 dependents.entry(pv.clone()).or_default().push(name.clone());
             }
-            for (selector, _) in &selected_if {
-                dependents
-                    .entry(selector.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
+            register_selection_dependencies(dependents, &name, &selected);
             register_predicate_dependencies(dependents, &name, &predicates);
             let mut providers = Vec::new();
             let mut provider_set = HashSet::new();
@@ -2184,8 +2465,7 @@ fn build_node(
                 pvalue,
                 entries,
                 default,
-                selectors,
-                selected_if,
+                selected,
                 providers,
                 predicates,
                 value_cache: std::cell::RefCell::new(None),
@@ -2200,8 +2480,6 @@ fn build_node(
             len,
             access,
             bitfield,
-            selectors,
-            selected_if,
             pvalue,
             on_value,
             off_value,
@@ -2213,12 +2491,6 @@ fn build_node(
             if let Some(ref pv) = pvalue {
                 dependents.entry(pv.clone()).or_default().push(name.clone());
             }
-            for (selector, _) in &selected_if {
-                dependents
-                    .entry(selector.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
             register_predicate_dependencies(dependents, &name, &predicates);
             let node = BooleanNode {
                 name: name.clone(),
@@ -2227,8 +2499,6 @@ fn build_node(
                 len,
                 access,
                 bitfield,
-                selectors,
-                selected_if,
                 pvalue,
                 on_value,
                 off_value,
@@ -2249,6 +2519,12 @@ fn build_node(
         } => {
             if let Some(ref pv) = pvalue {
                 dependents.entry(pv.clone()).or_default().push(name.clone());
+            }
+            if let CommandValueSrc::FromNode(provider) = &command_value {
+                dependents
+                    .entry(provider.clone())
+                    .or_default()
+                    .push(name.clone());
             }
             register_predicate_dependencies(dependents, &name, &predicates);
             let node = CommandNode {
@@ -2356,6 +2632,7 @@ fn build_node(
                 vars_from,
                 unit: decl.unit,
                 output: decl.output,
+                slope: decl.slope,
                 predicates: decl.predicates,
                 cache: std::cell::RefCell::new(None),
             };
@@ -2397,6 +2674,7 @@ fn build_node(
                 vars_to,
                 vars_from,
                 unit: decl.unit,
+                slope: decl.slope,
                 predicates: decl.predicates,
                 cache: std::cell::RefCell::new(None),
             };

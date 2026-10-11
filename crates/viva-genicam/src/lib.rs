@@ -130,6 +130,18 @@ pub enum GenicamError {
     /// The camera reported a pixel format without a conversion path.
     #[error("unsupported pixel format: {0}")]
     UnsupportedPixelFormat(viva_pfnc::PixelFormat),
+    /// A command was written but the camera did not report it finished
+    /// (GenICam `IsDone`) within the time allowed.
+    ///
+    /// The write itself was acknowledged: the camera may still be acting on
+    /// it, or its command register may never clear.
+    #[error("command {name} was executed but did not report completion within {waited:?}")]
+    CommandNotDone {
+        /// The command node.
+        name: String,
+        /// How long [`Camera::execute_and_wait`] polled.
+        waited: Duration,
+    },
 }
 
 impl GenicamError {
@@ -141,6 +153,14 @@ impl GenicamError {
         GenicamError::Transport(msg.into())
     }
 }
+
+/// How often [`Camera::execute_and_wait`] asks a command whether it has
+/// finished.
+///
+/// GenICam leaves the interval to the application; a `<PollingTime>` in the
+/// XML is not read yet (backlog GA-05). Ten milliseconds keeps a self-clearing
+/// command's latency low at a cost of one register read per poll.
+pub const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Camera facade combining a nodemap with a transport implementing [`RegisterIo`].
 #[derive(Debug)]
@@ -479,6 +499,53 @@ impl<T: RegisterIo> Camera<T> {
     pub fn execute_command(&mut self, name: &str) -> Result<(), GenicamError> {
         self.nodemap
             .exec_command(name, &self.transport)
+            .map_err(Into::into)
+    }
+
+    /// Execute a command and wait until the camera reports it finished.
+    ///
+    /// GenICam Standard v2.1.1 §2.8.8: "the state of other nodes can depend on
+    /// the completion of the Command therefore applications ... should always
+    /// wait for the command completion by calling IsDone immediately after the
+    /// Execute". This polls [`NodeMap::is_done`] every
+    /// [`COMMAND_POLL_INTERVAL`] until it answers `true` or `timeout` passes.
+    ///
+    /// A command whose register path is write-only — most of them — is done
+    /// as soon as the write is acknowledged, so this returns as quickly as
+    /// [`Camera::execute_command`] does. A self-clearing command (its register
+    /// reads back the command value until the device has finished) is waited
+    /// on. Reads made afterwards see the state the command left.
+    ///
+    /// Returns [`GenicamError::CommandNotDone`] when the camera has not
+    /// finished by `timeout`; the command was still executed.
+    pub async fn execute_and_wait(
+        &mut self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(), GenicamError> {
+        self.execute_command(name)?;
+        let started = Instant::now();
+        loop {
+            if self.nodemap.is_done(name, &self.transport)? {
+                return Ok(());
+            }
+            let waited = started.elapsed();
+            if waited >= timeout {
+                return Err(GenicamError::CommandNotDone {
+                    name: name.to_string(),
+                    waited,
+                });
+            }
+            sleep(COMMAND_POLL_INTERVAL.min(timeout - waited)).await;
+        }
+    }
+
+    /// Whether the command `name` has finished: GenICam's `IsDone`.
+    ///
+    /// See [`NodeMap::is_done`]; [`Camera::execute_and_wait`] polls it.
+    pub fn is_done(&self, name: &str) -> Result<bool, GenicamError> {
+        self.nodemap
+            .is_done(name, &self.transport)
             .map_err(Into::into)
     }
 
@@ -1425,6 +1492,116 @@ mod tests {
             camera.get("AcquisitionFrameRateAbs").expect("read back"),
             "12.5"
         );
+    }
+
+    /// A command register the device clears once it has finished: the first
+    /// `busy_reads` reads after a write still return the command value.
+    struct SelfClearingIo {
+        addr: u64,
+        busy_reads: usize,
+        state: Mutex<(Vec<u8>, usize, usize)>,
+    }
+
+    impl SelfClearingIo {
+        fn new(addr: u64, busy_reads: usize) -> Self {
+            Self {
+                addr,
+                busy_reads,
+                state: Mutex::new((vec![0; 4], 0, 0)),
+            }
+        }
+
+        /// `(writes, reads)` seen at the command register.
+        fn counts(&self) -> (usize, usize) {
+            let state = self.state.lock().unwrap();
+            (state.1, state.2)
+        }
+    }
+
+    impl RegisterIo for SelfClearingIo {
+        fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+            assert_eq!(addr, self.addr, "only the command register is read");
+            let mut state = self.state.lock().unwrap();
+            state.2 += 1;
+            if state.2 > self.busy_reads {
+                state.0 = vec![0; len];
+            }
+            Ok(state.0.clone())
+        }
+
+        fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
+            assert_eq!(addr, self.addr);
+            let mut state = self.state.lock().unwrap();
+            state.0 = data.to_vec();
+            state.1 += 1;
+            Ok(())
+        }
+    }
+
+    const COMMAND_XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Command Name="UserSetLoad">
+                <pValue>UserSetLoadReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="UserSetLoadReg">
+                <Address>0x4000</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Command Name="TriggerSoftware">
+                <pValue>TriggerSoftwareReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="TriggerSoftwareReg">
+                <Address>0x4000</Address><Length>4</Length><AccessMode>WO</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+
+    fn command_camera(io: SelfClearingIo) -> Camera<SelfClearingIo> {
+        let model = viva_genapi_xml::parse(COMMAND_XML).expect("parse");
+        Camera::new(io, NodeMap::try_from_xml(model).expect("build nodemap"))
+    }
+
+    /// GA-36: executing waits until the register no longer reads back the
+    /// command value (GenICam Standard v2.1.1 §2.8.8, `IsDone`).
+    #[tokio::test]
+    async fn execute_and_wait_polls_until_the_command_clears() {
+        let mut camera = command_camera(SelfClearingIo::new(0x4000, 3));
+        camera
+            .execute_and_wait("UserSetLoad", Duration::from_secs(5))
+            .await
+            .expect("finishes after three busy reads");
+        assert_eq!(camera.transport().counts(), (1, 4));
+    }
+
+    /// GA-36: a command that never finishes is reported, not waited on
+    /// forever and not reported as done.
+    #[tokio::test]
+    async fn execute_and_wait_gives_up_at_the_timeout() {
+        let mut camera = command_camera(SelfClearingIo::new(0x4000, usize::MAX));
+        let err = camera
+            .execute_and_wait("UserSetLoad", Duration::from_millis(50))
+            .await
+            .expect_err("never clears");
+        assert!(
+            matches!(err, GenicamError::CommandNotDone { ref name, .. } if name == "UserSetLoad"),
+            "{err:?}"
+        );
+        assert_eq!(camera.transport().counts().0, 1, "written once");
+    }
+
+    /// GA-36: a write-only command is done once written; its register is
+    /// never read, which a device would refuse.
+    #[tokio::test]
+    async fn execute_and_wait_does_not_read_a_write_only_command() {
+        let mut camera = command_camera(SelfClearingIo::new(0x4000, usize::MAX));
+        camera
+            .execute_and_wait("TriggerSoftware", Duration::from_secs(5))
+            .await
+            .expect("done at once");
+        assert_eq!(camera.transport().counts(), (1, 0));
     }
 
     #[test]

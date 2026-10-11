@@ -173,16 +173,27 @@ impl ResendState {
 
     /// The camera answered `answer` for packet `id`. Returns how many packets
     /// asked for it has thereby declared unavailable.
+    ///
+    /// "And every one before it" closes the earlier gaps too, counting those
+    /// asked for: a late arrival there is then neither asked for again nor
+    /// counted as recovered, so each packet asked for ends in one outcome
+    /// (Codex review of #195). An earlier gap not yet asked for closes
+    /// uncounted.
     pub fn unavailable(&mut self, id: u32, answer: Answer) -> u64 {
-        if answer == Answer::GoneWithPrevious {
-            for gap in self.gaps.iter_mut().filter(|g| g.last < id) {
-                gap.due = None;
-            }
-        }
-        match self.gaps.iter().position(|g| g.contains(id)) {
+        let mut gone = match self.gaps.iter().position(|g| g.contains(id)) {
             Some(at) if self.gaps[at].requests > 0 => self.gaps.remove(at).len(),
             _ => 0,
+        };
+        if answer == Answer::GoneWithPrevious {
+            self.gaps.retain(|gap| {
+                let earlier = gap.last < id;
+                if earlier && gap.requests > 0 {
+                    gone += gap.len();
+                }
+                !earlier
+            });
         }
+        gone
     }
 
     /// Append the requests due at `now` for block `block_id`, whose packets —
@@ -350,11 +361,42 @@ mod tests {
         );
         assert_eq!(state.unavailable(7, Answer::Gone), 3);
         assert_eq!(state.unavailable(7, Answer::Gone), 0, "already closed");
-        assert_eq!(state.unavailable(3, Answer::GoneWithPrevious), 2);
+        assert_eq!(
+            state.unavailable(3, Answer::GoneWithPrevious),
+            2 + 1,
+            "gap 3-4, and gap 1 before it"
+        );
         assert!(
             due(&mut state, t0 + 50 * MS, 100).is_empty(),
             "gap 1 is before 3, so it is not asked for again"
         );
+    }
+
+    /// "This packet and every one before it are gone" closes the earlier
+    /// gaps asked for and counts their packets as unavailable, so a late
+    /// arrival in one of them is not counted as recovered as well (Codex
+    /// review of #195): each packet asked for ends in one outcome.
+    #[test]
+    fn gone_with_previous_closes_and_counts_the_earlier_gaps() {
+        let mut state = ResendState::default();
+        let t0 = Instant::now();
+        for id in [0, 2, 5, 9] {
+            state.arrived(id, t0, DEFAULT_RESEND_DELAY);
+        }
+        assert_eq!(
+            due(&mut state, t0 + 2 * MS, 100),
+            vec![(1, 1), (3, 4), (6, 8)]
+        );
+        assert_eq!(
+            state.unavailable(7, Answer::GoneWithPrevious),
+            3 + 2 + 1,
+            "the gap holding 7 and both gaps before it"
+        );
+        assert!(
+            !state.arrived(1, t0 + 3 * MS, DEFAULT_RESEND_DELAY),
+            "packet 1 was counted unavailable; it cannot be recovered too"
+        );
+        assert!(due(&mut state, t0 + 50 * MS, 100).is_empty());
     }
 
     /// Ids beyond the trailer are not the block's.

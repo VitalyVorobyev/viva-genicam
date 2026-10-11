@@ -4,12 +4,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
 
-**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. L and U, like the receive engine, packet resend and the chunk and event ports already on `main`, are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
-
-## L — GigE session lifecycle and discovery
-
-**Goal**: closing a camera releases it, a camera another application controls can be watched, and losing control is reported. Discovery finds a camera on the wrong subnet and says so.
-**Rows**: TC-28, TC-29, TC-30, TC-31, TC-32, SR-20, SR-08, API-18, TC-25, TC-26.
+**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
 ## F — Facade: typed and type-gated `Camera`, SFNC helpers, blocking API
 
@@ -29,7 +24,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 ## Y — Python parity and threads
 
 **Goal**: the Python package offers what the Rust facade does, from any thread, with NumPy arrays of the right shape and type; the Windows wheel is tested.
-**Rows**: PY-01, PY-02, PY-03, PY-04, CI-04.
+**Rows**: PY-01, PY-02, PY-03, PY-04, PY-05, CI-04.
 
 ## X — Errors, public surfaces, services
 
@@ -49,7 +44,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 ## Waiting on hardware
 
 - **GA-44**: whether cameras clear a command register once the command is done, which `IsDone` relies on.
-- **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, once L enables `PENDING_ACK` (TC-30).
+- **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, now possible: `PENDING_ACK` is enabled where the camera offers it.
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
 - **TC-27**: USB3 Vision has never met a camera; needs `viva-camctl report --usb 0` from one.
 - **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.
@@ -62,7 +57,9 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **SR-24**: whether cameras accept a packet resend request sent from the stream socket rather than the control channel's port; a lossy stream's `-vv` log, or a capture, settles it.
 - **SR-25**: how a camera answers a resend it cannot serve (which status, per packet or per range, or silence), and whether resent packets carry status `0x0100`.
 - **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
-- **PX-05**: line or image padding when a width ends inside a packing group (an odd width in `Mono12p`); needs a capture from such a camera.
+- **PX-05**: line or image padding when a width ends inside a packing group (an odd width in `Mono12p`) and no padding is declared; needs a capture from such a camera.
+- **TC-38**: whether a CCP read tells an application another took control, and whether devices accept writes while nobody holds it; a capture of two applications on one camera.
+- **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
 
 ## Studio
 
@@ -71,7 +68,7 @@ Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-referen
 - **Foundations**: ST-45, ST-46, ST-47.
 - **Viewer parity**: ST-39.
 - **Distribution**: ST-07.
-- **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.
+- **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-49.
 
 ## Not planned for 0.9.0
 

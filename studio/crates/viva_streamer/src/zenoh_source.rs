@@ -180,7 +180,7 @@ async fn run_inner(
                     }
                     continue;
                 };
-                let frame = match encoder.encode(format, header.width, header.height, pixel_data) {
+                let frame = match encoder.encode(format, header.width, header.height, None, pixel_data) {
                     Ok(frame) => frame,
                     Err(err) => {
                         warn!("Dropped frame seq={}: {err}", header.seq);

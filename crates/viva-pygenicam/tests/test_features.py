@@ -130,10 +130,15 @@ def test_execute_runs_a_command_and_changes_the_camera(camera):
     # UserSetLoad's register in <pInvalidator>, as FLIR's XML does (GA-24).
     assert camera.get("ExposureTime").startswith("5000")
 
-    # And a fresh nodemap agrees, so the device itself was reset.
+    # And a fresh nodemap agrees, so the device itself was reset. A monitor:
+    # `camera` still holds control, so a second controller would be refused.
     cams = vg.discover(timeout_ms=1500, all=True)
-    reopened = vg.connect_gige(next(c for c in cams if c.ip.startswith("127.")))
+    reopened = vg.connect_gige(
+        next(c for c in cams if c.ip.startswith("127.")), monitor=True
+    )
     assert reopened.get("ExposureTime").startswith("5000")
+    with pytest.raises(Exception, match="monitor"):
+        reopened.set("ExposureTime", "1000.0")
 
 
 def test_execute_rejects_a_non_command_node(camera):

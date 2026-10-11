@@ -71,9 +71,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let control_addr = SocketAddr::new(IpAddr::V4(device.ip), GVCP_PORT);
-    let control = std::sync::Arc::new(Mutex::new(
-        viva_genicam::gige::GigeDevice::open(control_addr).await?,
-    ));
+    let control = std::sync::Arc::new(Mutex::new({
+        let mut device = viva_genicam::gige::GigeDevice::open(control_addr).await?;
+        // The adapter built from it keeps control alive, and releases it
+        // when dropped.
+        device.claim_control().await?;
+        device
+    }));
     let xml = viva_genapi_xml::fetch_and_load_xml({
         let control = control.clone();
         move |address, length| {

@@ -201,14 +201,21 @@ class Camera:
         return FrameStream(native, self)
 
 
-def connect_gige(device_info: GigeDeviceInfo, iface: Optional[str] = None) -> Camera:
+def connect_gige(
+    device_info: GigeDeviceInfo, iface: Optional[str] = None, monitor: bool = False
+) -> Camera:
     """Connect to a GigE Vision camera.
 
     ``iface`` accepts either one of the host interface's IPv4 addresses or its
     OS name. Omit it to use the interface the camera was discovered on, or
     failing that the host interface whose subnet contains the camera's IP.
+
+    The camera's control privilege is claimed, kept alive, and released when
+    the camera is garbage-collected; opening fails while another application
+    holds it. ``monitor=True`` opens read-only instead: nothing is claimed or
+    written, so it works alongside that application, and every ``set`` fails.
     """
-    native = _native.connect_gige(device_info._handle, iface)
+    native = _native.connect_gige(device_info._handle, iface, monitor)
     return Camera(native)
 
 

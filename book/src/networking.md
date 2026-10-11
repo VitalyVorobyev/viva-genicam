@@ -404,6 +404,32 @@ Monitor:
 - Host CPU usage.
 - Switch port statistics if your hardware exposes them.
 
+### 6.1. One camera, several applications
+
+A GigE Vision camera takes configuration from one application at a time: the
+one holding its *control privilege*. Opening a camera claims it, and closing
+it — dropping the `Camera`, or a Python camera being garbage-collected —
+gives it back, so the next application, or the next run of yours, can open
+the camera at once.
+
+While one application controls the camera, a second one opening it normally
+is refused. It can still **watch**:
+
+- Open the camera read-only — `connect_gige_as` with `Access::Monitor` in
+  Rust, `monitor=True` in Python, and `viva-camctl get` always. A monitor
+  claims nothing and writes nothing; reading features works, and a write is
+  refused with an error that says why.
+- If the controlling application streams to a **multicast group**, a monitor
+  receives the same frames: `Camera::open_stream` with
+  `StreamOptions::monitor()` reads the group, port and packet size from the
+  camera and joins the group. A camera streaming to one host's own address
+  cannot be watched by another.
+
+An application that loses the privilege — its heartbeat lapsed, or, on a
+camera that names its controller, another application took it meanwhile — is
+told: the camera's `control_state()` becomes `Lost` (Rust), and
+`reclaim_control()` asks for it again.
+
 ---
 
 ## 7. Using --iface and discovery quirks
@@ -424,6 +450,35 @@ library can see, which is the fastest way to learn the GUID.
 If discovery only works when you specify `--iface`, you likely have multiple
 NICs on overlapping subnets, or a default route that prefers a different
 interface. This is not unusual; be explicit in production setups.
+
+### 7.1. Asking one camera directly: `--ip`
+
+Discovery broadcasts, and a broadcast stops at a router. A camera you know the
+address of can be asked directly:
+
+```bash
+viva-camctl list --ip 192.168.10.20
+```
+
+In Rust that is `gige::discover_ip`. It finds a camera behind a router, or on
+a network where broadcasts are filtered.
+
+### 7.2. A camera configured for another subnet
+
+Discovery sends to each interface's subnet broadcast and to `255.255.255.255`,
+so a camera whose address does not belong to your network still answers —
+and then every connection to it fails, because the host cannot reach that
+address. `viva-camctl list` says so under the table:
+
+```text
+WARNING [0]: 192.168.77.10 is configured for 192.168.77.10/24, which the host address 169.254.1.2/16 is not on. ...
+```
+
+The diagnostic report shows each camera's subnet and gateway too. Give the
+camera an address on your subnet with `viva-camctl set-ip`, or give the host
+one on the camera's (see [§2](#2-ip-addressing-basics)). A camera that cannot
+answer the host at all may still answer if allowed to broadcast its reply:
+`viva-camctl list --allow-broadcast-ack`.
 
 ---
 
@@ -475,7 +530,8 @@ When the vendor's viewer sees the camera or streams from it and
   tool shows, then reproduce them with `viva-camctl stream --packet-size N` and
   `viva-camctl set`.
 - **Control privilege.** Close the vendor tool first: while it holds the
-  control channel, nothing else can configure the camera.
+  control channel, nothing else can configure the camera
+  ([§6.1](#61-one-camera-several-applications)).
 
 Capture logs with `-vv` (or `RUST_LOG=debug`) at the same frame rate and
 resolution, and if it still makes no sense,

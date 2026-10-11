@@ -76,7 +76,7 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(args.ip, args.index, args.iface.as_ref(), timeout).await?;
     info!(ip = %device.ip, "opening camera for benchmark");
-    let mut camera = common::open_camera(&device)
+    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
         .await
         .context("open camera for bench")?;
 

@@ -78,12 +78,18 @@ Implementations:
 
 - `GigeRegisterIo` — async-to-sync adapter over `GigeDevice` using
   `block_in_place` + `block_on`; safe to call from both async and sync
-  contexts. Also **owns the control-channel keepalive**: constructing one
-  spawns a task that reads `GevHeartbeatTimeout` and refreshes the device's
-  timer at a quarter of it, and dropping one cancels and drains its I/O before
-  runtime shutdown. The runtime must outlive the transport. Holding the
+  contexts. Also **owns the control session**: constructing one for a device
+  that claimed control spawns a task that reads `GevHeartbeatTimeout` and
+  refreshes the device's timer at a quarter of it, and dropping one cancels
+  and drains its I/O before runtime shutdown, then releases control (CCP ← 0)
+  within 500 ms. The runtime must outlive the transport. Holding the
   transport is therefore sufficient to hold control privilege — nothing above
-  this layer runs a heartbeat. While a register operation holds the device
+  this layer runs a heartbeat. Its `control_state` (`Held`, `Monitor`, `Lost`,
+  `Released`, watchable) reports privilege lost to an expired heartbeat, or to
+  another application on a camera that names its controller;
+  `reclaim_control` takes it back. A *monitor*
+  (`GigeRegisterIo::monitor`, `Access::Monitor`) claims nothing, sends no
+  heartbeat and refuses writes before they reach the wire. While a register operation holds the device
   mutex, the GVCP receive loop itself sends CCP probes and drains their ACKs
   by request ID. The background task covers idle time; the socket owner covers
   in-flight waits ([ADR-0023](adrs/adr0023-inflight-gvcp-heartbeats.md)).

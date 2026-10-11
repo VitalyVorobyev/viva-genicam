@@ -37,8 +37,9 @@ loopback port — the old Windows path compiled on macOS for the truncation.
 **One receive engine, the same on every OS**, in `viva-genicam`'s `stream`
 module:
 
-- **Thread model.** Each `FrameStream` owns one `std::thread`. It reads a
-  blocking socket with a **5 ms read timeout**; every wake-up, a datagram or the
+- **Thread model.** Each `FrameStream` owns one `std::thread`. It waits up to
+  **5 ms** for the socket to be readable (`poll`, `WSAPoll` on Windows) and
+  then reads it without blocking; every wake-up, a datagram or the
   timeout, feeds the assembler and lets its timers fire, so blocks close on time
   whether or not the application is asking for frames. Dropping the stream sets
   a stop flag and joins the thread, within one tick. A socket error that only
@@ -145,7 +146,8 @@ Added in milestone S (backlog SR-04, SR-03, SR-22):
   whose status names why, which the engine reads before parsing anything else
   and counts as an error-status packet. `0x800C` (`PACKET_UNAVAILABLE`) and
   `0x8012` (`PACKET_REMOVED_FROM_MEMORY`) close the gap containing the packet
-  id; `0x8011` (`..._AND_PREVIOUS_...`) also stops the earlier gaps; `0x8010`
+  id; `0x8011` (`..._AND_PREVIOUS_...`) also closes the earlier gaps, counting
+  those asked for as unavailable; `0x8010`
   (`NOT_YET_AVAILABLE`) and `0x8014` (`TEMPORARILY_UNAVAILABLE`) leave the gap
   to its retries. Status names are Wireshark's.
 - **Counters.** `resend_requested` counts each packet asked for once, however
@@ -225,3 +227,19 @@ the control channel's, and how they answer one they cannot serve, are open
 - Everything here is derived from aravis, Wireshark and arithmetic, and
   verified on the fake; the release notes say so until a reporter's hardware
   confirms it.
+
+## Amendment — 2026-10-11 (milestone L)
+
+- The receive thread no longer reads with a receive timeout. Microsoft
+  documents a socket whose receive timed out as being in an indeterminate
+  state; two Windows CI runs each lost one frame of a harness test with resend
+  off, consistent with a datagram lost as the 5 ms timeout fired. It now waits
+  for readiness and reads non-blocking (`viva_gige::nic::wait_readable`).
+- `0x8011` closes and counts the earlier gaps (Codex review of #195), so each
+  packet asked for still ends in exactly one outcome.
+- A multicast stream leaves its group explicitly when it drops (SR-08), and
+  `StreamOptions::monitor()` opens a receive-only stream on a group another
+  application configured: nothing is claimed or written, group, port and
+  packet size are read from the camera, and resend stays off.
+- A frame carries the leader's `padding_x`; conversion reads each line from
+  its own start when it is non-zero (`Frame::row_stride`).

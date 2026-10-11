@@ -7,6 +7,7 @@ serves every test.
 
 from __future__ import annotations
 
+import gc
 import sys
 from typing import Iterator
 
@@ -31,6 +32,19 @@ def fake_gige() -> Iterator[FakeGigeCamera]:
         yield cam
     finally:
         cam.stop()
+
+
+@pytest.fixture(autouse=True)
+def _free_cameras() -> Iterator[None]:
+    """Free every camera a test opened before the next test opens one.
+
+    A camera holds the fake's control privilege until it is freed, and the
+    next controller is refused meanwhile, as a real camera refuses it. A test
+    that caught an exception keeps its camera alive in a reference cycle
+    (traceback, frame, locals), which only the cycle collector frees.
+    """
+    yield
+    gc.collect()
 
 
 @pytest.fixture()

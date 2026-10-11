@@ -118,6 +118,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
 }
 
 #[tokio::main]
+#[allow(clippy::await_holding_lock)] // the stream is configured under the device lock
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
     let args = parse_args()?;
@@ -154,9 +155,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let control_addr = SocketAddr::new(IpAddr::V4(device.ip), GVCP_PORT);
-    let control = std::sync::Arc::new(Mutex::new(
-        viva_genicam::gige::GigeDevice::open(control_addr).await?,
-    ));
+    let control = std::sync::Arc::new(Mutex::new({
+        let mut device = viva_genicam::gige::GigeDevice::open(control_addr).await?;
+        // The adapter built from it keeps control alive, and releases it
+        // when dropped.
+        device.claim_control().await?;
+        device
+    }));
     let xml = viva_genapi_xml::fetch_and_load_xml({
         let control = control.clone();
         move |address, length| {
@@ -181,7 +186,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     camera.configure_stream_multicast(args.stream_idx, args.group, args.port)?;
 
-    let mut stream_device = viva_genicam::gige::GigeDevice::open(control_addr).await?;
+    // The stream channel is written over the camera's own control connection:
+    // only the application holding control may configure it.
+    let mut stream_device = camera.transport().lock_device()?;
     let mut builder = StreamBuilder::new(&mut stream_device)
         .iface(iface.clone())
         .dest(StreamDest::Multicast {
@@ -197,6 +204,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         builder = builder.auto_packet_size();
     }
     let stream = builder.build().await?;
+    drop(stream_device);
 
     // The receive engine assembles the blocks and keeps the counters.
     let mut frames = FrameStream::new(stream, Some(camera.time_sync().clone()));

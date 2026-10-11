@@ -122,6 +122,8 @@ pub struct BlockSpec {
     /// Chunk layout ID the trailer reports when the payload type carries the
     /// extended chunk flag.
     pub chunk_layout_id: u32,
+    /// Padding X in the leader: bytes after every line of the image.
+    pub padding_x: u16,
 }
 
 impl BlockSpec {
@@ -145,6 +147,7 @@ impl BlockSpec {
             trailer_status: 0,
             size_y: height,
             chunk_layout_id: 0,
+            padding_x: 0,
         }
     }
 
@@ -239,7 +242,7 @@ pub fn leader(spec: &BlockSpec) -> Vec<u8> {
     buf.extend_from_slice(&spec.height.to_be_bytes());
     buf.extend_from_slice(&0u32.to_be_bytes()); // offset x
     buf.extend_from_slice(&0u32.to_be_bytes()); // offset y
-    buf.extend_from_slice(&0u16.to_be_bytes()); // padding x
+    buf.extend_from_slice(&spec.padding_x.to_be_bytes()); // padding x
     buf.extend_from_slice(&0u16.to_be_bytes()); // padding y
     buf
 }

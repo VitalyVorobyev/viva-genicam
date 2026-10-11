@@ -34,24 +34,33 @@
 //!
 //! // Two 12-bit pixels, 0xABC and 0x123, in the GigE Vision layout.
 //! let bytes = [0xAB, 0x3C, 0x12];
-//! let samples = convert::unpack_u16(PixelFormat::Mono12Packed, 2, 1, &bytes)?;
+//! let samples = convert::unpack_u16(PixelFormat::Mono12Packed, 2, 1, None, &bytes)?;
 //! assert_eq!(samples, [0xABC, 0x123]);
 //!
 //! // For display: the top eight bits, through buffers kept between frames.
 //! let mut converter = Converter::new();
-//! let grey = converter.gray8(PixelFormat::Mono12Packed, 2, 1, &bytes)?;
+//! let grey = converter.gray8(PixelFormat::Mono12Packed, 2, 1, None, &bytes)?;
 //! assert_eq!(grey, [0xAB, 0x12]);
 //! # Ok::<(), convert::ConvertError>(())
 //! ```
 //!
 //! # Geometry
 //!
-//! Pixels are read as one continuous run from the first line to the last —
-//! PFNC 2.4 §6.7's *image padding* — and a payload must hold at least
-//! [`PixelFormat::image_bytes`]; bytes past that are ignored. The other §6.7
-//! reading, *line padding*, differs only when a line ends inside a packing
-//! group (an odd width in `12p`, say). PFNC leaves the choice to the
-//! transport standard, and which one cameras use there is still open.
+//! Without a row stride, pixels are read as one continuous run from the
+//! first line to the last — PFNC 2.4 §6.7's *image padding* — and a payload
+//! must hold at least [`PixelFormat::image_bytes`]; bytes past that are
+//! ignored.
+//!
+//! With a row stride — a camera that sends bytes after every line, as the
+//! GVSP image leader's `padding_x` declares — each line is decoded on its
+//! own: [`PixelFormat::line_bytes`] of pixels, a packing group the line ends
+//! inside completed (§6.7 *line padding*), then the next line `row_stride`
+//! bytes after the start of this one.
+//!
+//! The two readings differ only when a line ends inside a packing group (an
+//! odd width in `12p`, say). PFNC leaves the choice to the transport
+//! standard, and which one cameras use for an unpadded odd width is still
+//! open (backlog PX-05).
 
 use core::fmt;
 
@@ -72,6 +81,13 @@ pub enum ConvertError {
         expected: usize,
         /// Bytes the payload has.
         actual: usize,
+    },
+    /// The row stride is shorter than one line of the image.
+    StrideTooShort {
+        /// Bytes from one line to the next, as given.
+        stride: usize,
+        /// Bytes one line needs ([`PixelFormat::line_bytes`]).
+        line: usize,
     },
     /// `width × height` does not fit in memory.
     TooLarge {
@@ -95,6 +111,10 @@ impl fmt::Display for ConvertError {
             } => write!(
                 f,
                 "{format} payload is {actual} bytes; the image needs {expected}"
+            ),
+            ConvertError::StrideTooShort { stride, line } => write!(
+                f,
+                "a row stride of {stride} bytes is shorter than a line, {line} bytes"
             ),
             ConvertError::TooLarge { width, height } => {
                 write!(f, "a {width}×{height} image does not fit in memory")
@@ -157,19 +177,24 @@ pub fn supports(format: PixelFormat) -> bool {
 
 /// The camera's sample values of a single-component format (`Mono*`,
 /// `Bayer*`), one per pixel, row-major. A Bayer mosaic is returned as it is.
+///
+/// `row_stride` is the distance in bytes from the start of one line to the
+/// next when the camera pads its lines; `None` reads the image as one run.
+/// The module's *Geometry* section says which is which.
 pub fn unpack_u16(
     format: PixelFormat,
     width: u32,
     height: u32,
+    row_stride: Option<usize>,
     src: &[u8],
 ) -> Result<Vec<u16>, ConvertError> {
-    let (pixels, src) = geometry(format, width, height, src)?;
+    let rows = rows(format, width, height, row_stride, src)?;
     let single = match layout(format) {
         Some(Layout::Mono(single) | Layout::Bayer(single, _)) => single,
         _ => return Err(ConvertError::Unsupported(format)),
     };
     let mut out = Vec::new();
-    unpack_into(single, pixels, src, &mut out);
+    unpack_rows(single, rows, &mut out);
     Ok(out)
 }
 
@@ -180,10 +205,11 @@ pub fn to_rgb8(
     format: PixelFormat,
     width: u32,
     height: u32,
+    row_stride: Option<usize>,
     src: &[u8],
 ) -> Result<Vec<u8>, ConvertError> {
     let mut out = Vec::new();
-    Converter::new().rgb8_into(format, width, height, src, &mut out)?;
+    Converter::new().rgb8_into(format, width, height, row_stride, src, &mut out)?;
     Ok(out)
 }
 
@@ -194,23 +220,27 @@ pub fn full_depth(
     format: PixelFormat,
     width: u32,
     height: u32,
+    row_stride: Option<usize>,
     src: &[u8],
 ) -> Result<Pixels, ConvertError> {
     let layout = layout(format).ok_or(ConvertError::Unsupported(format))?;
-    let (pixels, src) = geometry(format, width, height, src)?;
+    let rows = rows(format, width, height, row_stride, src)?;
     let mut conv = Converter::new();
     Ok(match layout {
-        Layout::Mono(single) if single.is_8_bit() => Pixels::Gray8(src[..pixels].to_vec()),
+        Layout::Mono(single) if single.is_8_bit() => {
+            let mut scratch = Vec::new();
+            Pixels::Gray8(gather8(rows, &mut scratch).to_vec())
+        }
         Layout::Mono(single) => {
             let mut samples = Vec::new();
-            unpack_into(single, pixels, src, &mut samples);
+            unpack_rows(single, rows, &mut samples);
             Pixels::Gray16 {
                 samples,
                 bits: single.bits,
             }
         }
         Layout::Bayer(single, offsets) if !single.is_8_bit() => {
-            unpack_into(single, pixels, src, &mut conv.samples);
+            unpack_rows(single, rows, &mut conv.samples);
             let mut samples = Vec::new();
             demosaic_bilinear(
                 &conv.samples,
@@ -226,7 +256,7 @@ pub fn full_depth(
         }
         _ => {
             let mut out = Vec::new();
-            conv.rgb8_into(format, width, height, src, &mut out)?;
+            conv.rgb8_into(format, width, height, row_stride, src, &mut out)?;
             Pixels::Rgb8(out)
         }
     })
@@ -250,42 +280,47 @@ impl Converter {
         Self::default()
     }
 
-    /// A monochrome frame as 8-bit grey, one byte per pixel; `Mono8` is lent
-    /// back as it is. [`ConvertError::Unsupported`] for anything else.
+    /// A monochrome frame as 8-bit grey, one byte per pixel; `Mono8` without
+    /// line padding is lent back as it is. [`ConvertError::Unsupported`] for
+    /// anything else.
     pub fn gray8<'a>(
         &'a mut self,
         format: PixelFormat,
         width: u32,
         height: u32,
+        row_stride: Option<usize>,
         src: &'a [u8],
     ) -> Result<&'a [u8], ConvertError> {
         let Some(Layout::Mono(single)) = layout(format) else {
             return Err(ConvertError::Unsupported(format));
         };
-        let (pixels, src) = geometry(format, width, height, src)?;
+        let rows = rows(format, width, height, row_stride, src)?;
         if single.is_8_bit() {
-            return Ok(&src[..pixels]);
+            return Ok(gather8(rows, &mut self.out));
         }
-        unpack_into(single, pixels, src, &mut self.samples);
+        unpack_rows(single, rows, &mut self.samples);
         narrow_into(&self.samples, single.bits, &mut self.out);
         Ok(&self.out)
     }
 
-    /// The frame as 8-bit RGB, three bytes per pixel; `RGB8` is lent back as
-    /// it is.
+    /// The frame as 8-bit RGB, three bytes per pixel; `RGB8` without line
+    /// padding is lent back as it is.
     pub fn rgb8<'a>(
         &'a mut self,
         format: PixelFormat,
         width: u32,
         height: u32,
+        row_stride: Option<usize>,
         src: &'a [u8],
     ) -> Result<&'a [u8], ConvertError> {
         if format == PixelFormat::RGB8Packed {
-            let (pixels, src) = geometry(format, width, height, src)?;
-            return Ok(&src[..pixels * 3]);
+            let rows = rows(format, width, height, row_stride, src)?;
+            if rows.count <= 1 {
+                return Ok(&rows.src[..rows.pixels * 3]);
+            }
         }
         let mut out = core::mem::take(&mut self.out);
-        let result = self.rgb8_into(format, width, height, src, &mut out);
+        let result = self.rgb8_into(format, width, height, row_stride, src, &mut out);
         self.out = out;
         result.map(|()| self.out.as_slice())
     }
@@ -295,18 +330,21 @@ impl Converter {
         format: PixelFormat,
         width: u32,
         height: u32,
+        row_stride: Option<usize>,
         src: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<(), ConvertError> {
         let layout = layout(format).ok_or(ConvertError::Unsupported(format))?;
-        let (pixels, src) = geometry(format, width, height, src)?;
+        let rows = rows(format, width, height, row_stride, src)?;
         out.clear();
         match layout {
             Layout::Mono(single) => {
                 if single.is_8_bit() {
-                    out.extend(src[..pixels].iter().flat_map(|&v| [v, v, v]));
+                    for row in rows.iter() {
+                        out.extend(row[..rows.pixels].iter().flat_map(|&v| [v, v, v]));
+                    }
                 } else {
-                    unpack_into(single, pixels, src, &mut self.samples);
+                    unpack_rows(single, rows, &mut self.samples);
                     let bits = single.bits;
                     out.extend(self.samples.iter().flat_map(|&v| {
                         let v = narrow(v, bits);
@@ -316,9 +354,9 @@ impl Converter {
             }
             Layout::Bayer(single, offsets) => {
                 let mosaic = if single.is_8_bit() {
-                    &src[..pixels]
+                    gather8(rows, &mut self.mosaic)
                 } else {
-                    unpack_into(single, pixels, src, &mut self.samples);
+                    unpack_rows(single, rows, &mut self.samples);
                     narrow_into(&self.samples, single.bits, &mut self.mosaic);
                     &self.mosaic[..]
                 };
@@ -327,15 +365,121 @@ impl Converter {
             Layout::Rgb(order) => {
                 let stride = order.stride();
                 let [r, g, b] = order.indices();
-                out.extend(
-                    src.chunks_exact(stride)
-                        .take(pixels)
-                        .flat_map(|px| [px[r], px[g], px[b]]),
-                );
+                for row in rows.iter() {
+                    out.extend(
+                        row.chunks_exact(stride)
+                            .take(rows.pixels)
+                            .flat_map(|px| [px[r], px[g], px[b]]),
+                    );
+                }
             }
-            Layout::Yuv(order) => yuv_into(order, pixels, src, out),
+            Layout::Yuv(order) => {
+                out.reserve(rows.total() * 3);
+                for row in rows.iter() {
+                    yuv_append(order, rows.pixels, row, out);
+                }
+            }
         }
         Ok(())
+    }
+}
+
+/// Where an image's pixels lie in its payload: one run, or one line every
+/// `stride` bytes.
+#[derive(Clone, Copy)]
+struct Rows<'a> {
+    src: &'a [u8],
+    /// Pixels in a row: the whole image when it is one run.
+    pixels: usize,
+    /// Bytes holding a row's pixels.
+    bytes: usize,
+    stride: usize,
+    count: usize,
+}
+
+impl<'a> Rows<'a> {
+    fn iter(self) -> impl Iterator<Item = &'a [u8]> {
+        (0..self.count).map(move |y| &self.src[y * self.stride..][..self.bytes])
+    }
+
+    fn total(self) -> usize {
+        self.pixels * self.count
+    }
+}
+
+/// The rows of an image, or why its payload cannot hold them.
+///
+/// Without a stride the image is one run of `width × height` pixels (PFNC
+/// 2.4 §6.7 image padding). With one, each line holds `width` pixels, a
+/// packing group it ends inside completed (§6.7 line padding), and starts
+/// `stride` bytes after the previous one; the last needs no padding after it.
+fn rows(
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    row_stride: Option<usize>,
+    src: &[u8],
+) -> Result<Rows<'_>, ConvertError> {
+    let Some(stride) = row_stride else {
+        let (pixels, src) = geometry(format, width, height, src)?;
+        return Ok(Rows {
+            src,
+            pixels,
+            bytes: src.len(),
+            stride: src.len(),
+            count: 1,
+        });
+    };
+    let too_large = ConvertError::TooLarge { width, height };
+    (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(too_large.clone())?;
+    let line = format.line_bytes(width).ok_or(too_large.clone())?;
+    if stride < line {
+        return Err(ConvertError::StrideTooShort { stride, line });
+    }
+    let expected = match (height as usize).checked_sub(1) {
+        None => 0,
+        Some(before_last) => stride
+            .checked_mul(before_last)
+            .and_then(|start| start.checked_add(line))
+            .ok_or(too_large)?,
+    };
+    if src.len() < expected {
+        return Err(ConvertError::ShortPayload {
+            format,
+            expected,
+            actual: src.len(),
+        });
+    }
+    Ok(Rows {
+        src,
+        pixels: width as usize,
+        bytes: line,
+        stride,
+        count: height as usize,
+    })
+}
+
+/// The 8-bit samples of `rows` in one slice: borrowed when the image is one
+/// run, gathered into `scratch` otherwise.
+fn gather8<'a>(rows: Rows<'a>, scratch: &'a mut Vec<u8>) -> &'a [u8] {
+    if rows.count <= 1 {
+        return &rows.src[..rows.total()];
+    }
+    scratch.clear();
+    for row in rows.iter() {
+        scratch.extend_from_slice(&row[..rows.pixels]);
+    }
+    scratch
+}
+
+/// Every row's samples, in order.
+fn unpack_rows(single: Single, rows: Rows<'_>, out: &mut Vec<u16>) {
+    out.clear();
+    out.reserve(rows.total());
+    for row in rows.iter() {
+        unpack_append(single, rows.pixels, row, out);
     }
 }
 
@@ -492,9 +636,9 @@ fn layout(format: PixelFormat) -> Option<Layout> {
 
 // ── Unpacking and normalising ────────────────────────────────────────────────
 
-/// `pixels` samples of `src`, which [`geometry`] has sized.
-fn unpack_into(single: Single, pixels: usize, src: &[u8], out: &mut Vec<u16>) {
-    out.clear();
+/// Append `pixels` samples of `src`, which [`rows`] has sized.
+fn unpack_append(single: Single, pixels: usize, src: &[u8], out: &mut Vec<u16>) {
+    let start = out.len();
     out.reserve(pixels);
     match single.packing {
         Packing::Unpacked if single.is_8_bit() => {
@@ -530,7 +674,7 @@ fn unpack_into(single: Single, pixels: usize, src: &[u8], out: &mut Vec<u16>) {
                 out.push((u16::from(msb1) << shift) | ((u16::from(lsb) >> 4) & mask));
             }
             // A completed last group carries one pixel too many.
-            out.truncate(pixels);
+            out.truncate(start + pixels);
         }
     }
 }
@@ -638,7 +782,9 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
     ]
 }
 
-fn yuv_into(order: YuvOrder, pixels: usize, src: &[u8], out: &mut Vec<u8>) {
+/// Append `pixels` pixels of `src` as RGB.
+fn yuv_append(order: YuvOrder, pixels: usize, src: &[u8], out: &mut Vec<u8>) {
+    let start = out.len();
     // (bytes per group, the luma offsets, the Cb offset, the Cr offset)
     let (group, lumas, cb, cr): (usize, &[usize], usize, usize) = match order {
         YuvOrder::Yuyv => (4, &[0, 2], 1, 3),
@@ -654,7 +800,7 @@ fn yuv_into(order: YuvOrder, pixels: usize, src: &[u8], out: &mut Vec<u8>) {
         }
     }
     // A completed last group carries pixels past the image.
-    out.truncate(pixels * 3);
+    out.truncate(start + pixels * 3);
 }
 
 #[cfg(test)]
@@ -663,7 +809,7 @@ mod tests {
     use crate::PixelFormat as P;
 
     fn unpack(format: P, width: u32, height: u32, src: &[u8]) -> Vec<u16> {
-        unpack_u16(format, width, height, src).unwrap()
+        unpack_u16(format, width, height, None, src).unwrap()
     }
 
     // ── Unpacking: golden vectors from the standards ─────────────────────────
@@ -750,7 +896,7 @@ mod tests {
     #[test]
     fn a_partial_last_group_needs_its_whole_group() {
         assert_eq!(
-            unpack_u16(P::Mono12p, 1, 1, &[0xBC, 0x0A]),
+            unpack_u16(P::Mono12p, 1, 1, None, &[0xBC, 0x0A]),
             Err(ConvertError::ShortPayload {
                 format: P::Mono12p,
                 expected: 3,
@@ -764,10 +910,59 @@ mod tests {
         );
     }
 
+    /// A GVSP image leader declares `padding_x` bytes after every line
+    /// (Codex review of #196): with a row stride each line starts where it
+    /// says, not where the previous one's pixels ended.
+    #[test]
+    fn padded_lines_are_read_from_their_own_start() {
+        // Mono8, 3 × 2, two bytes of padding after each line.
+        let src = [1, 2, 3, 0xEE, 0xEE, 4, 5, 6, 0xEE, 0xEE];
+        assert_eq!(
+            unpack_u16(P::Mono8, 3, 2, Some(5), &src).unwrap(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        let mut conv = Converter::new();
+        assert_eq!(
+            conv.gray8(P::Mono8, 3, 2, Some(5), &src).unwrap(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        // The last line needs no padding after it.
+        assert!(unpack_u16(P::Mono8, 3, 2, Some(5), &src[..8]).is_ok());
+        // RGB8, 1 × 2, one byte of padding.
+        let rgb = [1, 2, 3, 0xEE, 4, 5, 6, 0xEE];
+        assert_eq!(
+            to_rgb8(P::RGB8Packed, 1, 2, Some(4), &rgb).unwrap(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            conv.rgb8(P::RGB8Packed, 1, 2, Some(4), &rgb).unwrap(),
+            [1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    /// A padded `Mono12p` line of three pixels ends inside its second
+    /// packing group, which the line completes (PFNC 2.4 §6.7): six bytes,
+    /// then the padding, then the next line.
+    #[test]
+    fn a_padded_packed_line_completes_its_own_group() {
+        let src = [
+            0x23, 0x61, 0x45, 0x89, 0x07, 0x00, 0xEE, // 0x123 0x456 0x789 (+0) | pad
+            0x11, 0x21, 0x22, 0x33, 0x03, 0x00, 0xEE, // 0x111 0x222 0x333 (+0) | pad
+        ];
+        assert_eq!(
+            unpack_u16(P::Mono12p, 3, 2, Some(7), &src).unwrap(),
+            [0x123, 0x456, 0x789, 0x111, 0x222, 0x333]
+        );
+        assert_eq!(
+            unpack_u16(P::Mono12p, 3, 2, Some(5), &src),
+            Err(ConvertError::StrideTooShort { stride: 5, line: 6 })
+        );
+    }
+
     #[test]
     fn short_payloads_are_refused_and_trailing_bytes_ignored() {
         assert_eq!(
-            to_rgb8(P::Mono8, 2, 2, &[1, 2, 3]),
+            to_rgb8(P::Mono8, 2, 2, None, &[1, 2, 3]),
             Err(ConvertError::ShortPayload {
                 format: P::Mono8,
                 expected: 4,
@@ -775,7 +970,7 @@ mod tests {
             })
         );
         assert_eq!(
-            to_rgb8(P::Mono8, 1, 1, &[9, 0xEE, 0xEE]).unwrap(),
+            to_rgb8(P::Mono8, 1, 1, None, &[9, 0xEE, 0xEE]).unwrap(),
             [9, 9, 9]
         );
     }
@@ -789,7 +984,7 @@ mod tests {
                 assert!(!supports(format), "{format}");
                 continue;
             };
-            let converts = to_rgb8(format, 4, 2, &vec![0; len]).is_ok();
+            let converts = to_rgb8(format, 4, 2, None, &vec![0; len]).is_ok();
             assert_eq!(supports(format), converts, "{format}");
             supported += usize::from(converts);
         }
@@ -801,13 +996,13 @@ mod tests {
     fn formats_without_a_conversion_say_so() {
         for format in [P::Coord3DC32f, P::Confidence8, P::Unknown(0x0123_4567)] {
             assert_eq!(
-                to_rgb8(format, 1, 1, &[0; 16]),
+                to_rgb8(format, 1, 1, None, &[0; 16]),
                 Err(ConvertError::Unsupported(format))
             );
         }
         let mut conv = Converter::new();
         assert_eq!(
-            conv.gray8(P::RGB8Packed, 1, 1, &[1, 2, 3]),
+            conv.gray8(P::RGB8Packed, 1, 1, None, &[1, 2, 3]),
             Err(ConvertError::Unsupported(P::RGB8Packed))
         );
     }
@@ -818,23 +1013,36 @@ mod tests {
     #[test]
     fn deep_samples_keep_their_top_eight_bits() {
         let mut conv = Converter::new();
-        assert_eq!(conv.gray8(P::Mono10, 1, 1, &[0xFF, 0x03]).unwrap(), [0xFF]);
-        assert_eq!(conv.gray8(P::Mono12, 1, 1, &[0xF0, 0x0F]).unwrap(), [0xFF]);
-        assert_eq!(conv.gray8(P::Mono14, 1, 1, &[0xFF, 0x3F]).unwrap(), [0xFF]);
-        assert_eq!(conv.gray8(P::Mono16, 1, 1, &[0x00, 0x80]).unwrap(), [0x80]);
-        // 0xABC >> 4 and 0x123 >> 4.
         assert_eq!(
-            conv.gray8(P::Mono12p, 2, 1, &[0xBC, 0x3A, 0x12]).unwrap(),
-            [0xAB, 0x12]
+            conv.gray8(P::Mono10, 1, 1, None, &[0xFF, 0x03]).unwrap(),
+            [0xFF]
         );
         assert_eq!(
-            conv.gray8(P::Mono12Packed, 2, 1, &[0xAB, 0x3C, 0x12])
+            conv.gray8(P::Mono12, 1, 1, None, &[0xF0, 0x0F]).unwrap(),
+            [0xFF]
+        );
+        assert_eq!(
+            conv.gray8(P::Mono14, 1, 1, None, &[0xFF, 0x3F]).unwrap(),
+            [0xFF]
+        );
+        assert_eq!(
+            conv.gray8(P::Mono16, 1, 1, None, &[0x00, 0x80]).unwrap(),
+            [0x80]
+        );
+        // 0xABC >> 4 and 0x123 >> 4.
+        assert_eq!(
+            conv.gray8(P::Mono12p, 2, 1, None, &[0xBC, 0x3A, 0x12])
                 .unwrap(),
             [0xAB, 0x12]
         );
-        assert_eq!(conv.gray8(P::Mono8, 2, 1, &[3, 4]).unwrap(), [3, 4]);
         assert_eq!(
-            to_rgb8(P::Mono10p, 4, 1, &[0xA5, 0x6A, 0x05, 0xCF, 0xC3]).unwrap(),
+            conv.gray8(P::Mono12Packed, 2, 1, None, &[0xAB, 0x3C, 0x12])
+                .unwrap(),
+            [0xAB, 0x12]
+        );
+        assert_eq!(conv.gray8(P::Mono8, 2, 1, None, &[3, 4]).unwrap(), [3, 4]);
+        assert_eq!(
+            to_rgb8(P::Mono10p, 4, 1, None, &[0xA5, 0x6A, 0x05, 0xCF, 0xC3]).unwrap(),
             [
                 0xA9, 0xA9, 0xA9, 0x56, 0x56, 0x56, 0x3C, 0x3C, 0x3C, 0xC3, 0xC3, 0xC3
             ]
@@ -892,7 +1100,7 @@ mod tests {
                         }
                     }
                 }
-                let rgb = to_rgb8(format, 4, 4, &src).unwrap();
+                let rgb = to_rgb8(format, 4, 4, None, &src).unwrap();
                 for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
                     let i = (y * 4 + x) * 3;
                     assert_eq!(&rgb[i..i + 3], [200, 100, 50], "{format} at ({x}, {y})");
@@ -913,7 +1121,7 @@ mod tests {
              56, 210,  78, 190,
             120,   9, 140,  11,
         ];
-        let rgb = to_rgb8(P::BayerRG8, 4, 4, &mosaic).unwrap();
+        let rgb = to_rgb8(P::BayerRG8, 4, 4, None, &mosaic).unwrap();
         let at = |x: usize, y: usize| <[u8; 3]>::try_from(&rgb[(y * 4 + x) * 3..][..3]).unwrap();
         // B site: G = (90+150+200+210)/4 = 162, R = (12+34+56+78)/4 = 45.
         assert_eq!(at(1, 1), [45, 162, 7]);
@@ -940,11 +1148,12 @@ mod tests {
             src.extend_from_slice(&row);
             src.extend_from_slice(&row);
         }
-        let rgb = to_rgb8(P::BayerRG12Packed, 4, 4, &src).unwrap();
+        let rgb = to_rgb8(P::BayerRG12Packed, 4, 4, None, &src).unwrap();
         assert_eq!(&rgb[(4 + 1) * 3..][..3], [200, 100, 50]);
         assert_eq!(&rgb[(2 * 4 + 2) * 3..][..3], [200, 100, 50]);
 
-        let Pixels::Rgb16 { samples, bits } = full_depth(P::BayerRG12Packed, 4, 4, &src).unwrap()
+        let Pixels::Rgb16 { samples, bits } =
+            full_depth(P::BayerRG12Packed, 4, 4, None, &src).unwrap()
         else {
             panic!("a 12-bit mosaic keeps its depth");
         };
@@ -974,7 +1183,7 @@ mod tests {
             (P::YCbCr422_8_CbYCrY, [150, 100, 90, 200]),
         ] {
             assert_eq!(
-                to_rgb8(format, 2, 1, &bytes).unwrap(),
+                to_rgb8(format, 2, 1, None, &bytes).unwrap(),
                 [PX0, PX1].concat(),
                 "{format}"
             );
@@ -984,15 +1193,28 @@ mod tests {
     #[test]
     fn yuv411_and_444_component_orders() {
         assert_eq!(
-            to_rgb8(P::YUV411_8_UYYVYY, 4, 1, &[150, 100, 200, 90, 100, 200]).unwrap(),
+            to_rgb8(
+                P::YUV411_8_UYYVYY,
+                4,
+                1,
+                None,
+                &[150, 100, 200, 90, 100, 200]
+            )
+            .unwrap(),
             [PX0, PX1, PX0, PX1].concat()
         );
-        assert_eq!(to_rgb8(P::YUV8_UYV, 1, 1, &[150, 100, 90]).unwrap(), PX0);
         assert_eq!(
-            to_rgb8(P::YCbCr8_CbYCr, 1, 1, &[150, 100, 90]).unwrap(),
+            to_rgb8(P::YUV8_UYV, 1, 1, None, &[150, 100, 90]).unwrap(),
             PX0
         );
-        assert_eq!(to_rgb8(P::YCbCr8, 1, 1, &[100, 150, 90]).unwrap(), PX0);
+        assert_eq!(
+            to_rgb8(P::YCbCr8_CbYCr, 1, 1, None, &[150, 100, 90]).unwrap(),
+            PX0
+        );
+        assert_eq!(
+            to_rgb8(P::YCbCr8, 1, 1, None, &[100, 150, 90]).unwrap(),
+            PX0
+        );
     }
 
     /// §8.2.1: "Values must be truncated to fit in that range."
@@ -1001,7 +1223,7 @@ mod tests {
     #[test]
     fn ycbcr_results_are_clamped_to_the_8_bit_range() {
         assert_eq!(
-            to_rgb8(P::YCbCr8, 1, 1, &[250, 128, 255]).unwrap(),
+            to_rgb8(P::YCbCr8, 1, 1, None, &[250, 128, 255]).unwrap(),
             [255, 159, 250]
         );
     }
@@ -1009,7 +1231,14 @@ mod tests {
     /// §6.7: an odd last pixel still arrives in a whole 4:2:2 group.
     #[test]
     fn an_odd_yuv422_width_reads_the_completed_group() {
-        let rgb = to_rgb8(P::YUV422_8, 3, 1, &[100, 150, 200, 90, 100, 150, 0, 90]).unwrap();
+        let rgb = to_rgb8(
+            P::YUV422_8,
+            3,
+            1,
+            None,
+            &[100, 150, 200, 90, 100, 150, 0, 90],
+        )
+        .unwrap();
         assert_eq!(rgb, [PX0, PX1, PX0].concat());
     }
 
@@ -1017,13 +1246,25 @@ mod tests {
 
     #[test]
     fn rgb_orders_and_alpha() {
-        assert_eq!(to_rgb8(P::RGB8Packed, 1, 1, &[1, 2, 3]).unwrap(), [1, 2, 3]);
-        assert_eq!(to_rgb8(P::BGR8Packed, 1, 1, &[1, 2, 3]).unwrap(), [3, 2, 1]);
-        assert_eq!(to_rgb8(P::RGBa8, 1, 1, &[1, 2, 3, 99]).unwrap(), [1, 2, 3]);
-        assert_eq!(to_rgb8(P::BGRa8, 1, 1, &[1, 2, 3, 99]).unwrap(), [3, 2, 1]);
+        assert_eq!(
+            to_rgb8(P::RGB8Packed, 1, 1, None, &[1, 2, 3]).unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            to_rgb8(P::BGR8Packed, 1, 1, None, &[1, 2, 3]).unwrap(),
+            [3, 2, 1]
+        );
+        assert_eq!(
+            to_rgb8(P::RGBa8, 1, 1, None, &[1, 2, 3, 99]).unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            to_rgb8(P::BGRa8, 1, 1, None, &[1, 2, 3, 99]).unwrap(),
+            [3, 2, 1]
+        );
         let mut conv = Converter::new();
         let src = [4, 5, 6];
-        let out = conv.rgb8(P::RGB8Packed, 1, 1, &src).unwrap();
+        let out = conv.rgb8(P::RGB8Packed, 1, 1, None, &src).unwrap();
         assert!(core::ptr::eq(out, &src[..]), "RGB8 is lent, not copied");
     }
 
@@ -1032,22 +1273,22 @@ mod tests {
     #[test]
     fn full_depth_keeps_the_camera_values() {
         assert_eq!(
-            full_depth(P::Mono12p, 2, 1, &[0xBC, 0x3A, 0x12]).unwrap(),
+            full_depth(P::Mono12p, 2, 1, None, &[0xBC, 0x3A, 0x12]).unwrap(),
             Pixels::Gray16 {
                 samples: vec![0xABC, 0x123],
                 bits: 12
             }
         );
         assert_eq!(
-            full_depth(P::Mono8, 2, 1, &[1, 2]).unwrap(),
+            full_depth(P::Mono8, 2, 1, None, &[1, 2]).unwrap(),
             Pixels::Gray8(vec![1, 2])
         );
         assert_eq!(
-            full_depth(P::BGR8Packed, 1, 1, &[1, 2, 3]).unwrap(),
+            full_depth(P::BGR8Packed, 1, 1, None, &[1, 2, 3]).unwrap(),
             Pixels::Rgb8(vec![3, 2, 1])
         );
         assert_eq!(
-            full_depth(P::Mono10, 1, 1, &[0xA5, 0x02])
+            full_depth(P::Mono10, 1, 1, None, &[0xA5, 0x02])
                 .unwrap()
                 .into_rgb(),
             Pixels::Rgb16 {
@@ -1056,7 +1297,7 @@ mod tests {
             }
         );
         assert_eq!(
-            full_depth(P::Mono8, 1, 1, &[7]).unwrap().into_rgb(),
+            full_depth(P::Mono8, 1, 1, None, &[7]).unwrap().into_rgb(),
             Pixels::Rgb8(vec![7; 3])
         );
     }
@@ -1067,8 +1308,8 @@ mod tests {
     fn the_converter_reuses_its_buffers() {
         let mut conv = Converter::new();
         let src = [0u8; 16 * 2];
-        let first = conv.rgb8(P::BayerRG12, 4, 4, &src).unwrap().as_ptr();
-        let second = conv.rgb8(P::BayerRG12, 4, 4, &src).unwrap().as_ptr();
+        let first = conv.rgb8(P::BayerRG12, 4, 4, None, &src).unwrap().as_ptr();
+        let second = conv.rgb8(P::BayerRG12, 4, 4, None, &src).unwrap().as_ptr();
         assert_eq!(first, second);
     }
 }

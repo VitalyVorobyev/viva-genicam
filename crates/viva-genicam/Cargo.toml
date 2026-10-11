@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "High-level GenICam facade: discovery, control, streaming, events"
 readme = "README.md"
@@ -50,6 +49,7 @@ viva-fake-gige = { path = "../viva-fake-gige" }
 viva-fake-u3v = { path = "../viva-fake-u3v" }
 viva-u3v = { version = "0.8", path = "../viva-u3v" }
 fastrand = "2"
+socket2 = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

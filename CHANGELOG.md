@@ -12,6 +12,25 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **Dropping a GigE camera releases its control privilege**, waiting at most
+  500 ms for the camera to acknowledge, so a reopen no longer waits out the
+  heartbeat timeout. `GigeRegisterIo::new` expects a device that holds control
+  (`claim_control`); `GigeRegisterIo::monitor` is the read-only one. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- **A second application opening a camera another one controls is refused**
+  at open, as cameras refuse its writes; open it read-only instead
+  (`connect_gige_as(.., Access::Monitor)`, Python `monitor=True`).
+  `viva-camctl` claims control for the commands that write and opens `get`
+  read-only. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- **Discovery no longer asks cameras to broadcast their answers.** The
+  allow-broadcast-acknowledge flag is opt-in (`DiscoveryOptions`,
+  `viva-camctl list --allow-broadcast-ack`); discovery now also sends to
+  `255.255.255.255`. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- **`viva_pfnc::convert` takes a row stride**: `unpack_u16`, `to_rgb8`,
+  `full_depth` and `Converter::gray8`/`rgb8` gain `row_stride: Option<usize>`;
+  `Frame` gains `padding_x` and `row_stride()`. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- `viva_sfnc::MULTICAST_ENABLE` is removed (below); `GigeDevice::gvcp_capability`
+  returns a `GvcpCapability`; `nic::mtu` returns `Mtu`, measured or assumed. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+
 - **Chunk values come from the camera's XML.** `ChunkKind`, `ChunkValue`,
   `ChunkMap`, `parse_chunk_bytes` and `Frame::chunk` are removed: `Frame::chunks`
   holds the frame's chunks by ID, and `Camera::with_chunks` /
@@ -79,6 +98,21 @@ release opens with what to read before upgrading.
   counts every frame not delivered complete. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
 
 ### Added
+
+- Read-only monitors: `connect_gige_as` with `Access::Monitor` claims and
+  writes nothing, so it opens a camera another application controls; a write
+  is refused with an error naming why. `StreamOptions::monitor()` watches that
+  application's multicast stream, reading group, port and packet size from the
+  camera. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- `GigeRegisterIo::control_state` and `watch_control` report losing control
+  privilege — CCP read back without our bits, or, on a camera that names its
+  controller, another application holding it — and `reclaim_control` /
+  `release_control` act on it. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- `gige::discover_ip` and `viva-camctl list --ip` ask one camera directly.
+  Discovery reads each camera's subnet and gateway; `viva-camctl list` and the
+  report flag a camera configured for a subnet the host is not on. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- `PENDING_ACK` is switched on at open where GVCP Capability says the camera
+  has it, so a slow command is waited for instead of sent again. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 
 - Chunk and event features read through the camera's own XML (ADR-0026):
   `Camera::with_chunks` and `chunk_features` for a frame, `with_event` and
@@ -166,6 +200,24 @@ release opens with what to read before upgrading.
   ([#192](https://github.com/VitalyVorobyev/viva-genicam/pull/192))
 
 ### Fixed
+
+- `Camera::configure_stream_multicast` set the don't-fragment bit
+  (`viva_sfnc::MULTICAST_ENABLE` named `GevSCPSDoNotFragment`; SFNC has no
+  multicast enable), looked for `GevSCPDA` instead of SFNC's `GevSCDA`, and
+  without those nodes wrote the port into the high half of `GevSCPHostPort`. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- A memory write shorter than a word or off a word boundary went out as given;
+  it is widened to whole words, the bytes around it read first. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- An ICMP error or a failed heartbeat while a `PENDING_ACK`ed command waited
+  had the command sent again; a camera reporting a heartbeat timeout of 0
+  switched heartbeats during long waits off. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- Frames whose lines carry padding (the GVSP leader's `padding_x`) were
+  converted with every row after the first shifted. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- A multicast stream leaves its group when it is dropped. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- On Windows a multicast stream received nothing sent from the same host (a
+  camera simulator, say): `IP_MULTICAST_LOOP`, off for receivers, filters
+  receiving there. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- The report printed an assumed 1 500-byte MTU as measured when the lookup
+  failed; it now says so. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 
 - 518 registers on chunk and event ports in 19 vendor documents read device
   memory at their port-relative address: `EventExposureEndTimestamp` returned

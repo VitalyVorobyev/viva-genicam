@@ -231,6 +231,10 @@ pub fn run_stream(
                 pixel_format,
                 raw.leader.width,
                 raw.leader.height,
+                (raw.leader.x_padding != 0)
+                    .then(|| pixel_format.line_bytes(raw.leader.width))
+                    .flatten()
+                    .map(|line| line + usize::from(raw.leader.x_padding)),
                 raw.payload.as_ref(),
                 save_format,
                 rgb,

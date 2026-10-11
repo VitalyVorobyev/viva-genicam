@@ -10,6 +10,6 @@ pub mod stats;
 pub mod time;
 
 pub use gvcp::{
-    DeviceInfo, GVCP_PORT, GigeDevice, GigeError, discover, discover_all, discover_on_interface,
-    force_ip,
+    DeviceInfo, DiscoveryOptions, GVCP_PORT, GigeDevice, GigeError, GvcpCapability, discover,
+    discover_all, discover_ip, discover_on_interface, discover_with, force_ip,
 };

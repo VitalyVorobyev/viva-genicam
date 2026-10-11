@@ -126,14 +126,11 @@ impl Device for Camera<GigeRegisterIo> {
         if let Err(error) = Camera::acquisition_stop(self) {
             tracing::debug!(%error, "AcquisitionStop while releasing the camera");
         }
-        let handle = tokio::runtime::Handle::current();
-        match self.transport().lock_device() {
-            Ok(mut device) => {
-                if let Err(error) = handle.block_on(device.release_control()) {
-                    tracing::debug!(%error, "releasing control privilege");
-                }
-            }
-            Err(error) => tracing::debug!(%error, "releasing control privilege"),
+        // Dropping the camera releases it too; here it happens under the
+        // caller's shorter acknowledgement timeout, and dropping then finds
+        // nothing left to release.
+        if let Err(error) = self.transport().release_control() {
+            tracing::debug!(%error, "releasing control privilege");
         }
     }
 

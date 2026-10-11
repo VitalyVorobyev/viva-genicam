@@ -45,7 +45,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(args.ip, args.index, args.iface.as_ref(), timeout).await?;
     info!(ip = %device.ip, "opening camera for streaming");
-    let mut camera = common::open_camera(&device)
+    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
         .await
         .context("open camera for stream")?;
 
@@ -219,6 +219,7 @@ fn save_frame(
         frame.pixel_format,
         frame.width,
         frame.height,
+        frame.row_stride(),
         &frame.payload,
         format,
         rgb,

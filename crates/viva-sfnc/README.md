@@ -14,7 +14,7 @@ Provides well-known feature name strings so you never have to hard-code `"Exposu
 - **Image control** -- `EXPOSURE_TIME`, `GAIN`, `GAIN_SELECTOR`, `PIXEL_FORMAT`
 - **Chunk data** -- `CHUNK_MODE_ACTIVE`, `CHUNK_SELECTOR`, `CHUNK_ENABLE`
 - **Events** -- `EVENT_SELECTOR`, `EVENT_NOTIFICATION`
-- **Streaming** -- `STREAM_CH_SELECTOR`, `SCP_HOST_PORT`, `SCP_DEST_ADDR`, `MULTICAST_ENABLE`
+- **Streaming** -- `STREAM_CH_SELECTOR`, `SCP_HOST_PORT`, `SCP_DEST_ADDR`
 - **Timestamps** -- `TS_LATCH_CMDS`, `TS_VALUE_NODES`, `TS_FREQ_NODES`
 - **Multi-name support** -- vendor-agnostic arrays for features with alternative names
 

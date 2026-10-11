@@ -7,24 +7,14 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use viva_fake_gige::FakeCamera;
+mod common;
+
 use viva_genicam::report::{ReportRequest, ReportTarget, build_report};
 
-async fn fake() -> FakeCamera {
-    loop {
-        match FakeCamera::builder()
-            .bind_ip([127, 0, 0, 1].into())
-            .port(3956)
-            .build()
-            .await
-        {
-            Ok(camera) => return camera,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(e) => panic!("failed to start the fake camera: {e}"),
-        }
-    }
+/// The fake on 127.0.0.1:3956, one at a time: two report tests sharing the
+/// port would each discover the other's camera.
+async fn fake() -> common::TestCamera {
+    common::TestCamera::start().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -98,4 +88,31 @@ async fn report_describes_a_camera_the_caller_holds_open() {
         "the nodemap was not built: {report}"
     );
     assert!(report.contains("<RegisterDescription"), "no XML: {report}");
+}
+
+/// TC-31: discovery in the report gives each camera's subnet and gateway,
+/// and says so when a camera is configured for a network the host is not on
+/// — it answers a broadcast, and every connection to it then fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_report_flags_a_camera_configured_for_another_subnet() {
+    let _camera = common::TestCamera::start_with(|b| {
+        b.current_ip(Ipv4Addr::new(192, 168, 77, 10))
+            .subnet_mask(Ipv4Addr::new(255, 255, 255, 0))
+            .gateway(Ipv4Addr::new(192, 168, 77, 1))
+    })
+    .await;
+    let request = ReportRequest {
+        iface: Some("127.0.0.1".parse().expect("selector")),
+        discovery_timeout: Duration::from_millis(300),
+        ..ReportRequest::new("report-test 1.0", ReportTarget::None)
+    };
+    let report = build_report(&request).await;
+    for expected in [
+        "[0] 192.168.77.10",
+        "subnet:       255.255.255.0",
+        "gateway:      192.168.77.1",
+        "not on the subnet of 127.0.0.1",
+    ] {
+        assert!(report.contains(expected), "missing {expected:?}:\n{report}");
+    }
 }

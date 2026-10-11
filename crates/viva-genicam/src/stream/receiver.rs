@@ -421,8 +421,10 @@ pub(crate) fn spawn(
     shared: Arc<Shared>,
     explicit_rcvbuf: Option<usize>,
 ) -> std::io::Result<JoinHandle<()>> {
-    socket.set_nonblocking(false)?;
-    socket.set_read_timeout(Some(TICK))?;
+    // Wait for readiness, then read without blocking: not a receive timeout,
+    // whose expiry Windows documents as leaving the socket indeterminate —
+    // a datagram arriving as it fires can be lost (`nic::wait_readable`).
+    socket.set_nonblocking(true)?;
     thread::Builder::new()
         .name("viva-gvsp-rx".into())
         .spawn(move || run(socket, packet_size, stats, shared, explicit_rcvbuf))
@@ -451,7 +453,11 @@ fn run(
     let mut chunk_layout_warned = false;
 
     while !shared.stop.load(Ordering::Acquire) {
-        let received = socket.recv_from(&mut buf);
+        let received = match nic::wait_readable(&socket, TICK) {
+            Ok(true) => socket.recv_from(&mut buf),
+            Ok(false) => Err(ErrorKind::WouldBlock.into()),
+            Err(err) => Err(err),
+        };
         // Settings are read after the wait, so one changed while the thread
         // was blocked in the read applies to the datagram that ended it.
         let wanted = AssemblyConfig {

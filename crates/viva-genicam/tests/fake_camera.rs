@@ -2611,6 +2611,8 @@ async fn test_gevscpd_is_left_alone_unless_asked() {
         .write_register(0x0d08, 777)
         .await
         .expect("operator's GevSCPD");
+    // A raw device gives control up only when told to.
+    device.release_control().await.expect("release");
     drop(device);
 
     let (_frame_stream, _camera) = setup_stream(&device_info).await;

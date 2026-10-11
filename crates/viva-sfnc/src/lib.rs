@@ -47,9 +47,11 @@ pub const STREAM_CH_SELECTOR: &str = "GevStreamChannelSelector";
 /// Stream channel destination UDP port aliases ordered by preference.
 pub const SCP_HOST_PORT: &[&str] = &["GevSCPHostPort", "SCPHostPort"];
 /// Stream channel destination address aliases ordered by preference.
-pub const SCP_DEST_ADDR: &[&str] = &["GevSCPDA", "SCPDestinationAddress"];
-/// Multicast enable aliases ordered by preference.
-pub const MULTICAST_ENABLE: &[&str] = &["GevSCPSDoNotFragment", "GevMulticastEnable"];
+///
+/// SFNC names it `GevSCDA` (25 documents in the vendor corpus). A multicast
+/// address here is what makes a stream multicast: SFNC has no separate
+/// "multicast enable" feature.
+pub const SCP_DEST_ADDR: &[&str] = &["GevSCDA"];
 
 /// Timestamp latch commands ordered by preference.
 ///

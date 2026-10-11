@@ -148,9 +148,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| "no GigE Vision cameras discovered".to_string())?;
 
     let control_addr = SocketAddr::new(std::net::IpAddr::V4(device.ip), GVCP_PORT);
-    let control = Arc::new(Mutex::new(
-        viva_genicam::gige::GigeDevice::open(control_addr).await?,
-    ));
+    let control = Arc::new(Mutex::new({
+        let mut device = viva_genicam::gige::GigeDevice::open(control_addr).await?;
+        // The adapter built from it keeps control alive, and releases it
+        // when dropped.
+        device.claim_control().await?;
+        device
+    }));
     let mut camera = build_camera(control).await?;
 
     let enable_refs: Vec<&str> = args.enable.iter().map(|s| s.as_str()).collect();

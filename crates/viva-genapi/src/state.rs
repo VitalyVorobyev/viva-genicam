@@ -528,7 +528,8 @@ mod tests {
             .expect("state");
         assert_eq!(
             state.enum_entries,
-            Some(vec!["Mono16".to_string(), "Mono8".to_string()])
+            Some(vec!["Mono8".to_string(), "Mono16".to_string()]),
+            "in the XML's order"
         );
     }
 

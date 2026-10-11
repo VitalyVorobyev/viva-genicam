@@ -14,7 +14,7 @@ use viva_zenoh_api::{
 };
 use zenoh::Session;
 
-use crate::device::DeviceHandle;
+use crate::device::{DeviceHandle, DeviceOps};
 use crate::pixel_format::expected_payload_len;
 
 /// Run the acquisition control queryable and frame streaming loop.
@@ -176,7 +176,7 @@ async fn handle_start(
     // afterwards, the initial leader/payload packets can be missed and the
     // stream may never recover in practice. Arming the reader first keeps the
     // UDP socket draining from the first packet onward.
-    if let Err(e) = device.exec_command("AcquisitionStart").await {
+    if let Err(e) = device.acquisition_start().await {
         handle.abort();
         let _ = handle.await;
         return NodeOpResponse::err(format!("AcquisitionStart failed: {e}"));
@@ -208,7 +208,7 @@ async fn handle_stop(
     }
 
     // Stop acquisition on the camera.
-    if let Err(e) = device.exec_command("AcquisitionStop").await {
+    if let Err(e) = device.acquisition_stop().await {
         warn!(device_id, error = %e, "AcquisitionStop failed");
     }
 

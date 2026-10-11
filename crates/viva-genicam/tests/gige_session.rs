@@ -97,6 +97,132 @@ async fn release_control_gives_control_up_and_says_so() {
     assert_eq!(camera.transport().control_state(), ControlState::Released);
 }
 
+/// A release the camera refuses leaves the session holding what it held,
+/// and still watching it: the keepalive resumes, and finds out here that
+/// another application has control.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_release_keeps_the_session_watching_control() {
+    let cam = common::TestCamera::start_with(|b| b.heartbeat_timeout_ms(400)).await;
+    let camera = open(Access::Control).await;
+    let mut changes = camera.transport().watch_control();
+
+    cam.fake().revoke_control().await;
+    let mut other = GigeDevice::open(fake_addr()).await.expect("open");
+    other
+        .claim_control()
+        .await
+        .expect("another application claims");
+
+    camera
+        .transport()
+        .release_control()
+        .expect_err("the camera refuses a release from a non-controller");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        changes.wait_for(|state| *state == ControlState::Lost),
+    )
+    .await
+    .expect("the keepalive resumed and reported the loss")
+    .expect("the session is alive");
+    other.release_control().await.expect("release");
+}
+
+/// A dropped camera on a current-thread runtime sends its release without
+/// waiting, and sends it the way the session reaches registers: a device
+/// that refuses WRITEREG gets a WRITEMEM.
+#[tokio::test]
+async fn the_release_on_drop_follows_the_sessions_memory_access() {
+    let cam = common::TestCamera::start_with(|b| {
+        b.refuse_register_commands(viva_fake_gige::RegisterCommandRefusal::NotImplemented)
+    })
+    .await;
+    let mut device = GigeDevice::open(fake_addr()).await.expect("open");
+    device
+        .claim_control()
+        .await
+        .expect("claim through WRITEMEM");
+    assert!(device.memory_access_only(), "the refusal latched WRITEMEM");
+    let addr = device.local_addr().expect("local address");
+    assert_eq!(cam.fake().controller().await, Some(addr));
+
+    drop(GigeRegisterIo::new(
+        tokio::runtime::Handle::current(),
+        device,
+    ));
+    let released = tokio::time::timeout(Duration::from_secs(2), async {
+        while cam.fake().controller().await.is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "still controlled; sent {:x?}",
+        cam.fake().commands().from(addr)
+    );
+}
+
+/// Only a session that holds control writes. After a release, or once
+/// control is lost, a write is refused before it reaches the camera, which
+/// would otherwise take it from anyone while nobody controls it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_without_control_writes_nothing() {
+    let cam = common::TestCamera::start_with(|b| b.heartbeat_timeout_ms(400)).await;
+    let mut camera = open(Access::Control).await;
+    let addr = client_addr(&camera);
+
+    camera.transport().release_control().expect("release");
+    let err = camera
+        .set("BlackLevel", "7")
+        .expect_err("a released session does not write");
+    assert!(err.to_string().contains("reclaim_control"), "{err}");
+
+    camera.transport().reclaim_control().expect("reclaim");
+    let mut changes = camera.transport().watch_control();
+    cam.fake().revoke_control().await;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        changes.wait_for(|state| *state == ControlState::Lost),
+    )
+    .await
+    .expect("the loss is reported")
+    .expect("the session is alive");
+    camera
+        .set("BlackLevel", "7")
+        .expect_err("a session that lost control does not write");
+
+    assert_eq!(cam.fake().peek(REG_BLACK_LEVEL, 4).await, [0, 0, 0, 0]);
+    let wrote_black_level = cam
+        .fake()
+        .commands()
+        .from(addr)
+        .iter()
+        .any(|&(command, at)| is_write(command) && at == REG_BLACK_LEVEL);
+    assert!(!wrote_black_level, "a write reached the camera");
+}
+
+/// Stream setup claims control again before it writes; when it then fails,
+/// the session still says it holds control, as the camera does, and keeps
+/// it alive and releases it on drop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_setup_that_fails_after_claiming_keeps_the_claim() {
+    let cam = common::TestCamera::start().await;
+    let mut camera = open(Access::Control).await;
+    camera.transport().release_control().expect("release");
+
+    assert!(
+        camera
+            .open_stream(StreamOptions::new().packet_size(1))
+            .is_err(),
+        "a 1-byte packet size is refused"
+    );
+    assert_eq!(cam.fake().controller().await, Some(client_addr(&camera)));
+    assert_eq!(camera.transport().control_state(), ControlState::Held);
+
+    drop(camera);
+    assert_eq!(cam.fake().controller().await, None, "dropping releases it");
+}
+
 // ---------------------------------------------------------------------------
 // Monitors and losing control (TC-29)
 // ---------------------------------------------------------------------------

@@ -78,9 +78,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     let mut frame_stream = camera.open_stream(options).context("open stream")?;
     let stats = frame_stream.stats_handle();
 
-    if let Err(err) = camera.set("TLParamsLocked", "1") {
-        warn!(error = %err, "failed to lock transport-layer parameters");
-    }
+    // Sets TLParamsLocked too, and acquisition_stop clears it.
     camera.acquisition_start().context("start acquisition")?;
     let mut saved_frames = 0usize;
     let mut frame_index = 0usize;
@@ -184,9 +182,6 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     }
 
     camera.acquisition_stop().context("stop acquisition")?;
-    if let Err(err) = camera.set("TLParamsLocked", "0") {
-        warn!(error = %err, "failed to unlock transport-layer parameters");
-    }
     if interrupted {
         println!("Stream interrupted by user.");
     }

@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## F — Facade: typed and type-gated `Camera`, SFNC helpers, blocking API
-
-**Goal**: common tasks without knowing each vendor's feature names or running an async runtime; GigE-only methods only on GigE cameras.
-**Rows**: API-14, API-15, API-16, API-05, API-06, API-08, API-09.
-
 ## V — Configuration: persistence and the field-engineer CLI
 
 **Goal**: save a camera's configuration to a file and restore it, and do from `viva-camctl` what a field engineer does with a vendor tool.
@@ -60,6 +55,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **PX-05**: line or image padding when a width ends inside a packing group (an odd width in `Mono12p`) and no padding is declared; needs a capture from such a camera.
 - **TC-38**: whether a CCP read tells an application another took control, and whether devices accept writes while nobody holds it; a capture of two applications on one camera.
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
+- **API-19**: whether a camera declares an exposure name it does not implement, and what SVS's binning `On` does; a report from either camera settles it.
 
 ## Studio
 

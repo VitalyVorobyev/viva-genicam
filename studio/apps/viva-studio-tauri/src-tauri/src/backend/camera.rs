@@ -10,8 +10,8 @@ use std::time::Duration;
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::u3v::usb::UsbTransfer;
 use viva_genicam::{
-    Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions, U3vFrameStream,
-    U3vRegisterIo, U3vStreamBuilder,
+    COMMAND_TIMEOUT, Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
+    U3vFrameStream, U3vRegisterIo, U3vStreamBuilder,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -24,8 +24,12 @@ pub(crate) trait Device: Send {
     fn feature_state(&self, name: &str) -> Result<FeatureState, String>;
 
     /// Write `value` to `name`, and name the features the write may change.
-    /// A command executes on any value.
     fn set(&mut self, name: &str, value: &str) -> Result<Vec<String>, String>;
+
+    /// Execute command `name`, waiting for the camera to report it finished
+    /// (GenICam `IsDone`, up to [`COMMAND_TIMEOUT`]), and name the features
+    /// it may change.
+    fn execute(&mut self, name: &str) -> Result<Vec<String>, String>;
 
     /// The image size and pixel format a stream would start with.
     fn image_format(&self) -> (u32, u32, String);
@@ -64,6 +68,19 @@ fn set_on<R: RegisterIo>(
     Ok(camera.nodemap().invalidated_by(name))
 }
 
+/// A `UserSetSave` is finished when the button returns (backlog ST-48). A
+/// command still busy at the timeout was executed all the same: logged.
+fn execute_on<R: RegisterIo>(camera: &mut Camera<R>, name: &str) -> Result<Vec<String>, String> {
+    match camera.execute_and_wait_blocking(name, COMMAND_TIMEOUT) {
+        Ok(()) => {}
+        Err(GenicamError::CommandNotDone { waited, .. }) => {
+            tracing::warn!(name, ?waited, "command executed but not reported done");
+        }
+        Err(e) => return Err(format!("Failed to execute '{name}': {e}")),
+    }
+    Ok(camera.nodemap().invalidated_by(name))
+}
+
 fn image_format_of<R: RegisterIo>(camera: &Camera<R>) -> (u32, u32, String) {
     let dimension = |name: &str, fallback: u32| {
         camera
@@ -90,6 +107,10 @@ impl Device for Camera<GigeRegisterIo> {
 
     fn set(&mut self, name: &str, value: &str) -> Result<Vec<String>, String> {
         set_on(self, name, value)
+    }
+
+    fn execute(&mut self, name: &str) -> Result<Vec<String>, String> {
+        execute_on(self, name)
     }
 
     fn image_format(&self) -> (u32, u32, String) {
@@ -146,6 +167,10 @@ impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
 
     fn set(&mut self, name: &str, value: &str) -> Result<Vec<String>, String> {
         set_on(self, name, value)
+    }
+
+    fn execute(&mut self, name: &str) -> Result<Vec<String>, String> {
+        execute_on(self, name)
     }
 
     fn image_format(&self) -> (u32, u32, String) {

@@ -16,21 +16,18 @@ cam.set("ExposureTime", "7500.0")
 
 ### Typed helpers
 
-Two SFNC-standard features have dedicated float setters so you don't pass numbers as strings:
+The exposure and the gain have setters that take a number and find the
+feature the camera has for it:
 
 ```python
-cam.set_exposure_time_us(10_000.0)
-cam.set_gain_db(6.0)
+cam.set_exposure_time(10_000.0)   # returns the feature written, e.g. "ExposureTimeAbs"
+cam.set_gain(6.0)                 # "Gain", or "GainRaw" on an older camera
 ```
 
-These write the canonical SFNC names `ExposureTime` and `Gain` as floats, and
-raise `GenApiError` if the camera calls them something else. They are a typed
-convenience over `set`, not a compatibility layer — there is **no** vendor-alias
-fallback here. If your camera uses a different name, pass it to `set` directly:
-
-```python
-cam.set("ExposureTimeAbs", "10000")
-```
+The exposure goes to `ExposureTime`, else `ExposureTimeAbs` (both in
+microseconds), else `ExposureTimeRaw` (the camera's own units, rounded to an
+integer); the gain to `Gain` (decibels), else `GainRaw` (the camera's own
+units). A camera with none of them raises `GenicamError`, naming them.
 
 ### Error model
 
@@ -152,9 +149,8 @@ is unavailable while `Default` is selected, and `execute` raises
 
 Two more things worth knowing:
 
-- `cam.set("UserSetLoad", "1")` also executes the command, without waiting —
-  `set` dispatches Command nodes and discards the value. Prefer `execute`; it
-  says what it does.
+- A command is executed, never set: `cam.set("UserSetLoad", "1")` raises
+  `GenApiError`.
 - **A read after the command returns the new value when the camera's XML says
   it should.** A register may declare `<pInvalidator>` nodes: "when this one
   changes, my cached value is stale". The FLIR Blackfly S BFS-PGE-31S4C-C names

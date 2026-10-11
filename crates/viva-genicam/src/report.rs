@@ -283,20 +283,24 @@ fn interfaces(out: &mut String) {
     let _ = writeln!(out);
 }
 
+/// Discovery for a report allows a broadcast acknowledgement: a camera
+/// configured for another subnet may be able to answer only that way, and it
+/// is the camera a report most needs to find.
 async fn discover_devices(
     timeout: Duration,
     iface: Option<&IfaceSelector>,
 ) -> Result<Vec<DeviceInfo>, String> {
+    let options = viva_gige::DiscoveryOptions::new().allow_broadcast_ack(true);
     match iface {
         Some(selector) => {
             let iface = selector
                 .resolve()
                 .map_err(|e| format!("resolve host interface '{selector}': {e}"))?;
-            viva_gige::discover_on_interface(timeout, iface.name())
+            viva_gige::discover_with(timeout, &options.interface(iface.name()))
                 .await
                 .map_err(|e| format!("discover devices on interface: {e}"))
         }
-        None => viva_gige::discover(timeout)
+        None => viva_gige::discover_with(timeout, &options)
             .await
             .map_err(|e| format!("broadcast discovery: {e}")),
     }

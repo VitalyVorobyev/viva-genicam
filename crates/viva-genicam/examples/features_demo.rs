@@ -100,7 +100,7 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
     println!("  Width (after set) -> {}", camera.get("Width")?);
 
     println!("  ExposureTime -> {}", camera.get(sfnc::EXPOSURE_TIME)?);
-    camera.set_exposure_time_us(75.0)?;
+    camera.set_exposure_time(75.0)?;
     println!(
         "  ExposureTime (after set) -> {}",
         camera.get(sfnc::EXPOSURE_TIME)?
@@ -161,7 +161,7 @@ fn run_real() -> Result<(), Box<dyn Error>> {
     let mut camera = Camera::new(transport, nodemap);
 
     println!("  ExposureTime -> {}", camera.get(sfnc::EXPOSURE_TIME)?);
-    camera.set_exposure_time_us(5000.0)?;
+    camera.set_exposure_time(5000.0)?;
     println!(
         "  ExposureTime (after set) -> {}",
         camera.get(sfnc::EXPOSURE_TIME)?

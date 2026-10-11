@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 5. Write a feature ──────────────────────────────────────────────────
     println!("Setting Width = 320, ExposureTime = 10000 ...");
     camera.set("Width", "320")?;
-    camera.set_exposure_time_us(10_000.0)?;
+    camera.set_exposure_time(10_000.0)?;
     println!("  Width readback = {}\n", camera.get("Width")?);
     // ANCHOR_END: read_features
 

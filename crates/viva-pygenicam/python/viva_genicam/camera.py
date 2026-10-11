@@ -56,11 +56,17 @@ class Camera:
         """Set a feature value; the string is parsed per node type."""
         self._native.set(name, value)
 
-    def set_exposure_time_us(self, value: float) -> None:
-        self._native.set_exposure_time_us(value)
+    def set_exposure_time(self, value: float) -> str:
+        """Write the exposure time through whichever feature the camera has:
+        ``ExposureTime`` or ``ExposureTimeAbs`` (microseconds), else
+        ``ExposureTimeRaw`` (device units). Returns that feature's name."""
+        return self._native.set_exposure_time(value)
 
-    def set_gain_db(self, value: float) -> None:
-        self._native.set_gain_db(value)
+    def set_gain(self, value: float) -> str:
+        """Write the gain of the selected gain control through whichever
+        feature the camera has: ``Gain`` (dB), else ``GainRaw`` (device
+        units). Returns that feature's name."""
+        return self._native.set_gain(value)
 
     def enum_entries(self, name: str) -> list[str]:
         """List allowed entries for an enumeration feature."""
@@ -115,9 +121,7 @@ class Camera:
         ``wait=False`` returns ``False`` once the write is acknowledged,
         without asking.
 
-        ``set(name, "1")`` also executes a command, without waiting — it reads
-        like a write and the value it takes is discarded, so prefer
-        ``execute``.
+        A command is executed, never set: ``set(name, "1")`` raises.
 
         Reads after the command re-read the camera for every feature whose
         register names the command's register in ``<pInvalidator>`` — FLIR's

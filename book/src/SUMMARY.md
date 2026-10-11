@@ -13,6 +13,7 @@
 - [Tutorials](tutorials/README.md)
   - [Discover devices (GigE)](tutorials/discovery.md)
   - [Registers: read & write](tutorials/registers.md)
+  - [Common tasks](tutorials/common-tasks.md)
   - [Fetch & parse GenApi XML](tutorials/genapi-xml.md)
   - [Streaming (GVSP) – first steps](tutorials/streaming.md)
   - [Testing without hardware](tutorials/fake-camera.md)

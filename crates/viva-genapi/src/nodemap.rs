@@ -423,9 +423,17 @@ impl NodeMap {
     }
 
     /// Read an integer feature value using the provided transport.
+    ///
+    /// A `<Converter>` evaluates in floating point; its value is rounded to
+    /// the nearest integer, as [`NodeMap::set_float`] rounds a value written
+    /// to an `<IntConverter>`.
     pub fn get_integer(&self, name: &str, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
-        if let Some(Node::IntConverter(_)) = self.nodes.get(name) {
-            return self.get_int_converter(name, io);
+        match self.nodes.get(name) {
+            Some(Node::IntConverter(_)) => return self.get_int_converter(name, io),
+            Some(Node::Converter(_)) => {
+                return round_to_i64(name, self.get_converter(name, io)?);
+            }
+            _ => {}
         }
         if let Some(output) = self.nodes.get(name).and_then(|node| match node {
             Node::SwissKnife(sk) => Some(sk.output),
@@ -677,6 +685,13 @@ impl NodeMap {
             node.value_cache.replace(Some(entry.clone()));
             return Ok(entry);
         }
+        // A floating enumeration: the entry written, else its start value.
+        if node.addressing.is_none()
+            && let Some(start) = node.value
+        {
+            let raw_value = node.floating.borrow().unwrap_or(start);
+            return self.lookup_enum_entry(node, raw_value, io);
+        }
         let addressing = node
             .addressing
             .as_ref()
@@ -725,6 +740,24 @@ impl NodeMap {
             self.invalidate_dependents(name);
             return Ok(());
         }
+        // A floating enumeration has no register: the entry lives here, as a
+        // floating integer's value does (GenICam Standard v2.1.1 §2.8.5).
+        if node.addressing.is_none() && node.value.is_some() {
+            let entry_decl = node
+                .entries
+                .iter()
+                .find(|candidate| candidate.name == entry)
+                .ok_or_else(|| GenApiError::EnumNoSuchEntry {
+                    node: name.to_string(),
+                    entry: entry.to_string(),
+                })?;
+            let raw = self.resolve_enum_entry_value(node, entry_decl, io)?;
+            debug!(node = %name, raw, entry, "write floating enumeration");
+            node.floating.replace(Some(raw));
+            node.value_cache.replace(None);
+            self.invalidate_dependents(name);
+            return Ok(());
+        }
         let addressing = node
             .addressing
             .as_ref()
@@ -751,22 +784,22 @@ impl NodeMap {
     }
 
     /// List the available entry names for an enumeration feature.
+    ///
+    /// In the order the XML declares them, which is the order a GUI shows,
+    /// each name once.
     pub fn enum_entries(&self, name: &str) -> Result<Vec<String>, GenApiError> {
         let node = self.get_enum_node(name)?;
-        if let Some(mapping) = node.mapping_cache.borrow().as_ref() {
-            let mut names: Vec<_> = mapping.by_name.keys().cloned().collect();
-            names.sort();
-            names.dedup();
-            return Ok(names);
-        }
-        let mut names: Vec<_> = node
+        let mapping = node.mapping_cache.borrow();
+        let names = node
             .entries
             .iter()
-            .map(|entry| entry.name.clone())
-            .collect();
-        names.sort();
-        names.dedup();
-        Ok(names)
+            .map(|entry| entry.name.as_str())
+            .filter(|entry| {
+                mapping
+                    .as_ref()
+                    .is_none_or(|mapping| mapping.by_name.contains_key(*entry))
+            });
+        Ok(unique_in_order(names))
     }
 
     /// Evaluate `pIsImplemented` for `name`, returning `true` when the feature
@@ -982,7 +1015,7 @@ impl NodeMap {
         if !any_entry_predicate {
             return self.enum_entries(name);
         }
-        let mut out = Vec::new();
+        let mut out: Vec<&str> = Vec::new();
         for entry in &node.entries {
             if let Some(provider) = &entry.predicates.p_is_implemented
                 && !self.eval_predicate_ref(name, provider, io)?
@@ -994,11 +1027,9 @@ impl NodeMap {
             {
                 continue;
             }
-            out.push(entry.name.clone());
+            out.push(entry.name.as_str());
         }
-        out.sort();
-        out.dedup();
-        Ok(out)
+        Ok(unique_in_order(out))
     }
 
     fn predicate_refs(&self, name: &str) -> Result<&PredicateRefs, GenApiError> {
@@ -1045,6 +1076,13 @@ impl NodeMap {
             let on = node.on_value.unwrap_or(1);
             return Ok(raw == on);
         }
+        // A floating boolean: what was written, else its start value.
+        if node.addressing.is_none()
+            && let Some(start) = node.value
+        {
+            let raw = node.floating.borrow().unwrap_or(start);
+            return Ok(raw == node.on_value.unwrap_or(1));
+        }
         let addressing = node
             .addressing
             .as_ref()
@@ -1080,6 +1118,19 @@ impl NodeMap {
             let off = node.off_value.unwrap_or(0);
             let raw = if value { on } else { off };
             return self.set_integer(&pv, raw, io);
+        }
+        // A floating boolean has no register: the value lives here, as a
+        // floating integer's does (GenICam Standard v2.1.1 §2.8.5).
+        if node.addressing.is_none() && node.value.is_some() {
+            let raw = if value {
+                node.on_value.unwrap_or(1)
+            } else {
+                node.off_value.unwrap_or(0)
+            };
+            debug!(node = %name, raw, value, "write floating boolean");
+            node.floating.replace(Some(raw));
+            self.invalidate_dependents(name);
+            return Ok(());
         }
         let addressing = node
             .addressing
@@ -1946,6 +1997,17 @@ impl NodeMap {
         self.invalidate_dependents(name);
     }
 
+    /// Forget every cached value: for a command known to change the
+    /// device's state wholesale, such as `UserSetLoad`, on a camera whose XML
+    /// does not say which features it changes. What the host itself holds —
+    /// a floating `<Integer>` or `<Boolean>` — is kept.
+    pub fn invalidate_all(&self) {
+        for node in self.nodes.values() {
+            node.invalidate_cache();
+        }
+        self.bump_generation();
+    }
+
     fn invalidate_dependents(&self, name: &str) {
         self.bump_generation();
         if let Some(children) = self.dependents.get(name) {
@@ -2154,7 +2216,7 @@ impl NodeMap {
 
     /// Write a String feature value using the provided transport.
     pub fn set_string(
-        &self,
+        &mut self,
         name: &str,
         value: &str,
         io: &dyn RegisterIo,
@@ -2204,7 +2266,7 @@ impl NodeMap {
     /// file-transfer buffer to 100 000 bytes because the caller supplied 12 is
     /// data loss, not a convenience.
     pub fn set_register(
-        &self,
+        &mut self,
         name: &str,
         data: &[u8],
         io: &dyn RegisterIo,
@@ -2410,6 +2472,7 @@ fn build_node(
             default,
             selected,
             pvalue,
+            value,
             predicates,
         } => {
             if let Some(ref addr) = addressing {
@@ -2445,9 +2508,11 @@ fn build_node(
                 default,
                 selected,
                 providers,
+                value,
                 predicates,
                 value_cache: std::cell::RefCell::new(None),
                 mapping_cache: std::cell::RefCell::new(None),
+                floating: std::cell::RefCell::new(None),
             };
             Ok((name, Node::Enum(node)))
         }
@@ -2461,6 +2526,7 @@ fn build_node(
             pvalue,
             on_value,
             off_value,
+            value,
             predicates,
         } => {
             if let Some(ref addr) = addressing {
@@ -2480,9 +2546,11 @@ fn build_node(
                 pvalue,
                 on_value,
                 off_value,
+                value,
                 predicates,
                 cache: std::cell::RefCell::new(None),
                 raw_cache: std::cell::RefCell::new(None),
+                floating: std::cell::RefCell::new(None),
             };
             Ok((name, Node::Boolean(node)))
         }
@@ -2872,6 +2940,16 @@ fn expr_error(name: &str, err: SkEvalError) -> GenApiError {
             msg: format!("function {func} expects {expected} args, got {got}"),
         },
     }
+}
+
+/// `names` without repeats, in the order they first appear.
+fn unique_in_order<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    names
+        .into_iter()
+        .filter(|name| seen.insert(*name))
+        .map(str::to_string)
+        .collect()
 }
 
 impl TryFrom<XmlModel> for NodeMap {

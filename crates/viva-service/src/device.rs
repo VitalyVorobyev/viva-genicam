@@ -7,7 +7,8 @@ use tracing::{debug, warn};
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
-    Camera, FrameStream, GenicamError, GigeRegisterIo, StreamOptions, connect_gige_with_xml, gige,
+    COMMAND_TIMEOUT, Camera, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
+    connect_gige_with_xml, gige,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -25,8 +26,14 @@ pub trait DeviceOps: Send + Sync + 'static {
     async fn get_feature(&self, name: &str) -> Result<String, GenicamError>;
     /// Write a feature value by name.
     async fn set_feature(&self, name: &str, value: &str) -> Result<(), GenicamError>;
-    /// Execute a command node.
+    /// Execute a command node and wait for it to finish ([`camera_execute`]).
     async fn exec_command(&self, name: &str) -> Result<(), GenicamError>;
+    /// Start acquisition the facade's way, `TLParamsLocked` with it
+    /// ([`Camera::acquisition_start`]).
+    async fn acquisition_start(&self) -> Result<(), GenicamError>;
+    /// Stop acquisition, clearing `TLParamsLocked`
+    /// ([`Camera::acquisition_stop`]).
+    async fn acquisition_stop(&self) -> Result<(), GenicamError>;
 
     /// Read the full live state of a feature: value, access mode, kind, range,
     /// available enum entries, unit. Default implementation projects from
@@ -236,10 +243,9 @@ impl DeviceHandle {
         .map_err(|e| GenicamError::Transport(e.to_string()))?
     }
 
-    /// Execute a command node via spawn_blocking (commands are invoked via `set`).
+    /// Execute a command node and wait for it to finish ([`camera_execute`]).
     pub async fn exec_command(&self, name: &str) -> Result<(), GenicamError> {
-        // Camera::set() dispatches Command nodes to exec_command internally.
-        self.set_feature(name, "1").await
+        camera_execute(&self.camera, name).await
     }
 
     /// Read the model name from the camera (best-effort).
@@ -290,6 +296,14 @@ impl DeviceOps for DeviceHandle {
         DeviceHandle::exec_command(self, name).await
     }
 
+    async fn acquisition_start(&self) -> Result<(), GenicamError> {
+        camera_acquisition(&self.camera, true).await
+    }
+
+    async fn acquisition_stop(&self) -> Result<(), GenicamError> {
+        camera_acquisition(&self.camera, false).await
+    }
+
     /// Rich introspection for GigE devices: typed reads against the NodeMap
     /// populate the full [`FeatureState`] tuple. This is what lets remote-mode
     /// UIs show live ranges, filter enum dropdowns, and gate Apply/Execute on
@@ -332,6 +346,60 @@ where
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Execute command `name` on a camera shared behind a mutex and wait, on the
+/// blocking pool, for the camera to report it finished (GenICam `IsDone`, up
+/// to [`COMMAND_TIMEOUT`]): a `UserSetSave` is done when the caller hears
+/// back (backlog ST-48). One still busy at the timeout was executed all the
+/// same, so that is logged, not returned.
+pub async fn camera_execute<T>(
+    camera: &Arc<Mutex<Camera<T>>>,
+    name: &str,
+) -> Result<(), GenicamError>
+where
+    T: RegisterIo + Send + 'static,
+{
+    let cam = camera.clone();
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut cam = cam
+            .lock()
+            .map_err(|_| GenicamError::Transport("camera mutex poisoned".to_string()))?;
+        match cam.execute_and_wait_blocking(&name, COMMAND_TIMEOUT) {
+            Err(GenicamError::CommandNotDone { name, waited }) => {
+                warn!(%name, ?waited, "command executed but not reported done");
+                Ok(())
+            }
+            other => other,
+        }
+    })
+    .await
+    .map_err(|e| GenicamError::Transport(e.to_string()))?
+}
+
+/// [`Camera::acquisition_start`] (`start`) or [`Camera::acquisition_stop`]
+/// on a camera shared behind a mutex, on the blocking pool.
+pub async fn camera_acquisition<T>(
+    camera: &Arc<Mutex<Camera<T>>>,
+    start: bool,
+) -> Result<(), GenicamError>
+where
+    T: RegisterIo + Send + 'static,
+{
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut cam = cam
+            .lock()
+            .map_err(|_| GenicamError::Transport("camera mutex poisoned".to_string()))?;
+        if start {
+            cam.acquisition_start()
+        } else {
+            cam.acquisition_stop()
+        }
+    })
+    .await
+    .map_err(|e| GenicamError::Transport(e.to_string()))?
 }
 
 /// [`viva_genicam::genapi::NodeMap::invalidated_by`] for a camera shared

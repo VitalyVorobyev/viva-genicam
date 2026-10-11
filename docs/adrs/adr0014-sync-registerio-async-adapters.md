@@ -43,3 +43,11 @@ XML browsing) implement the trait directly with no runtime involved.
   current-thread runtime would panic. This constraint is on the adapter,
   not the trait — an async-native adapter could be added later without
   touching the engine.
+
+## Amendment — 2026-10-11
+
+The adapter no longer panics on a current-thread runtime: it bridges from any
+context, and a camera opened from a current-thread runtime, or through the
+blocking API, gets a runtime of its own
+([ADR-0027](adr0027-blocking-api-and-transport-runtimes.md)). The trait is
+unchanged.

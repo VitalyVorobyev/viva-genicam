@@ -12,9 +12,7 @@ This is the flow from issue #121: select a user set, then load it.
 until the camera reports it finished (GenICam's ``IsDone``), for up to
 ``timeout`` seconds; ``wait=False`` returns once the write is acknowledged.
 
-``cam.set("UserSetLoad", "1")`` also executes the command, without waiting —
-``set`` dispatches Command nodes and discards the value. It reads like a write
-and the value is meaningless, so prefer ``execute``.
+A command is executed, never set: ``cam.set("UserSetLoad", "1")`` raises.
 
 Usage:
     python execute_command.py                          # list Command features

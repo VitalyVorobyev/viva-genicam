@@ -44,3 +44,9 @@ jobs:
       # document and evaluates every node in it.
       - name: Build and evaluate every nodemap
         run: cargo test -p viva-genapi --test vendor_corpus -- --nocapture
+
+      # The `Camera` helpers for standard features find each by the names
+      # cameras declare it under: each must resolve to a node it can drive,
+      # or name every name it tried.
+      - name: Resolve every standard feature
+        run: cargo test -p viva-genicam --test sfnc_corpus -- --nocapture

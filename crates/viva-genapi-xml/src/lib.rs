@@ -808,6 +808,10 @@ pub enum NodeDecl {
         selected: Vec<String>,
         /// Node providing the integer value (delegates register read/write).
         pvalue: Option<String>,
+        /// `<Value>`: the start value of an enumeration with no register
+        /// behind it, a selector the host keeps (AVT's `GainSelector`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<i64>,
         /// Predicate refs gating implementation / availability / lock state.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
         predicates: PredicateRefs,
@@ -827,6 +831,11 @@ pub enum NodeDecl {
         on_value: Option<i64>,
         /// Off value for pValue-backed booleans.
         off_value: Option<i64>,
+        /// `<Value>`: the start value of a boolean with no register behind
+        /// it, compared with `on_value`. AVT and Prosilica declare
+        /// `TLParamsLocked` this way.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<i64>,
         /// Predicate refs gating implementation / availability / lock state.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
         predicates: PredicateRefs,

@@ -182,6 +182,11 @@ pub(crate) async fn run(
                 continue;
             }
             let dest = SocketAddr::new(std::net::IpAddr::V4(config.dest_ip), config.dest_port);
+            // With the FrameStart trigger on, no frame without its trigger.
+            if !regs.lock().await.take_frame_start() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                continue;
+            }
 
             let first = block_id;
             let mut datagrams = match build_block(&config, &options, first, clock_origin) {

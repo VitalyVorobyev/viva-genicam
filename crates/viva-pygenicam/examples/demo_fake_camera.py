@@ -35,7 +35,7 @@ def main() -> None:
                 print(f"   {name:<14} ERROR: {exc}")
 
         print("5. Writing ExposureTime = 7500 µs ...")
-        cam.set_exposure_time_us(7500.0)
+        cam.set_exposure_time(7500.0)
         print(f"   readback: {cam.get('ExposureTime')}")
 
         print("6. Streaming 5 frames ...")

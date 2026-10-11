@@ -104,9 +104,10 @@ addresses).
 **`FrameStream` / `U3vFrameStream`** (`viva-genicam`) — frame streams. The
 GigE side is the GVSP receive engine
 ([ADR-0025](adrs/adr0025-gvsp-receive-engine.md)): one thread per stream reads
-the socket, a socket-free assembler builds blocks in place, and frames reach the
-application through a four-frame drop-oldest queue, async or blocking; opened by
-`Camera::open_stream`. The U3V side wraps blocking USB bulk reads via
+the socket, accepting only the camera as a source, a socket-free assembler
+builds blocks in place and finds the gaps to ask the camera for again, and
+frames reach the application through a four-frame drop-oldest queue, async or
+blocking; opened by `Camera::open_stream`. The U3V side wraps blocking USB bulk reads via
 `spawn_blocking` + an mpsc channel, created through `U3vStreamBuilder` or
 `U3vFrameStream::start()`.
 
@@ -179,7 +180,8 @@ the cases). Consequences:
 3. **DRY** — one implementation per concern: a single frame-reassembly path,
    pixel formats owned by `viva-pfnc`.
 4. **YAGNI** — no speculative scaffolding; dead code gets deleted or wired up
-   (the unused GVSP resend machinery is the cautionary tale).
+   (the GVSP resend request that sat unused, in the wrong layout, until 0.9 is
+   the cautionary tale).
 5. **Spec-conformance over self-consistency** — tests validate against the
    standard, not against our own second implementation of the same mistake.
 6. **Errors carry sources; panics never cross a public API on remote input.**

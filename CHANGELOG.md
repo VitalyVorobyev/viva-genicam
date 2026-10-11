@@ -29,8 +29,8 @@ release opens with what to read before upgrading.
 - **`StreamStats` is rewritten and moved to `viva_genicam::StreamStats`.** It
   counts every frame once — complete, incomplete, missed or dropped to
   backpressure — plus what became of the packets; `drops` becomes
-  `frames_lost()`, and the resend counters are gone until resend exists. Only
-  the stream records them. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
+  `frames_lost()`, and `resends`/`resend_ranges` give way to the resend
+  counters below. Only the stream records them. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
 - **`Stream::socket()` and `FrameStream::socket()` are removed**, with the
   legacy `gvsp::parse_packet`/`GvspPacket` and the unused reassembly types
   (`Reassembler`, `FrameQueue`, `BufferPool`, `ResendPlanner`,
@@ -40,6 +40,21 @@ release opens with what to read before upgrading.
   `frames`/`drops`/`resends` become `frames_complete`, `frames_incomplete`,
   `frames_missed`, `frames_backpressure`, `packets_received` and
   `packets_missing`; `stream` and `bench` print the same counters. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
+- **A stream binds a port of its own.** The library, Python and Viva Studio
+  received on port 24575 (`0x5FFF`) and `viva-camctl` on 10040; now the
+  operating system picks a free port for each stream and the camera is told
+  it. Behind a firewall that admits only a known port, name one with
+  `destination_port` or `--port`. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- **`GevSCPD` is written only when asked**, and in time:
+  `StreamOptions::packet_delay(Duration)` and `StreamBuilder::packet_delay`
+  (which took raw ticks) convert it to the camera's ticks. Every stream used to
+  write it — 25 ticks for packets of 1 500 bytes or less, 0 above — over the
+  camera's own setting. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- **`GigeDevice::request_resend` is removed**, with `StreamConfig::resend_enabled`;
+  its 8-byte request matched neither Wireshark's dissector nor aravis, and
+  nothing called it. Resend is now the stream's (below).
+  `StreamParams` gains `channel` and `camera`, and its `packet_delay` is an
+  `Option`. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
 - **`viva-zenoh-api` payloads are `#[non_exhaustive]`** with constructors
   (`DeviceStatus::connected`, `AcquisitionStatus::active`, `ImageMeta::new`, …),
   so a later field is not a breaking change. `AcquisitionStatus.dropped` now
@@ -47,15 +62,25 @@ release opens with what to read before upgrading.
 
 ### Added
 
-- `Camera::open_stream(StreamOptions)`: one call that claims control,
-  configures the stream channel (multicast included), negotiates the packet
-  size and starts the receive engine with the camera's `PayloadSize`. Studio,
-  `viva-service`, `viva-camctl` and Python now open streams through it.
-  ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
+- `Camera::open_stream(StreamOptions)`: one call that claims control and only
+  then configures the stream channel (multicast included), negotiates the
+  packet size and starts the receive engine with the camera's `PayloadSize`.
+  Studio, `viva-service`, `viva-camctl` and Python now open streams through it.
+  ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194), [#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
 - `FrameStream::next_block_blocking` and `next_frame_blocking` for code without
   an async runtime, `set_deliver_incomplete` to receive frames that lost
   packets, with a status saying how, and `from_socket` for a camera configured
   elsewhere. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
+- **Packet resend.** A stream asks a camera whose capability register says it
+  supports it to send lost packets again, in the layout Wireshark's dissector
+  reads, from the stream's own socket; a frame that got its packets back is
+  complete. `resend_requested`, `resend_recovered` and `resend_unavailable`
+  count it; `ResendPolicy::Off`, `--no-resend` or `resend=False` turn it off.
+  Tested against the fake camera only. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- `--packet-delay-ns` on `viva-camctl stream` and `bench`, `packet_delay_ns=`
+  and `resend=` on Python's `stream()`; `bench --json-out` adds the resend
+  counters. The report bundle records GVCP Capability and the timestamp tick
+  frequency. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
 - `Camera::execute_and_wait`, `Camera::is_done` and `NodeMap::is_done`
   (GenICam `IsDone`), so a caller can wait for a command such as `UserSetSave`
   to finish instead of sleeping. `viva-camctl execute` and Python's
@@ -108,6 +133,16 @@ release opens with what to read before upgrading.
   ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
 - Payload type `0x4001` (image with chunks) kept only its low byte; other
   payload types were dropped without a count. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
+- Two streams on one host shared a port and split each other's packets; any
+  sender could feed a stream. A stream now accepts only its camera's
+  address, counted in `packets_ignored_foreign` otherwise. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- A stream channel the camera does not have (`GevNumberOfStreamChannels`) was
+  configured anyway; it is refused before anything is written. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- A camera sending smaller data packets than the host expected could have its
+  frame delivered as complete, with gaps and shifted data; it is now
+  incomplete. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- On macOS the interface MTU always read as 1 500, so automatic packet sizing
+  never chose jumbo frames. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
 - Writes to a floating `<Integer>` (a `<Value>` with no register) always
   failed; 319 corpus features write through one, among them AVT's
   `TriggerSelector` and Sony's `UserSetSelector`. ([#193](https://github.com/VitalyVorobyev/viva-genicam/pull/193))

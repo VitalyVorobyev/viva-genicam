@@ -25,7 +25,7 @@ use crate::nodemap::{
     node_info_with_state,
 };
 use crate::runtime::runtime;
-use crate::stream::{build_gige_stream, build_u3v_stream, PyFrameStream};
+use crate::stream::{build_gige_stream, build_u3v_stream, GigeStreamRequest, PyFrameStream};
 
 pub(crate) type GigeCamera = Camera<GigeRegisterIo>;
 pub(crate) type U3vCamera = Camera<U3vRegisterIo<RusbTransfer>>;
@@ -418,7 +418,8 @@ impl PyCamera {
         }
     }
 
-    #[pyo3(signature = (iface=None, packet_size=None, auto_packet_size=false, multicast=None, destination_port=None))]
+    #[pyo3(signature = (iface=None, packet_size=None, auto_packet_size=false, multicast=None, destination_port=None, packet_delay_ns=None, resend=true))]
+    #[allow(clippy::too_many_arguments)]
     fn open_stream(
         &self,
         py: Python<'_>,
@@ -427,6 +428,8 @@ impl PyCamera {
         auto_packet_size: bool,
         multicast: Option<&str>,
         destination_port: Option<u16>,
+        packet_delay_ns: Option<u64>,
+        resend: bool,
     ) -> PyResult<PyFrameStream> {
         match &self.inner {
             CameraInner::Gige {
@@ -463,10 +466,14 @@ impl PyCamera {
                     py,
                     camera.clone(),
                     Some(iface_resolved),
-                    packet_size,
-                    auto_packet_size,
-                    multicast_addr,
-                    destination_port,
+                    GigeStreamRequest {
+                        packet_size,
+                        auto_packet_size,
+                        multicast: multicast_addr,
+                        destination_port,
+                        packet_delay_ns,
+                        resend,
+                    },
                 )
             }
             CameraInner::U3v { camera, .. } => build_u3v_stream(py, camera.clone()),

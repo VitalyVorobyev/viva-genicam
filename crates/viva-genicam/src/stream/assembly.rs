@@ -26,16 +26,20 @@
 //! - **Block ids** are compared wrap-aware. A forward jump counts the skipped
 //!   ids as missed frames; a block a little behind the newest is late; a long
 //!   way behind, or back to 1, is a restart.
+//! - **Resend.** With resend on, each block tracks its gaps
+//!   ([`ResendState`]); [`Assembler::resend_due`] says which ranges to ask
+//!   for, and a camera's "no longer available" answer closes a range.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use super::resend::{Answer, ResendConfig, ResendRequest, ResendState};
 use super::stats::{IgnoredPacket, StreamStatsAccumulator};
 use bytes::Bytes;
 use tracing::{debug, warn};
 use viva_gige::gvsp::{
-    GvspContent, GvspHeader, GvspLeader, GvspTrailer, PacketBitmap, is_image_payload,
-    parse_packet_ref,
+    GVSP_EXTENDED_HEADER_SIZE, GVSP_HEADER_SIZE, GvspContent, GvspHeader, GvspLeader, GvspTrailer,
+    PacketBitmap, is_image_payload, parse_header, parse_packet_ref, status,
 };
 
 use crate::frame::FrameStatus;
@@ -106,7 +110,7 @@ impl BufferSource for Allocate {
 }
 
 /// What the assembler needs to know about the stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AssemblyConfig {
     /// `GevSCPSPacketSize` in force.
     pub packet_size: u32,
@@ -114,6 +118,8 @@ pub(crate) struct AssemblyConfig {
     pub payload_size: Option<usize>,
     /// Inactivity after which an unfinished block closes.
     pub block_timeout: Duration,
+    /// Whether and how to ask for lost packets.
+    pub resend: ResendConfig,
 }
 
 impl AssemblyConfig {
@@ -123,6 +129,7 @@ impl AssemblyConfig {
             packet_size,
             payload_size: None,
             block_timeout: DEFAULT_BLOCK_TIMEOUT,
+            resend: ResendConfig::default(),
         }
     }
 }
@@ -174,6 +181,10 @@ enum Resolution {
 #[derive(Debug)]
 struct BlockInFlight {
     block_id: u64,
+    /// Whether the block's packets carry extended ids.
+    extended_ids: bool,
+    /// Gaps to ask for, when resend is on and the block is assembled.
+    resend: Option<ResendState>,
     last_packet: Instant,
     leader: Option<LeaderInfo>,
     leader_payload_type: Option<u16>,
@@ -263,6 +274,19 @@ struct Warned {
     unsupported: bool,
 }
 
+/// How a GVSP status that answers a resend request is acted on, or `None`
+/// for any other status. The names are Wireshark's `GEV_STATUS_*`. Gone and
+/// gone-with-previous close the range; "not yet available" and "temporarily
+/// unavailable" leave it to its retries.
+fn resend_answer(status: u16) -> Option<Option<Answer>> {
+    match status {
+        status::PACKET_UNAVAILABLE | status::PACKET_REMOVED_FROM_MEMORY => Some(Some(Answer::Gone)),
+        status::PACKET_AND_PREVIOUS_REMOVED_FROM_MEMORY => Some(Some(Answer::GoneWithPrevious)),
+        status::PACKET_NOT_YET_AVAILABLE | status::PACKET_TEMPORARILY_UNAVAILABLE => Some(None),
+        _ => None,
+    }
+}
+
 /// Assembles GVSP blocks from datagrams. See the module documentation.
 pub(crate) struct Assembler {
     config: AssemblyConfig,
@@ -325,6 +349,16 @@ impl Assembler {
     /// Take one datagram that arrived at `now`. Blocks that finish are
     /// appended to `out` in the order they started.
     pub(crate) fn ingest(&mut self, datagram: &[u8], now: Instant, out: &mut Vec<AssembledBlock>) {
+        // A camera that cannot resend a packet answers with a bare header, so
+        // the status is read before anything else is parsed.
+        if let Ok(header) = parse_header(datagram)
+            && let Some(answer) = resend_answer(header.status)
+        {
+            self.touch(header.block_id, now);
+            self.stats.record_ignored_packet(IgnoredPacket::ErrorStatus);
+            self.on_resend_answer(&header, answer);
+            return;
+        }
         let packet = match parse_packet_ref(datagram) {
             Ok(packet) => packet,
             Err(err) => {
@@ -386,13 +420,115 @@ impl Assembler {
             None => {}
         }
 
-        match content {
-            Content::Leader(leader) => self.on_leader(index, leader),
+        let arrived = match content {
+            Content::Leader(leader) => {
+                self.on_leader(index, leader);
+                true
+            }
             Content::Payload(data) => self.on_payload(index, &header, data),
-            Content::Trailer(trailer) => self.on_trailer(index, &header, trailer),
+            Content::Trailer(trailer) => {
+                self.on_trailer(index, &header, trailer);
+                true
+            }
+        };
+        if arrived {
+            self.track_arrival(index, header.packet_id, is_trailer, now);
         }
         self.try_complete(index);
         self.emit(out);
+    }
+
+    /// Tell the block's resend state that packet `id` arrived.
+    fn track_arrival(&mut self, index: usize, id: u32, is_trailer: bool, now: Instant) {
+        let delay = self.config.resend.delay;
+        let Some(resend) = self.in_flight[index].resend.as_mut() else {
+            return;
+        };
+        if resend.arrived(id, now, delay) {
+            self.stats.record_resend_recovered();
+        }
+        if is_trailer {
+            resend.trailer(id);
+        }
+    }
+
+    /// A camera's answer to a resend request it could not serve.
+    fn on_resend_answer(&mut self, header: &GvspHeader, answer: Option<Answer>) {
+        let block = self
+            .in_flight
+            .iter_mut()
+            .find(|b| b.block_id == header.block_id && b.resolved.is_none());
+        let (Some(block), Some(answer)) = (block, answer) else {
+            debug!(
+                block_id = header.block_id,
+                packet_id = header.packet_id,
+                status = format_args!("{:#06x}", header.status),
+                "resend answer for a block not in flight, or one to retry"
+            );
+            return;
+        };
+        let Some(resend) = block.resend.as_mut() else {
+            return;
+        };
+        let gone = resend.unavailable(header.packet_id, answer);
+        debug!(
+            block_id = header.block_id,
+            packet_id = header.packet_id,
+            status = format_args!("{:#06x}", header.status),
+            gone,
+            "the camera cannot resend these packets"
+        );
+        if gone > 0 {
+            self.stats.record_resend_unavailable(gone);
+        }
+    }
+
+    /// Append the resend requests due at `now`, in block order.
+    pub(crate) fn resend_due(&mut self, now: Instant, out: &mut Vec<ResendRequest>) {
+        let config = self.config.resend;
+        if !config.enabled {
+            return;
+        }
+        let packet_size = self.config.packet_size;
+        for block in self.in_flight.iter_mut() {
+            if block.resolved.is_some() {
+                continue;
+            }
+            let Some(resend) = block.resend.as_mut() else {
+                continue;
+            };
+            let header_len = if block.extended_ids {
+                GVSP_EXTENDED_HEADER_SIZE
+            } else {
+                GVSP_HEADER_SIZE
+            };
+            let stride = payload_stride(packet_size, header_len).max(1);
+            // Leader, data packets and trailer: from the trailer once it has
+            // come, else from the buffer, else from what has been seen.
+            let packets = match &block.trailer {
+                Some(t) => u64::from(t.last_payload_id) + 2,
+                None if !block.buffer.is_empty() => block.buffer.len().div_ceil(stride) as u64 + 2,
+                None => u64::from(resend.frontier()) + 1,
+            };
+            let done = resend.due(
+                now,
+                &config,
+                packets,
+                (block.block_id, block.extended_ids),
+                out,
+            );
+            if done.newly_requested > 0 {
+                self.stats.record_resend_requested(done.newly_requested);
+            }
+            if done.budget_spent {
+                debug!(
+                    block_id = block.block_id,
+                    packets,
+                    budget = config.budget,
+                    "resend budget spent: no more requests for this block"
+                );
+            }
+        }
     }
 
     /// Close every block that has been silent for the block timeout.
@@ -506,6 +642,8 @@ impl Assembler {
         bitmap.reset(packets);
         self.in_flight.push_back(BlockInFlight {
             block_id: header.block_id,
+            extended_ids: header.extended_ids,
+            resend: self.config.resend.enabled.then(ResendState::default),
             last_packet: now,
             leader: None,
             leader_payload_type: None,
@@ -535,6 +673,7 @@ impl Assembler {
             .filter(|_| is_image_payload(leader.payload_type))
         else {
             block.unsupported = true;
+            block.resend = None;
             block.buffer = Vec::new();
             let payload_type = leader.payload_type;
             let block_id = block.block_id;
@@ -568,19 +707,22 @@ impl Assembler {
         ESTIMATE_CAP.max(self.config.payload_size.unwrap_or(0))
     }
 
-    fn on_payload(&mut self, index: usize, header: &GvspHeader, data: &[u8]) {
+    /// Place a data packet. Returns whether it counts as having arrived for
+    /// resend: a packet beyond the frame does not, a refused one does — the
+    /// camera would only send the same bytes again.
+    fn on_payload(&mut self, index: usize, header: &GvspHeader, data: &[u8]) -> bool {
         let packet_size = self.config.packet_size;
         let limit = self.buffer_limit() as u64;
         let block = &mut self.in_flight[index];
         if block.unsupported {
             self.stats.record_ignored_packet(IgnoredPacket::Unsupported);
-            return;
+            return false;
         }
         let packet_id = header.packet_id;
         let stride = payload_stride(packet_size, header.header_len);
         if packet_id == 0 || stride == 0 {
             self.stats.record_ignored_packet(IgnoredPacket::Malformed);
-            return;
+            return false;
         }
         if block
             .trailer
@@ -588,12 +730,12 @@ impl Assembler {
             .is_some_and(|t| packet_id > t.last_payload_id)
         {
             self.out_of_range(index, packet_id, data.len());
-            return;
+            return false;
         }
         let slot = (packet_id - 1) as usize;
         if block.bitmap.contains(slot) {
             self.stats.record_duplicate_packet();
-            return;
+            return true;
         }
         if data.len() > stride {
             // Written at our stride it would overlap the next packet: the two
@@ -602,13 +744,13 @@ impl Assembler {
             // scrambled, which is not.
             let block_id = block.block_id;
             self.size_mismatch(block_id, packet_id, data.len(), stride);
-            return;
+            return true;
         }
         let offset = slot as u64 * stride as u64;
         let end = offset + data.len() as u64;
         if end > limit {
             self.out_of_range(index, packet_id, data.len());
-            return;
+            return false;
         }
         let (offset, end) = (offset as usize, end as usize);
         if end > block.buffer.len() {
@@ -644,10 +786,28 @@ impl Assembler {
             block.short_packet = None;
             mismatches.push(pending);
         }
-        let block_id = block.block_id;
         for (id, len, stride) in mismatches {
-            self.size_mismatch(block_id, id, len, stride);
+            self.refuse_short(index, id, len, stride);
         }
+        true
+    }
+
+    /// A data packet shorter than the stride turned out not to be the last:
+    /// the camera's stride is not ours, so its bytes sit in the wrong place.
+    /// It is taken back out — bit cleared, bytes zeroed — so the frame closes
+    /// incomplete instead of completing with shifted data (Codex review of
+    /// #194). The camera would send the same bytes again, so it is not asked
+    /// for.
+    fn refuse_short(&mut self, index: usize, packet_id: u32, len: usize, stride: usize) {
+        let block = &mut self.in_flight[index];
+        let slot = (packet_id - 1) as usize;
+        if block.bitmap.clear(slot) {
+            let offset = slot * stride;
+            let end = (offset + len).min(block.buffer.len());
+            block.buffer[offset.min(end)..end].fill(0);
+        }
+        let block_id = block.block_id;
+        self.size_mismatch(block_id, packet_id, len, stride);
     }
 
     fn on_trailer(&mut self, index: usize, header: &GvspHeader, trailer: GvspTrailer<'_>) {
@@ -685,8 +845,7 @@ impl Assembler {
             && short.0 < last_payload_id
         {
             block.short_packet = None;
-            let block_id = block.block_id;
-            self.size_mismatch(block_id, short.0, short.1, short.2);
+            self.refuse_short(index, short.0, short.1, short.2);
         }
     }
 
@@ -832,6 +991,7 @@ mod tests {
     //! invented, so nothing here sleeps.
 
     use super::*;
+    use crate::stream::resend::ResendRequest;
     use viva_fake_gige::gvsp::{BlockSpec, Datagram, PacketKind, block_datagrams, image_size};
     use viva_fake_gige::{MONO8, MONO12_PACKED, PacketScript, ScriptStep};
 
@@ -1287,6 +1447,151 @@ mod tests {
         );
         // Packets 1..=4 are short, 5 is the last: four mismatches.
         assert_eq!(stats.snapshot().packets_size_mismatch, 4);
+    }
+
+    /// A short packet that is not the last is taken back out: the frame closes
+    /// incomplete, with zeros where it was, instead of completing with shifted
+    /// data (Codex review of #194).
+    #[test]
+    fn a_frame_of_short_packets_is_not_complete() {
+        let (mut asm, stats) = assembler();
+        let mut s = spec(1, 64, 32);
+        s.packet_size = 500;
+        let t0 = Instant::now();
+        let mut out = feed(&mut asm, &block_datagrams(&s, &image(2048, 17), &[]), t0);
+        out.extend(poll(&mut asm, t0 + Duration::from_secs(1)));
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].status,
+            FrameStatus::Incomplete { missing_packets: 4 },
+            "packets 1..=4 are short and not the last"
+        );
+        assert!(out[0].payload[..540 * 4].iter().all(|b| *b == 0));
+        assert_eq!(stats.snapshot().packets_size_mismatch, 4);
+    }
+
+    fn resend_assembler() -> (Assembler, StreamStatsAccumulator) {
+        let stats = StreamStatsAccumulator::new();
+        let mut config = AssemblyConfig::new(PACKET_SIZE);
+        config.resend.enabled = true;
+        (Assembler::new(config, stats.clone()), stats)
+    }
+
+    fn due(asm: &mut Assembler, at: Instant) -> Vec<ResendRequest> {
+        let mut out = Vec::new();
+        asm.resend_due(at, &mut out);
+        out
+    }
+
+    /// A lost data packet is asked for once its gap is old enough, and
+    /// counts as recovered when it comes.
+    #[test]
+    fn a_lost_packet_is_asked_for_and_counted_when_it_comes() {
+        let (mut asm, stats) = resend_assembler();
+        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 30), &[]);
+        let t0 = Instant::now();
+        let lost = datagrams[2].clone();
+        let rest: Vec<Datagram> = datagrams
+            .iter()
+            .filter(|d| d.packet_id != 2)
+            .cloned()
+            .collect();
+        assert!(feed(&mut asm, &rest, t0).is_empty());
+        assert!(due(&mut asm, t0 + MS).is_empty(), "younger than the delay");
+        assert_eq!(
+            due(&mut asm, t0 + 2 * MS),
+            vec![ResendRequest {
+                block_id: 5,
+                first: 2,
+                last: 2,
+                extended_ids: false
+            }]
+        );
+        let out = feed(&mut asm, &[lost], t0 + 3 * MS);
+        assert_eq!(out[0].status, FrameStatus::Complete);
+        let snap = stats.snapshot();
+        assert_eq!((snap.resend_requested, snap.resend_recovered), (1, 1));
+    }
+
+    /// A packet the camera sends again may carry status `0x0100`
+    /// (`PACKET_RESEND`): a success, so it is used.
+    #[test]
+    fn a_packet_marked_as_resent_is_used() {
+        let (mut asm, _) = assembler();
+        let mut datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 31), &[]);
+        datagrams[2].bytes[0] = 0x01;
+        let out = feed(&mut asm, &datagrams, Instant::now());
+        assert_eq!(out[0].status, FrameStatus::Complete);
+    }
+
+    /// The camera's "no longer available" is a bare header, here in the
+    /// trailer's format. It closes the range and is not the frame's status.
+    #[test]
+    fn an_unavailable_answer_closes_the_range_not_the_frame() {
+        let (mut asm, stats) = resend_assembler();
+        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 32), &[]);
+        let t0 = Instant::now();
+        let rest: Vec<Datagram> = datagrams
+            .iter()
+            .filter(|d| d.packet_id != 2)
+            .cloned()
+            .collect();
+        feed(&mut asm, &rest, t0);
+        assert_eq!(due(&mut asm, t0 + 2 * MS).len(), 1);
+        let bare = Datagram {
+            block_id: 5,
+            packet_id: 2,
+            kind: PacketKind::Trailer,
+            bytes: vec![0x80, 0x0C, 0x00, 0x05, 0x02, 0x00, 0x00, 0x02],
+        };
+        assert!(feed(&mut asm, &[bare], t0 + 3 * MS).is_empty());
+        assert!(due(&mut asm, t0 + 30 * MS).is_empty(), "not asked again");
+        let out = poll(&mut asm, t0 + Duration::from_secs(1));
+        assert_eq!(
+            out[0].status,
+            FrameStatus::Incomplete { missing_packets: 1 }
+        );
+        let snap = stats.snapshot();
+        assert_eq!(snap.resend_unavailable, 1);
+        assert_eq!(snap.packets_ignored_error_status, 1);
+    }
+
+    /// "Not yet available" and "temporarily unavailable" leave the range to
+    /// its retries.
+    #[test]
+    fn a_transient_answer_leaves_the_range_to_its_retries() {
+        let (mut asm, stats) = resend_assembler();
+        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 33), &[]);
+        let t0 = Instant::now();
+        let rest: Vec<Datagram> = datagrams
+            .iter()
+            .filter(|d| d.packet_id != 2)
+            .cloned()
+            .collect();
+        feed(&mut asm, &rest, t0);
+        assert_eq!(due(&mut asm, t0 + 2 * MS).len(), 1);
+        let bare = Datagram {
+            block_id: 5,
+            packet_id: 2,
+            kind: PacketKind::Payload,
+            bytes: vec![0x80, 0x14, 0x00, 0x05, 0x03, 0x00, 0x00, 0x02],
+        };
+        feed(&mut asm, &[bare], t0 + 3 * MS);
+        assert_eq!(due(&mut asm, t0 + 22 * MS).len(), 1, "asked again");
+        assert_eq!(stats.snapshot().resend_unavailable, 0);
+    }
+
+    /// A short packet is not asked for again: the camera would send the same
+    /// bytes.
+    #[test]
+    fn a_short_packet_is_not_asked_for_again() {
+        let (mut asm, stats) = resend_assembler();
+        let mut s = spec(1, 64, 32);
+        s.packet_size = 500;
+        let t0 = Instant::now();
+        feed(&mut asm, &block_datagrams(&s, &image(2048, 34), &[]), t0);
+        assert!(due(&mut asm, t0 + 10 * MS).is_empty());
+        assert_eq!(stats.snapshot().resend_requested, 0);
     }
 
     /// A trailer claiming four billion packets allocates and counts nothing on

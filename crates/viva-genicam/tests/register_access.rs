@@ -248,3 +248,52 @@ async fn fake_refuses_reads_of_write_only_registers() {
         "ACCESS_DENIED is an answer, not a missing command"
     );
 }
+
+/// `open_stream` claims control before it writes anything to the stream
+/// channel, multicast included. After control was released — or lost to a
+/// heartbeat — the multicast path used to write the destination first, which
+/// a device refuses from an application without privilege (Codex review of
+/// #194).
+#[tokio::test(flavor = "multi_thread")]
+async fn open_stream_claims_control_before_configuring_the_stream_channel() {
+    let cam = common::TestCamera::start().await;
+    let camera = connect_fake().await;
+    with_camera(&camera, |cam| {
+        use viva_genicam::genapi::RegisterIo;
+        // Give control up, as Viva Studio does between acquisitions.
+        cam.transport()
+            .write(CCP, &[0, 0, 0, 0])
+            .expect("release CCP");
+    })
+    .await;
+    let commands = cam.fake().commands();
+    commands.reset();
+
+    let iface = gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback");
+    let options = viva_genicam::StreamOptions::new()
+        .iface(iface)
+        .multicast(std::net::Ipv4Addr::new(239, 192, 1, 10));
+    // Joining a group on loopback is not supported everywhere; what matters
+    // here is the order of the writes, whatever the outcome.
+    let _ = with_camera(&camera, move |cam| cam.open_stream(options).map(drop)).await;
+
+    let writes: Vec<u64> = commands
+        .sequence()
+        .into_iter()
+        .filter(|(command, _)| matches!(command, GvcpCommand::WriteReg | GvcpCommand::WriteMem))
+        .map(|(_, addr)| addr)
+        .collect();
+    let claim = writes
+        .iter()
+        .position(|addr| *addr == CCP)
+        .unwrap_or_else(|| panic!("control was never claimed: {writes:x?}"));
+    let first_stream_write = writes
+        .iter()
+        .position(|addr| (0x0d00..0x0e00).contains(addr));
+    if let Some(first) = first_stream_write {
+        assert!(
+            claim < first,
+            "a stream channel register was written before control was claimed: {writes:x?}"
+        );
+    }
+}

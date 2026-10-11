@@ -7,16 +7,21 @@
 //! [`DeliveryQueue`] of [`DELIVERY_CAPACITY`]: when the application falls
 //! behind, the oldest waiting frame is dropped and counted as backpressure,
 //! rather than the kernel dropping packets where no counter can see them.
+//!
+//! The thread also enforces the camera as the only source, and sends the
+//! resend requests the assembler finds due — from this socket, to the
+//! camera's GVCP port, without waiting for an answer (SR-04).
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::stats::StreamStatsAccumulator;
+use super::resend::{ResendConfig, ResendRequest};
+use super::stats::{IgnoredPacket, StreamStatsAccumulator};
 use tracing::{debug, warn};
 use viva_gige::nic::{self, DEFAULT_RCVBUF_BYTES, RecvBuffer};
 
@@ -201,6 +206,23 @@ impl<T> DeliveryQueue<T> {
     }
 }
 
+/// Where resend requests go: the camera's GVCP address and the stream
+/// channel, packed as `ip << 32 | port << 16 | channel`. 0 is "do not ask",
+/// since 0.0.0.0 is never a camera.
+fn pack_target(camera: SocketAddrV4, channel: u16) -> u64 {
+    (u64::from(u32::from(*camera.ip())) << 32)
+        | (u64::from(camera.port()) << 16)
+        | u64::from(channel)
+}
+
+fn unpack_target(packed: u64) -> Option<(SocketAddrV4, u16)> {
+    (packed != 0).then(|| {
+        let ip = Ipv4Addr::from((packed >> 32) as u32);
+        let port = (packed >> 16) as u16;
+        (SocketAddrV4::new(ip, port), packed as u16)
+    })
+}
+
 /// State shared between a `FrameStream` and its receive thread.
 #[derive(Debug)]
 pub(crate) struct Shared {
@@ -210,22 +232,87 @@ pub(crate) struct Shared {
     /// `PayloadSize`; 0 when unknown.
     payload_size: AtomicU64,
     deliver_incomplete: AtomicBool,
+    /// The only source accepted, as a `u32`; 0 accepts any.
+    source_filter: AtomicU32,
+    /// See [`pack_target`].
+    resend_target: AtomicU64,
+    resend_delay_ns: AtomicU64,
+    resend_retry_ns: AtomicU64,
+    resend_max_requests: AtomicU32,
+    /// `f64` bits.
+    resend_budget: AtomicU64,
 }
 
 impl Shared {
     pub(crate) fn new() -> Self {
+        let resend = ResendConfig::default();
         Self {
             queue: DeliveryQueue::new(DELIVERY_CAPACITY),
             stop: AtomicBool::new(false),
             block_timeout_ns: AtomicU64::new(DEFAULT_BLOCK_TIMEOUT.as_nanos() as u64),
             payload_size: AtomicU64::new(0),
             deliver_incomplete: AtomicBool::new(false),
+            source_filter: AtomicU32::new(0),
+            resend_target: AtomicU64::new(0),
+            resend_delay_ns: AtomicU64::new(nanos(resend.delay)),
+            resend_retry_ns: AtomicU64::new(nanos(resend.retry_interval)),
+            resend_max_requests: AtomicU32::new(resend.max_requests),
+            resend_budget: AtomicU64::new(resend.budget.to_bits()),
+        }
+    }
+
+    pub(crate) fn set_source_filter(&self, camera: Option<Ipv4Addr>) {
+        self.source_filter
+            .store(camera.map_or(0, u32::from), Ordering::Relaxed);
+    }
+
+    pub(crate) fn source_filter(&self) -> Option<Ipv4Addr> {
+        match self.source_filter.load(Ordering::Relaxed) {
+            0 => None,
+            ip => Some(Ipv4Addr::from(ip)),
+        }
+    }
+
+    pub(crate) fn set_resend_target(&self, target: Option<(SocketAddrV4, u16)>) {
+        let packed = target.map_or(0, |(camera, channel)| pack_target(camera, channel));
+        self.resend_target.store(packed, Ordering::Relaxed);
+    }
+
+    pub(crate) fn resend_target(&self) -> Option<(SocketAddrV4, u16)> {
+        unpack_target(self.resend_target.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_resend_delay(&self, delay: Duration) {
+        self.resend_delay_ns.store(nanos(delay), Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_resend_retry_interval(&self, interval: Duration) {
+        self.resend_retry_ns
+            .store(nanos(interval), Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_resend_max_requests(&self, requests: u32) {
+        self.resend_max_requests.store(requests, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_resend_budget(&self, budget: f64) {
+        self.resend_budget
+            .store(budget.to_bits(), Ordering::Relaxed);
+    }
+
+    fn resend_config(&self) -> ResendConfig {
+        ResendConfig {
+            enabled: self.resend_target.load(Ordering::Relaxed) != 0,
+            delay: Duration::from_nanos(self.resend_delay_ns.load(Ordering::Relaxed)),
+            retry_interval: Duration::from_nanos(self.resend_retry_ns.load(Ordering::Relaxed)),
+            max_requests: self.resend_max_requests.load(Ordering::Relaxed),
+            budget: f64::from_bits(self.resend_budget.load(Ordering::Relaxed)),
         }
     }
 
     pub(crate) fn set_block_timeout(&self, timeout: Duration) {
-        let nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
-        self.block_timeout_ns.store(nanos, Ordering::Relaxed);
+        self.block_timeout_ns
+            .store(nanos(timeout), Ordering::Relaxed);
     }
 
     pub(crate) fn block_timeout(&self) -> Duration {
@@ -251,6 +338,10 @@ impl Shared {
     fn deliver_incomplete(&self) -> bool {
         self.deliver_incomplete.load(Ordering::Relaxed)
     }
+}
+
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Marks the queue finished however the thread exits, a panic included, so
@@ -354,23 +445,38 @@ fn run(
     rcvbuf.ensure(&socket, assembler.frame_size_hint());
     let mut buf = vec![0u8; DATAGRAM_MAX];
     let mut done: Vec<AssembledBlock> = Vec::new();
+    let mut requests: Vec<ResendRequest> = Vec::new();
+    let mut sender = ResendSender::default();
     let mut reset_logged = false;
 
     while !shared.stop.load(Ordering::Acquire) {
+        let received = socket.recv_from(&mut buf);
+        // Settings are read after the wait, so one changed while the thread
+        // was blocked in the read applies to the datagram that ended it.
         let wanted = AssemblyConfig {
             packet_size,
             payload_size: shared.payload_size(),
             block_timeout: shared.block_timeout(),
+            resend: shared.resend_config(),
         };
         if wanted != assembler.config() {
             assembler.set_config(wanted);
         }
+        let source_filter = shared.source_filter();
 
-        match socket.recv_from(&mut buf) {
-            Ok((len, _from)) => {
+        match received {
+            Ok((len, from)) => {
                 stats.record_packet_received();
-                silence.record_packet();
-                assembler.ingest(&buf[..len], Instant::now(), &mut done);
+                // SR-03: only the camera's datagrams are the stream's. A port
+                // another sender knows, or a second camera aimed at this one,
+                // must not fill or split its frames.
+                if source_filter.is_some_and(|camera| from.ip() != IpAddr::V4(camera)) {
+                    stats.record_ignored_packet(IgnoredPacket::Foreign);
+                    silence.record_foreign(from);
+                } else {
+                    silence.record_packet();
+                    assembler.ingest(&buf[..len], Instant::now(), &mut done);
+                }
             }
             Err(err)
                 if matches!(
@@ -400,13 +506,97 @@ fn run(
             }
         }
 
-        assembler.poll(Instant::now(), &mut done);
+        let now = Instant::now();
+        assembler.poll(now, &mut done);
+        if let Some((camera, channel)) = shared.resend_target() {
+            assembler.resend_due(now, &mut requests);
+            for request in requests.drain(..) {
+                sender.send(&socket, camera, channel, &request);
+            }
+        }
         let deliver_incomplete = shared.deliver_incomplete();
         for block in done.drain(..) {
             deliver(block, deliver_incomplete, &shared, &stats, &mut silence);
         }
         silence.tick();
         rcvbuf.ensure(&socket, assembler.frame_size_hint());
+    }
+}
+
+/// Sends `PACKETRESEND_CMD`s from the stream socket.
+#[derive(Debug)]
+struct ResendSender {
+    request_id: u16,
+    reset_logged: bool,
+    failure_logged: bool,
+}
+
+impl Default for ResendSender {
+    fn default() -> Self {
+        Self {
+            request_id: 1,
+            reset_logged: false,
+            failure_logged: false,
+        }
+    }
+}
+
+impl ResendSender {
+    /// Send one request. A failed send never ends the stream: the request is
+    /// lost like any datagram, and the frame closes incomplete if nothing else
+    /// brings the packets (SR-22).
+    fn send(
+        &mut self,
+        socket: &UdpSocket,
+        camera: SocketAddrV4,
+        channel: u16,
+        request: &ResendRequest,
+    ) {
+        let id = self.request_id;
+        // Request id 0 is not used on GVCP.
+        self.request_id = self.request_id.checked_add(1).unwrap_or(1);
+        let bytes = viva_gige::gvcp::encode_packet_resend(
+            id,
+            channel,
+            request.block_id,
+            request.first,
+            request.last,
+            request.extended_ids,
+        );
+        debug!(
+            block_id = request.block_id,
+            first = request.first,
+            last = request.last,
+            %camera,
+            "asking for lost packets"
+        );
+        match socket.send_to(&bytes, SocketAddr::V4(camera)) {
+            Ok(_) => {}
+            // Windows reports an earlier ICMP port-unreachable on the next
+            // call on the socket, a send included.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
+                ) =>
+            {
+                if !self.reset_logged {
+                    self.reset_logged = true;
+                    debug!(error = %err, "ignoring a connection reset while sending a resend request");
+                }
+            }
+            Err(err) => {
+                if !self.failure_logged {
+                    self.failure_logged = true;
+                    warn!(
+                        error = %err,
+                        %camera,
+                        "could not send a packet resend request; lost packets will not be \
+                         recovered while this persists"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -448,6 +638,9 @@ enum Silence {
     NoPacket,
     /// Datagrams are arriving and no frame has completed.
     NoFrame,
+    /// Datagrams are arriving, but only from addresses that are not the
+    /// camera's.
+    OnlyForeign(SocketAddr),
 }
 
 /// Warns once when a stream produces nothing, and names what to check.
@@ -469,6 +662,8 @@ struct SilenceWatch {
     packet_size: u32,
     saw_packet: bool,
     saw_frame: bool,
+    /// The first datagram from an address that is not the camera's.
+    saw_foreign: Option<SocketAddr>,
     warned: bool,
 }
 
@@ -479,6 +674,7 @@ impl SilenceWatch {
             packet_size,
             saw_packet: false,
             saw_frame: false,
+            saw_foreign: None,
             warned: false,
         }
     }
@@ -486,6 +682,11 @@ impl SilenceWatch {
     /// A datagram arrived — parsed or not. Malformed still means the path works.
     fn record_packet(&mut self) {
         self.saw_packet = true;
+    }
+
+    /// A datagram arrived from an address that is not the camera's.
+    fn record_foreign(&mut self, from: SocketAddr) {
+        self.saw_foreign.get_or_insert(from);
     }
 
     /// A frame completed, so there is nothing left to diagnose.
@@ -502,10 +703,10 @@ impl SilenceWatch {
             return Silence::Quiet;
         }
         self.warned = true;
-        if self.saw_packet {
-            Silence::NoFrame
-        } else {
-            Silence::NoPacket
+        match (self.saw_packet, self.saw_foreign) {
+            (true, _) => Silence::NoFrame,
+            (false, Some(from)) => Silence::OnlyForeign(from),
+            (false, None) => Silence::NoPacket,
         }
     }
 
@@ -523,6 +724,14 @@ impl SilenceWatch {
                  reached the camera; a camera waiting for a trigger; or a network path that \
                  cannot carry packets this large — retry with an explicit packet size of 1500 to \
                  rule that out"
+            ),
+            Silence::OnlyForeign(from) => warn!(
+                %from,
+                seconds,
+                "GVSP datagrams are arriving, but only from {from}, which is not the camera; \
+                 they are ignored and counted in packets_ignored_foreign. A camera that sends \
+                 its stream from another address than the one it answers control commands on \
+                 needs FrameStream::set_source_filter(None)"
             ),
             Silence::NoFrame => warn!(
                 packet_size = self.packet_size,
@@ -563,6 +772,21 @@ mod tests {
         let mut packets = SilenceWatch::new(1500);
         packets.record_packet();
         assert_eq!(packets.assess(SILENCE_GRACE), Silence::NoFrame);
+    }
+
+    #[test]
+    fn silence_watch_names_a_foreign_sender() {
+        let from: SocketAddr = "10.0.0.7:5000".parse().unwrap();
+        let mut watch = SilenceWatch::new(1500);
+        watch.record_foreign(from);
+        assert_eq!(watch.assess(SILENCE_GRACE), Silence::OnlyForeign(from));
+    }
+
+    #[test]
+    fn a_resend_target_round_trips_through_its_packing() {
+        let camera = SocketAddrV4::new(Ipv4Addr::new(169, 254, 1, 2), 3956);
+        assert_eq!(unpack_target(pack_target(camera, 7)), Some((camera, 7)));
+        assert_eq!(unpack_target(0), None);
     }
 
     #[test]

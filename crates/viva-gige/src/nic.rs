@@ -435,9 +435,9 @@ fn available() -> String {
 
 /// Read the MTU configured for the provided interface.
 ///
-/// On Linux the value is obtained from `/sys/class/net/<iface>/mtu` to avoid
-/// platform specific `ioctl` calls. The function falls back to the canonical
-/// Ethernet MTU (1500 bytes) when the information cannot be fetched.
+/// Linux reads `/sys/class/net/<iface>/mtu`, Windows `GetIfEntry2`, macOS
+/// the link-layer entry's `if_data.ifi_mtu` from `getifaddrs(3)`. Anything
+/// else, or a failed lookup, falls back to the Ethernet MTU of 1500 bytes.
 pub fn mtu(_iface: &Iface) -> io::Result<u32> {
     #[cfg(target_os = "linux")]
     {
@@ -483,7 +483,58 @@ pub fn mtu(_iface: &Iface) -> io::Result<u32> {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    match link_mtu(_iface.name()) {
+        Some(mtu) => {
+            tracing::debug!(name = _iface.name(), mtu, "resolved interface MTU");
+            return Ok(mtu);
+        }
+        None => {
+            debug!(
+                name = _iface.name(),
+                "no link-layer address entry for the interface; using an MTU of 1500"
+            );
+        }
+    }
+
     Ok(1500)
+}
+
+/// The MTU of interface `name` from its `AF_LINK` entry in `getifaddrs(3)`,
+/// whose `ifa_data` is the interface's `struct if_data` (TC-11).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn link_mtu(name: &str) -> Option<u32> {
+    use std::ffi::CStr;
+
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` fills `list` with a linked list it allocates, which
+    // is released with `freeifaddrs` below on every path that got one.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let mut found = None;
+    let mut entry = list;
+    while !entry.is_null() {
+        // SAFETY: `entry` is a node of the list `getifaddrs` returned, not yet
+        // freed; its name is a NUL-terminated C string.
+        let ifa = unsafe { &*entry };
+        let is_link = !ifa.ifa_addr.is_null()
+            // SAFETY: `ifa_addr` was checked non-null and points at a sockaddr.
+            && i32::from(unsafe { (*ifa.ifa_addr).sa_family }) == libc::AF_LINK;
+        // SAFETY: as above, `ifa_name` is a valid C string for the list's lifetime.
+        let same_name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes() == name.as_bytes();
+        if is_link && same_name && !ifa.ifa_data.is_null() {
+            // SAFETY: for an `AF_LINK` entry, `ifa_data` points at the
+            // interface's `struct if_data`.
+            let data = unsafe { &*(ifa.ifa_data as *const libc::if_data) };
+            found = Some(data.ifi_mtu);
+            break;
+        }
+        entry = ifa.ifa_next;
+    }
+    // SAFETY: `list` came from a successful `getifaddrs` and is freed once.
+    unsafe { libc::freeifaddrs(list) };
+    found
 }
 
 /// Largest packet an IPv4 datagram can carry.
@@ -535,6 +586,12 @@ impl Default for McOptions {
 }
 
 /// Bind a UDP socket configured for GVSP traffic.
+///
+/// `port` 0 lets the operating system choose a free port; read it back with
+/// `local_addr`. The socket is bound without `SO_REUSEADDR` or
+/// `SO_REUSEPORT`: a unicast stream port is this socket's alone, and with
+/// either option a second stream on the same host could bind it too and take
+/// a share of the camera's datagrams (SR-03).
 pub async fn bind_udp(
     bind: IpAddr,
     port: u16,
@@ -553,10 +610,6 @@ pub async fn bind_udp(
         IpAddr::V6(_) => Domain::IPV6,
     };
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-
-    socket.set_reuse_address(true)?;
-    #[cfg(all(unix, not(target_os = "solaris")))]
-    socket.set_reuse_port(true)?;
 
     let granted = request_recv_buffer(SockRef::from(&socket), recv_buffer)?;
     debug!(
@@ -612,6 +665,10 @@ pub async fn bind_multicast(
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
+    // Several receivers on one host may watch the same group and port — a
+    // controller and a monitor, say — and each needs its own socket bound to
+    // it. Every one of them gets each datagram sent to the group, so sharing
+    // the port here splits nothing, unlike a unicast port (`bind_udp`).
     if opts.reuse_addr {
         socket.set_reuse_address(true)?;
         #[cfg(all(unix, not(target_os = "solaris")))]
@@ -696,6 +753,17 @@ mod tests {
 
         assert_eq!(iface.ipv4(), Some(Ipv4Addr::LOCALHOST));
         assert_ne!(iface.ipv4(), Some(remote));
+    }
+
+    /// TC-11: macOS reads the interface's MTU instead of assuming Ethernet's;
+    /// `lo0` is 16384 by default.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn loopback_mtu_is_read_on_macos() {
+        let lo0 = Iface::from_system("lo0").expect("lo0");
+        let mtu = mtu(&lo0).expect("mtu");
+        assert_ne!(mtu, 1500, "the fallback, not lo0's own MTU");
+        assert!(mtu > 1500, "{mtu}");
     }
 
     #[test]

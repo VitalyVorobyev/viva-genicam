@@ -31,10 +31,14 @@ pub mod consts {
     pub const FORCEIP_COMMAND: u16 = 0x0004;
     /// Opcode of the FORCEIP acknowledgement.
     pub const FORCEIP_ACK: u16 = 0x0005;
-    /// Opcode for requesting packet resends.
+    /// Opcode of `PACKETRESEND_CMD`, which asks for no acknowledgement: the
+    /// answer is the packets themselves, on the stream channel. See
+    /// [`encode_packet_resend`](super::encode_packet_resend).
     pub const PACKET_RESEND_COMMAND: u16 = 0x0040;
-    /// Opcode of the packet resend acknowledgement.
-    pub const PACKET_RESEND_ACK: u16 = 0x0041;
+    /// Flag-byte bit 4 on `PACKETRESEND_CMD`: the payload carries a 64-bit
+    /// block id and 32-bit packet ids (GigE Vision 2.0 extended ids). The same
+    /// bit means "allow broadcast acknowledge" on `DISCOVERY_CMD`.
+    pub const PACKET_RESEND_EXTENDED_IDS: u8 = 0x10;
     /// Opcode of the PENDING_ACK acknowledgement (GigE Vision 1.2, section 18.5).
     ///
     /// A device that cannot complete a command within the controller's timeout
@@ -106,6 +110,23 @@ pub mod consts {
     /// window. GVSP image traffic does not count — a stream can be running at
     /// full rate while the control channel times out underneath it.
     pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
+
+    /// Number of stream channels the device implements
+    /// (`GevNumberOfStreamChannels`). Wireshark: `GVCP_NUMBER_OF_STREAM_CHANNELS`.
+    pub const NUMBER_OF_STREAM_CHANNELS: u64 = 0x0904;
+    /// GVCP Capability: one bit per optional command or feature. Wireshark:
+    /// `GVCP_CAPABILITY`.
+    pub const GVCP_CAPABILITY: u64 = 0x0934;
+    /// Capability bit 29 — counting from the most significant bit as bit 0,
+    /// as the specification does — `PACKETRESEND_CMD` supported. Wireshark's
+    /// `hf_gvcp_capability_packetresend` masks `0x00000004`; aravis reads the
+    /// same bit (`ARV_GVBS_GVCP_CAPABILITY_PACKET_RESEND`, `1 << 2`).
+    pub const CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004;
+    /// Timestamp tick frequency, high 32 bits (`GevTimestampTickFrequencyHigh`).
+    pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
+    /// Timestamp tick frequency, low 32 bits (`GevTimestampTickFrequencyLow`).
+    /// `GevSCPD` counts in these ticks.
+    pub const TIMESTAMP_TICK_FREQUENCY_LOW: u64 = 0x0940;
 
     // ── Message channel bootstrap registers ─────────────────────────────
     //
@@ -206,6 +227,62 @@ pub const SCPS_FIRE_TEST_PACKET: u32 = 0x8000_0000;
 /// talked us out of.
 pub const SCPS_DO_NOT_FRAGMENT: u32 = 0x4000_0000;
 
+/// Encode a `PACKETRESEND_CMD` asking the device to send packets
+/// `first_packet..=last_packet` of block `block_id` on stream channel
+/// `channel` again.
+///
+/// The command asks for **no acknowledgement**: the answer is the packets
+/// themselves, on the stream channel. With 16-bit block ids the payload is
+/// 12 bytes; with extended ids (`extended_ids`, flag `0x10`) it is 20:
+///
+/// | Bytes | Standard ids                   | Extended ids                |
+/// |-------|--------------------------------|-----------------------------|
+/// | 0–1   | stream channel index           | stream channel index        |
+/// | 2–3   | block id (16 bits)             | reserved, 0                 |
+/// | 4–7   | first packet id (24 bits)      | first packet id (32 bits)   |
+/// | 8–11  | last packet id (24 bits)       | last packet id (32 bits)    |
+/// | 12–19 | —                              | block id (64 bits)          |
+///
+/// The layout is the field table Wireshark's `packet-gvcp.c` dissects
+/// (`dissect_packetresend_cmd`, which reads the standard packet ids as the
+/// low 24 bits of each word). aravis builds the same bytes for channel 0
+/// (`arv_gvcp_packet_new_packet_resend_cmd`) — corroboration, not the rule.
+/// With standard ids the block id is truncated to its 16 bits and the packet
+/// ids to their 24, which is all those fields hold.
+pub fn encode_packet_resend(
+    request_id: u16,
+    channel: u16,
+    block_id: u64,
+    first_packet: u32,
+    last_packet: u32,
+    extended_ids: bool,
+) -> Bytes {
+    const PACKET_ID_24: u32 = 0x00FF_FFFF;
+    let length: u16 = if extended_ids { 20 } else { 12 };
+    let mut buf = BytesMut::with_capacity(viva_gencp::HEADER_SIZE + length as usize);
+    buf.put_u8(GVCP_CMD_KEY);
+    buf.put_u8(if extended_ids {
+        consts::PACKET_RESEND_EXTENDED_IDS
+    } else {
+        0
+    });
+    buf.put_u16(consts::PACKET_RESEND_COMMAND);
+    buf.put_u16(length);
+    buf.put_u16(request_id);
+    buf.put_u16(channel);
+    if extended_ids {
+        buf.put_u16(0);
+        buf.put_u32(first_packet);
+        buf.put_u32(last_packet);
+        buf.put_u64(block_id);
+    } else {
+        buf.put_u16(block_id as u16);
+        buf.put_u32(first_packet & PACKET_ID_24);
+        buf.put_u32(last_packet & PACKET_ID_24);
+    }
+    buf.freeze()
+}
+
 /// GVCP request header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GvcpRequestHeader {
@@ -243,9 +320,8 @@ impl GvcpRequestHeader {
     ///
     /// Bit 4 is overloaded by the specification: it means "allow broadcast
     /// acknowledge" on `DISCOVERY_CMD` and "64-bit block IDs" on
-    /// `PACKETRESEND_CMD`/`EVENT_CMD`/`EVENTDATA_CMD`. We only ever set it for
-    /// the former and only ever read it for the latter, so one mapping covers
-    /// both.
+    /// `PACKETRESEND_CMD`/`EVENT_CMD`/`EVENTDATA_CMD`. This header sets it only
+    /// as the former; [`encode_packet_resend`] writes its own flag byte.
     fn gvcp_flags_byte(&self) -> u8 {
         let mut byte = 0u8;
         if self.flags.contains(CommandFlags::ACK_REQUIRED) {
@@ -860,14 +936,20 @@ pub struct GigeDevice {
 pub struct StreamParams {
     /// Selected GVSP packet size (bytes).
     pub packet_size: u32,
-    /// Packet delay expressed in GVSP clock ticks (80 ns units).
-    pub packet_delay: u32,
+    /// `GevSCPD` written, in timestamp ticks; `None` when the stream left the
+    /// camera's own value alone.
+    pub packet_delay: Option<u32>,
     /// Link MTU used to derive the packet size.
     pub mtu: u32,
     /// Host IPv4 address configured on the device.
     pub host: Ipv4Addr,
     /// Host port configured on the device.
     pub port: u16,
+    /// Stream channel index.
+    pub channel: u32,
+    /// The camera's GVCP address, where packet resend requests go; `None`
+    /// for a stream received on a socket of the caller's.
+    pub camera: Option<SocketAddr>,
 }
 
 impl GigeDevice {
@@ -1537,7 +1619,28 @@ impl GigeDevice {
         Ok(raw & STREAM_PACKET_SIZE_MASK)
     }
 
-    /// Configure the packet delay (`GevSCPD`).
+    /// Read GVCP Capability (`0x0934`): which optional commands the device
+    /// implements. [`consts::CAPABILITY_PACKET_RESEND`] is the resend bit.
+    pub async fn gvcp_capability(&mut self) -> Result<u32, GigeError> {
+        self.read_u32(consts::GVCP_CAPABILITY).await
+    }
+
+    /// Read `GevNumberOfStreamChannels` (`0x0904`).
+    pub async fn stream_channel_count(&mut self) -> Result<u32, GigeError> {
+        self.read_u32(consts::NUMBER_OF_STREAM_CHANNELS).await
+    }
+
+    /// Read the timestamp tick frequency in hertz (`0x093C` high, `0x0940`
+    /// low): the unit of device timestamps and of `GevSCPD`. A device without
+    /// a timestamp clock reports 0.
+    pub async fn timestamp_tick_frequency(&mut self) -> Result<u64, GigeError> {
+        let high = self.read_u32(consts::TIMESTAMP_TICK_FREQUENCY_HIGH).await?;
+        let low = self.read_u32(consts::TIMESTAMP_TICK_FREQUENCY_LOW).await?;
+        Ok((u64::from(high) << 32) | u64::from(low))
+    }
+
+    /// Write `GevSCPD`, the delay between stream packets, in timestamp ticks
+    /// (see [`GigeDevice::timestamp_tick_frequency`]).
     pub async fn set_stream_packet_delay(
         &mut self,
         channel: u32,
@@ -1586,81 +1689,6 @@ impl GigeDevice {
         self.write_u32(consts::CURRENT_IP_CONFIG, updated).await?;
         info!(config = format!("0x{updated:08x}"), "enabled persistent IP");
         Ok(())
-    }
-
-    /// Request resend of a packet range for the provided block identifier.
-    pub async fn request_resend(
-        &mut self,
-        block_id: u16,
-        first_packet: u16,
-        last_packet: u16,
-    ) -> Result<(), GigeError> {
-        let mut payload = BytesMut::with_capacity(8);
-        payload.put_u16(block_id);
-        payload.put_u16(0); // Reserved as per spec.
-        payload.put_u16(first_packet);
-        payload.put_u16(last_packet);
-
-        let request_id = self.next_request_id();
-        let header = GvcpRequestHeader {
-            flags: CommandFlags::ACK_REQUIRED,
-            command: consts::PACKET_RESEND_COMMAND,
-            length: payload.len() as u16,
-            request_id,
-        };
-        let packet = header.encode(&payload);
-        trace!(
-            block_id,
-            first_packet, last_packet, request_id, "sending packet resend request"
-        );
-        self.socket.send(&packet).await?;
-        self.last_command_sent = time::Instant::now();
-        // A delayed heartbeat ACK has a payload; receive it in full before
-        // filtering by request ID rather than truncating it to a resend header.
-        let mut buf = [0u8; viva_gencp::HEADER_SIZE + consts::GENCP_MAX_BLOCK];
-        match self
-            .recv_for_request(
-                &mut buf,
-                request_id,
-                time::Instant::now() + self.control_timeout,
-            )
-            .await
-        {
-            AckRecv::Received(len) => {
-                if len != viva_gencp::HEADER_SIZE {
-                    return Err(GigeError::Protocol("resend ack length mismatch".into()));
-                }
-                let mut cursor = &buf[..];
-                let status = StatusCode::from_raw(cursor.get_u16());
-                let command = cursor.get_u16();
-                let length = cursor.get_u16();
-                let ack_request_id = cursor.get_u16();
-                if command == consts::PENDING_ACK {
-                    // Legal, but not worth waiting for: by the time the device
-                    // finished, the frame this resend belongs to would already
-                    // have been completed or dropped. Report it accurately
-                    // instead of as an unexpected opcode.
-                    return Err(GigeError::Protocol(
-                        "device requested more time for a packet resend".into(),
-                    ));
-                }
-                if command != consts::PACKET_RESEND_ACK {
-                    return Err(GigeError::Protocol("unexpected resend ack opcode".into()));
-                }
-                if length != 0 {
-                    return Err(GigeError::Protocol("resend ack carried payload".into()));
-                }
-                if ack_request_id != request_id {
-                    return Err(GigeError::Protocol("resend ack request id mismatch".into()));
-                }
-                if status != StatusCode::Success {
-                    return Err(GigeError::Status(status));
-                }
-                Ok(())
-            }
-            AckRecv::Io(err) => Err(err.into()),
-            AckRecv::TimedOut => Err(GigeError::Timeout),
-        }
     }
 }
 
@@ -2163,5 +2191,50 @@ mod tests {
         assert_eq!(converted.command, OpCode::ReadMem.ack_code());
         assert_eq!(converted.length, 12);
         assert_eq!(converted.request_id, 0x44);
+    }
+
+    /// The standard `PACKETRESEND_CMD`, written out byte by byte from the
+    /// field table (Wireshark `dissect_packetresend_cmd`), not from a round
+    /// trip through any parser of ours.
+    #[test]
+    fn packet_resend_has_the_12_byte_standard_layout() {
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            0x42, 0x00,             // key, flags: no acknowledgement, 16-bit ids
+            0x00, 0x40,             // PACKETRESEND_CMD
+            0x00, 0x0C,             // 12 bytes
+            0x12, 0x34,             // request id
+            0x00, 0x02,             // stream channel 2
+            0xBE, 0xEF,             // block id
+            0x00, 0x00, 0x00, 0x05, // first packet id
+            0x00, 0x12, 0x34, 0x56, // last packet id
+        ];
+        assert_eq!(
+            encode_packet_resend(0x1234, 2, 0xBEEF, 5, 0x12_3456, false).as_ref(),
+            expected
+        );
+        // The fields hold 16 and 24 bits; nothing spills into the neighbours.
+        let truncated = encode_packet_resend(1, 0, 0x1_0002, 0xFF00_0001, 0xFF00_0002, false);
+        assert_eq!(&truncated[10..], &[0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn packet_resend_has_the_20_byte_extended_layout() {
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            0x42, 0x10,             // key, flags: extended ids, no acknowledgement
+            0x00, 0x40,             // PACKETRESEND_CMD
+            0x00, 0x14,             // 20 bytes
+            0x00, 0x07,             // request id
+            0x00, 0x01,             // stream channel 1
+            0x00, 0x00,             // reserved
+            0x01, 0x00, 0x00, 0x05, // first packet id, all 32 bits
+            0x01, 0x00, 0x00, 0x09, // last packet id
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, // block id
+        ];
+        assert_eq!(
+            encode_packet_resend(7, 1, (1 << 32) | 2, 0x0100_0005, 0x0100_0009, true).as_ref(),
+            expected
+        );
     }
 }

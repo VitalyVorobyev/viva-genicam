@@ -163,11 +163,18 @@ Application code opens streams through `viva-genicam`, not this crate directly:
 ```
 
 `Camera::open_stream` takes a `StreamOptions` (`iface`, `packet_size`,
-`auto_packet_size`, `multicast`, `destination_port`, `rcvbuf_bytes`). The
-lower-level `StreamBuilder` (in `viva_genicam::stream`) adds `dest`,
-`target_mtu`, `probe`, `packet_delay` and `channel`, for a stream built on a
+`auto_packet_size`, `multicast`, `destination_port`, `packet_delay`, `resend`,
+`rcvbuf_bytes`). The lower-level `StreamBuilder` (in `viva_genicam::stream`)
+adds `dest`, `target_mtu`, `probe` and `channel`, for a stream built on a
 `GigeDevice` of your own; `FrameStream::new` then starts the receive engine on
 it.
+
+Either way the socket is bound first, to a port the operating system picks
+unless `destination_port` names one, and that port is what the stream channel
+is pointed at; `GevSCPD` is written only for a `packet_delay`, in the camera's
+timestamp ticks; a channel at or beyond `GevNumberOfStreamChannels` is refused
+before anything is written; and the stream accepts datagrams only from the
+camera's address.
 
 ### Packet size and MTU
 
@@ -200,9 +207,16 @@ belong to this layer:
 
 ### Resend
 
-No stream requests a packet resend yet
-([#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191)); a lost
-packet is a lost frame.
+`gvcp::encode_packet_resend` builds `PACKETRESEND_CMD` (`0x0040`): 12 bytes of
+stream channel, 16-bit block id and 24-bit first and last packet ids, or 20
+bytes with extended ids (flag `0x10`): channel, a reserved half-word, 32-bit
+packet ids and the 64-bit block id. It asks for no acknowledgement — the answer
+is the packets themselves. The receive engine sends it from the stream socket
+to the camera's control port, when `GigeDevice::gvcp_capability` has bit `0x4`
+set; `gvsp::status` names the statuses a camera answers with when it cannot,
+and `gvsp::parse_header` reads such an answer, which is a header and nothing
+else. When and how often the engine asks is in
+[Streaming → Packet resend](../tutorials/streaming.md#46-packet-resend).
 
 ### Chunk data
 

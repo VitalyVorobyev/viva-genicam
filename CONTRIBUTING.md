@@ -75,7 +75,7 @@ cargo test -p viva-genicam --test inflight_keepalive # probes continue while reg
 cargo test -p viva-genicam --test keepalive_shutdown # dropping the transport cancels keepalive I/O
 cargo test -p viva-gige    --test inflight_keepalive # heartbeats during long ACK waits (ADR-0023)
 # GVSP receive engine, from scripted datagrams on ephemeral ports (no UDP 3956)
-cargo test -p viva-genicam --test gvsp_engine        # reordering, loss, timeouts, counters (ADR-0025)
+cargo test -p viva-genicam --test gvsp_engine        # reordering, loss, resend, timeouts, counters (ADR-0025)
 # USB3 Vision
 cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva-fake-u3v
 cargo test -p viva-u3v     --test gencp_conformance  # wire layouts from GenCP 1.2 and vendor XML

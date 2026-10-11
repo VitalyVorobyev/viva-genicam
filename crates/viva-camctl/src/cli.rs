@@ -137,8 +137,19 @@ pub enum Cmd {
         mode: String,
         #[arg(long)]
         group: Option<Ipv4Addr>,
-        #[arg(long, default_value_t = 10040)]
-        port: u16,
+        /// Receive on this UDP port, for a firewall that admits only it
+        /// [default: a free port the operating system picks]
+        #[arg(long)]
+        port: Option<u16>,
+        /// Have the camera wait this many nanoseconds between packets
+        /// (GevSCPD, converted to its timestamp ticks) [default: leave
+        /// GevSCPD as it is]
+        #[arg(long)]
+        packet_delay_ns: Option<u64>,
+        /// Never ask the camera to resend lost packets [default: ask, if the
+        /// camera supports it]
+        #[arg(long)]
+        no_resend: bool,
         /// Set GevSCPSPacketSize from the host NIC MTU, then path-probe
         /// (ADR-0021). Mutually exclusive with --packet-size. Default is to
         /// leave the camera's current value alone.
@@ -200,8 +211,19 @@ pub enum Cmd {
         mode: String,
         #[arg(long)]
         group: Option<Ipv4Addr>,
-        #[arg(long, default_value_t = 10040)]
-        port: u16,
+        /// Receive on this UDP port, for a firewall that admits only it
+        /// [default: a free port the operating system picks]
+        #[arg(long)]
+        port: Option<u16>,
+        /// Have the camera wait this many nanoseconds between packets
+        /// (GevSCPD, converted to its timestamp ticks) [default: leave
+        /// GevSCPD as it is]
+        #[arg(long)]
+        packet_delay_ns: Option<u64>,
+        /// Never ask the camera to resend lost packets [default: ask, if the
+        /// camera supports it]
+        #[arg(long)]
+        no_resend: bool,
         #[arg(long, default_value_t = 300)]
         duration_s: u64,
         #[arg(long)]
@@ -357,6 +379,8 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             mode,
             group,
             port,
+            packet_delay_ns,
+            no_resend,
             packet_size,
             auto,
             save,
@@ -371,6 +395,8 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 mode,
                 group,
                 port,
+                packet_delay: packet_delay_ns.map(Duration::from_nanos),
+                resend: !no_resend,
                 packet_size,
                 auto,
                 save,
@@ -401,6 +427,8 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             mode,
             group,
             port,
+            packet_delay_ns,
+            no_resend,
             duration_s,
             json_out,
         } => {
@@ -411,6 +439,8 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 mode,
                 group,
                 port,
+                packet_delay: packet_delay_ns.map(Duration::from_nanos),
+                resend: !no_resend,
                 duration_s,
                 json_out,
             };
@@ -467,9 +497,40 @@ mod tests {
                 mode, port, group, ..
             } => {
                 assert_eq!(mode, "multicast");
-                assert_eq!(port, 12000);
+                assert_eq!(port, Some(12000));
                 assert_eq!(group, Some("239.1.1.1".parse().unwrap()));
             }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// No `--port` lets the operating system pick one (SR-03); resend is on
+    /// unless asked off, and `GevSCPD` is left alone unless a delay is given.
+    #[test]
+    fn stream_defaults_leave_the_port_delay_and_resend_to_the_library() {
+        let cli = Cli::parse_from(["viva-camctl", "stream"]);
+        match cli.cmd {
+            Cmd::Stream {
+                port,
+                packet_delay_ns,
+                no_resend,
+                ..
+            } => assert_eq!((port, packet_delay_ns, no_resend), (None, None, false)),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "viva-camctl",
+            "bench",
+            "--packet-delay-ns",
+            "2000",
+            "--no-resend",
+        ]);
+        match cli.cmd {
+            Cmd::Bench {
+                packet_delay_ns,
+                no_resend,
+                ..
+            } => assert_eq!((packet_delay_ns, no_resend), (Some(2000), true)),
             other => panic!("unexpected variant: {other:?}"),
         }
     }

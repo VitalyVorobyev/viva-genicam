@@ -22,8 +22,11 @@ const EWMA_ALPHA: f64 = 0.2;
 /// **Packets.** `packets_received` counts every datagram read from the socket;
 /// the other packet counters say what became of the ones that were not used.
 ///
-/// Resend counters arrive with packet resend (milestone S); until something
-/// can increment them they are not here.
+/// **Resend.** Each packet asked for again counts once in `resend_requested`,
+/// however many requests it took, and then at most once more: in
+/// `resend_recovered` if it arrived, in `resend_unavailable` if the camera
+/// said it no longer has it. What is left was neither — lost again, or its
+/// frame closed first.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct StreamStats {
@@ -57,9 +60,18 @@ pub struct StreamStats {
     pub packets_ignored_late: u64,
     /// Leader or data packets whose status reports an error.
     pub packets_ignored_error_status: u64,
+    /// Datagrams from an address other than the camera's.
+    pub packets_ignored_foreign: u64,
     /// Data packets, other than a block's last, whose length is not the
-    /// stride the packet size implies.
+    /// stride the packet size implies. They are not used: a frame that had
+    /// one closes incomplete.
     pub packets_size_mismatch: u64,
+    /// Packets asked for again, each counted once however often it was asked.
+    pub resend_requested: u64,
+    /// Packets asked for again that then arrived.
+    pub resend_recovered: u64,
+    /// Packets asked for again that the camera answered it no longer has.
+    pub resend_unavailable: u64,
     /// Payload bytes of complete frames handed to the application.
     pub bytes: u64,
     /// Time between the last two complete frames.
@@ -91,6 +103,7 @@ impl StreamStats {
             + self.packets_ignored_out_of_range
             + self.packets_ignored_late
             + self.packets_ignored_error_status
+            + self.packets_ignored_foreign
     }
 }
 
@@ -106,8 +119,11 @@ pub(crate) enum IgnoredPacket {
     OutOfRange,
     /// For a block already closed, or older than the blocks in flight.
     Late,
-    /// A leader or data packet whose status reports an error.
+    /// A leader or data packet whose status reports an error, or a resend
+    /// answer that carries no data.
     ErrorStatus,
+    /// From an address other than the camera's.
+    Foreign,
 }
 
 #[derive(Debug)]
@@ -135,7 +151,11 @@ struct StatsInner {
     ignored_out_of_range: AtomicU64,
     ignored_late: AtomicU64,
     ignored_error_status: AtomicU64,
+    ignored_foreign: AtomicU64,
     packets_size_mismatch: AtomicU64,
+    resend_requested: AtomicU64,
+    resend_recovered: AtomicU64,
+    resend_unavailable: AtomicU64,
     bytes: AtomicU64,
     rates: Mutex<Rates>,
 }
@@ -173,7 +193,11 @@ impl StreamStatsAccumulator {
                 ignored_out_of_range: zero(),
                 ignored_late: zero(),
                 ignored_error_status: zero(),
+                ignored_foreign: zero(),
                 packets_size_mismatch: zero(),
+                resend_requested: zero(),
+                resend_recovered: zero(),
+                resend_unavailable: zero(),
                 bytes: zero(),
                 rates: Mutex::new(Rates {
                     last_frame_dt: Duration::ZERO,
@@ -204,6 +228,7 @@ impl StreamStatsAccumulator {
             IgnoredPacket::OutOfRange => &self.inner.ignored_out_of_range,
             IgnoredPacket::Late => &self.inner.ignored_late,
             IgnoredPacket::ErrorStatus => &self.inner.ignored_error_status,
+            IgnoredPacket::Foreign => &self.inner.ignored_foreign,
         };
         add(counter, 1);
     }
@@ -211,6 +236,21 @@ impl StreamStatsAccumulator {
     /// A data packet other than a block's last did not fill the stride.
     pub(crate) fn record_size_mismatch(&self) {
         add(&self.inner.packets_size_mismatch, 1);
+    }
+
+    /// `count` packets were asked for again for the first time.
+    pub(crate) fn record_resend_requested(&self, count: u64) {
+        add(&self.inner.resend_requested, count);
+    }
+
+    /// A packet asked for again arrived.
+    pub(crate) fn record_resend_recovered(&self) {
+        add(&self.inner.resend_recovered, 1);
+    }
+
+    /// The camera answered that it no longer has `count` packets asked for.
+    pub(crate) fn record_resend_unavailable(&self, count: u64) {
+        add(&self.inner.resend_unavailable, count);
     }
 
     /// A frame closed incomplete without `count` of its packets.
@@ -299,7 +339,11 @@ impl StreamStatsAccumulator {
             packets_ignored_out_of_range: get(&inner.ignored_out_of_range),
             packets_ignored_late: get(&inner.ignored_late),
             packets_ignored_error_status: get(&inner.ignored_error_status),
+            packets_ignored_foreign: get(&inner.ignored_foreign),
             packets_size_mismatch: get(&inner.packets_size_mismatch),
+            resend_requested: get(&inner.resend_requested),
+            resend_recovered: get(&inner.resend_recovered),
+            resend_unavailable: get(&inner.resend_unavailable),
             bytes: get(&inner.bytes),
             last_frame_dt: rates.last_frame_dt,
             avg_fps: rates.avg_fps,
@@ -325,12 +369,25 @@ mod tests {
         stats.record_backpressure_drop();
         stats.record_ignored_packet(IgnoredPacket::Late);
         stats.record_ignored_packet(IgnoredPacket::Malformed);
+        stats.record_ignored_packet(IgnoredPacket::Foreign);
         stats.record_duplicate_packet();
+        stats.record_resend_requested(3);
+        stats.record_resend_recovered();
+        stats.record_resend_unavailable(1);
         let snap = stats.clone().snapshot();
         assert_eq!(snap.frames_complete, 2);
         assert_eq!(snap.bytes, 200);
         assert_eq!(snap.frames_lost(), 1 + 3 + 1);
-        assert_eq!(snap.packets_ignored(), 2);
+        assert_eq!(snap.packets_ignored(), 3);
+        assert_eq!(snap.packets_ignored_foreign, 1);
+        assert_eq!(
+            (
+                snap.resend_requested,
+                snap.resend_recovered,
+                snap.resend_unavailable
+            ),
+            (3, 1, 1)
+        );
         assert_eq!(snap.packets_duplicate, 1);
         assert_eq!(snap.packets_ignored_late, 1);
     }

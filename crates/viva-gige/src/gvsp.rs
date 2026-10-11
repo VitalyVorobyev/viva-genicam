@@ -51,6 +51,25 @@ const FORMAT_TRAILER: u8 = 0x02;
 /// Packet format: generic data payload.
 const FORMAT_PAYLOAD: u8 = 0x03;
 
+/// GVSP packet status codes that concern packet resend. Names from
+/// Wireshark's `packet-gvcp.c` status table (`GEV_STATUS_*`); bit 15 marks an
+/// error.
+pub mod status {
+    /// Success: a packet sent again in answer to a resend request.
+    pub const PACKET_RESEND: u16 = 0x0100;
+    /// The packet asked for is no longer available.
+    pub const PACKET_UNAVAILABLE: u16 = 0x800C;
+    /// The packet asked for has not been sent yet.
+    pub const PACKET_NOT_YET_AVAILABLE: u16 = 0x8010;
+    /// The packet asked for, and every packet before it, has been removed
+    /// from the device's memory.
+    pub const PACKET_AND_PREVIOUS_REMOVED_FROM_MEMORY: u16 = 0x8011;
+    /// The packet asked for has been removed from the device's memory.
+    pub const PACKET_REMOVED_FROM_MEMORY: u16 = 0x8012;
+    /// The packet asked for cannot be sent just now (GigE Vision 2.0).
+    pub const PACKET_TEMPORARILY_UNAVAILABLE: u16 = 0x8014;
+}
+
 /// Destination for GVSP packets received by the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamDest {
@@ -104,14 +123,13 @@ pub struct StreamConfig {
     pub dest: StreamDest,
     /// Interface used for receiving packets and multicast subscription.
     pub iface: Iface,
-    /// Override for GVSP packet size determined via control plane.
+    /// GVSP packet size in force.
     pub packet_size: Option<u32>,
-    /// Override for GVSP packet delay determined via control plane.
+    /// `GevSCPD` written, in timestamp ticks; `None` when left alone.
     pub packet_delay: Option<u32>,
-    /// Optional source filter restricting packets to the configured IPv4 address.
+    /// The only address GVSP is accepted from: the camera's. Datagrams from
+    /// any other source are ignored and counted.
     pub source_filter: Option<Ipv4Addr>,
-    /// Whether GVCP resend requests should be issued when drops are detected.
-    pub resend_enabled: bool,
 }
 
 /// Errors raised while handling GVSP packets.
@@ -122,8 +140,6 @@ pub enum GvspError {
     Unsupported(&'static str),
     #[error("invalid packet: {0}")]
     Invalid(&'static str),
-    #[error("resend timeout")]
-    ResendTimeout,
 }
 
 /// Raw GVSP chunk extracted from a payload or trailer block.
@@ -272,13 +288,32 @@ pub struct GvspPacketRef<'a> {
 /// Fails only on a datagram too short for the header its own flag announces,
 /// or for the fixed fields of a leader or trailer.
 pub fn parse_packet_ref(datagram: &[u8]) -> Result<GvspPacketRef<'_>, GvspError> {
+    let header = parse_header(datagram)?;
+    let packet_format = datagram[4] & 0x0F;
+    let body = &datagram[header.header_len..];
+    let content = match packet_format {
+        FORMAT_LEADER => GvspContent::Leader(parse_leader(body)?),
+        FORMAT_PAYLOAD => GvspContent::Payload(body),
+        FORMAT_TRAILER => GvspContent::Trailer(parse_trailer(header.block_id, body)?),
+        other => GvspContent::Unsupported {
+            packet_format: other,
+        },
+    };
+    Ok(GvspPacketRef { header, content })
+}
+
+/// Parse only the header of a GVSP datagram.
+///
+/// What a packet that carries nothing else needs: a device answering a resend
+/// request it cannot serve sends a bare header with an error status, which
+/// [`parse_packet_ref`] would refuse as a truncated leader or trailer.
+pub fn parse_header(datagram: &[u8]) -> Result<GvspHeader, GvspError> {
     if datagram.len() < GVSP_HEADER_SIZE {
         return Err(GvspError::Invalid("GVSP header truncated"));
     }
     let status = u16::from_be_bytes([datagram[0], datagram[1]]);
     let format_byte = datagram[4];
     let extended_ids = format_byte & EXTENDED_ID_FLAG != 0;
-    let packet_format = format_byte & 0x0F;
 
     let header = if extended_ids {
         if datagram.len() < GVSP_EXTENDED_HEADER_SIZE {
@@ -302,17 +337,7 @@ pub fn parse_packet_ref(datagram: &[u8]) -> Result<GvspPacketRef<'_>, GvspError>
             header_len: GVSP_HEADER_SIZE,
         }
     };
-
-    let body = &datagram[header.header_len..];
-    let content = match packet_format {
-        FORMAT_LEADER => GvspContent::Leader(parse_leader(body)?),
-        FORMAT_PAYLOAD => GvspContent::Payload(body),
-        FORMAT_TRAILER => GvspContent::Trailer(parse_trailer(header.block_id, body)?),
-        other => GvspContent::Unsupported {
-            packet_format: other,
-        },
-    };
-    Ok(GvspPacketRef { header, content })
+    Ok(header)
 }
 
 /// Parse a data leader's payload.
@@ -505,6 +530,17 @@ impl PacketBitmap {
         } else {
             false
         }
+    }
+
+    /// Unmark a packet index. Returns `false` for an index not marked.
+    pub fn clear(&mut self, packet_id: usize) -> bool {
+        if !self.contains(packet_id) {
+            return false;
+        }
+        let (word, mask) = self.mask_for(packet_id);
+        self.words[word] &= !mask;
+        self.received -= 1;
+        true
     }
 
     /// Whether the first `count` indices are all marked received.
@@ -899,5 +935,17 @@ mod tests {
     fn a_truncated_extended_header_is_invalid() {
         let pkt = [0x00, 0x00, 0x00, 0x00, 0x83, 0x00, 0x00, 0x00, 0x00, 0x00];
         assert!(matches!(parse_packet_ref(&pkt), Err(GvspError::Invalid(_))));
+    }
+
+    /// A device that cannot resend a packet answers with a bare header: an
+    /// error status, the block and the packet id. Only the header parser can
+    /// read it; as a trailer it is truncated.
+    #[test]
+    fn a_bare_header_parses_on_its_own() {
+        let bare = [0x80, 0x0C, 0x00, 0x09, 0x02, 0x00, 0x00, 0x05];
+        let header = parse_header(&bare).expect("header");
+        assert_eq!(header.status, status::PACKET_UNAVAILABLE);
+        assert_eq!((header.block_id, header.packet_id), (9, 5));
+        assert!(parse_packet_ref(&bare).is_err());
     }
 }

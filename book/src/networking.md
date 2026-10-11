@@ -124,10 +124,12 @@ Then check the three things that most often stop a camera working on Windows:
 - **Firewall.** On first run Windows may ask whether to allow the program on
   Private / Public networks. Allow it on the profile the camera network uses —
   if in doubt, both. Discovery replies and the GVSP stream are both inbound UDP
-  (the stream arrives on `viva-camctl stream`'s `--port`, `10040` by default;
-  the library, Python and Viva Studio default to `0x5FFF`, 24575), so a firewall that blocks them breaks discovery or streaming even
-  though nothing reports an error. Running the terminal as Administrator the
-  first time makes sure the prompt can appear.
+  (the stream arrives on a port the operating system picks for each stream,
+  unless you name one — see [§3.3](#33-letting-the-reply-back-in-firewalld)),
+  so a firewall that blocks them breaks discovery or streaming even though
+  nothing reports an error. Allowing the program, rather than a port, covers
+  both. Running the terminal as Administrator the first time makes sure the
+  prompt can appear.
 - **Power saving.** Turn off "energy efficient Ethernet" and similar options in
   the NIC driver's advanced settings, and keep the power plan on high
   performance; they add latency and jitter.
@@ -208,7 +210,7 @@ Yours — substitute your own:
 | Host link-local address | Let the OS assign one, or pick an unused `169.254.x.y` |
 | Camera address | Whatever `viva-camctl list` reports; it can change between sessions |
 | firewalld zone | `firewall-cmd --get-active-zones` |
-| GVSP destination port | `10040` for `viva-camctl stream` unless you pass `--port`; `24575` (`0x5FFF`) for the library unless you set `StreamBuilder::destination_port` |
+| GVSP destination port | Picked by the operating system for each stream, unless you name one: `--port` on `viva-camctl stream`, `destination_port` in Rust and Python |
 
 ### 3.2. Giving the host a link-local address (Linux)
 
@@ -232,8 +234,7 @@ Once the host has a link-local address, discovery sends its directed broadcast
 to `169.254.255.255:3956`.
 
 On Windows this step is normally automatic — an adapter with no DHCP lease
-self-assigns a `169.254.x.y` address. On macOS the same is true, though see the
-MTU note in [§4](#4-mtu-and-jumbo-frames): jumbo frames cannot be selected there.
+self-assigns a `169.254.x.y` address. On macOS the same is true.
 
 ### 3.3. Letting the reply back in (firewalld)
 
@@ -254,20 +255,24 @@ sudo firewall-cmd --zone=public \
 Replace `public` with your zone. Keep `169.254.0.0/16` and `3956`.
 
 Streaming needs a second rule, because GVSP arrives on the port the host asked
-the camera to send to — `10040` for `viva-camctl stream`, `24575` (`0x5FFF`)
-for the library, Python and Viva Studio:
+the camera to send to. By default that is a free port the operating system
+picks for each stream, so either let in UDP from the camera's network:
 
 ```bash
-sudo firewall-cmd --zone=public --add-port=10040/udp   # viva-camctl stream
-sudo firewall-cmd --zone=public --add-port=24575/udp   # the library, Python, Viva Studio
+sudo firewall-cmd --zone=public \
+  --add-rich-rule='rule family="ipv4" source address="169.254.0.0/16" protocol value="udp" accept'
 ```
 
-If you override the port, allow the one you actually use:
+or name the port — `--port` on `viva-camctl stream`, `destination_port` in
+Rust (`StreamOptions`, `StreamBuilder`) and Python — and allow just that one:
 
 ```bash
 viva-camctl stream --ip <camera-ip> --iface <host-link-local-ip> --port <PORT>
 sudo firewall-cmd --zone=<your-zone> --add-port=<PORT>/udp
 ```
+
+A named port belongs to one stream: a second stream asking for the same port
+on the same host fails to open, rather than sharing the camera's packets.
 
 **These are runtime rules.** They vanish on the next firewall reload or reboot
 unless you repeat them with `--permanent`.
@@ -337,8 +342,11 @@ Typical steps:
 - **Host NIC:**
   - Windows: NIC properties → Advanced → "Jumbo Packet" or similar.
   - Linux: `sudo ip link set dev eth1 mtu 9000`
-  - macOS: some drivers expose an MTU setting in the network settings; others
-    do not support jumbo frames.
+  - macOS: System Settings → Network → the interface → Details → Hardware,
+    where the driver supports it; others do not support jumbo frames.
+
+The library reads the interface's MTU on Linux, Windows and macOS, so
+`--auto` (`auto_packet_size`) sizes packets from it.
 
 After changing MTU, confirm it took effect:
 
@@ -361,7 +369,10 @@ interval:
 
 If you see frame drops at high frame rates:
 
-1. Try slightly increasing the inter-packet delay.
+1. Try slightly increasing the inter-packet delay — in nanoseconds:
+   `viva-camctl stream --packet-delay-ns 2000`, `StreamOptions::packet_delay`
+   in Rust, `packet_delay_ns=` in Python. The library converts it to the
+   camera's timestamp ticks; without a delay it leaves `GevSCPD` as it is.
 2. Check whether the drop rate decreases, and whether overall throughput is
    still sufficient.
 
@@ -434,6 +445,8 @@ helps, the camera itself is the evidence we need: see
   the camera; `backpressure` climbing is the application not taking frames fast
   enough — no network change will help it
   ([what each counter means](tutorials/streaming.md#43-what-the-statistics-tell-you)).
+  Lost packets the camera sent again show up as `resend` recovered; many of
+  them still mean a network that drops packets.
 - A warning that the kernel granted a small GVSP receive buffer means bursts
   overflow the socket before the stream sees them: raise the limit it names
   (`net.core.rmem_max`, `kern.ipc.maxsockbuf`).

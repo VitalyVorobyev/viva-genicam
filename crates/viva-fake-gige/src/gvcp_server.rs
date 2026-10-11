@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, trace, warn};
 
 use crate::registers::RegisterMap;
+use crate::resend::{self, PACKETRESEND_CMD, ResendCounters, Retention};
 
 /// GVCP command key byte (first byte of every GVCP command).
 const GVCP_CMD_KEY: u8 = 0x42;
@@ -127,6 +128,7 @@ pub enum RegisterCommandRefusal {
 #[derive(Debug, Default)]
 pub struct CommandCounters {
     counts: std::sync::Mutex<HashMap<(GvcpCommand, u64), u64>>,
+    sequence: std::sync::Mutex<Vec<(GvcpCommand, u64)>>,
 }
 
 impl CommandCounters {
@@ -134,6 +136,19 @@ impl CommandCounters {
         if let Ok(mut counts) = self.counts.lock() {
             *counts.entry((command, addr)).or_default() += 1;
         }
+        if let Ok(mut sequence) = self.sequence.lock() {
+            sequence.push((command, addr));
+        }
+    }
+
+    /// Every register-access command received since the last
+    /// [`reset`](Self::reset), in arrival order: for a test about the order in
+    /// which a controller configures the device.
+    pub fn sequence(&self) -> Vec<(GvcpCommand, u64)> {
+        self.sequence
+            .lock()
+            .map(|sequence| sequence.clone())
+            .unwrap_or_default()
     }
 
     /// How many `command`s have been received, at any address.
@@ -162,16 +177,23 @@ impl CommandCounters {
         if let Ok(mut counts) = self.counts.lock() {
             counts.clear();
         }
+        if let Ok(mut sequence) = self.sequence.lock() {
+            sequence.clear();
+        }
     }
 }
 
 /// Behaviour of the GVCP server beyond the register store.
-#[derive(Debug, Default)]
-pub struct ServerOptions {
+#[derive(Debug)]
+pub(crate) struct ServerOptions {
     /// Counts of every register-access command received.
     pub counters: Arc<CommandCounters>,
     /// Refuse READREG/WRITEREG in this way, if set.
     pub refuse_register_commands: Option<RegisterCommandRefusal>,
+    /// The packets of recent blocks, for `PACKETRESEND_CMD`.
+    pub retention: Arc<std::sync::Mutex<Retention>>,
+    /// What the device did with resend requests.
+    pub resend: Arc<ResendCounters>,
 }
 
 /// Run the GVCP control server loop.
@@ -256,9 +278,12 @@ pub async fn run(
                     peer,
                     request_id,
                     payload,
+                    bind_ip,
                     &regs,
-                    &acq_start_notify,
-                    &acq_stop_flag,
+                    Acquisition {
+                        start: &acq_start_notify,
+                        stop: &acq_stop_flag,
+                    },
                 )
                 .await;
             }
@@ -271,14 +296,30 @@ pub async fn run(
                     peer,
                     request_id,
                     payload,
+                    bind_ip,
                     &regs,
-                    &acq_start_notify,
-                    &acq_stop_flag,
+                    Acquisition {
+                        start: &acq_start_notify,
+                        stop: &acq_stop_flag,
+                    },
                 )
                 .await;
             }
             ACTION_CMD => {
                 handle_action(&socket, peer, request_id, flags, payload).await;
+            }
+            // No acknowledgement: the command asks for none, and the answer
+            // is the packets themselves, sent from the stream socket.
+            PACKETRESEND_CMD => {
+                let supported = regs.lock().await.packet_resend_supported();
+                resend::serve(
+                    supported,
+                    &options.retention,
+                    &options.resend,
+                    flags,
+                    payload,
+                )
+                .await;
             }
             _ => {
                 debug!(command, "unsupported GVCP command");
@@ -424,9 +465,9 @@ async fn handle_writereg(
     peer: SocketAddr,
     request_id: u16,
     payload: &[u8],
+    source_ip: std::net::Ipv4Addr,
     regs: &Mutex<RegisterMap>,
-    acq_start: &Notify,
-    acq_stop_flag: &AtomicBool,
+    acquisition: Acquisition<'_>,
 ) {
     // WRITEREG payload: pairs of (address: u32, value: u32)
     if payload.len() < 8 || !payload.len().is_multiple_of(8) {
@@ -439,7 +480,7 @@ async fn handle_writereg(
             let value = &chunk[4..8];
             store.write(addr, value);
             store.handle_special_write(addr);
-            check_acquisition(addr, value, acq_start, acq_stop_flag);
+            check_acquisition(addr, value, acquisition.start, acquisition.stop);
         }
         (
             store.take_pending_test_packet(),
@@ -457,7 +498,7 @@ async fn handle_writereg(
     // from WRITEMEM would make the probe depend on which command the host
     // happened to choose — silently, since the write itself still succeeds.
     if let Some(size) = test_packet {
-        fire_test_packet(size, dest_ip, dest_port, max_on_wire).await;
+        fire_test_packet(size, source_ip, dest_ip, dest_port, max_on_wire).await;
     }
     trace!(%peer, "WRITEREG response");
 }
@@ -513,9 +554,9 @@ async fn handle_writemem(
     peer: SocketAddr,
     request_id: u16,
     payload: &[u8],
+    source_ip: std::net::Ipv4Addr,
     regs: &Mutex<RegisterMap>,
-    acq_start: &Notify,
-    acq_stop_flag: &AtomicBool,
+    acquisition: Acquisition<'_>,
 ) {
     // WRITEMEM payload: address(4) + data(N)
     if payload.len() < 4 {
@@ -527,7 +568,7 @@ async fn handle_writemem(
         let mut store = regs.lock().await;
         store.write(addr, data);
         store.handle_special_write(addr);
-        check_acquisition(addr, data, acq_start, acq_stop_flag);
+        check_acquisition(addr, data, acquisition.start, acquisition.stop);
         (
             store.take_pending_test_packet(),
             store.stream_dest_ip(),
@@ -546,7 +587,7 @@ async fn handle_writemem(
     // emits the test packet, and a controller that waits for the ack before
     // listening must not miss it.
     if let Some(size) = test_packet {
-        fire_test_packet(size, dest_ip, dest_port, max_on_wire).await;
+        fire_test_packet(size, source_ip, dest_ip, dest_port, max_on_wire).await;
     }
     trace!(%peer, addr = format!("0x{addr:x}"), len = data.len(), "WRITEMEM response");
 }
@@ -565,6 +606,7 @@ async fn handle_writemem(
 /// ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112)).
 async fn fire_test_packet(
     size: u32,
+    source_ip: std::net::Ipv4Addr,
     dest_ip: std::net::Ipv4Addr,
     dest_port: u16,
     max_on_wire: Option<u32>,
@@ -583,7 +625,8 @@ async fn fire_test_packet(
 
     const IP_AND_UDP_HEADERS: u32 = 28;
     let payload_len = size.saturating_sub(IP_AND_UDP_HEADERS) as usize;
-    let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await else {
+    // From the camera's own address, as every GVSP packet a device sends.
+    let Ok(sock) = UdpSocket::bind((source_ip, 0)).await else {
         return;
     };
     // A test packet is a GVSP payload-format datagram; the controller only
@@ -717,6 +760,13 @@ fn record_command(counters: &CommandCounters, command: u16, payload: &[u8]) {
         WRITEMEM_CMD if payload.len() >= 4 => counters.record(GvcpCommand::WriteMem, word(payload)),
         _ => {}
     }
+}
+
+/// How a register write starts and stops the GVSP sender.
+#[derive(Clone, Copy)]
+struct Acquisition<'a> {
+    start: &'a Notify,
+    stop: &'a AtomicBool,
 }
 
 /// Check if a write targets an acquisition register and notify accordingly.

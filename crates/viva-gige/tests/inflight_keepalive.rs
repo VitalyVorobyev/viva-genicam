@@ -71,34 +71,6 @@ async fn pending_write_is_not_repeated_to_refresh_the_heartbeat() {
 }
 
 #[tokio::test]
-async fn memory_only_heartbeat_and_packet_resend_share_the_socket_safely() {
-    let (address, task, _) = sensor::start(false).await;
-    let mut device = GigeDevice::open(address).await.unwrap();
-    device.claim_control().await.unwrap();
-    device.use_memory_access();
-    device.set_control_timeout(Duration::from_secs(2));
-    device.set_inflight_keepalive_period(Some(Duration::from_millis(75)));
-    assert_eq!(
-        device
-            .read_mem(u64::from(sensor::SLOW_REGISTER), 4)
-            .await
-            .unwrap(),
-        sensor::VALUE.to_be_bytes()
-    );
-    device.request_resend(1, 2, 3).await.unwrap();
-    let (observed, _socket) = task.await.unwrap();
-    assert_eq!(observed.commands, 1);
-    assert!(observed.heartbeat_opcodes.len() >= 3);
-    assert!(
-        observed
-            .heartbeat_opcodes
-            .iter()
-            .all(|opcode| *opcode == 0x0084)
-    );
-    assert!(!observed.expired);
-}
-
-#[tokio::test]
 async fn heartbeat_replies_do_not_extend_an_unanswered_requests_deadline() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();

@@ -9,7 +9,8 @@ use tokio::time::timeout as tokio_timeout;
 
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
-    FrameStream, GenicamError, StreamOptions, U3vFrameStream as U3vStream, U3vStreamBuilder,
+    FrameStream, GenicamError, ResendPolicy, StreamOptions, U3vFrameStream as U3vStream,
+    U3vStreamBuilder,
 };
 
 use crate::camera::{GigeCamera, U3vCamera};
@@ -92,15 +93,30 @@ impl PyFrameStream {
     }
 }
 
+/// How Python asked for a GigE stream, beyond the interface.
+pub(crate) struct GigeStreamRequest {
+    pub packet_size: Option<u32>,
+    pub auto_packet_size: bool,
+    pub multicast: Option<Ipv4Addr>,
+    pub destination_port: Option<u16>,
+    pub packet_delay_ns: Option<u64>,
+    pub resend: bool,
+}
+
 pub(crate) fn build_gige_stream(
     py: Python<'_>,
     camera: Arc<Mutex<GigeCamera>>,
     iface: Option<Iface>,
-    packet_size: Option<u32>,
-    auto_packet_size: bool,
-    multicast: Option<Ipv4Addr>,
-    destination_port: Option<u16>,
+    request: GigeStreamRequest,
 ) -> PyResult<PyFrameStream> {
+    let GigeStreamRequest {
+        packet_size,
+        auto_packet_size,
+        multicast,
+        destination_port,
+        packet_delay_ns,
+        resend,
+    } = request;
     if auto_packet_size && packet_size.is_some() {
         return Err(parse_error(
             "pass at most one of auto_packet_size=True and packet_size=...",
@@ -125,6 +141,12 @@ pub(crate) fn build_gige_stream(
         }
         if let Some(group) = multicast {
             options = options.multicast(group);
+        }
+        if let Some(ns) = packet_delay_ns {
+            options = options.packet_delay(std::time::Duration::from_nanos(ns));
+        }
+        if !resend {
+            options = options.resend(ResendPolicy::Off);
         }
         cam.open_stream(options).into_py_err()
     })?;

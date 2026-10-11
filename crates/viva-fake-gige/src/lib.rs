@@ -37,12 +37,14 @@ pub use gvcp_server::{
 pub mod gvsp;
 mod gvsp_sender;
 pub mod registers;
+pub mod resend;
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub use gvsp::{PacketScript, ScriptStep};
+pub use resend::ResendStats;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
@@ -66,6 +68,9 @@ pub struct FakeCameraBuilder {
     refuse_register_commands: Option<RegisterCommandRefusal>,
     identity: gvcp_server::Identity,
     sender: gvsp_sender::SenderOptions,
+    packet_resend: bool,
+    resend_retention: usize,
+    tick_frequency: Option<u64>,
 }
 
 /// PFNC pixel format codes.
@@ -93,6 +98,9 @@ impl Default for FakeCameraBuilder {
             refuse_register_commands: None,
             identity: gvcp_server::Identity::default(),
             sender: gvsp_sender::SenderOptions::default(),
+            packet_resend: true,
+            resend_retention: resend::DEFAULT_RETENTION,
+            tick_frequency: None,
         }
     }
 }
@@ -223,6 +231,42 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Answer `PACKETRESEND_CMD`, and say so in the GVCP Capability register
+    /// (`0x0934`, mask `0x4`) (default: on).
+    ///
+    /// Off, the capability bit is clear and requests are counted in
+    /// [`FakeCamera::resends`] but never answered, as on a device without
+    /// resend.
+    pub fn packet_resend(mut self, enable: bool) -> Self {
+        self.packet_resend = enable;
+        self
+    }
+
+    /// Keep the packets of the last `frames` blocks for resending (default
+    /// 4). A request for an older block is answered with a header-only GVSP
+    /// packet carrying `PACKET_UNAVAILABLE` (`0x800C`).
+    pub fn resend_retention(mut self, frames: usize) -> Self {
+        self.resend_retention = frames;
+        self
+    }
+
+    /// Report `hz` as the timestamp tick frequency (bootstrap `0x093C` and
+    /// `0x0940`; default 1 GHz), the unit `GevSCPD` counts in. `0` is what a
+    /// device without a timestamp clock reports.
+    pub fn tick_frequency(mut self, hz: u64) -> Self {
+        self.tick_frequency = Some(hz);
+        self
+    }
+
+    /// Also send every block from a second socket bound to `addr`, ahead of
+    /// the genuine one and with its image bytes inverted: valid GVSP from an
+    /// address that is not the camera's, which a receiver must ignore.
+    /// `addr` must be one of this host's addresses other than the camera's.
+    pub fn spoof_source(mut self, addr: Ipv4Addr) -> Self {
+        self.sender.spoof_source = Some(addr);
+        self
+    }
+
     /// Report a different `GevHeartbeatTimeout` than the 3 000 ms default.
     ///
     /// A shorter window keeps a test that has to wait one out from dominating
@@ -282,12 +326,21 @@ impl FakeCameraBuilder {
         }
         register_map.enforce_heartbeat(self.enforce_heartbeat);
         register_map.set_mac(self.identity.mac);
+        register_map.set_packet_resend(self.packet_resend);
+        if let Some(hz) = self.tick_frequency {
+            register_map.set_tick_frequency(hz);
+        }
         let regs = Arc::new(Mutex::new(register_map));
 
         let acq_start = Arc::new(Notify::new());
         let acq_stop_flag = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(CommandCounters::default());
         let blocks_sent = Arc::new(AtomicU64::new(0));
+        let spoofed = Arc::new(AtomicU64::new(0));
+        let resends = Arc::new(resend::ResendCounters::default());
+        let retention = Arc::new(std::sync::Mutex::new(resend::Retention::new(
+            self.resend_retention,
+        )));
 
         // Bind GVCP control socket. On macOS `SO_REUSEADDR` is a no-op for UDP,
         // so also set `SO_REUSEPORT` to let a fresh socket rebind the port while
@@ -316,6 +369,8 @@ impl FakeCameraBuilder {
             let options = gvcp_server::ServerOptions {
                 counters: counters.clone(),
                 refuse_register_commands: self.refuse_register_commands,
+                retention: retention.clone(),
+                resend: resends.clone(),
             };
             let identity = self.identity;
             tokio::spawn(async move {
@@ -333,9 +388,14 @@ impl FakeCameraBuilder {
             let acq_stop = acq_stop_flag.clone();
             let fps = self.fps;
             let options = self.sender;
-            let blocks_sent = blocks_sent.clone();
+            let shared = gvsp_sender::SenderShared {
+                blocks_sent: blocks_sent.clone(),
+                spoofed: spoofed.clone(),
+                retention,
+                source_ip: self.bind_ip,
+            };
             tokio::spawn(async move {
-                gvsp_sender::run(regs, acq_start, acq_stop, fps, options, blocks_sent).await;
+                gvsp_sender::run(regs, acq_start, acq_stop, fps, options, shared).await;
             })
         };
 
@@ -345,6 +405,8 @@ impl FakeCameraBuilder {
             regs,
             counters,
             blocks_sent,
+            spoofed,
+            resends,
             local_addr,
         })
     }
@@ -360,6 +422,8 @@ pub struct FakeCamera {
     regs: Arc<Mutex<registers::RegisterMap>>,
     counters: Arc<CommandCounters>,
     blocks_sent: Arc<AtomicU64>,
+    spoofed: Arc<AtomicU64>,
+    resends: Arc<resend::ResendCounters>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -400,6 +464,18 @@ impl FakeCamera {
     /// complete, incomplete, missed or dropped to backpressure on the host.
     pub fn blocks_sent(&self) -> u64 {
         self.blocks_sent.load(Ordering::Relaxed)
+    }
+
+    /// What this camera did with `PACKETRESEND_CMD`s: requests received,
+    /// packets sent again, packets it no longer held.
+    pub fn resends(&self) -> ResendStats {
+        self.resends.snapshot()
+    }
+
+    /// Datagrams sent from the [`spoof_source`](FakeCameraBuilder::spoof_source)
+    /// address.
+    pub fn spoofed_packets(&self) -> u64 {
+        self.spoofed.load(Ordering::Relaxed)
     }
 
     /// Read `len` bytes of device state directly, bypassing GVCP.

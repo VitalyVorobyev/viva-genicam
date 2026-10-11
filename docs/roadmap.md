@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. R, S, C, L and U are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## G — GenApi values: commands, limits, selectors
-
-**Goal**: a write puts the value the XML declares, within the limits it declares; commands can be waited on; the corpus test asserts values, not only the absence of errors.
-**Rows**: GA-35, GA-36, GA-37, GA-03, GA-04, GA-07, GA-10, GA-11, GA-33, GA-34.
-
 ## R — One GVSP receive engine
 
 **Goal**: one receive thread and one assembler on every OS, replacing the two in the library and the four in tools and examples. Frames time out from their last packet, extended IDs land where they belong, a `Frame` says whether it is complete, and the counters account for every block the camera sent.
@@ -73,6 +68,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 ## Waiting on hardware
 
+- **GA-44**: whether cameras clear a command register once the command is done, which `IsDone` relies on.
 - **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, once L enables `PENDING_ACK` (TC-30).
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
 - **TC-27**: USB3 Vision has never met a camera; needs `viva-camctl report --usb 0` from one.

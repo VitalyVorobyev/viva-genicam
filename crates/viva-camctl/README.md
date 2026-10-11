@@ -25,7 +25,7 @@ From a checkout, `cargo run -p viva-camctl -- <command>` works too.
 | `list` | Discover GigE Vision cameras on the network |
 | `get` | Read a GenApi feature value |
 | `set` | Write a GenApi feature value |
-| `execute` | Execute a GenApi Command feature (e.g. `UserSetLoad`) |
+| `execute` | Execute a GenApi Command feature (e.g. `UserSetLoad`) and wait until the camera reports it done (`--no-wait` to skip, `--wait-ms` to bound) |
 | `xml` | Dump the camera's GenApi XML without parsing it |
 | `report` | Collect a diagnostic bundle to attach to a bug report |
 | `stream` | Start a GVSP stream; save frames, or raw event-vision blocks |

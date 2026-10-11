@@ -6,49 +6,38 @@ use viva_genapi_xml::{AccessMode, EnumValueSrc, NodeDecl, NodeMeta, SkOutput, Xm
 use crate::error::ParseError;
 use crate::model::*;
 
-/// Build Integer constraints, returning `None` when the XML declared no
-/// explicit range (both `min == i64::MIN` AND `max == i64::MAX` — the parser
-/// sentinels for "no explicit bound") AND no `inc`. In that case the UI
-/// renders "range unknown" instead of showing the `i64::MIN..i64::MAX`
-/// bounds — these are parser sentinels, not device-reported ranges.
+/// Build Integer constraints from the bounds the XML declares, or `None` when
+/// it declares no `<Min>`, `<Max>` or `<Inc>`. In that case the UI renders
+/// "range unknown".
 ///
-/// When `pMin`/`pMax` references exist, the live-mode [`FeatureState::numeric`]
-/// from the backend overrides whatever static hint we produce here, so we do
-/// not need special handling for that case — sentinels mean "unknown at
-/// parse time" whether or not runtime can resolve them later.
-fn integer_constraints(min: i64, max: i64, inc: Option<i64>) -> Option<NumericConstraints> {
-    let min_is_sentinel = min == i64::MIN;
-    let max_is_sentinel = max == i64::MAX;
-    if min_is_sentinel && max_is_sentinel && inc.is_none() {
+/// An absent bound is unknown at parse time, not unbounded: `<pMin>`/`<pMax>`
+/// or the node `<pValue>` delegates to may supply it, and live mode reports
+/// the bound in force through [`FeatureState::numeric`]. A bound declared as
+/// exactly `i64::MIN`/`i64::MAX` is a real bound and is kept (backlog GA-34).
+fn integer_constraints(
+    min: Option<i64>,
+    max: Option<i64>,
+    inc: Option<i64>,
+) -> Option<NumericConstraints> {
+    if min.is_none() && max.is_none() && inc.is_none() {
         return None;
     }
     Some(NumericConstraints {
-        min: if min_is_sentinel {
-            None
-        } else {
-            Some(min as f64)
-        },
-        max: if max_is_sentinel {
-            None
-        } else {
-            Some(max as f64)
-        },
+        min: min.map(|v| v as f64),
+        max: max.map(|v| v as f64),
         inc: inc.map(|i| i as f64),
         value: None,
     })
 }
 
-/// Same idea as [`integer_constraints`] but for Float nodes. Float sentinels
-/// are `f64::MIN`/`f64::MAX`.
-fn float_constraints(min: f64, max: f64) -> Option<NumericConstraints> {
-    let min_is_sentinel = min == f64::MIN;
-    let max_is_sentinel = max == f64::MAX;
-    if min_is_sentinel && max_is_sentinel {
+/// Same idea as [`integer_constraints`] but for Float nodes.
+fn float_constraints(min: Option<f64>, max: Option<f64>) -> Option<NumericConstraints> {
+    if min.is_none() && max.is_none() {
         return None;
     }
     Some(NumericConstraints {
-        min: if min_is_sentinel { None } else { Some(min) },
-        max: if max_is_sentinel { None } else { Some(max) },
+        min,
+        max,
         inc: None,
         value: None,
     })
@@ -219,6 +208,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             p_min,
             p_max,
+            p_inc,
             ..
         } => UiNode {
             access_mode: Some(
@@ -228,13 +218,13 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             ),
             unit: unit.clone(),
             constraints: integer_constraints(*min, *max, *inc),
-            dependencies: [pvalue, p_min, p_max]
+            dependencies: [pvalue, p_min, p_max, p_inc]
                 .into_iter()
                 .flatten()
                 .cloned()
                 .collect(),
-            int_min: Some(*min),
-            int_max: Some(*max),
+            int_min: *min,
+            int_max: *max,
             int_inc: *inc,
             ..described(&name, UiNodeKind::Integer, meta)
         },
@@ -245,6 +235,8 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             max,
             unit,
             pvalue,
+            p_min,
+            p_max,
             ..
         } => UiNode {
             access_mode: Some(
@@ -254,7 +246,11 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             ),
             unit: unit.clone(),
             constraints: float_constraints(*min, *max),
-            dependencies: pvalue.iter().cloned().collect(),
+            dependencies: [pvalue, p_min, p_max]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect(),
             ..described(&name, UiNodeKind::Float, meta)
         },
         NodeDecl::Enum {
@@ -489,6 +485,7 @@ mod tests {
             <Command Name="AcquisitionStart">
                 <Address>0x0000_0500</Address>
                 <Length>4</Length>
+                <CommandValue>1</CommandValue>
             </Command>
         </RegisterDescription>
     "#;
@@ -674,18 +671,18 @@ mod tests {
             addressing: None,
             len: 4,
             access: AccessMode::RW,
-            min: 0,
-            max: 100,
+            min: Some(0),
+            max: Some(100),
             inc: None,
             unit: None,
             bitfield: None,
             sign: Default::default(),
             byte_order: viva_genapi_xml::ByteOrder::Big,
-            selectors: vec![],
-            selected_if: vec![],
+            selected: vec![],
             pvalue: None,
             p_max: None,
             p_min: None,
+            p_inc: None,
             value: None,
             predicates: Default::default(),
             invalidators: vec![],
@@ -701,31 +698,37 @@ mod tests {
         assert_eq!(decl_name(&cat_decl), "Root");
     }
 
-    // ── Integer / Float sentinel fallback ──────────────────────────────────
+    // ── Integer / Float bounds ─────────────────────────────────────────────
 
     #[test]
-    fn integer_constraints_returns_none_when_both_bounds_are_sentinels() {
-        // No explicit <Min>/<Max> → "range unknown". Live mode overrides
+    fn integer_constraints_returns_none_when_nothing_is_declared() {
+        // No explicit <Min>/<Max>/<Inc> → "range unknown". Live mode overrides
         // via FeatureState.numeric.
-        let c = integer_constraints(i64::MIN, i64::MAX, None);
-        assert!(
-            c.is_none(),
-            "sentinel-only integer must not leak i64::MIN/MAX: {c:?}"
-        );
+        let c = integer_constraints(None, None, None);
+        assert!(c.is_none(), "an undeclared range is unknown: {c:?}");
     }
 
     #[test]
     fn integer_constraints_preserves_explicit_min() {
-        let c = integer_constraints(1, i64::MAX, None);
+        let c = integer_constraints(Some(1), None, None);
         let c = c.expect("explicit min should produce Some constraints");
         assert_eq!(c.min, Some(1.0));
-        assert!(c.max.is_none(), "sentinel max should not leak");
+        assert!(c.max.is_none(), "an undeclared max stays unknown");
     }
 
     #[test]
-    fn integer_constraints_returns_some_when_inc_present_even_if_bounds_sentinels() {
+    fn integer_constraints_keeps_a_declared_full_domain_bound() {
+        // GA-34: `<Min>-9223372036854775808</Min>` is declared, not absent.
+        let c = integer_constraints(Some(i64::MIN), Some(i64::MAX), None);
+        let c = c.expect("declared bounds are kept");
+        assert_eq!(c.min, Some(i64::MIN as f64));
+        assert_eq!(c.max, Some(i64::MAX as f64));
+    }
+
+    #[test]
+    fn integer_constraints_returns_some_when_only_inc_is_declared() {
         // Inc alone is still useful information for the UI (step size).
-        let c = integer_constraints(i64::MIN, i64::MAX, Some(8));
+        let c = integer_constraints(None, None, Some(8));
         let c = c.expect("inc alone should still produce constraints");
         assert_eq!(c.inc, Some(8.0));
         assert!(c.min.is_none());
@@ -733,14 +736,14 @@ mod tests {
     }
 
     #[test]
-    fn float_constraints_returns_none_for_f64_sentinels() {
-        let c = float_constraints(f64::MIN, f64::MAX);
-        assert!(c.is_none(), "sentinel-only float must not leak: {c:?}");
+    fn float_constraints_returns_none_when_nothing_is_declared() {
+        let c = float_constraints(None, None);
+        assert!(c.is_none(), "an undeclared range is unknown: {c:?}");
     }
 
     #[test]
     fn float_constraints_preserves_explicit_bounds() {
-        let c = float_constraints(0.0, 100.0);
+        let c = float_constraints(Some(0.0), Some(100.0));
         let c = c.expect("explicit bounds should produce Some constraints");
         assert_eq!(c.min, Some(0.0));
         assert_eq!(c.max, Some(100.0));

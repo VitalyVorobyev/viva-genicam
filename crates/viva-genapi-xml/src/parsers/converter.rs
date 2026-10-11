@@ -8,8 +8,25 @@ use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
 use crate::{
     AccessMode, ConverterDecl, FormulaBindings, IntConverterDecl, NodeDecl, PredicateRefs,
-    SkOutput, StringDecl, XmlError,
+    SkOutput, Slope, StringDecl, XmlError,
 };
+
+/// Read a `<Slope>` element.
+///
+/// The schema allows four values. One we do not recognise falls back to
+/// `Automatic`, the standard's default, which finds the direction by probing
+/// the formula rather than assuming one.
+fn read_slope(
+    reader: &mut Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    node: &str,
+) -> Result<Slope, XmlError> {
+    let text = read_text_start(reader, event)?;
+    Ok(Slope::parse(&text).unwrap_or_else(|| {
+        tracing::warn!(node, slope = %text.trim(), "unknown <Slope>; probing instead");
+        Slope::Automatic
+    }))
+}
 
 /// Parse a `<Converter>` element into a [`NodeDecl::Converter`].
 pub fn parse_converter(
@@ -29,6 +46,7 @@ pub fn parse_converter(
     let mut buf = Vec::new();
     let mut bindings = FormulaBindings::default();
     let mut meta_builder = NodeMetaBuilder::default();
+    let mut slope = Slope::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -84,6 +102,9 @@ pub fn parse_converter(
                     // Add to both lists by default; real cameras might use direction hints
                     variables_to.push((var_name.clone(), target.to_string()));
                     variables_from.push((var_name, target.to_string()));
+                }
+                "Slope" => {
+                    slope = read_slope(reader, e, &name)?;
                 }
                 "Unit" => {
                     let text = read_text_start(reader, e)?;
@@ -170,6 +191,7 @@ pub fn parse_converter(
         bindings,
         unit,
         output,
+        slope,
         predicates,
     }))
 }
@@ -191,6 +213,7 @@ pub fn parse_int_converter(
     let mut buf = Vec::new();
     let mut bindings = FormulaBindings::default();
     let mut meta_builder = NodeMetaBuilder::default();
+    let mut slope = Slope::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -245,6 +268,9 @@ pub fn parse_int_converter(
                     }
                     variables_to.push((var_name.clone(), target.to_string()));
                     variables_from.push((var_name, target.to_string()));
+                }
+                "Slope" => {
+                    slope = read_slope(reader, e, &name)?;
                 }
                 "Unit" => {
                     let text = read_text_start(reader, e)?;
@@ -316,6 +342,7 @@ pub fn parse_int_converter(
         variables_from,
         bindings,
         unit,
+        slope,
         predicates,
     }))
 }
@@ -326,7 +353,7 @@ pub fn parse_string(
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, "Name")?;
-    let mut addressing = AddressingBuilder::new(&name);
+    let mut addressing = AddressingBuilder::default();
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
@@ -340,7 +367,7 @@ pub fn parse_string(
                 "Address" => {
                     let text = read_text_start(reader, e)?;
                     let addr = crate::util::parse_u64(&text)?;
-                    addressing.attach_selected_address(addr, None);
+                    addressing.push_fixed_address(addr);
                 }
                 "Length" => {
                     let text = read_text_start(reader, e)?;
@@ -348,7 +375,7 @@ pub fn parse_string(
                     let len = u32::try_from(value).map_err(|_| {
                         XmlError::Invalid(format!("length out of range for node {name}"))
                     })?;
-                    addressing.apply_length(len);
+                    addressing.set_length(len);
                 }
                 "pAddress" => {
                     let text = read_text_start(reader, e)?;

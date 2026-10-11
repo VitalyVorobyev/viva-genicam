@@ -65,6 +65,37 @@ nodemap.exec_command("AcquisitionStart", &io)?;
 is what most application code should use — see
 [Registers & features](../tutorials/registers.md).
 
+### Limits
+
+A write is checked against the feature's `Min`, `Max` and `Inc` before
+anything is sent — and before it is forwarded through `<pValue>`, so a limit
+declared on `Width` binds even though the register behind it declares none.
+Many cameras report their limits at run time instead (`<pMin>`, `<pMax>`,
+`<pInc>` pointing at other nodes); those are read when the write happens. A
+feature that declares no limit of its own takes the one of the node it
+delegates to. A value outside them is `GenApiError::Range`.
+
+`NodeMap::feature_state` reports the same limits — the bounds in force now —
+and a `<Converter>` reports its raw node's range mapped through its formula,
+in the order its `<Slope>` says (a `Decreasing` converter turns the raw
+maximum into its minimum).
+
+An `<Integer>` with a `<Value>` and nothing behind it is a *floating* value:
+writing it changes what it reads, within its limits, and nothing reaches the
+camera. Selectors on several cameras (AVT's `TriggerSelector`, Sony's
+`UserSetSelector`) are built this way.
+
+### Commands
+
+`exec_command` writes the value the command's XML names — a constant
+`<CommandValue>`, or the current value of the node `<pCommandValue>` points at
+(Hikrobot's `UserSetSave` writes the selected user set's number) — after
+checking the command's own `pIsAvailable` and `pIsLocked`. It returns when the
+write is acknowledged. `is_done(name, &io)` is GenICam's `IsDone`: a command
+whose register is write-only is done at once; otherwise the register is read
+from the camera, past every cache, and the command is done when it no longer
+holds the command value. `Camera::execute_and_wait` polls it.
+
 ### Addressing
 
 A node's address is not always a constant. It can be:
@@ -144,7 +175,8 @@ camera still opens, minus the features that could not be built.
 
 Values are cached and invalidated by dependency: writing a node clears the
 cached values of everything `dependents()` lists for it, including through
-`pValue` delegation and selector relationships. Cache correctness is a
+`pValue` delegation and selectors — a selector names the features it selects
+in `<pSelected>`, and writing it clears them and the registers behind them. Cache correctness is a
 conformance question, not an optimisation — a stale `Width` after a selector
 change is a wrong answer, not a slow one.
 
@@ -161,7 +193,7 @@ change is a wrong answer, not a slow one.
 | `Access(name)` | The node's access mode forbids the operation |
 | `Locked { name, locked_by }` | `pIsLocked` is engaged; `locked_by` is the feature to change |
 | `Range(name)` | Value outside `Min`/`Max`, or off `Inc` |
-| `Unavailable(name)` | Hidden by the current selector state |
+| `Unavailable(name)` | `pIsImplemented` or `pIsAvailable` says the feature cannot be used now |
 | `Io(msg)` | The transport failed |
 | `Parse(msg)` | Metadata or conversion failure |
 | `ExprParse` / `ExprEval` / `UnknownVariable` | A SwissKnife formula failed to parse, evaluate, or resolve a reference |

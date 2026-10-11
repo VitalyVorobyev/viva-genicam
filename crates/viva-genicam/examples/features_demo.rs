@@ -44,6 +44,7 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
                 <AccessMode>RW</AccessMode>
                 <EnumEntry Name="AnalogAll" Value="0" />
                 <EnumEntry Name="DigitalAll" Value="1" />
+                <pSelected>Gain</pSelected>
             </Enumeration>
             <Integer Name="Gain">
                 <Address>0x304</Address>
@@ -51,8 +52,6 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
                 <AccessMode>RW</AccessMode>
                 <Min>0</Min>
                 <Max>48</Max>
-                <pSelected>GainSelector</pSelected>
-                <Selected>AnalogAll</Selected>
             </Integer>
             <Boolean Name="GammaEnable">
                 <Address>0x400</Address>
@@ -60,13 +59,25 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
                 <AccessMode>RW</AccessMode>
             </Boolean>
             <Command Name="AcquisitionStart">
+                <pValue>AcquisitionStartReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="AcquisitionStartReg">
                 <Address>0x500</Address>
                 <Length>4</Length>
-            </Command>
+                <AccessMode>WO</AccessMode>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
             <Command Name="AcquisitionStop">
+                <pValue>AcquisitionStopReg</pValue>
+                <CommandValue>1</CommandValue>
+            </Command>
+            <IntReg Name="AcquisitionStopReg">
                 <Address>0x504</Address>
                 <Length>4</Length>
-            </Command>
+                <AccessMode>WO</AccessMode>
+                <Endianess>BigEndian</Endianess>
+            </IntReg>
         </RegisterDescription>
     "#;
 

@@ -7,7 +7,7 @@ use super::{NodeMetaBuilder, handle_predicate_start};
 use crate::util::{
     attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
 };
-use crate::{NodeDecl, NodeMeta, PredicateRefs, XmlError};
+use crate::{CommandValueSrc, NodeDecl, NodeMeta, PredicateRefs, XmlError};
 
 /// Parse a `<Command>` element into a [`NodeDecl::Command`].
 pub fn parse_command(
@@ -19,6 +19,7 @@ pub fn parse_command(
     let mut length = None;
     let mut pvalue = None;
     let mut command_value = None;
+    let mut p_command_value = None;
     let mut predicates = PredicateRefs::default();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -49,6 +50,13 @@ pub fn parse_command(
                     let text = read_text_start(reader, e)?;
                     command_value = Some(parse_i64(&text)?);
                 }
+                "pCommandValue" => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        p_command_value = Some(target.to_string());
+                    }
+                }
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
@@ -73,6 +81,14 @@ pub fn parse_command(
     // (e.g. SFNC standard features without register backing).
     let length = length.unwrap_or(4);
 
+    // The schema makes the two a choice; a document declaring both is
+    // ambiguous, and the dynamic one is the one the device keeps current.
+    let command_value = match (p_command_value, command_value) {
+        (Some(node), _) => CommandValueSrc::FromNode(node),
+        (None, Some(value)) => CommandValueSrc::Literal(value),
+        (None, None) => return Err(missing_command_value(&name)),
+    };
+
     Ok(NodeDecl::Command {
         name,
         meta: meta_builder.build(),
@@ -84,30 +100,18 @@ pub fn parse_command(
     })
 }
 
-/// Parse an empty `<Command />` element.
-pub fn parse_command_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError> {
-    let name = attribute_value_required(start, "Name")?;
-    let address = attribute_value(start, "Address")?
-        .map(|v| parse_u64(&v))
-        .transpose()?;
-    let length = attribute_value(start, "Length")?;
-    let length = match length {
-        Some(value) => {
-            let raw = parse_u64(&value)?;
-            u32::try_from(raw)
-                .map_err(|_| XmlError::Invalid("command length out of range".into()))?
-        }
-        None => 4,
-    };
-    Ok(NodeDecl::Command {
-        name,
-        meta: NodeMeta::default(),
-        address,
-        len: length,
-        pvalue: None,
-        command_value: None,
-        predicates: PredicateRefs::default(),
-    })
+/// Why a `<Command>` with no value is skipped.
+///
+/// GenICam Standard v2.1.1 §2.8.8 gives a command its value through
+/// `<CommandValue>` or `<pCommandValue>`, and §3.2's table of defaults has no
+/// entry for either, so there is no value to fall back on. All 490 commands in
+/// the 38-document vendor corpus declare one. Writing an invented `1` instead
+/// is how a user-set command saves into the wrong set, so the node is refused
+/// and the reason recorded.
+pub fn missing_command_value(name: &str) -> XmlError {
+    XmlError::Invalid(format!(
+        "Command {name} declares neither <CommandValue> nor <pCommandValue>"
+    ))
 }
 
 /// Parse a `<Category>` element into a [`NodeDecl::Category`].

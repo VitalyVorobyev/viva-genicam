@@ -48,8 +48,9 @@
 //! | `0x200a0`   | 4      | EventSelector                   | u32 BE   |
 //! | `0x200a4`   | 4      | EventNotification (per selector)| u32 BE   |
 //! | `0x200a8`   | 4      | UserSetSelector                 | u32 BE   |
-//! | `0x200ac`   | 4      | UserSetLoad (command, pValue)   | u32 BE   |
+//! | `0x200ac`   | 4      | UserSetLoad (command)           | u32 BE   |
 //! | `0x200b0`   | 4      | SoftwareSignal*Pulse (WO bits)  | u32 BE   |
+//! | `0x200b4`   | 4      | UserSetSave (command)           | u32 BE   |
 //! | `0x20100`   | 4      | WidthMin (RO)                   | u32 BE   |
 //! | `0x20104`   | 4      | WidthMax (RO)                   | u32 BE   |
 //! | `0x20108`   | 4      | HeightMin (RO)                  | u32 BE   |
@@ -221,20 +222,29 @@ pub const REG_EVENT_SELECTOR: u64 = 0x200a0;
 /// [`RegisterMap::event_notification_on`].
 pub const REG_EVENT_NOTIFICATION: u64 = 0x200a4;
 
-/// `REG_USER_SET_SELECTOR` and `REG_USER_SET_LOAD` back the SFNC user-set
-/// features, so the fake can answer the workflow issue #121 was filed about.
-///
-/// `UserSetLoad` is also the fake's first command that reaches its register
-/// through `<pValue>` rather than a bare `<Address>`. That matters for backlog
-/// `GA-10`: all 432 `<Command>` nodes in the vendor corpus use `<pValue>`, and
-/// until now all three of the fake's used the direct-address path — so our
-/// integration tests exercised only the path no real camera takes.
-/// Exposure the fake boots with, and returns to on `UserSetLoad`.
+/// Exposure the fake boots with, and returns to when `UserSetLoad` loads
+/// `Default`.
 pub const DEFAULT_EXPOSURE_US: f64 = 5000.0;
 
+/// `REG_USER_SET_SELECTOR`, `REG_USER_SET_LOAD` and `REG_USER_SET_SAVE` back
+/// the SFNC user-set features, so the fake can answer the workflow issue #121
+/// was filed about.
+///
+/// They are shaped after the Hikrobot MV-CS050-10GC
+/// (`Hikrobot_MV-CS050-10GC.xml:23009-23148` in the vendor corpus): both
+/// commands take the value they write from `<pCommandValue>`, an
+/// `<IntSwissKnife>` reading the selector register, so the *written value*
+/// names the user set. The fake acts on that value, not on the selector
+/// register — so a client that writes a constant `1` with `UserSet2` selected
+/// saves into set 1 here as it would on the camera, and a test can see it
+/// (backlog GA-35; ADR-0019's "fakes must be able to disagree").
 pub const REG_USER_SET_SELECTOR: u64 = 0x200a8;
-/// See [`REG_USER_SET_SELECTOR`].
+/// `UserSetLoad`: writing `n` loads user set `n`, `0` being `Default`.
 pub const REG_USER_SET_LOAD: u64 = 0x200ac;
+/// `UserSetSave`: writing `n` saves the current settings into user set `n`.
+/// `Default` cannot be saved: the XML makes the command unavailable while it
+/// is selected, and the fake ignores a write of `0`.
+pub const REG_USER_SET_SAVE: u64 = 0x200b4;
 
 /// A write-only register addressed bit by bit: a `<StructReg>` with
 /// `AccessMode WO` whose `<StructEntry>` bits each pulse one software signal.
@@ -260,6 +270,7 @@ pub const WRITE_ONLY_REGISTERS: &[u64] = &[
     REG_TIMESTAMP_LATCH,
     REG_USER_SET_LOAD,
     REG_SOFTWARE_SIGNAL_PULSE,
+    REG_USER_SET_SAVE,
 ];
 
 /// Limit registers.
@@ -326,6 +337,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <DisplayName>User Set Control</DisplayName>
     <pFeature>UserSetSelector</pFeature>
     <pFeature>UserSetLoad</pFeature>
+    <pFeature>UserSetSave</pFeature>
   </Category>
 
   <Category Name="DeviceControl">
@@ -620,32 +632,59 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Enumeration>
   <IntReg Name="AcquisitionModeReg"><Address>0x20020</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
+  <!-- Every <Command> here reaches its register through <pValue>, the shape
+       all 490 commands in the vendor corpus use; none has an <Address> of its
+       own (backlog GA-10). -->
   <Command Name="AcquisitionStart" NameSpace="Standard">
     <ToolTip>Start image acquisition</ToolTip>
-    <Address>0x20024</Address>
-    <Length>4</Length>
-    <AccessMode>WO</AccessMode>
+    <pValue>AcquisitionStartReg</pValue>
     <CommandValue>1</CommandValue>
-    <Endianess>BigEndian</Endianess>
   </Command>
+  <IntReg Name="AcquisitionStartReg"><Address>0x20024</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
+  <!-- The Hikrobot MV-CS050-10GC user-set block (Hikrobot_MV-CS050-10GC.xml,
+       lines 23009-23148): both commands write the selected set's index,
+       taken through <pCommandValue> from the selector register, and saving is
+       unavailable while Default is selected. -->
   <Enumeration Name="UserSetSelector" NameSpace="Standard">
-    <ToolTip>User set that UserSetLoad restores</ToolTip>
+    <ToolTip>User set that UserSetLoad and UserSetSave act on</ToolTip>
     <EnumEntry Name="Default"><Value>0</Value></EnumEntry>
-    <EnumEntry Name="UserSet0"><Value>1</Value></EnumEntry>
+    <EnumEntry Name="UserSet1"><Value>1</Value></EnumEntry>
+    <EnumEntry Name="UserSet2"><Value>2</Value></EnumEntry>
     <pValue>UserSetSelectorReg</pValue>
+    <pSelected>UserSetLoad</pSelected>
+    <pSelected>UserSetSave</pSelected>
   </Enumeration>
   <IntReg Name="UserSetSelectorReg"><Address>0x200a8</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
-  <!-- Reaches its register through <pValue>, unlike the three commands above.
-       That is the shape every <Command> in the vendor corpus uses, and the one
-       our tests had no example of (backlog GA-10). -->
   <Command Name="UserSetLoad" NameSpace="Standard">
-    <ToolTip>Restore the selected user set</ToolTip>
+    <ToolTip>Load the selected user set</ToolTip>
+    <ImposedAccessMode>WO</ImposedAccessMode>
     <pValue>UserSetLoadReg</pValue>
-    <CommandValue>1</CommandValue>
+    <pCommandValue>UserSetLoad_CmdValue</pCommandValue>
   </Command>
+  <IntSwissKnife Name="UserSetLoad_CmdValue">
+    <pVariable Name="VALUE">UserSetSelectorReg</pVariable>
+    <Formula>VALUE</Formula>
+  </IntSwissKnife>
   <IntReg Name="UserSetLoadReg"><Address>0x200ac</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+
+  <Command Name="UserSetSave" NameSpace="Standard">
+    <ToolTip>Save the current settings into the selected user set</ToolTip>
+    <pIsAvailable>UserSetSaveAvailable</pIsAvailable>
+    <ImposedAccessMode>WO</ImposedAccessMode>
+    <pValue>UserSetSaveReg</pValue>
+    <pCommandValue>UserSetSave_CmdValue</pCommandValue>
+  </Command>
+  <IntSwissKnife Name="UserSetSave_CmdValue">
+    <pVariable Name="VALUE">UserSetSelectorReg</pVariable>
+    <Formula>VALUE</Formula>
+  </IntSwissKnife>
+  <IntSwissKnife Name="UserSetSaveAvailable">
+    <pVariable Name="VAL">UserSetSelectorReg</pVariable>
+    <Formula>(VAL = 0)? 0:1</Formula>
+  </IntSwissKnife>
+  <IntReg Name="UserSetSaveReg"><Address>0x200b4</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- A write-only register addressed bit by bit. Each entry inherits WO from
        the StructReg, so setting one bit cannot read the register for the
@@ -661,12 +700,10 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Command Name="AcquisitionStop" NameSpace="Standard">
     <ToolTip>Stop image acquisition</ToolTip>
-    <Address>0x20028</Address>
-    <Length>4</Length>
-    <AccessMode>WO</AccessMode>
+    <pValue>AcquisitionStopReg</pValue>
     <CommandValue>1</CommandValue>
-    <Endianess>BigEndian</Endianess>
   </Command>
+  <IntReg Name="AcquisitionStopReg"><Address>0x20028</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Boolean Name="AcquisitionFrameRateEnable" NameSpace="Standard">
     <ToolTip>Enable manual control of AcquisitionFrameRate. When false, the frame rate is unavailable for read/write.</ToolTip>
@@ -835,12 +872,10 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Command Name="TimestampLatch" NameSpace="Standard">
     <ToolTip>Latch the current timestamp into GevTimestampValue</ToolTip>
-    <Address>0x20070</Address>
-    <Length>4</Length>
-    <AccessMode>WO</AccessMode>
+    <pValue>TimestampLatchReg</pValue>
     <CommandValue>1</CommandValue>
-    <Endianess>BigEndian</Endianess>
   </Command>
+  <IntReg Name="TimestampLatchReg"><Address>0x20070</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Chunk Data Control
@@ -941,7 +976,18 @@ pub struct RegisterMap {
     /// Size requested by the most recent write with the fire-test-packet bit,
     /// for the GVCP server to act on once it has released the register lock.
     pending_test_packet: Option<u32>,
+    /// User sets saved by `UserSetSave`, by set number: the registers a
+    /// `UserSetLoad` of that set restores.
+    user_sets: HashMap<u32, Vec<(u64, Vec<u8>)>>,
 }
+
+/// Registers a user set holds: the analog-control settings.
+const USER_SET_REGISTERS: &[u64] = &[
+    REG_EXPOSURE_TIME,
+    REG_GAIN,
+    REG_EXPOSURE_AUTO,
+    REG_GAIN_AUTO,
+];
 
 /// `GevSCPSPacketSize` bit 31: send one test packet of the requested size.
 pub const SCPS_FIRE_TEST_PACKET: u32 = 0x8000_0000;
@@ -1051,6 +1097,7 @@ impl RegisterMap {
         regs.insert(REG_ACQ_START, vec![0, 0, 0, 0]);
         regs.insert(REG_USER_SET_SELECTOR, 0u32.to_be_bytes().to_vec()); // Default
         regs.insert(REG_USER_SET_LOAD, 0u32.to_be_bytes().to_vec());
+        regs.insert(REG_USER_SET_SAVE, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_SOFTWARE_SIGNAL_PULSE, 0u32.to_be_bytes().to_vec());
         regs.insert(REG_ACQ_STOP, vec![0, 0, 0, 0]);
         regs.insert(REG_ACQ_FRAME_RATE, 30.0f32.to_be_bytes().to_vec());
@@ -1124,6 +1171,7 @@ impl RegisterMap {
             max_packet_size: None,
             max_on_wire: None,
             pending_test_packet: None,
+            user_sets: HashMap::new(),
         }
     }
 
@@ -1363,19 +1411,36 @@ impl RegisterMap {
                 .insert(REG_TIMESTAMP_VALUE, ts.to_be_bytes().to_vec());
         }
         if addr == REG_USER_SET_LOAD {
-            self.load_user_set();
+            let set = self.read_u32_be(REG_USER_SET_LOAD);
+            self.load_user_set(set);
+        }
+        if addr == REG_USER_SET_SAVE {
+            let set = self.read_u32_be(REG_USER_SET_SAVE);
+            self.save_user_set(set);
         }
     }
 
-    /// Restore the analog-control defaults, as `UserSetLoad` does on a real
-    /// camera.
+    fn read_u32_be(&self, addr: u64) -> u32 {
+        let data = self.read(addr, 4);
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    }
+
+    /// Restore user set `set`, as `UserSetLoad` does on a real camera: `0` is
+    /// `Default`, the analog-control defaults the fake boots with, and so is a
+    /// set never saved.
     ///
     /// A command that only acknowledges the write is untestable: a test could
     /// assert nothing beyond the absence of an error, which is the fake
     /// agreeing with itself. Restoring observable device state means a test can
     /// change a feature, execute the command, and read the change back out
     /// (ADR-0019).
-    fn load_user_set(&mut self) {
+    fn load_user_set(&mut self, set: u32) {
+        if let Some(saved) = self.user_sets.get(&set).cloned() {
+            for (addr, bytes) in saved {
+                self.regs.insert(addr, bytes);
+            }
+            return;
+        }
         self.regs.insert(
             REG_EXPOSURE_TIME,
             DEFAULT_EXPOSURE_US.to_be_bytes().to_vec(),
@@ -1384,6 +1449,31 @@ impl RegisterMap {
         self.regs
             .insert(REG_EXPOSURE_AUTO, 0u32.to_be_bytes().to_vec());
         self.regs.insert(REG_GAIN_AUTO, 0u32.to_be_bytes().to_vec());
+    }
+
+    /// Save the current settings into user set `set`. `Default` (`0`) is the
+    /// factory set and cannot be overwritten, so a write of `0` is ignored.
+    fn save_user_set(&mut self, set: u32) {
+        if set == 0 {
+            return;
+        }
+        let saved = USER_SET_REGISTERS
+            .iter()
+            .filter_map(|addr| self.regs.get(addr).map(|bytes| (*addr, bytes.clone())))
+            .collect();
+        self.user_sets.insert(set, saved);
+    }
+
+    /// The exposure saved in user set `set`, or `None` if nothing has been
+    /// saved there.
+    ///
+    /// Device state, read past the protocol: a test can check *which* set a
+    /// `UserSetSave` landed in without trusting the client's own account of
+    /// what it wrote.
+    pub fn saved_exposure(&self, set: u32) -> Option<f64> {
+        let saved = self.user_sets.get(&set)?;
+        let (_, bytes) = saved.iter().find(|(addr, _)| *addr == REG_EXPOSURE_TIME)?;
+        Some(f64::from_be_bytes(bytes.as_slice().try_into().ok()?))
     }
 
     // ── Accessors ───────────────────────────────────────────────────────

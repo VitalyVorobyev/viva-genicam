@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use parsers::{
-    parse_boolean, parse_category, parse_category_empty, parse_command, parse_command_empty,
+    missing_command_value, parse_boolean, parse_category, parse_category_empty, parse_command,
     parse_converter, parse_enum, parse_float, parse_int_converter, parse_integer, parse_register,
     parse_string, parse_struct_reg, parse_swissknife,
 };
@@ -32,6 +32,23 @@ pub enum EnumValueSrc {
     /// Numeric literal declared directly in the XML.
     Literal(i64),
     /// Value obtained from another node referenced via `<pValue>`.
+    FromNode(String),
+}
+
+/// Where a `<Command>` takes the value it writes.
+///
+/// GenICam Standard v2.1.1 §2.8.8: the command value "is written into a node
+/// which is referenced to by a pValue element", and it "can alternatively also
+/// be taken from pCommandValue". One of the two is required — the standard's
+/// table of defaults (§3.2) gives none — so a `<Command>` declaring neither is
+/// skipped rather than given an invented value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandValueSrc {
+    /// `<CommandValue>`: a constant.
+    Literal(i64),
+    /// `<pCommandValue>`: the node whose value is written, read each time the
+    /// command executes. Hikrobot's `UserSetSave` takes the selected user
+    /// set's index this way.
     FromNode(String),
 }
 
@@ -268,16 +285,6 @@ pub enum Addressing {
         /// Length of the register block in bytes.
         len: u32,
     },
-    /// Node switches between register blocks based on a selector value.
-    ///
-    /// This is `<Selected>`/`<pSelected>`, which picks one block rather than
-    /// contributing an offset, so it is not a term in the sum above.
-    BySelector {
-        /// Name of the selector node controlling the address.
-        selector: String,
-        /// Mapping of selector value to `(address, length)` pair.
-        map: Vec<(String, (u64, u32))>,
-    },
 }
 
 /// One contribution to a register address.
@@ -316,11 +323,10 @@ impl Addressing {
         }
     }
 
-    /// Register block length in bytes, when it does not depend on a selector.
-    pub fn byte_len(&self) -> Option<u32> {
+    /// Register block length in bytes.
+    pub fn byte_len(&self) -> u32 {
         match self {
-            Addressing::Sum { len, .. } => Some(*len),
-            Addressing::BySelector { .. } => None,
+            Addressing::Sum { len, .. } => *len,
         }
     }
 
@@ -341,7 +347,6 @@ impl Addressing {
                     },
                 })
                 .collect(),
-            Addressing::BySelector { selector, .. } => vec![selector.as_str()],
         }
     }
 }
@@ -455,6 +460,39 @@ impl SkOutput {
         }
     }
 }
+/// How a converter's `<FormulaFrom>` moves with its raw value.
+///
+/// GenICam Standard v2.1.1 §2.8.13: `<Slope>` "indicates if the formula is
+/// monotonously Increasing or Decreasing, if it is Varying (in this case the
+/// full number range is used), or if the slope is determined in an Automatic
+/// way by probing the function". It decides how the raw node's minimum and
+/// maximum map onto the converter's: a decreasing formula turns the raw
+/// maximum into the feature's minimum. §3.2 makes `Automatic` the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Slope {
+    /// The feature value grows with the raw value.
+    Increasing,
+    /// The feature value falls as the raw value grows.
+    Decreasing,
+    /// Neither: the converter's range is the full number range.
+    Varying,
+    /// Found by evaluating the formula at the raw bounds.
+    #[default]
+    Automatic,
+}
+
+impl Slope {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "Increasing" => Some(Slope::Increasing),
+            "Decreasing" => Some(Slope::Decreasing),
+            "Varying" => Some(Slope::Varying),
+            "Automatic" => Some(Slope::Automatic),
+            _ => None,
+        }
+    }
+}
+
 /// Named literals and sub-formulas declared alongside a formula.
 ///
 /// GenApi lets a `<SwissKnife>`, `<IntSwissKnife>` or `<Converter>` name parts
@@ -537,6 +575,9 @@ pub struct ConverterDecl {
     pub unit: Option<String>,
     /// Desired output type.
     pub output: SkOutput,
+    /// `<Slope>`: how the feature value moves with the raw one.
+    #[serde(default)]
+    pub slope: Slope,
     /// Predicate refs gating implementation / availability / lock state.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
     pub predicates: PredicateRefs,
@@ -567,6 +608,9 @@ pub struct IntConverterDecl {
     pub bindings: FormulaBindings,
     /// Engineering unit (if provided).
     pub unit: Option<String>,
+    /// `<Slope>`: how the feature value moves with the raw one.
+    #[serde(default)]
+    pub slope: Slope,
     /// Predicate refs gating implementation / availability / lock state.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
     pub predicates: PredicateRefs,
@@ -641,11 +685,16 @@ pub enum NodeDecl {
         len: u32,
         /// Access privileges.
         access: AccessMode,
-        /// Minimum allowed user value.
-        min: i64,
-        /// Maximum allowed user value.
-        max: i64,
-        /// Optional increment step enforced by the device.
+        /// `<Min>`; `None` when the XML declares none.
+        ///
+        /// Absent is not the same as `i64::MIN`: a document may declare the
+        /// full domain, and a feature delegating through `<pValue>` takes the
+        /// bound of the node it delegates to when it declares none itself.
+        min: Option<i64>,
+        /// `<Max>`; `None` when the XML declares none.
+        max: Option<i64>,
+        /// `<Inc>`; `None` when the XML declares none (GenICam's default
+        /// increment is 1).
         inc: Option<i64>,
         /// Engineering unit (if provided).
         unit: Option<String>,
@@ -659,16 +708,22 @@ pub enum NodeDecl {
         /// because an unmasked register has no bitfield to carry it.
         #[serde(default = "default_big_endian")]
         byte_order: ByteOrder,
-        /// Selector nodes referencing this feature.
-        selectors: Vec<String>,
-        /// Selector gating rules in the form (selector name, allowed values).
-        selected_if: Vec<(String, Vec<String>)>,
+        /// `<pSelected>`: the features this node selects.
+        ///
+        /// GenICam Standard v2.1.1 §2.8.4 puts `<pSelected>` on the
+        /// *selector*, naming each feature that "will show a different value
+        /// depending on the value of selector node".
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected: Vec<String>,
         /// Node providing the value (delegates read/write to another node).
         pvalue: Option<String>,
         /// Node providing the dynamic maximum.
         p_max: Option<String>,
         /// Node providing the dynamic minimum.
         p_min: Option<String>,
+        /// Node providing the dynamic increment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_inc: Option<String>,
         /// Static value (for constant integer nodes with `<Value>`).
         value: Option<i64>,
         /// Predicate refs gating implementation / availability / lock state.
@@ -687,17 +742,23 @@ pub enum NodeDecl {
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
         access: AccessMode,
-        min: f64,
-        max: f64,
+        /// `<Min>`; `None` when the XML declares none.
+        min: Option<f64>,
+        /// `<Max>`; `None` when the XML declares none.
+        max: Option<f64>,
         unit: Option<String>,
         /// Optional rational scale applied to the raw register value.
         scale: Option<(i64, i64)>,
         /// Optional additive offset applied after scaling.
         offset: Option<f64>,
-        selectors: Vec<String>,
-        selected_if: Vec<(String, Vec<String>)>,
         /// Node providing the value (delegates read/write to another node).
         pvalue: Option<String>,
+        /// Node providing the dynamic minimum.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_min: Option<String>,
+        /// Node providing the dynamic maximum.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_max: Option<String>,
         /// How the register payload should be interpreted — native IEEE 754
         /// or scaled integer. Defaults to [`FloatEncoding::ScaledInteger`] to
         /// preserve existing behaviour for XML that relied on it.
@@ -724,8 +785,10 @@ pub enum NodeDecl {
         access: AccessMode,
         entries: Vec<EnumEntryDecl>,
         default: Option<String>,
-        selectors: Vec<String>,
-        selected_if: Vec<(String, Vec<String>)>,
+        /// `<pSelected>`: the features this enumeration selects (GenICam
+        /// Standard v2.1.1 §2.8.4).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected: Vec<String>,
         /// Node providing the integer value (delegates register read/write).
         pvalue: Option<String>,
         /// Predicate refs gating implementation / availability / lock state.
@@ -741,8 +804,6 @@ pub enum NodeDecl {
         len: u32,
         access: AccessMode,
         bitfield: Option<BitField>,
-        selectors: Vec<String>,
-        selected_if: Vec<(String, Vec<String>)>,
         /// Node providing the value (delegates read/write to another node).
         pvalue: Option<String>,
         /// On value for pValue-backed booleans.
@@ -762,8 +823,9 @@ pub enum NodeDecl {
         len: u32,
         /// Node providing the command register (delegates write).
         pvalue: Option<String>,
-        /// Value to write when executing the command.
-        command_value: Option<i64>,
+        /// The value executing the command writes: `<CommandValue>` or
+        /// `<pCommandValue>`.
+        command_value: CommandValueSrc,
         /// Predicate refs gating implementation / availability / lock state.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
         predicates: PredicateRefs,
@@ -1114,9 +1176,16 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 "RegisterDescription" => {
                     version = schema_version_from(e)?;
                 }
+                // An empty `<Command/>` has no `<CommandValue>` to write.
                 "Command" => {
-                    let node = parse_command_empty(e)?;
-                    nodes.push(node);
+                    let name = attribute_value(e, "Name")?;
+                    let error = missing_command_value(name.as_deref().unwrap_or("<unnamed>"));
+                    tracing::warn!(error = %error, "skipping unparsable node");
+                    skipped.push(SkippedNode {
+                        tag: "Command".to_string(),
+                        name,
+                        error: error.to_string(),
+                    });
                 }
                 "Category" => {
                     let node = parse_category_empty(e)?;
@@ -1230,6 +1299,7 @@ mod tests {
                 <AccessMode>RW</AccessMode>
                 <EnumEntry Name="AnalogAll" Value="0" />
                 <EnumEntry Name="DigitalAll" Value="1" />
+                <pSelected>Gain</pSelected>
             </Enumeration>
             <Integer Name="Gain">
                 <Address>0x0000_0304</Address>
@@ -1237,8 +1307,6 @@ mod tests {
                 <AccessMode>RW</AccessMode>
                 <Min>0</Min>
                 <Max>48</Max>
-                <pSelected>GainSelector</pSelected>
-                <Selected>AnalogAll</Selected>
             </Integer>
             <Boolean Name="GammaEnable">
                 <Address>0x0000_0400</Address>
@@ -1248,6 +1316,7 @@ mod tests {
             <Command Name="AcquisitionStart">
                 <Address>0x0000_0500</Address>
                 <Length>4</Length>
+                <CommandValue>1</CommandValue>
             </Command>
         </RegisterDescription>
     "#;
@@ -1284,8 +1353,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(name, "Width");
-                assert_eq!(*min, 16);
-                assert_eq!(*max, 4096);
+                assert_eq!(*min, Some(16));
+                assert_eq!(*max, Some(4096));
                 assert_eq!(*inc, Some(2));
             }
             other => panic!("unexpected node: {other:?}"),
@@ -1304,22 +1373,28 @@ mod tests {
             other => panic!("unexpected node: {other:?}"),
         }
         match &model.nodes[3] {
-            NodeDecl::Enum { name, entries, .. } => {
+            NodeDecl::Enum {
+                name,
+                entries,
+                selected,
+                ..
+            } => {
                 assert_eq!(name, "GainSelector");
                 assert_eq!(entries.len(), 2);
                 assert!(matches!(entries[0].value, EnumValueSrc::Literal(0)));
                 assert!(matches!(entries[1].value, EnumValueSrc::Literal(1)));
+                // GenICam Standard v2.1.1 §2.8.4: the selector names what it
+                // selects (backlog GA-03).
+                assert_eq!(selected, &["Gain".to_string()]);
             }
             other => panic!("unexpected node: {other:?}"),
         }
         match &model.nodes[4] {
             NodeDecl::Integer {
-                name, selected_if, ..
+                name, addressing, ..
             } => {
                 assert_eq!(name, "Gain");
-                assert_eq!(selected_if.len(), 1);
-                assert_eq!(selected_if[0].0, "GainSelector");
-                assert_eq!(selected_if[0].1, vec!["AnalogAll".to_string()]);
+                assert_eq!(addressing, &Some(Addressing::fixed(0x304, 2)));
             }
             other => panic!("unexpected node: {other:?}"),
         }

@@ -4,7 +4,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use viva_genapi_xml::{
-    AccessMode, Addressing, BitField, ByteOrder, EnumEntryDecl, FloatEncoding, Sign,
+    AccessMode, Addressing, BitField, ByteOrder, CommandValueSrc, EnumEntryDecl, FloatEncoding,
+    Sign, Slope,
 };
 pub use viva_genapi_xml::{NodeMeta, PredicateRefs, Representation, SkOutput, Visibility};
 
@@ -202,11 +203,13 @@ pub struct IntegerNode {
     pub len: u32,
     /// Declared access rights.
     pub access: AccessMode,
-    /// Minimum permitted user value.
-    pub min: i64,
-    /// Maximum permitted user value.
-    pub max: i64,
-    /// Optional increment step the value must respect.
+    /// `<Min>`, when declared. The bound in force — which `<pMin>` and the
+    /// `<pValue>` target also decide — is what
+    /// [`NodeMap::feature_state`](crate::NodeMap::feature_state) reports.
+    pub min: Option<i64>,
+    /// `<Max>`, when declared.
+    pub max: Option<i64>,
+    /// `<Inc>`, when declared.
     pub inc: Option<i64>,
     /// Optional engineering unit such as "us".
     pub unit: Option<String>,
@@ -216,22 +219,26 @@ pub struct IntegerNode {
     pub sign: Sign,
     /// Byte order of the register payload. GenICam defaults to big-endian.
     pub byte_order: ByteOrder,
-    /// Selector nodes controlling the visibility of this node.
-    pub selectors: Vec<String>,
-    /// Selector gating rules in the form `(selector, allowed values)`.
-    pub selected_if: Vec<(String, Vec<String>)>,
+    /// `<pSelected>`: the features this node selects.
+    pub selected: Vec<String>,
     /// Node providing the value (delegates read/write).
     pub pvalue: Option<String>,
     /// Node providing the dynamic maximum.
     pub p_max: Option<String>,
     /// Node providing the dynamic minimum.
     pub p_min: Option<String>,
-    /// Static value for constant nodes.
+    /// Node providing the dynamic increment.
+    pub p_inc: Option<String>,
+    /// `<Value>`: the start value of a "floating" integer, one with no
+    /// register behind it (GenICam Standard v2.1.1 §2.8.5).
     pub value: Option<i64>,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<i64>>,
     pub(crate) raw_cache: RefCell<Option<Vec<u8>>>,
+    /// What was last written to a floating integer. Its state, not a cache of
+    /// the device's: invalidation leaves it alone.
+    pub(crate) floating: RefCell<Option<i64>>,
 }
 
 /// Floating point feature metadata.
@@ -243,17 +250,22 @@ pub struct FloatNode {
     /// Register addressing metadata (absent when delegated via `pvalue`).
     pub addressing: Option<Addressing>,
     pub access: AccessMode,
-    pub min: f64,
-    pub max: f64,
+    /// `<Min>`, when declared. The bound in force is what
+    /// [`NodeMap::feature_state`](crate::NodeMap::feature_state) reports.
+    pub min: Option<f64>,
+    /// `<Max>`, when declared.
+    pub max: Option<f64>,
     pub unit: Option<String>,
     /// Optional rational scale `(numerator, denominator)` applied to the raw value.
     pub scale: Option<(i64, i64)>,
     /// Optional offset added after scaling.
     pub offset: Option<f64>,
-    pub selectors: Vec<String>,
-    pub selected_if: Vec<(String, Vec<String>)>,
     /// Node providing the value (delegates read/write).
     pub pvalue: Option<String>,
+    /// Node providing the dynamic minimum.
+    pub p_min: Option<String>,
+    /// Node providing the dynamic maximum.
+    pub p_max: Option<String>,
     /// How the register payload is encoded (IEEE 754 or scaled integer).
     pub encoding: FloatEncoding,
     /// Byte order of the register payload.
@@ -276,8 +288,8 @@ pub struct EnumNode {
     pub pvalue: Option<String>,
     pub entries: Vec<EnumEntryDecl>,
     pub default: Option<String>,
-    pub selectors: Vec<String>,
-    pub selected_if: Vec<(String, Vec<String>)>,
+    /// `<pSelected>`: the features this enumeration selects.
+    pub selected: Vec<String>,
     pub providers: Vec<String>,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
@@ -310,8 +322,6 @@ pub struct BooleanNode {
     pub access: AccessMode,
     /// Optional bitfield (absent for pValue-backed booleans).
     pub bitfield: Option<BitField>,
-    pub selectors: Vec<String>,
-    pub selected_if: Vec<(String, Vec<String>)>,
     /// Node providing the value (delegates read/write).
     pub pvalue: Option<String>,
     /// On value for pValue-backed booleans.
@@ -375,8 +385,9 @@ pub struct CommandNode {
     pub len: u32,
     /// Node providing the command register.
     pub pvalue: Option<String>,
-    /// Value to write when executing the command.
-    pub command_value: Option<i64>,
+    /// The value executing the command writes: `<CommandValue>`, or the
+    /// node `<pCommandValue>` names, read when the command executes.
+    pub command_value: CommandValueSrc,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
 }
@@ -424,6 +435,9 @@ pub struct ConverterNode {
     pub unit: Option<String>,
     /// Desired output type.
     pub output: SkOutput,
+    /// `<Slope>`: how the value moves with the raw one, which decides how
+    /// the raw bounds map onto this node's.
+    pub slope: Slope,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached user-facing value alongside the generation it was computed in.
@@ -453,6 +467,8 @@ pub struct IntConverterNode {
     pub vars_from: Vec<FormulaVar>,
     /// Optional engineering unit.
     pub unit: Option<String>,
+    /// `<Slope>`: how the value moves with the raw one.
+    pub slope: Slope,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached user-facing value alongside the generation it was computed in.
@@ -503,16 +519,9 @@ pub struct RegisterNode {
 impl RegisterNode {
     /// Declared length of the register block in bytes.
     ///
-    /// `None` for a selector-mapped block, whose length depends on the current
-    /// selector value and therefore needs a transport to resolve — use
-    /// `NodeMap::register_address` for that.
-    ///
     /// This exists so a consumer can report a register's size without naming
     /// `Addressing`, which is not re-exported (backlog `API-02`).
-    pub fn declared_len(&self) -> Option<u32> {
-        match &self.addressing {
-            Addressing::Sum { len, .. } => Some(*len),
-            Addressing::BySelector { .. } => None,
-        }
+    pub fn declared_len(&self) -> u32 {
+        self.addressing.byte_len()
     }
 }

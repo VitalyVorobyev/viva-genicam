@@ -61,7 +61,10 @@ If the value does not change, the usual causes are:
   which the library evaluates before every write — so a locked feature is
   refused locally with a clear error, rather than being sent to the camera and
   failing there.
-- The value violates a constraint (range, increment, alignment).
+- The value violates a constraint — `Min`, `Max` or `Inc`. Many cameras
+  report these at run time (`pMin`/`pMax`/`pInc` in the XML: a `Width` whose
+  maximum shrinks as `OffsetX` grows), and the library reads them and refuses
+  an out-of-range write locally, before anything reaches the camera.
 - Another feature is overriding manual control — `ExposureAuto` is the usual
   culprit for `ExposureTime`, `GainAuto` for `Gain`.
 
@@ -82,10 +85,10 @@ Many cameras multiplex several logical settings onto the same registers:
 - `GainSelector` = `All`, `Red`, `Green`, `Blue`, …
 - `Gain` = the value for the currently selected channel.
 
-Changing the selector changes which "row" you are editing. The `NodeMap`
-re-resolves the addressing and invalidates the cached values that depended on
-it, so a read after a selector write returns the new channel's value rather than
-a stale one.
+Changing the selector changes which "row" you are editing. The camera's XML
+lists, on the selector, the features it selects (`<pSelected>`); the `NodeMap`
+re-resolves their addressing and drops their cached values, so a read after a
+selector write returns the new channel's value rather than a stale one.
 
 `viva-camctl get` reads the selector's current value only. To see which
 entries it accepts, call `Camera::enum_entries("GainSelector")` in Rust or

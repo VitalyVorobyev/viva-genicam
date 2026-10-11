@@ -11,47 +11,22 @@ use crate::{AddressTerm, Addressing, BitField, ByteOrder, IndexOffset, XmlError}
 pub struct AddressingBuilder {
     pub(crate) terms: Vec<AddressTerm>,
     pub(crate) length: Option<u32>,
-    pub(crate) selector: Option<String>,
-    pub(crate) entries: Vec<AddressEntry>,
-    pub(crate) pending_value: Option<String>,
-    pub(crate) pending_len: Option<u32>,
-}
-
-/// A single selector-to-address mapping entry.
-#[derive(Debug, Clone)]
-pub struct AddressEntry {
-    pub value: String,
-    pub address: u64,
-    pub len: Option<u32>,
 }
 
 impl AddressingBuilder {
-    /// Create a new builder with the node name for error messages.
-    pub fn new(_node: &str) -> Self {
-        Self::default()
-    }
-
-    /// Finalize the builder into an [`Addressing`] variant using default length 0.
+    /// Finalize the builder into an [`Addressing`] using default length 0.
     ///
     /// This is useful for StringReg nodes where the length is optional and can
     /// default to the full register.
     pub fn build(self) -> Addressing {
         let len = self.length.unwrap_or(0);
-        if !self.terms.is_empty() {
+        if self.terms.is_empty() {
+            Addressing::fixed(0, len)
+        } else {
             Addressing::Sum {
                 terms: self.terms,
                 len,
             }
-        } else if !self.entries.is_empty() {
-            let selector = self.selector.unwrap_or_default();
-            let map = self
-                .entries
-                .iter()
-                .map(|e| (e.value.clone(), (e.address, e.len.unwrap_or(len))))
-                .collect();
-            Addressing::BySelector { selector, map }
-        } else {
-            Addressing::fixed(0, len)
         }
     }
 
@@ -78,86 +53,21 @@ impl AddressingBuilder {
         });
     }
 
-    /// Register a selector node for address switching.
-    pub fn register_selector(&mut self, selector: &str) {
-        if self.selector.is_none() {
-            self.selector = Some(selector.to_string());
-        }
-    }
-
-    /// Push a selector value for the next address attachment.
-    pub fn push_selected_value(&mut self, value: String) {
-        self.pending_value = Some(value);
-        self.pending_len = None;
-    }
-
-    /// Apply a length value, either to the pending selector entry or globally.
-    pub fn apply_length(&mut self, len: u32) {
-        if self.pending_value.is_some() {
-            self.pending_len = Some(len);
-        } else {
-            self.length = Some(len);
-        }
-    }
-
-    /// Attach an address to the current pending selector value.
-    ///
-    /// Without a pending `<Selected>` value this is an ordinary `<Address>`
-    /// term.
-    pub fn attach_selected_address(&mut self, address: u64, len_override: Option<u32>) {
-        if let Some(value) = self.pending_value.take() {
-            let len = len_override.or(self.pending_len.take());
-            self.entries.push(AddressEntry {
-                value,
-                address,
-                len,
-            });
-        } else {
-            self.push_fixed_address(address);
-            if let Some(len) = len_override {
-                self.length = Some(len);
-            }
-        }
-    }
-
-    /// Finalize the builder into an [`Addressing`] variant.
+    /// Finalize the builder into an [`Addressing`].
     pub fn finalize(self, node: &str, default_len: Option<u32>) -> Result<Addressing, XmlError> {
-        if !self.entries.is_empty() {
-            let selector = self.selector.ok_or_else(|| {
-                XmlError::Invalid(format!(
-                    "node {node} provides <Selected> addresses without <pSelected>"
-                ))
-            })?;
-            let mut map = Vec::new();
-            for entry in self.entries {
-                let len = entry.len.or(self.length).or(default_len).ok_or_else(|| {
-                    XmlError::Invalid(format!(
-                        "node {node} is missing <Length> for selector value {}",
-                        entry.value
-                    ))
-                })?;
-                if let Some(existing) = map.iter_mut().find(|(value, _)| *value == entry.value) {
-                    *existing = (entry.value.clone(), (entry.address, len));
-                } else {
-                    map.push((entry.value.clone(), (entry.address, len)));
-                }
-            }
-            Ok(Addressing::BySelector { selector, map })
-        } else {
-            let len = self
-                .length
-                .or(default_len)
-                .ok_or_else(|| XmlError::Invalid(format!("node {node} is missing <Length>")))?;
-            if self.terms.is_empty() {
-                return Err(XmlError::Invalid(format!(
-                    "node {node} is missing <Address>"
-                )));
-            }
-            Ok(Addressing::Sum {
-                terms: self.terms,
-                len,
-            })
+        let len = self
+            .length
+            .or(default_len)
+            .ok_or_else(|| XmlError::Invalid(format!("node {node} is missing <Length>")))?;
+        if self.terms.is_empty() {
+            return Err(XmlError::Invalid(format!(
+                "node {node} is missing <Address>"
+            )));
         }
+        Ok(Addressing::Sum {
+            terms: self.terms,
+            len,
+        })
     }
 }
 
@@ -252,35 +162,17 @@ impl BitfieldBuilder {
     }
 
     /// Finalize the builder into a [`BitField`] if sufficient data was provided.
-    pub fn finish(self, node: &str, lengths: &[u32]) -> Result<Option<BitField>, XmlError> {
+    pub fn finish(self, node: &str, len_bytes: u32) -> Result<Option<BitField>, XmlError> {
         let source = match self.source {
             Some(source) => source,
             None => return Ok(None),
         };
         let byte_order = self.byte_order.unwrap_or(ByteOrder::Little);
-        if lengths.is_empty() {
+        if len_bytes == 0 {
             return Err(XmlError::Invalid(format!(
-                "node {node} is missing register length information"
+                "node {node} declares zero-length register"
             )));
         }
-        let mut unique_len = None;
-        for len in lengths {
-            if *len == 0 {
-                return Err(XmlError::Invalid(format!(
-                    "node {node} declares zero-length register"
-                )));
-            }
-            if let Some(existing) = unique_len {
-                if existing != *len {
-                    return Err(XmlError::Invalid(format!(
-                        "node {node} uses inconsistent register lengths"
-                    )));
-                }
-            } else {
-                unique_len = Some(*len);
-            }
-        }
-        let len_bytes = unique_len.unwrap_or(0);
         let total_bits = len_bytes
             .checked_mul(8)
             .ok_or_else(|| XmlError::Invalid(format!("node {node} register length overflow")))?;
@@ -423,13 +315,5 @@ impl BitfieldBuilder {
             })?,
             byte_order,
         }))
-    }
-}
-
-/// Extract lengths from an addressing variant.
-pub fn addressing_lengths(addressing: &Addressing) -> Vec<u32> {
-    match addressing {
-        Addressing::Sum { len, .. } => vec![*len],
-        Addressing::BySelector { map, .. } => map.iter().map(|(_, (_, len))| *len).collect(),
     }
 }

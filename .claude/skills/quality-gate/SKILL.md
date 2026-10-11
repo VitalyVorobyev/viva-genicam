@@ -15,7 +15,7 @@ report it with the fix hint, and do not continue until it is fixed.
 | 1 | `cargo fmt --all --check` | run `cargo fmt --all`, then re-check |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | fix every warning — CI treats them as errors |
 | 3 | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` | fix doc warnings (broken links, missing docs) |
-| 4 | `cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml -p viva-genapi` and `cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml --no-default-features` | Studio browses XML in the browser through these two crates. The usual cause is a new dependency that does not build for wasm32 (`socket2`, tokio's `net`, anything compiling C): keep it out of them, or behind a feature that is off by default. Needs `rustup target add wasm32-unknown-unknown` once |
+| 4 | `cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml -p viva-genapi -p viva-pfnc` and `cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml --no-default-features` | Studio browses XML in the browser through the first two crates, and `viva-pfnc`'s pixel conversion promises the same. The usual cause is a new dependency that does not build for wasm32 (`socket2`, tokio's `net`, anything compiling C): keep it out of them, or behind a feature that is off by default. Needs `rustup target add wasm32-unknown-unknown` once |
 | 5 | `cargo test --workspace` | show failing test names + output, fix, re-run |
 
 CI also runs two jobs that are too slow for every push; run them locally when

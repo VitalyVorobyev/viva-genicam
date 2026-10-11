@@ -1712,6 +1712,21 @@ impl Drop for U3vFrameStream {
 /// let frames = U3vStreamBuilder::new(&mut camera)
 ///     .build()?;
 /// ```
+/// The bytes a `width × height` frame in the `pixel_format` named occupies,
+/// for a camera without `PayloadSize`.
+#[cfg(feature = "u3v")]
+fn computed_frame_size(pixel_format: &str, width: u32, height: u32) -> Result<u64, GenicamError> {
+    PixelFormat::from_name(pixel_format)
+        .image_bytes(width, height)
+        .map(|bytes| bytes as u64)
+        .ok_or_else(|| {
+            GenicamError::parse(format!(
+                "cannot size a {pixel_format} frame: the camera has no PayloadSize and the \
+                 format declares no size; pass U3vStreamBuilder::payload_size"
+            ))
+        })
+}
+
 /// Whether reading `PayloadSize` failed because the camera has no such
 /// feature, the one failure a computed size may stand in for.
 #[cfg(feature = "u3v")]
@@ -1742,17 +1757,17 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
     /// Override the payload size (bytes per frame).
     ///
     /// When not set, the builder reads the camera's `PayloadSize`, or
-    /// computes it from Width, Height and a whole-byte PixelFormat.
+    /// computes it from Width, Height and PixelFormat.
     pub fn payload_size(mut self, size: u64) -> Self {
         self.payload_size = Some(size);
         self
     }
 
     /// Bytes in one frame. The camera's `PayloadSize` is the authority: it
-    /// knows its own packing and padding. Without it, width × height × the
-    /// format's whole bytes a pixel; a packed format such as `Mono12Packed`
-    /// has none, and guessing one byte made the reader take the rest of the
-    /// image for the trailer and fail (Codex review of #179).
+    /// knows its own packing and padding. Without it, the format's
+    /// `image_bytes` for width × height, exact for a packed format such as
+    /// `Mono12Packed`; guessing one byte a pixel made the reader take the rest
+    /// of the image for the trailer and fail (Codex review of #179).
     fn frame_size(&self) -> Result<u64, GenicamError> {
         match self.camera.get("PayloadSize") {
             Ok(text) => {
@@ -1767,22 +1782,14 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
             Err(error) if payload_size_is_absent(&error) => {}
             Err(error) => return Err(error),
         }
-        let dimension = |name: &str| -> Result<u64, GenicamError> {
+        let dimension = |name: &str| -> Result<u32, GenicamError> {
             self.camera
                 .get(name)?
                 .parse()
                 .map_err(|e| GenicamError::parse(format!("{name}: {e}")))
         };
         let pixel_format = self.camera.get("PixelFormat")?;
-        let bytes = PixelFormat::from_name(&pixel_format)
-            .bytes_per_pixel()
-            .ok_or_else(|| {
-                GenicamError::parse(format!(
-                    "cannot size a {pixel_format} frame: the camera has no PayloadSize and the \
-                     format has no whole-byte pixel; pass U3vStreamBuilder::payload_size"
-                ))
-            })?;
-        Ok(dimension("Width")? * dimension("Height")? * bytes as u64)
+        computed_frame_size(&pixel_format, dimension("Width")?, dimension("Height")?)
     }
 
     /// Finalise the builder: configure the SIRM, set StreamEnable, and return
@@ -1884,6 +1891,21 @@ mod tests {
         );
         assert!(delay_in_ticks(us(10), 0).is_err());
         assert!(delay_in_ticks(Duration::from_secs(10), 1_000_000_000).is_err());
+    }
+
+    /// Without `PayloadSize`, a frame is sized from its PFNC code: a packed
+    /// format at its packed size (`Mono12Packed`: 64 × 48 × 1.5, as the fake
+    /// U3V camera's own `PayloadSize` says), not refused.
+    #[cfg(feature = "u3v")]
+    #[test]
+    fn a_camera_without_payload_size_is_sized_from_its_format() {
+        assert_eq!(computed_frame_size("Mono8", 64, 48).unwrap(), 3072);
+        assert_eq!(computed_frame_size("Mono16", 64, 48).unwrap(), 6144);
+        assert_eq!(computed_frame_size("Mono12Packed", 64, 48).unwrap(), 4608);
+        assert_eq!(computed_frame_size("Mono10p", 64, 48).unwrap(), 3840);
+        assert_eq!(computed_frame_size("YUV422Packed", 64, 48).unwrap(), 6144);
+        // A name nobody knows has no size to compute.
+        assert!(computed_frame_size("Fancy42", 64, 48).is_err());
     }
 
     #[test]

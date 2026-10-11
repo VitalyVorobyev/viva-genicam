@@ -67,7 +67,7 @@ dropped: number, };
 
 export type ImageMeta = { pixel_format: PixelFormat, width: number, height: number, payload_size: number, };
 
-export type PixelFormat = "Mono8" | "Mono10" | "Mono12" | "Mono16" | "BayerRG8" | "BayerGR8" | "BayerBG8" | "BayerGB8" | "BayerRG10" | "BayerGR10" | "BayerBG10" | "BayerGB10" | "BayerRG12" | "BayerGR12" | "BayerBG12" | "BayerGB12" | "BayerRG16" | "BayerGR16" | "BayerBG16" | "BayerGB16" | "RGB8" | "BGR8" | "RGBa8" | "YCbCr422_8" | "YCbCr8" | "Coord3D_C16" | "Unknown";
+export type PixelFormat = "Mono8" | "Mono10" | "Mono12" | "Mono16" | "BayerRG8" | "BayerGR8" | "BayerBG8" | "BayerGB8" | "BayerRG10" | "BayerGR10" | "BayerBG10" | "BayerGB10" | "BayerRG12" | "BayerGR12" | "BayerBG12" | "BayerGB12" | "BayerRG16" | "BayerGR16" | "BayerBG16" | "BayerGB16" | "RGB8" | "BGR8" | "RGBa8" | "YCbCr422_8" | "YCbCr8" | "Coord3D_C16" | "Mono14" | "Mono10p" | "Mono12p" | "Mono10Packed" | "Mono12Packed" | "BayerRG10p" | "BayerGR10p" | "BayerBG10p" | "BayerGB10p" | "BayerRG12p" | "BayerGR12p" | "BayerBG12p" | "BayerGB12p" | "BayerRG10Packed" | "BayerGR10Packed" | "BayerBG10Packed" | "BayerGB10Packed" | "BayerRG12Packed" | "BayerGR12Packed" | "BayerBG12Packed" | "BayerGB12Packed" | "BGRa8" | "YUV422_8" | "YUV422_8_UYVY" | "YCbCr422_8_CbYCrY" | "YUV411_8_UYYVYY" | "YUV8_UYV" | "YCbCr8_CbYCr" | "Unknown";
 
 export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string,
 /**

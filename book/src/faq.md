@@ -87,7 +87,11 @@ cargo run -p viva-camctl -- stream \
 ```
 
 Without `--duration-s` the stream runs until Ctrl+C. Both formats are plain
-NetPBM, readable by most image viewers, OpenCV and Pillow. Event-vision cameras
+8-bit NetPBM, readable by most image viewers, OpenCV and Pillow. For a camera
+with more than 8 bits per sample, add `--save-format png` or
+`--save-format tiff` to keep them all in a 16-bit file
+([Streaming → Saving frames](./tutorials/streaming.md#22-saving-frames)).
+Event-vision cameras
 produce `block_NNNN.evt3` / `.evt21` files instead; see
 [Streaming → Event-vision cameras](./tutorials/streaming.md#23-event-vision-cameras).
 

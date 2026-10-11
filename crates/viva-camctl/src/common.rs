@@ -14,6 +14,8 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use viva_genapi_xml::{self, XmlError};
 use viva_genicam::genapi::NodeMap;
+use viva_genicam::image_io::{self, ImageFormat};
+use viva_genicam::pfnc::{self, PixelFormat};
 use viva_genicam::{Camera, GigeRegisterIo};
 use viva_gige::DeviceInfo;
 use viva_gige::discover_on_interface;
@@ -231,6 +233,52 @@ pub fn encode_ppm(width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// The file format `--save-format` writes frames in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SaveFormat {
+    /// 8-bit NetPBM: PGM for Mono8, PPM for anything else or with `--rgb`.
+    Pnm,
+    /// PNG at the camera's bit depth: 16-bit when samples are wider than 8
+    /// bits, with the depth in `sBIT`.
+    Png,
+    /// Uncompressed TIFF at the camera's bit depth.
+    Tiff,
+}
+
+/// A frame's pixels as a file in `save`, and the extension to give it.
+/// `rgb` writes colour even for a monochrome frame.
+pub fn encode_frame(
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    payload: &[u8],
+    save: SaveFormat,
+    rgb: bool,
+) -> Result<(Vec<u8>, &'static str)> {
+    let file = match save {
+        SaveFormat::Pnm if !rgb && format == PixelFormat::Mono8 => {
+            let mut converter = pfnc::convert::Converter::new();
+            let pixels = converter
+                .gray8(format, width, height, payload)
+                .map_err(|e| anyhow!("convert frame: {e}"))?;
+            return Ok((encode_pgm(width, height, pixels)?, "pgm"));
+        }
+        SaveFormat::Pnm => {
+            let pixels = pfnc::convert::to_rgb8(format, width, height, payload)
+                .map_err(|e| anyhow!("convert frame to RGB8: {e}"))?;
+            return Ok((encode_ppm(width, height, &pixels)?, "ppm"));
+        }
+        SaveFormat::Png => ImageFormat::Png,
+        SaveFormat::Tiff => ImageFormat::Tiff,
+    };
+    let pixels = pfnc::convert::full_depth(format, width, height, payload)
+        .map_err(|e| anyhow!("convert frame: {e}"))?;
+    let pixels = if rgb { pixels.into_rgb() } else { pixels };
+    let encoded = image_io::encode(&pixels, width, height, file)
+        .with_context(|| format!("encode {}", file.extension()))?;
+    Ok((encoded, file.extension()))
+}
+
 pub fn save_image(buffer: &[u8], path: &PathBuf) -> Result<()> {
     let mut file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     file.write_all(buffer)
@@ -268,6 +316,36 @@ mod tests {
         let encoded = encode_pgm(2, 2, &data).expect("encode");
         assert!(encoded.starts_with(b"P5\n2 2\n255\n"));
         assert_eq!(encoded.len(), 4 + "P5\n2 2\n255\n".len());
+    }
+
+    /// Mono8 stays PGM by default; PNG and TIFF keep a 12-bit camera's depth.
+    #[test]
+    fn a_frame_is_saved_in_the_format_asked_for() {
+        let mono8 = |save, rgb| encode_frame(PixelFormat::Mono8, 1, 1, &[7], save, rgb).unwrap();
+        let (pgm, ext) = mono8(SaveFormat::Pnm, false);
+        assert_eq!((pgm.as_slice(), ext), (&b"P5\n1 1\n255\n\x07"[..], "pgm"));
+        let (ppm, ext) = mono8(SaveFormat::Pnm, true);
+        assert_eq!(
+            (ppm.as_slice(), ext),
+            (&b"P6\n1 1\n255\n\x07\x07\x07"[..], "ppm")
+        );
+
+        let mono12 = [0xBC, 0x0A];
+        let (png, ext) =
+            encode_frame(PixelFormat::Mono12, 1, 1, &mono12, SaveFormat::Png, false).unwrap();
+        assert_eq!(ext, "png");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        // IHDR: bit depth 16, colour type 0 (greyscale).
+        assert_eq!(&png[24..26], [16, 0]);
+        let (png, _) =
+            encode_frame(PixelFormat::Mono12, 1, 1, &mono12, SaveFormat::Png, true).unwrap();
+        // Colour type 2 (truecolour).
+        assert_eq!(&png[24..26], [16, 2]);
+
+        let (tiff, ext) =
+            encode_frame(PixelFormat::Mono12, 1, 1, &mono12, SaveFormat::Tiff, false).unwrap();
+        assert_eq!(ext, "tiff");
+        assert!(tiff.starts_with(b"II*\0") || tiff.starts_with(b"MM\0*"));
     }
 
     #[test]

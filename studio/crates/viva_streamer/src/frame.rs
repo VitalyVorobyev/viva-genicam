@@ -1,83 +1,40 @@
 //! Turning a camera frame into the BMP the viewer draws.
 //!
-//! One implementation for both of Studio's modes (backlog ST-32): embedded
-//! mode maps the camera's PFNC format to a [`PixelLayout`], remote mode maps
-//! the wire's, and [`FrameEncoder`] does the rest. Each mode used to carry its
-//! own encoder, and the embedded one could not show Mono10/12, Bayer above 8
-//! bits or RGBa8.
+//! One implementation for both of Studio's modes (backlog ST-32), and the same
+//! one as the library: embedded mode passes the camera's PFNC format, remote
+//! mode the wire's ([`viva_zenoh_api::PixelFormat::to_pfnc`]), and
+//! [`FrameEncoder`] converts with [`viva_pfnc::convert`] — the conversion
+//! `viva_genicam::Frame::to_rgb8` returns — so the viewer shows the pixels the
+//! library hands an application.
 
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use viva_zenoh_api::PixelFormat as WirePixelFormat;
+use thiserror::Error;
+use viva_pfnc::PixelFormat;
+use viva_pfnc::convert::{self, ConvertError, Converter};
 
-use crate::bmp::{
-    BayerPattern, BmpEncoder, BmpError, debayer_bilinear_into, mono_u16le_to_gray8_into,
-};
+use crate::bmp::{BmpEncoder, BmpError};
 
-/// How a frame's pixels are laid out, as far as drawing them is concerned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelLayout {
-    /// One sample per pixel: one byte for 8 bits, two little-endian bytes
-    /// above that.
-    Mono {
-        bits: u8,
-    },
-    /// A Bayer mosaic, sampled as [`PixelLayout::Mono`] is.
-    Bayer {
-        pattern: BayerPattern,
-        bits: u8,
-    },
-    Rgb8,
-    Bgr8,
-    /// RGB with an alpha byte, which is dropped.
-    Rgba8,
+/// Why a frame could not be drawn.
+#[derive(Debug, Error)]
+pub enum EncodeError {
+    /// The pixels could not be converted: an undrawable format, or a payload
+    /// shorter than its image.
+    #[error(transparent)]
+    Convert(#[from] ConvertError),
+    #[error(transparent)]
+    Bmp(#[from] BmpError),
 }
 
-impl PixelLayout {
-    /// The layout of a wire format, or `None` for one the viewer cannot draw.
-    pub fn of_wire(format: &WirePixelFormat) -> Option<Self> {
-        use BayerPattern::{Bggr, Gbrg, Grbg, Rggb};
-        use WirePixelFormat as F;
-        let bayer = |pattern, bits| Some(Self::Bayer { pattern, bits });
-        match format {
-            F::Mono8 => Some(Self::Mono { bits: 8 }),
-            F::Mono10 => Some(Self::Mono { bits: 10 }),
-            F::Mono12 => Some(Self::Mono { bits: 12 }),
-            F::Mono16 => Some(Self::Mono { bits: 16 }),
-            F::BayerRG8 => bayer(Rggb, 8),
-            F::BayerGR8 => bayer(Grbg, 8),
-            F::BayerBG8 => bayer(Bggr, 8),
-            F::BayerGB8 => bayer(Gbrg, 8),
-            F::BayerRG10 => bayer(Rggb, 10),
-            F::BayerGR10 => bayer(Grbg, 10),
-            F::BayerBG10 => bayer(Bggr, 10),
-            F::BayerGB10 => bayer(Gbrg, 10),
-            F::BayerRG12 => bayer(Rggb, 12),
-            F::BayerGR12 => bayer(Grbg, 12),
-            F::BayerBG12 => bayer(Bggr, 12),
-            F::BayerGB12 => bayer(Gbrg, 12),
-            F::BayerRG16 => bayer(Rggb, 16),
-            F::BayerGR16 => bayer(Grbg, 16),
-            F::BayerBG16 => bayer(Bggr, 16),
-            F::BayerGB16 => bayer(Gbrg, 16),
-            F::RGB8 => Some(Self::Rgb8),
-            F::BGR8 => Some(Self::Bgr8),
-            F::RGBa8 => Some(Self::Rgba8),
-            _ => None,
-        }
-    }
-}
-
-/// Encodes frames as BMP, keeping its encoders and scratch buffers between
+/// Encodes frames as BMP, keeping its encoders and conversion buffers between
 /// frames: only the BMP handed to the viewer is allocated per frame.
 #[derive(Debug, Default)]
 pub struct FrameEncoder {
     size: (u32, u32),
     gray: Option<BmpEncoder>,
     rgb: Option<BmpEncoder>,
-    samples: Vec<u8>,
-    colour: Vec<u8>,
+    converter: Converter,
 }
 
 impl FrameEncoder {
@@ -85,68 +42,38 @@ impl FrameEncoder {
         Self::default()
     }
 
-    /// Encode one `width × height` frame of `layout`.
+    /// Whether frames of `format` can be drawn.
+    pub fn can_draw(format: PixelFormat) -> bool {
+        convert::supports(format)
+    }
+
+    /// Encode one `width × height` frame: monochrome as an 8-bit grey BMP,
+    /// everything else as 24-bit RGB. Bytes past the image are ignored.
     pub fn encode(
         &mut self,
-        layout: PixelLayout,
+        format: PixelFormat,
         width: u32,
         height: u32,
         pixels: &[u8],
-    ) -> Result<Bytes, BmpError> {
+    ) -> Result<Bytes, EncodeError> {
         if self.size != (width, height) {
             self.size = (width, height);
             self.gray = None;
             self.rgb = None;
         }
-        match layout {
-            PixelLayout::Mono { bits: 8 } => self.gray().encode_gray8(pixels),
-            PixelLayout::Mono { bits } => {
-                mono_u16le_to_gray8_into(pixels, bits, &mut self.samples);
-                let samples = std::mem::take(&mut self.samples);
-                let bmp = self.gray().encode_gray8(&samples);
-                self.samples = samples;
-                bmp
-            }
-            PixelLayout::Bayer { pattern, bits } => {
-                let mosaic: &[u8] = if bits == 8 {
-                    pixels
-                } else {
-                    mono_u16le_to_gray8_into(pixels, bits, &mut self.samples);
-                    &self.samples
-                };
-                debayer_bilinear_into(mosaic, width, height, pattern, &mut self.colour);
-                let colour = std::mem::take(&mut self.colour);
-                let bmp = self.rgb().encode_rgb24(&colour);
-                self.colour = colour;
-                bmp
-            }
-            PixelLayout::Rgb8 => self.rgb().encode_rgb24(pixels),
-            PixelLayout::Bgr8 => self.rgb().encode_bgr24(pixels),
-            PixelLayout::Rgba8 => {
-                self.colour.clear();
-                self.colour.extend(
-                    pixels
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .flat_map(|[r, g, b, _]| [*r, *g, *b]),
-                );
-                let colour = std::mem::take(&mut self.colour);
-                let bmp = self.rgb().encode_rgb24(&colour);
-                self.colour = colour;
-                bmp
-            }
+        if format.is_mono() {
+            let gray = self.converter.gray8(format, width, height, pixels)?;
+            let encoder = self
+                .gray
+                .get_or_insert_with(|| BmpEncoder::new(width, height));
+            Ok(encoder.encode_gray8(gray)?)
+        } else {
+            let rgb = self.converter.rgb8(format, width, height, pixels)?;
+            let encoder = self
+                .rgb
+                .get_or_insert_with(|| BmpEncoder::new_rgb24(width, height));
+            Ok(encoder.encode_rgb24(rgb)?)
         }
-    }
-
-    fn gray(&mut self) -> &BmpEncoder {
-        let (w, h) = self.size;
-        self.gray.get_or_insert_with(|| BmpEncoder::new(w, h))
-    }
-
-    fn rgb(&mut self) -> &BmpEncoder {
-        let (w, h) = self.size;
-        self.rgb.get_or_insert_with(|| BmpEncoder::new_rgb24(w, h))
     }
 }
 
@@ -195,8 +122,9 @@ impl FramePacer {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{FrameEncoder, FramePacer, PixelLayout};
-    use crate::bmp::BayerPattern;
+    use viva_pfnc::PixelFormat;
+
+    use super::{EncodeError, FrameEncoder, FramePacer};
 
     #[test]
     fn the_pacer_draws_the_first_frame_even_with_no_viewer() {
@@ -227,18 +155,22 @@ mod tests {
         let mut enc = FrameEncoder::new();
         // 0x0FF0 at 12 bits is 0xFF at 8.
         let bmp = enc
-            .encode(PixelLayout::Mono { bits: 12 }, 1, 1, &[0xF0, 0x0F])
+            .encode(PixelFormat::Mono12, 1, 1, &[0xF0, 0x0F])
             .unwrap();
         assert_eq!(first_pixel(&bmp, 1), [0xFF]);
     }
 
     #[test]
-    fn bgr8_lands_in_bmp_order_untouched() {
+    fn bgr8_lands_in_bmp_order() {
         let mut enc = FrameEncoder::new();
-        let bmp = enc.encode(PixelLayout::Bgr8, 1, 1, &[1, 2, 3]).unwrap();
+        let bmp = enc
+            .encode(PixelFormat::BGR8Packed, 1, 1, &[1, 2, 3])
+            .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [1, 2, 3]);
         // Negative control: the same bytes as RGB are swapped.
-        let bmp = enc.encode(PixelLayout::Rgb8, 1, 1, &[1, 2, 3]).unwrap();
+        let bmp = enc
+            .encode(PixelFormat::RGB8Packed, 1, 1, &[1, 2, 3])
+            .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [3, 2, 1]);
     }
 
@@ -246,7 +178,7 @@ mod tests {
     fn rgba8_drops_the_alpha() {
         let mut enc = FrameEncoder::new();
         let bmp = enc
-            .encode(PixelLayout::Rgba8, 1, 1, &[1, 2, 3, 99])
+            .encode(PixelFormat::RGBa8, 1, 1, &[1, 2, 3, 99])
             .unwrap();
         assert_eq!(first_pixel(&bmp, 3), [3, 2, 1]);
     }
@@ -256,24 +188,126 @@ mod tests {
         let mut enc = FrameEncoder::new();
         // A uniform 2x2 mosaic at 12-bit 0x0800 is mid-grey everywhere.
         let mosaic: Vec<u8> = [0x00, 0x08].repeat(4);
-        let layout = PixelLayout::Bayer {
-            pattern: BayerPattern::Rggb,
-            bits: 12,
-        };
-        let bmp = enc.encode(layout, 2, 2, &mosaic).unwrap();
+        let bmp = enc.encode(PixelFormat::BayerRG12, 2, 2, &mosaic).unwrap();
         assert_eq!(first_pixel(&bmp, 3), [0x80, 0x80, 0x80]);
     }
 
     #[test]
     fn a_new_size_gets_new_headers() {
         let mut enc = FrameEncoder::new();
-        let small = enc
-            .encode(PixelLayout::Mono { bits: 8 }, 2, 2, &[0; 4])
-            .unwrap();
-        let large = enc
-            .encode(PixelLayout::Mono { bits: 8 }, 4, 4, &[0; 16])
-            .unwrap();
+        let small = enc.encode(PixelFormat::Mono8, 2, 2, &[0; 4]).unwrap();
+        let large = enc.encode(PixelFormat::Mono8, 4, 4, &[0; 16]).unwrap();
         let width = |bmp: &[u8]| i32::from_le_bytes(bmp[18..22].try_into().unwrap());
         assert_eq!((width(&small), width(&large)), (2, 4));
+    }
+
+    #[test]
+    fn short_and_undrawable_frames_are_errors() {
+        let mut enc = FrameEncoder::new();
+        assert!(matches!(
+            enc.encode(PixelFormat::Mono12Packed, 2, 2, &[0; 5]),
+            Err(EncodeError::Convert(_))
+        ));
+        assert!(!FrameEncoder::can_draw(PixelFormat::Coord3DABC32f));
+        assert!(FrameEncoder::can_draw(PixelFormat::YUV422_8_UYVY));
+    }
+
+    /// Trailing bytes (GVSP padding) are not part of the image.
+    #[test]
+    fn bytes_past_the_image_are_ignored() {
+        let mut enc = FrameEncoder::new();
+        let bmp = enc.encode(PixelFormat::Mono8, 1, 1, &[7, 0xEE]).unwrap();
+        assert_eq!(first_pixel(&bmp, 1), [7]);
+    }
+
+    /// The pixels of a top-down BMP as RGB rows, grey or 24-bit alike.
+    fn bmp_rgb(bmp: &[u8]) -> Vec<u8> {
+        let u32_at = |i: usize| u32::from_le_bytes(bmp[i..i + 4].try_into().unwrap());
+        let offset = u32_at(10) as usize;
+        let width = u32_at(18) as usize;
+        let height = (u32_at(22) as i32).unsigned_abs() as usize;
+        let bits = u16::from_le_bytes([bmp[28], bmp[29]]);
+        let bytes_per_pixel = usize::from(bits / 8);
+        let stride = (width * bytes_per_pixel).div_ceil(4) * 4;
+        let mut rgb = Vec::new();
+        for y in 0..height {
+            let row = &bmp[offset + y * stride..][..width * bytes_per_pixel];
+            match bits {
+                8 => rgb.extend(row.iter().flat_map(|&v| [v, v, v])),
+                _ => rgb.extend(
+                    row.as_chunks::<3>()
+                        .0
+                        .iter()
+                        .flat_map(|[b, g, r]| [*r, *g, *b]),
+                ),
+            }
+        }
+        rgb
+    }
+
+    /// One implementation: what the viewer draws is, pixel for pixel, the RGB
+    /// the library's `Frame::to_rgb8` returns — both are
+    /// `viva_pfnc::convert::to_rgb8` — for every family of format the
+    /// converter handles, packed and Y'CbCr included.
+    #[test]
+    fn the_viewer_draws_what_the_library_converts() {
+        use viva_pfnc::PixelFormat as P;
+        let (width, height) = (8, 4);
+        for format in [
+            P::Mono8,
+            P::Mono10,
+            P::Mono12,
+            P::Mono14,
+            P::Mono16,
+            P::Mono10p,
+            P::Mono12p,
+            P::Mono10Packed,
+            P::Mono12Packed,
+            P::BayerRG8,
+            P::BayerGR8,
+            P::BayerGB8,
+            P::BayerBG8,
+            P::BayerRG10,
+            P::BayerGR12,
+            P::BayerBG16,
+            P::BayerGB10p,
+            P::BayerRG12p,
+            P::BayerGR10Packed,
+            P::BayerBG12Packed,
+            P::RGB8Packed,
+            P::BGR8Packed,
+            P::RGBa8,
+            P::BGRa8,
+            P::YUV422_8,
+            P::YUV422_8_UYVY,
+            P::YCbCr422_8,
+            P::YCbCr422_8_CbYCrY,
+            P::YUV411_8_UYYVYY,
+            P::YUV8_UYV,
+            P::YCbCr8,
+            P::YCbCr8_CbYCr,
+        ] {
+            let len = format.image_bytes(width, height).unwrap();
+            // Deterministic bytes; 16-bit containers kept to `bits`.
+            let mut src: Vec<u8> = (0..len).map(|i| (i * 89 + 7) as u8).collect();
+            let unpacked_16 =
+                format.bits_per_pixel() == Some(16) && format.bytes_per_pixel() == Some(2);
+            if unpacked_16 && (format.is_mono() || format.is_bayer()) {
+                // Mono12 → 12, BayerBG16 → 16.
+                let name = format.to_string();
+                let bits: u32 = name
+                    .trim_start_matches(char::is_alphabetic)
+                    .parse()
+                    .unwrap();
+                for pair in src.as_chunks_mut::<2>().0 {
+                    *pair = (u16::from_le_bytes(*pair) >> (16 - bits)).to_le_bytes();
+                }
+            }
+            let library = viva_pfnc::convert::to_rgb8(format, width, height, &src).unwrap();
+            let bmp = FrameEncoder::new()
+                .encode(format, width, height, &src)
+                .unwrap_or_else(|e| panic!("{format}: {e}"));
+            assert_eq!(bmp_rgb(&bmp), library, "{format}");
+        }
     }
 }

@@ -87,6 +87,19 @@ release opens with what to read before upgrading.
   `Camera.execute` wait by default (`--no-wait`/`--wait-ms`;
   `wait=`/`timeout=`); a camera that has not reported completion in time is a
   warning there, not an error, since the command was sent. ([#193](https://github.com/VitalyVorobyev/viva-genicam/pull/193))
+- Packed and Y'CbCr pixel formats: `viva_pfnc::PixelFormat` names Mono10p,
+  Mono12p, Mono10Packed, Mono12Packed, Bayer at 10 and 12 bits (unpacked, `p`
+  and `Packed`), RGBa8/BGRa8 and 8-bit YUV/Y'CbCr 4:1:1, 4:2:2 and 4:4:4, with
+  codes from EMVA's values table. `bits_per_pixel`, `line_bytes` and
+  `image_bytes` size them exactly. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
+- `viva_pfnc::convert`: unpack to `u16`, reduce to 8 bits, bilinear Bayer
+  demosaic and Y'CbCr to RGB. `Frame::to_rgb8` and Viva Studio's viewer both
+  use it, so Studio shows the pixels the library returns, and both now handle
+  all of the formats above. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
+- Frames saved at the camera's bit depth: the `image-io` feature's
+  `viva_genicam::image_io` writes 16-bit PNG (depth in `sBIT`) and TIFF, and
+  `viva-camctl stream --save-format png|tiff` uses it; PGM/PPM stays the
+  default. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
 
 ### Changed
 
@@ -115,6 +128,13 @@ release opens with what to read before upgrading.
   `Integer` gains `p_inc` and `selected`, `Float` gains `p_min`/`p_max`;
   `Command::command_value` is a `CommandValueSrc`; `Addressing::BySelector`,
   `selectors` and `selected_if` are gone. ([#193](https://github.com/VitalyVorobyev/viva-genicam/pull/193))
+- `Frame::to_rgb8` demosaics bilinearly (it copied from the 2×2 cell) and
+  ignores bytes past the image instead of rejecting the frame. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
+- The services publish the camera's pixel format by name for every format
+  Studio can draw: Mono10/12/14, Bayer above 8 bits and the packed formats were
+  published as `Unknown`; the wire `PixelFormat` gains 28 variants. `ImageMeta`
+  reads legacy names such as `YUV422Packed`, and its `payload_size` is the
+  camera's `PayloadSize`, or the exact packed size without one. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
 - Viva Studio's Linux bundles (AppImage and deb) are built on Ubuntu 24.04, so
   they need glibc 2.39 or newer — Ubuntu 24.04, Debian 13, Fedora 40 or later.
   The Ubuntu 22.04 build image retires in April 2027.
@@ -143,6 +163,12 @@ release opens with what to read before upgrading.
   incomplete. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
 - On macOS the interface MTU always read as 1 500, so automatic packet sizing
   never chose jumbo frames. ([#195](https://github.com/VitalyVorobyev/viva-genicam/pull/195))
+- `PixelFormat::BayerGR16`, `BayerRG16`, `BayerGB16` and `BayerBG16` carried the
+  codes of BayerGB10, BayerBG10, BayerGR12 and BayerRG12, so a camera sending
+  one of those was read as 16-bit Bayer of another pattern. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
+- A packed format is sized exactly when the camera has no `PayloadSize`:
+  `U3vStreamBuilder` refused it, and `viva-camctl stream-usb` sized it at one
+  byte a pixel, a third short for `Mono12Packed`. ([#196](https://github.com/VitalyVorobyev/viva-genicam/pull/196))
 - Writes to a floating `<Integer>` (a `<Value>` with no register) always
   failed; 319 corpus features write through one, among them AVT's
   `TriggerSelector` and Sony's `UserSetSelector`. ([#193](https://github.com/VitalyVorobyev/viva-genicam/pull/193))

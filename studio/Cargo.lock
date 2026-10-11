@@ -3417,12 +3417,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "viva-pfnc"
+version = "0.8.0"
+
+[[package]]
 name = "viva-zenoh-api"
 version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "viva-pfnc",
 ]
 
 [[package]]
@@ -3436,6 +3441,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "viva-pfnc",
  "viva-zenoh-api",
  "zenoh",
 ]

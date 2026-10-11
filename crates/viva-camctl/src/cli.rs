@@ -19,6 +19,7 @@ use crate::cmd_set_ip;
 use crate::cmd_stream::{self, StreamArgs};
 use crate::cmd_usb;
 use crate::cmd_xml::{self, XmlArgs};
+use crate::common::SaveFormat;
 
 #[derive(Parser, Debug)]
 #[command(name = "viva-camctl", version, about = "GenICam CLI")]
@@ -161,6 +162,10 @@ pub enum Cmd {
         packet_size: Option<u32>,
         #[arg(long, default_value_t = 1)]
         save: usize,
+        /// File format for --save: pnm (8-bit PGM/PPM), or png/tiff at the
+        /// camera's bit depth (16-bit above 8 bits)
+        #[arg(long, value_enum, default_value_t = SaveFormat::Pnm)]
+        save_format: SaveFormat,
         /// Append every completed EVT block's raw payload to this file,
         /// in arrival order (replay capture). Image frames are unaffected;
         /// use --save for frame_NNNN files.
@@ -272,6 +277,10 @@ pub enum Cmd {
         /// Number of frames to save to disk
         #[arg(long, default_value_t = 1)]
         save: usize,
+        /// File format for --save: pnm (8-bit PGM/PPM), or png/tiff at the
+        /// camera's bit depth (16-bit above 8 bits)
+        #[arg(long, value_enum, default_value_t = SaveFormat::Pnm)]
+        save_format: SaveFormat,
         /// Convert saved frames to RGB
         #[arg(long)]
         rgb: bool,
@@ -384,6 +393,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             packet_size,
             auto,
             save,
+            save_format,
             rgb,
             duration_s,
             raw_out,
@@ -400,6 +410,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 packet_size,
                 auto,
                 save,
+                save_format,
                 rgb,
                 duration_s,
                 raw_out,
@@ -459,9 +470,10 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::StreamUsb {
             index,
             save,
+            save_format,
             rgb,
             duration_s,
-        } => cmd_usb::run_stream(index, save, rgb, duration_s)?,
+        } => cmd_usb::run_stream(index, save, save_format, rgb, duration_s)?,
     };
 
     Ok(())
@@ -532,6 +544,17 @@ mod tests {
                 ..
             } => assert_eq!((packet_delay_ns, no_resend), (Some(2000), true)),
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_accepts_a_save_format() {
+        for args in [
+            ["viva-camctl", "stream", "--save-format", "png"],
+            ["viva-camctl", "stream", "--save-format", "tiff"],
+            ["viva-camctl", "stream-usb", "--save-format", "tiff"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }
     }
 

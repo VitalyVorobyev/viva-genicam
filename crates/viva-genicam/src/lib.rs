@@ -81,6 +81,9 @@ pub mod chunks;
 pub mod events;
 pub mod evs;
 pub mod frame;
+#[cfg(feature = "image-io")]
+#[cfg_attr(docsrs, doc(cfg(feature = "image-io")))]
+pub mod image_io;
 pub mod report;
 pub mod stream;
 pub mod time;

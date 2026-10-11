@@ -88,6 +88,32 @@ cargo run -p viva-camctl -- stream \
 `--save` defaults to **1**, so a plain `stream` run leaves one file behind;
 pass `--save 0` to write nothing.
 
+NetPBM files are 8-bit, so a camera deeper than that loses its low bits in
+them. `--save-format png` or `--save-format tiff` keeps every bit:
+
+- Monochrome frames are saved grey and everything else RGB; `--rgb` makes a
+  grey frame RGB too.
+- A camera with more than 8 bits per sample gets a **16-bit** file: Mono10 to
+  Mono16, packed or not, and Bayer mosaics, which are demosaiced at their own
+  depth.
+- 16-bit files hold the samples scaled to the full 16-bit range, as the PNG
+  standard requires: a 12-bit `0xABC` is stored as `0xABCA`. Shift right by
+  `16 − bits` to get the camera's values back. A PNG records `bits` in its
+  `sBIT` chunk; a TIFF holds the same samples without it.
+
+```bash
+cargo run -p viva-camctl -- stream \
+  --ip 192.168.0.10 --iface 192.168.0.5 --duration-s 5 --save 3 --save-format tiff
+```
+
+`stream-usb` takes the same `--save-format`.
+
+Every format can be saved that the library converts: monochrome and Bayer at 8
+to 16 bits, including the packed `Mono10p`/`Mono12p` and GigE Vision
+`Mono10Packed`/`Mono12Packed` families; RGB and BGR, with or without alpha; and
+8-bit YUV / Y'CbCr at 4:4:4, 4:2:2 and 4:1:1. A 3D or event-vision frame
+cannot be converted, and saving it fails with a message saying so.
+
 ### 2.3. Event-vision cameras
 
 Event-based (EVS) cameras send blocks of encoded events rather than images.
@@ -154,6 +180,15 @@ only `FrameStatus::Complete` frames; see
 [§4.4](#44-incomplete-frames-and-the-block-timeout) to receive the others.
 Code without an async runtime can call `next_frame_blocking(timeout)` instead of
 `next_frame().await`.
+
+Each `Frame` carries its payload and its PFNC pixel format. `Frame::to_rgb8()`
+converts any format listed in [§2.2](#22-saving-frames) to 8-bit RGB, with
+samples deeper than 8 bits reduced to their top eight and Bayer mosaics
+demosaiced by bilinear interpolation; Viva Studio's viewer draws with the same
+conversion, so it shows exactly these pixels. For the camera's own sample
+values, `viva_genicam::pfnc::convert::unpack_u16` returns one `u16` per pixel,
+and with the crate's `image-io` feature `viva_genicam::image_io` writes PNG and
+TIFF files as `viva-camctl` does.
 
 No camera? The [fake camera](./fake-camera.md) streams over loopback:
 

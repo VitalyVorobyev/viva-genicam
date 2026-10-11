@@ -174,7 +174,8 @@ jobs:
   # (`NullIo`), and docs/design.md promises both compile for the browser. This
   # is the only thing that checks it. Twice: with default features (`fetch`
   # adds the pure-Rust `zip`), and `viva-genapi-xml` without them, which is how
-  # `studio/Cargo.toml` takes it.
+  # `studio/Cargo.toml` takes it. `viva-pfnc`'s pixel conversion promises the
+  # same, so it is checked with them.
   wasm:
     name: wasm32
     runs-on: ubuntu-latest
@@ -191,7 +192,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Cargo check (default features)
-        run: cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml -p viva-genapi
+        run: cargo check --locked --target wasm32-unknown-unknown -p viva-genapi-xml -p viva-genapi -p viva-pfnc
 
       - name: Cargo check (viva-genapi-xml without default features)
         if: ${{ !cancelled() }}

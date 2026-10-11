@@ -41,7 +41,8 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
 **Supporting crates:**
 
 - `viva-pfnc` — Pixel Format Naming Convention tables; the single authority for
-  pixel-format codes and layouts.
+  pixel-format codes and layouts, and the one pixel conversion
+  (`viva_pfnc::convert`) the library, Python and Viva Studio share.
 - `viva-sfnc` — Standard Feature Naming Convention constants.
 - `viva-zenoh-api` — the message payloads and topic names the services
   publish. This is the contract, not the transport: despite the name it does
@@ -178,7 +179,7 @@ the cases). Consequences:
 2. **SOLID, applied pragmatically** — small traits (`RegisterIo`,
    `UsbTransfer`) as seams; open for extension via traits, not boolean flags.
 3. **DRY** — one implementation per concern: a single frame-reassembly path,
-   pixel formats owned by `viva-pfnc`.
+   pixel formats and their conversion owned by `viva-pfnc`.
 4. **YAGNI** — no speculative scaffolding; dead code gets deleted or wired up
    (the GVSP resend request that sat unused, in the wrong layout, until 0.9 is
    the cautionary tale).

@@ -7,7 +7,6 @@ use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
 use viva_genicam::evs::{EvsBlock, EvsFormat};
-use viva_genicam::pfnc::PixelFormat;
 use viva_genicam::stream::StreamBlock;
 use viva_genicam::{Frame, ResendPolicy, StreamOptions};
 
@@ -34,6 +33,8 @@ pub struct StreamArgs {
     /// [`StreamArgs::packet_size`].
     pub auto: bool,
     pub save: usize,
+    /// File format of the frames `save` writes.
+    pub save_format: common::SaveFormat,
     /// Append every completed EVT block's raw payload to this single file.
     pub raw_out: Option<PathBuf>,
     pub rgb: bool,
@@ -139,7 +140,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                                 frame_index += 1;
 
                                 if saved_frames < args.save {
-                                    if let Err(err) = save_frame(&frame, frame_index, args.rgb) {
+                                    if let Err(err) = save_frame(&frame, frame_index, args.save_format, args.rgb) {
                                         warn!(error = %err, frame = frame_index, "failed to save frame");
                                     } else {
                                         saved_frames += 1;
@@ -208,16 +209,20 @@ fn parse_mode(value: &str) -> Result<StreamMode> {
     }
 }
 
-fn save_frame(frame: &Frame, index: usize, rgb: bool) -> Result<PathBuf> {
-    let (buffer, ext) = if !rgb && frame.pixel_format == PixelFormat::Mono8 {
-        let data = frame.payload.clone();
-        let encoded = common::encode_pgm(frame.width, frame.height, data.as_ref())?;
-        (encoded, "pgm")
-    } else {
-        let rgb_pixels = frame.to_rgb8().context("convert frame to RGB8")?;
-        let encoded = common::encode_ppm(frame.width, frame.height, &rgb_pixels)?;
-        (encoded, "ppm")
-    };
+fn save_frame(
+    frame: &Frame,
+    index: usize,
+    format: common::SaveFormat,
+    rgb: bool,
+) -> Result<PathBuf> {
+    let (buffer, ext) = common::encode_frame(
+        frame.pixel_format,
+        frame.width,
+        frame.height,
+        &frame.payload,
+        format,
+        rgb,
+    )?;
     let path = PathBuf::from(format!("frame_{index:04}.{ext}"));
     common::save_image(&buffer, &path)?;
     info!(file = %path.display(), "saved frame");

@@ -37,7 +37,9 @@ zenoh = "1"
 
 # The library workspace, by path. These are the only crates the studio consumes
 # from it (ADR-0017), and `viva-genapi-xml` is taken without default features so
-# the studio never pulls the `fetch` path.
+# the studio never pulls the `fetch` path. `viva-pfnc` is the pixel conversion
+# the library's `Frame::to_rgb8` uses too, so the viewer draws the same pixels.
 viva-genapi = { path = "../crates/viva-genapi" }
+viva-pfnc = { path = "../crates/viva-pfnc" }
 viva-genapi-xml = { path = "../crates/viva-genapi-xml", default-features = false }
 viva-zenoh-api = { path = "../crates/viva-zenoh-api" }

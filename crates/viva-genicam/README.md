@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 |------|-------------|
 | `u3v` | Enable USB3 Vision transport |
 | `u3v-usb` | Enable USB3 Vision with real USB hardware access (includes `u3v`) |
+| `image-io` | `image_io`: save frames as PNG and TIFF at the camera's bit depth (adds `png` and `tiff`) |
 
 ## Documentation
 

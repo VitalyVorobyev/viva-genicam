@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use viva_pfnc::PixelFormat;
 
-use crate::chunks::ChunkMap;
+use crate::chunks::ChunkData;
 use crate::frame::FrameStatus;
 
 /// Encoding used by a LUCID event-vision stream block.
@@ -45,8 +45,8 @@ pub struct EvsBlock {
     /// but it is retained as wire metadata rather than generalized from one
     /// device observation.
     pub trailer_size_y: u32,
-    /// Decoded chunk data carried by the trailer, when present.
-    pub chunks: Option<ChunkMap>,
+    /// The block's chunks by chunk ID, as on [`crate::Frame::chunks`].
+    pub chunks: Option<ChunkData>,
     /// Host-correlated timestamp, when time synchronization is available.
     pub ts_host: Option<SystemTime>,
     /// GVSP block id.

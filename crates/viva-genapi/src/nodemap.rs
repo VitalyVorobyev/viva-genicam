@@ -1,13 +1,17 @@
 //! NodeMap implementation for runtime feature access.
 
+mod ports;
+
+pub use ports::ChunkData;
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
     AccessMode, AddressTerm, Addressing, ByteOrder, CommandValueSrc, EnumEntryDecl, EnumValueSrc,
-    FloatEncoding, FormulaBindings, IndexOffset, NodeDecl, PredicateRefs, Sign, SkippedNode, Slope,
-    Visibility, XmlModel,
+    FloatEncoding, FormulaBindings, IndexOffset, NodeDecl, PortKind, PredicateRefs, Sign,
+    SkippedNode, Slope, Visibility, XmlModel,
 };
 
 use crate::bitops::{extract, insert};
@@ -37,6 +41,11 @@ pub struct NodeMap {
     command_targets: HashSet<String>,
     skipped: Vec<SkippedNode>,
     generation: Cell<u64>,
+    /// `<Port>` declarations by name: which addresses are the device's and
+    /// which a chunk's or an event's.
+    ports: HashMap<String, PortKind>,
+    /// Chunk and event data attached to those ports.
+    attached: ports::Attached,
 }
 
 fn register_addressing_dependency(
@@ -124,34 +133,6 @@ fn value_provider(node: &Node) -> Option<&str> {
         Node::Converter(n) => Some(n.p_value.as_str()),
         Node::IntConverter(n) => Some(n.p_value.as_str()),
         _ => None,
-    }
-}
-
-/// Refuse a register bound to a port we do not route.
-///
-/// `<pPort>` selects which port a register's address is relative to. Absent, or
-/// `"Device"`, means the device's own register space; anything else — a chunk
-/// port, an event port, a serial port — is a different address space entirely.
-///
-/// Reading such a node through the device port would not fail. It would return
-/// whatever happens to live at that address: the Micro-Epsilon scanCONTROL's
-/// three `Chunk*Results` registers all sit at address `0x0`, so a device-port
-/// read hands back GVCP bootstrap registers dressed as measurement data. That
-/// is the silent-wrong-answer failure ADR-0018 exists to refuse, so the node is
-/// parsed and listed but not readable until GA-12 routes ports properly.
-///
-/// This is deliberately stricter than the ~200 `IntReg`/`FloatReg`/`StringReg`
-/// nodes on non-device ports that this crate already exposes without a guard.
-/// The asymmetry is GA-12's debt, not a new inconsistency: new code conforms,
-/// and the old code is on the list.
-fn ensure_device_port(name: &str, port: Option<&str>) -> Result<(), GenApiError> {
-    match port {
-        None => Ok(()),
-        Some(p) if p.eq_ignore_ascii_case("Device") => Ok(()),
-        Some(p) => Err(GenApiError::Unavailable(format!(
-            "register '{name}' is bound to port '{p}'; \
-             non-device ports are not routed yet (GA-12)"
-        ))),
     }
 }
 
@@ -344,6 +325,11 @@ impl NodeMap {
         // built from, so leaving them behind would make a feature the parser
         // could not read indistinguishable from one the camera does not have.
         let mut skipped = model.skipped;
+        let ports: HashMap<String, PortKind> = model
+            .ports
+            .into_iter()
+            .map(|port| (port.name, port.kind))
+            .collect();
         for decl in model.nodes {
             let tag = decl.kind().to_string();
             let name = Some(decl.name().to_string());
@@ -381,9 +367,12 @@ impl NodeMap {
             command_targets: HashSet::new(),
             skipped,
             generation: Cell::new(0),
+            ports,
+            attached: ports::Attached::default(),
         };
         map.command_targets = map.find_command_targets();
         map.link_selected_values();
+        map.link_port_dependents();
         Ok(map)
     }
 
@@ -471,14 +460,11 @@ impl NodeMap {
             .addressing
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let location = self.locate(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
             return Ok(value);
         }
-        let raw = io.read(address, len as usize).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        let raw = self.read_location(name, &location, io)?;
         let value = if let Some(bitfield) = node.bitfield {
             let extracted = extract(&raw, bitfield).map_err(|err| map_bitops_error(name, err))?;
             interpret_bitfield_value(
@@ -531,7 +517,7 @@ impl NodeMap {
             .addressing
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let (address, len) = self.locate_for_write(name, addressing, io)?;
         if let Some(bitfield) = node.bitfield {
             let encoded = encode_bitfield_value(
                 name,
@@ -600,14 +586,11 @@ impl NodeMap {
             .addressing
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let location = self.locate(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
             return Ok(value);
         }
-        let raw = io.read(address, len as usize).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        let raw = self.read_location(name, &location, io)?;
         let value = match node.encoding {
             FloatEncoding::Ieee754 => {
                 let v = decode_ieee754(name, &raw, node.byte_order)?;
@@ -656,7 +639,7 @@ impl NodeMap {
             .addressing
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let (address, len) = self.locate_for_write(name, addressing, io)?;
         let bytes = match node.encoding {
             FloatEncoding::Ieee754 => {
                 let bytes = encode_ieee754(name, value, len, node.byte_order)?;
@@ -698,14 +681,11 @@ impl NodeMap {
             .addressing
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let location = self.locate(name, addressing, io)?;
         if let Some(value) = node.value_cache.borrow().clone() {
             return Ok(value);
         }
-        let raw = io.read(address, len as usize).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        let raw = self.read_location(name, &location, io)?;
         // `<Enumeration>` declares no `<Sign>` and no `<Endianess>` — no
         // document in the vendor corpus declares one — so the GenICam
         // defaults apply: signed entry values, big-endian payload.
@@ -749,7 +729,7 @@ impl NodeMap {
             .addressing
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let (address, len) = self.locate_for_write(name, addressing, io)?;
         let entry_decl = node
             .entries
             .iter()
@@ -1072,14 +1052,11 @@ impl NodeMap {
         let bitfield = node
             .bitfield
             .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let location = self.locate(name, addressing, io)?;
         if let Some(value) = *node.cache.borrow() {
             return Ok(value);
         }
-        let raw = io.read(address, len as usize).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        let raw = self.read_location(name, &location, io)?;
         let raw_value = extract(&raw, bitfield).map_err(|err| map_bitops_error(name, err))?;
         let value = raw_value != 0;
         debug!(node = %name, raw = raw_value, value, "read boolean feature");
@@ -1111,7 +1088,7 @@ impl NodeMap {
         let bitfield = node
             .bitfield
             .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
-        let (address, len) = self.resolve_address(name, addressing, io)?;
+        let (address, len) = self.locate_for_write(name, addressing, io)?;
         let encoded = if value { 1 } else { 0 };
         let readable = !matches!(node.access, AccessMode::WO);
         let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
@@ -1370,7 +1347,10 @@ impl NodeMap {
     /// GenICam addressing.
     ///
     /// Returns [`GenApiError::Unavailable`] for a node that has no addressing
-    /// of its own because it delegates through `<pValue>`.
+    /// of its own because it delegates through `<pValue>`, and for a register
+    /// on a chunk or event port: its address counts from the start of a chunk
+    /// or an event, and handing it out as a device address is how such
+    /// registers ended up reading device memory (GA-12).
     pub fn register_address(
         &self,
         name: &str,
@@ -1379,19 +1359,17 @@ impl NodeMap {
         let node = self
             .node(name)
             .ok_or_else(|| GenApiError::NodeNotFound(name.to_string()))?;
-        let addressing = match node {
-            Node::Integer(node) => node.addressing.as_ref(),
-            Node::Float(node) => node.addressing.as_ref(),
-            Node::Enum(node) => node.addressing.as_ref(),
-            Node::Boolean(node) => node.addressing.as_ref(),
-            Node::String(node) => Some(&node.addressing),
-            Node::Register(node) => Some(&node.addressing),
-            _ => None,
-        }
-        .ok_or_else(|| {
+        let addressing = crate::nodes::node_addressing(node).ok_or_else(|| {
             GenApiError::Unavailable(format!("node '{name}' has no register addressing"))
         })?;
-        self.resolve_address(name, addressing, io)
+        self.locate_for_write(name, addressing, io)
+            .map_err(|err| match err {
+                GenApiError::PortNotWritable { node, port } => GenApiError::Unavailable(format!(
+                    "register '{node}' is on port '{port}': its address is relative to a chunk \
+                     or an event, not a device address"
+                )),
+                other => other,
+            })
     }
 
     fn resolve_address(
@@ -1401,7 +1379,7 @@ impl NodeMap {
         io: &dyn RegisterIo,
     ) -> Result<(u64, u32), GenApiError> {
         match addressing {
-            Addressing::Sum { terms, len } => {
+            Addressing::Sum { terms, len, .. } => {
                 let mut address: u64 = 0;
                 for term in terms {
                     address =
@@ -1434,7 +1412,9 @@ impl NodeMap {
             addr,
         };
         match term {
-            AddressTerm::Fixed(offset) => Ok(*offset),
+            // Two's complement: a negative literal on a chunk port is an
+            // offset from the chunk's end, read back as `i64` by `locate`.
+            AddressTerm::Fixed(offset) => Ok(*offset as u64),
             AddressTerm::Node(provider) => {
                 let value = self.get_integer(provider, io)?;
                 u64::try_from(value).map_err(|_| bad(value))
@@ -2161,8 +2141,8 @@ impl NodeMap {
         {
             return Ok(value.clone());
         }
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
-        let raw = io.read(address, len as usize)?;
+        let location = self.locate(name, &node.addressing, io)?;
+        let raw = self.read_location(name, &location, io)?;
         // Convert bytes to string, stopping at first null byte
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
         let value = String::from_utf8_lossy(&raw[..end]).to_string();
@@ -2181,7 +2161,7 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         let node = self.get_string_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        let (address, len) = self.locate_for_write(name, &node.addressing, io)?;
         // Build byte buffer with null termination
         let mut buf = vec![0u8; len as usize];
         let bytes = value.as_bytes();
@@ -2204,14 +2184,13 @@ impl NodeMap {
     pub fn get_register(&self, name: &str, io: &dyn RegisterIo) -> Result<Vec<u8>, GenApiError> {
         let node = self.get_register_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        ensure_device_port(name, node.port.as_deref())?;
         if let Some((ref value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value.clone());
         }
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
-        let raw = io.read(address, len as usize)?;
+        let location = self.locate(name, &node.addressing, io)?;
+        let raw = self.read_location(name, &location, io)?;
         node.cache
             .replace(Some((raw.clone(), self.generation.get())));
         debug!(node = %name, len = raw.len(), "get_register");
@@ -2232,8 +2211,7 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         let node = self.get_register_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        ensure_device_port(name, node.port.as_deref())?;
-        let (address, len) = self.resolve_address(name, &node.addressing, io)?;
+        let (address, len) = self.locate_for_write(name, &node.addressing, io)?;
         if data.len() != len as usize {
             return Err(GenApiError::Range(format!(
                 "register '{name}' is {len} bytes; got {}",
@@ -2705,7 +2683,6 @@ fn build_node(
                 meta: decl.meta,
                 addressing: decl.addressing,
                 access: decl.access,
-                port: decl.port,
                 predicates: decl.predicates,
                 cache: std::cell::RefCell::new(None),
             };

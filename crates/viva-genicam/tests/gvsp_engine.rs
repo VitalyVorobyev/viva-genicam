@@ -9,7 +9,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
-use viva_fake_gige::gvsp::{BlockSpec, Datagram, block_datagrams, image_size, interleave};
+use viva_fake_gige::gvsp::{
+    BlockSpec, Datagram, block_datagrams, chunk_payload, image_size, interleave,
+};
 use viva_fake_gige::{MONO8, MONO12_PACKED, PacketScript, ScriptStep};
 use viva_genicam::StreamStats;
 use viva_genicam::{FrameStatus, FrameStream, GenicamError};
@@ -89,7 +91,7 @@ async fn extended_ids_place_each_packet_at_its_own_stride() {
     let mut spec = BlockSpec::image(1, 64, 32, MONO8, 576);
     spec.extended_ids = true;
     let img = image(64 * 32, 1);
-    h.send(&block_datagrams(&spec, &img, &[]));
+    h.send(&block_datagrams(&spec, &img));
 
     let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
         .await
@@ -114,7 +116,7 @@ async fn a_slow_transfer_with_small_gaps_completes() {
     // 40 payload packets at a 540-byte stride.
     let spec = BlockSpec::image(1, 216, 100, MONO8, 576);
     let img = image(216 * 100, 2);
-    let datagrams = block_datagrams(&spec, &img, &[]);
+    let datagrams = block_datagrams(&spec, &img);
     assert_eq!(datagrams.len(), 42);
     let sender = h.send_paced(datagrams, Duration::from_millis(8));
 
@@ -136,7 +138,7 @@ async fn a_trailer_before_the_last_payload_completes_the_frame() {
     let spec = BlockSpec::image(1, 64, 32, MONO8, 576);
     let img = image(64 * 32, 3);
     let script = PacketScript::new().step(ScriptStep::TrailerBeforeLastPayload { block: 1 });
-    h.send(&script.apply(block_datagrams(&spec, &img, &[])));
+    h.send(&script.apply(block_datagrams(&spec, &img)));
 
     let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
         .await
@@ -154,7 +156,7 @@ async fn a_repeated_leader_does_not_reset_the_frame() {
     let spec = BlockSpec::image(1, 64, 32, MONO8, 576);
     let img = image(64 * 32, 4);
     let script = PacketScript::new().step(ScriptStep::RepeatLeader { block: 1, after: 2 });
-    h.send(&script.apply(block_datagrams(&spec, &img, &[])));
+    h.send(&script.apply(block_datagrams(&spec, &img)));
 
     let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
         .await
@@ -175,7 +177,7 @@ async fn a_packed_frame_is_not_truncated() {
     let size = image_size(MONO12_PACKED, 64, 32);
     assert_eq!(size, 64 * 32 * 3 / 2);
     let img = image(size, 5);
-    h.send(&block_datagrams(&spec, &img, &[]));
+    h.send(&block_datagrams(&spec, &img));
 
     let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
         .await
@@ -192,8 +194,8 @@ async fn interleaved_blocks_both_complete() {
     let mut h = Harness::new(576);
     let a = image(64 * 32, 6);
     let b = image(64 * 32, 7);
-    let first = block_datagrams(&BlockSpec::image(1, 64, 32, MONO8, 576), &a, &[]);
-    let second = block_datagrams(&BlockSpec::image(2, 64, 32, MONO8, 576), &b, &[]);
+    let first = block_datagrams(&BlockSpec::image(1, 64, 32, MONO8, 576), &a);
+    let second = block_datagrams(&BlockSpec::image(2, 64, 32, MONO8, 576), &b);
     h.send(&interleave(first, second));
 
     for (id, expected) in [(1, &a), (2, &b)] {
@@ -211,7 +213,6 @@ fn small_block(block_id: u64) -> Vec<Datagram> {
     block_datagrams(
         &BlockSpec::image(block_id, 32, 32, MONO8, 576),
         &image(32 * 32, block_id as u8),
-        &[],
     )
 }
 
@@ -242,7 +243,7 @@ fn extended_block_id_gaps_are_counted() {
     for id in [1u64 << 33, (1 << 33) + 1, (1 << 33) + 5] {
         let mut spec = BlockSpec::image(id, 32, 32, MONO8, 576);
         spec.extended_ids = true;
-        h.send(&block_datagrams(&spec, &image(1024, 1), &[]));
+        h.send(&block_datagrams(&spec, &image(1024, 1)));
         h.stream
             .next_block_blocking(WAIT)
             .expect("every sent block completes")
@@ -428,7 +429,7 @@ async fn an_extended_chunk_image_keeps_its_payload_type() {
     let mut h = Harness::new(576);
     let mut spec = BlockSpec::image(1, 32, 32, MONO8, 576);
     spec.payload_type = 0x4001;
-    h.send(&block_datagrams(&spec, &image(1024, 1), &[]));
+    h.send(&block_datagrams(&spec, &image(1024, 1)));
     let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
         .await
         .expect("an 0x4001 block is an image")
@@ -443,7 +444,7 @@ fn an_unsupported_payload_type_is_counted() {
     let h = Harness::new(576);
     let mut spec = BlockSpec::image(1, 32, 32, MONO8, 576);
     spec.payload_type = 0x0003; // file
-    h.send(&block_datagrams(&spec, &image(1024, 1), &[]));
+    h.send(&block_datagrams(&spec, &image(1024, 1)));
     let stats = h.settle(|s| s.frames_unsupported == 1);
     assert_eq!(stats.frames_unsupported, 1, "{stats:?}");
     // The leader and two data packets; the trailer closes the block.
@@ -502,7 +503,7 @@ async fn a_frame_of_short_packets_is_not_complete() {
     h.stream.set_deliver_incomplete(true);
     let mut spec = BlockSpec::image(1, 64, 32, MONO8, 576);
     spec.packet_size = 500;
-    h.send(&block_datagrams(&spec, &image(64 * 32, 1), &[]));
+    h.send(&block_datagrams(&spec, &image(64 * 32, 1)));
     let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
         .await
         .expect("the block closes")
@@ -617,7 +618,7 @@ fn resend_harness(packet_size: u32, channel: u16) -> (Harness, ControlPort) {
 async fn a_lost_packet_is_asked_for_in_the_standard_layout_and_recovered() {
     let (mut h, control) = resend_harness(576, 3);
     let img = image(64 * 32, 3);
-    let datagrams = block_datagrams(&BlockSpec::image(0x0102, 64, 32, MONO8, 576), &img, &[]);
+    let datagrams = block_datagrams(&BlockSpec::image(0x0102, 64, 32, MONO8, 576), &img);
     let lost = datagrams[2].clone(); // data packet 2
     let script = PacketScript::new().step(ScriptStep::Drop {
         block: 0x0102,
@@ -670,7 +671,7 @@ async fn an_extended_id_request_carries_the_64_bit_block_id() {
     let mut spec = BlockSpec::image(block, 64, 32, MONO8, 576);
     spec.extended_ids = true;
     let img = image(64 * 32, 4);
-    let datagrams = block_datagrams(&spec, &img, &[]);
+    let datagrams = block_datagrams(&spec, &img);
     let lost: Vec<Datagram> = datagrams[2..4].to_vec(); // data packets 2 and 3
     let script = PacketScript::new()
         .step(ScriptStep::Drop { block, packet: 2 })
@@ -718,7 +719,6 @@ async fn a_range_the_camera_no_longer_holds_is_not_asked_for_again() {
     h.send(&script.apply(block_datagrams(
         &BlockSpec::image(9, 64, 32, MONO8, 576),
         &image(64 * 32, 5),
-        &[],
     )));
     let (request, _) = control.next(WAIT).expect("a resend request");
     assert_eq!((request.first, request.last), (2, 2));
@@ -766,7 +766,7 @@ async fn resend_requests_stop_at_a_quarter_of_the_frame() {
     for packet in (2..=40).step_by(2) {
         script = script.step(ScriptStep::Drop { block: 1, packet });
     }
-    h.send(&script.apply(block_datagrams(&spec, &image(540 * 40, 6), &[])));
+    h.send(&script.apply(block_datagrams(&spec, &image(540 * 40, 6))));
 
     let mut asked = 0;
     while let Some((request, _)) = control.next(Duration::from_millis(300)) {
@@ -821,4 +821,64 @@ async fn datagrams_from_another_address_are_ignored() {
         .expect("the camera's own block")
         .expect("stream running");
     assert_eq!(block.block_id(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Chunk payloads (TC-06)
+// ---------------------------------------------------------------------------
+
+/// An image with chunks (`0x4001`), laid out by the fake's own encoder: the
+/// image as the first chunk, then two values, across several data packets.
+/// The frame's payload is the image alone; its chunks are kept by their
+/// 32-bit IDs.
+#[tokio::test]
+async fn an_image_with_chunks_arrives_as_its_image_and_its_chunks() {
+    let mut h = Harness::new(576);
+    let mut spec = BlockSpec::image(1, 64, 32, MONO8, 576);
+    spec.payload_type = viva_fake_gige::gvsp::PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK;
+    let img = image(64 * 32, 4);
+    let frame_id = 7u64.to_le_bytes();
+    let info = [0, 0, 0, 64, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 8, 0];
+    let data = chunk_payload(&[(1, &img), (0x0504_0003, &frame_id), (0xA5A5_0100, &info)]);
+    h.send(&block_datagrams(&spec, &data));
+
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("a frame with chunks completes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.payload_type, 0x4001);
+    assert!(frame.payload.as_ref() == img.as_slice(), "the image alone");
+    let chunks = frame.chunks.expect("chunks");
+    assert_eq!(
+        chunks.ids().collect::<Vec<_>>(),
+        vec![1, 0x0504_0003, 0xA5A5_0100]
+    );
+    assert_eq!(&chunks.get(0x0504_0003).expect("frame id")[..], &frame_id);
+    assert_eq!(&chunks.get(0xA5A5_0100).expect("info")[..], &info);
+}
+
+/// Chunk data (`0x0004`): a block of chunks with no image and no geometry in
+/// its leader. Sized from the packets, as `PayloadSize` is unknown here; the
+/// unfixed engine counted it unsupported and delivered nothing.
+#[tokio::test]
+async fn a_chunk_data_block_is_assembled() {
+    let mut h = Harness::new(576);
+    let spec = BlockSpec::chunk_data(1, 576);
+    let big = image(1500, 9);
+    let data = chunk_payload(&[(2, &big), (3, &42u32.to_le_bytes())]);
+    h.send(&block_datagrams(&spec, &data));
+
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("a chunk-data block completes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.payload_type, 0x0004);
+    assert_eq!((frame.width, frame.height), (0, 0));
+    assert!(frame.payload.as_ref() == data.as_slice(), "the block whole");
+    let chunks = frame.chunks.expect("chunks");
+    assert!(chunks.get(2).expect("big")[..] == big[..]);
+    assert_eq!(&chunks.get(3).expect("value")[..], &42u32.to_le_bytes());
+    assert_eq!(h.stream.stats().frames_unsupported, 0);
 }

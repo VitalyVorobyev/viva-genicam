@@ -7,12 +7,13 @@ use tracing::warn;
 use super::{
     NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS,
     TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX,
-    TAG_P_SELECTED, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
-    handle_p_selected_start, handle_predicate_start,
+    TAG_P_PORT, TAG_P_SELECTED, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty,
+    handle_addressing_start, handle_p_selected_start, handle_predicate_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
-    attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
+    attribute_value, attribute_value_required, parse_address, parse_i64, parse_u64,
+    read_text_start, skip_element,
 };
 use crate::{
     AccessMode, BitField, ByteOrder, EnumEntryDecl, EnumValueSrc, NodeDecl, PredicateRefs, XmlError,
@@ -23,7 +24,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     let name = attribute_value_required(&start, "Name")?;
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, "Address")? {
-        addressing.push_fixed_address(parse_u64(&addr)?);
+        addressing.push_fixed_address(parse_address(&addr)?);
     }
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
@@ -52,7 +53,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
                         pvalue = Some(target.to_string());
                     }
                 }
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | "Length" => {
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT | "Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
@@ -131,7 +132,7 @@ pub fn parse_boolean(
     let name = attribute_value_required(&start, "Name")?;
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, "Address")? {
-        addressing.push_fixed_address(parse_u64(&addr)?);
+        addressing.push_fixed_address(parse_address(&addr)?);
     }
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
@@ -170,7 +171,7 @@ pub fn parse_boolean(
                 }
                 // Shared handling so `<Address>`, `<pAddress>` and
                 // `<pIndex>` all contribute their term.
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX => {
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT => {
                     handle_addressing_start(reader, e, &name, &mut addressing)?;
                 }
                 "Length" => {

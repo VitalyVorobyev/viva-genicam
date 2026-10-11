@@ -1,4 +1,4 @@
-//! Frame representation combining pixel data with optional chunk metadata.
+//! Frame representation combining pixel data with optional chunk data.
 
 use std::time::SystemTime;
 
@@ -6,7 +6,7 @@ use bytes::Bytes;
 use viva_pfnc::PixelFormat;
 use viva_pfnc::convert::ConvertError;
 
-use crate::chunks::{ChunkKind, ChunkMap, ChunkValue};
+use crate::chunks::ChunkData;
 
 /// How a frame's block ended.
 ///
@@ -44,7 +44,11 @@ impl FrameStatus {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Frame {
-    /// Contiguous image payload containing pixel data.
+    /// The image: contiguous pixel data.
+    ///
+    /// For an image with chunks (`0x4001`) this is the image chunk alone,
+    /// without the chunks that follow it. A chunk-data block (`0x0004`) has
+    /// no image: `payload` is its chunk data, and `width` and `height` are 0.
     pub payload: Bytes,
     /// Width of the image in pixels.
     pub width: u32,
@@ -52,8 +56,14 @@ pub struct Frame {
     pub height: u32,
     /// Pixel format describing how to interpret the payload bytes.
     pub pixel_format: PixelFormat,
-    /// Optional map of chunk values decoded from the GVSP trailer.
-    pub chunks: Option<ChunkMap>,
+    /// The block's chunks by chunk ID, when its payload type carries chunks
+    /// (`0x0004`, or the `0x4000` flag), the block is complete, and its chunk
+    /// layout parsed.
+    ///
+    /// What each chunk holds is the camera's XML's to say: read the values
+    /// through GenApi with [`Camera::with_chunks`](crate::Camera::with_chunks)
+    /// or [`Camera::chunk_features`](crate::Camera::chunk_features).
+    pub chunks: Option<ChunkData>,
     /// Device timestamp reported by the camera when available.
     pub ts_dev: Option<u64>,
     /// Host timestamp obtained by mapping the device ticks.
@@ -90,11 +100,6 @@ impl Frame {
     /// Whether every packet of the frame arrived.
     pub fn is_complete(&self) -> bool {
         self.status.is_complete()
-    }
-
-    /// Retrieve a chunk value by kind if it exists.
-    pub fn chunk(&self, kind: ChunkKind) -> Option<&ChunkValue> {
-        self.chunks.as_ref()?.get(&kind)
     }
 
     /// Host-reconstructed timestamp if the camera reports a device timestamp.

@@ -31,12 +31,7 @@ const DEFAULT_CORPUS: &str = "fixtures/vendor-xml";
 ///
 /// Everything else that fails to parse is a regression. Keep this list short
 /// and each entry tied to a `docs/backlog.md` task.
-const EXPECTED_SKIPS: &[(&str, &str)] = &[
-    // XML-01: negative register address (`<Address>-4</Address>`), used for
-    // offsets relative to the end of a chunk block. Our addressing model is
-    // unsigned.
-    ("Baumer_HXG20.xml", "ChunkImageLength"),
-];
+const EXPECTED_SKIPS: &[(&str, &str)] = &[];
 
 /// Node types we cannot represent yet, as `(tag, required error substring)`.
 ///

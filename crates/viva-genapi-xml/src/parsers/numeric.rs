@@ -5,14 +5,14 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::{
     NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_LSB,
-    TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX, TAG_P_SELECTED,
-    TAG_VALUE, handle_addressing_empty, handle_addressing_start, handle_invalidator_start,
-    handle_p_selected_start, handle_predicate_start,
+    TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX, TAG_P_PORT,
+    TAG_P_SELECTED, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
+    handle_invalidator_start, handle_p_selected_start, handle_predicate_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
-    attribute_value, attribute_value_required, parse_f64, parse_i64, parse_scale, parse_u64,
-    read_text_start, skip_element,
+    attribute_value, attribute_value_required, parse_address, parse_f64, parse_i64, parse_scale,
+    parse_u64, read_text_start, skip_element,
 };
 use crate::{AccessMode, ByteOrder, FloatEncoding, NodeDecl, PredicateRefs, Sign, XmlError};
 
@@ -24,7 +24,7 @@ pub fn parse_integer(
     let name = attribute_value_required(&start, "Name")?;
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, "Address")? {
-        addressing.push_fixed_address(parse_u64(&addr)?);
+        addressing.push_fixed_address(parse_address(&addr)?);
     }
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
@@ -90,7 +90,7 @@ pub fn parse_integer(
                 }
                 // Shared handling so `<Address>`, `<pAddress>` and
                 // `<pIndex>` all contribute their term.
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX => {
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT => {
                     handle_addressing_start(reader, e, &name, &mut addressing)?;
                 }
                 "Length" => {
@@ -309,7 +309,7 @@ pub fn parse_float(
     let is_float_reg = node_name.as_str() == "FloatReg";
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, "Address")? {
-        addressing.push_fixed_address(parse_u64(&addr)?);
+        addressing.push_fixed_address(parse_address(&addr)?);
     }
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
@@ -357,7 +357,7 @@ pub fn parse_float(
                         p_max = Some(target.to_string());
                     }
                 }
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | "Length" => {
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT | "Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
@@ -481,7 +481,7 @@ fn addressing_primary_length(addr: &crate::Addressing) -> Option<u32> {
     match addr {
         // A runtime-resolved address says nothing about the payload encoding,
         // so we decline to auto-detect rather than guess.
-        crate::Addressing::Sum { terms, len } => terms
+        crate::Addressing::Sum { terms, len, .. } => terms
             .iter()
             .all(|term| matches!(term, crate::AddressTerm::Fixed(_)))
             .then_some(*len),

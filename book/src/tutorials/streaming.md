@@ -196,6 +196,52 @@ No camera? The [fake camera](./fake-camera.md) streams over loopback:
 cargo run -p viva-genicam --example demo_fake_camera
 ```
 
+### 3.1. Chunks and events
+
+A camera can attach values to each frame — the timestamp, the exposure and
+gain it used, a frame counter, the state of its I/O lines — as **chunks**, and
+send **events** on the message channel when something happens: an exposure
+ends, a line toggles. Which chunks and events a camera has, and how each value
+is encoded, is in its own GenApi XML: the `Chunk*` and `Event*` features read
+their values from the frame or the event the way any other feature reads a
+register. There is no table of known chunks to fall short of.
+
+Turn chunk mode on and enable the chunks you want:
+
+```rust,ignore
+{{#include ../../../crates/viva-genicam/examples/demo_fake_camera.rs:enable_chunks}}
+```
+
+Each frame then carries its chunks (`frame.chunks`), and `frame.payload` is the
+image alone. Read every chunk feature the frame carries, or one of them:
+
+```rust,ignore
+{{#include ../../../crates/viva-genicam/examples/demo_fake_camera.rs:chunk_features}}
+```
+
+Outside `with_chunks`, a chunk feature has nothing to read and fails with
+`NotAttached`: a value never outlives its frame, and nothing is read from the
+camera for it.
+
+Events work the same way. Point the message channel at the host and enable
+the events you want:
+
+```rust,ignore
+{{#include ../../../crates/viva-genicam/examples/demo_fake_camera.rs:enable_events}}
+```
+
+and read an event's features from the event itself:
+
+```rust,ignore
+{{#include ../../../crates/viva-genicam/examples/demo_fake_camera.rs:event_features}}
+```
+
+The names come from your camera's XML — SFNC calls them `ChunkTimestamp`,
+`ChunkExposureTime`, `EventExposureEndTimestamp` and so on — which
+`viva-camctl xml --ip <CAMERA-IP> --out camera.xml` saves for you to read.
+Chunks and events are GigE Vision only for now; USB3 Vision frames carry no
+chunks yet.
+
 ---
 
 ## 4. Tuning for stability
@@ -387,6 +433,7 @@ vendor's viewer on the same cabling. If it still makes no sense,
 You should now be able to:
 
 - Start a stream from the CLI and from Rust, and save frames or event blocks.
+- Read the chunk values a frame carries and the features of an event.
 - Tell from the counters whether frames are lost on the network (`incomplete`,
   `missed`) or in your own code (`backpressure`).
 - Know which knob to reach for first: packet size and MTU, then packet delay;

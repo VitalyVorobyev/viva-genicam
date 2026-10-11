@@ -1,225 +1,118 @@
-//! Decode GVSP chunk payloads into typed values.
+//! Chunk data in a GigE Vision payload.
+//!
+//! A camera in chunk mode sends each frame as a run of chunks — the image
+//! first, then one chunk per enabled value — each its data followed by a tag
+//! naming its chunk ID and length (TC-06, [`viva_gige::gvsp::parse_chunks`]).
+//! What a chunk *means* is not decided here: the camera's own XML declares
+//! which registers sit on which chunk, at which offset and in which byte
+//! order, and [`Camera::with_chunks`](crate::Camera::with_chunks) reads them
+//! through GenApi like any other feature (ADR-0026).
 
-use std::collections::HashMap;
+use bytes::Bytes;
+pub use viva_genapi::ChunkData;
+pub use viva_gige::gvsp::ChunkError;
+use viva_gige::gvsp::{PAYLOAD_TYPE_CHUNK_DATA, has_extended_chunks, is_image_payload};
 
-use bytes::{Buf, Bytes};
-use thiserror::Error;
-use tracing::{debug, warn};
-use viva_gige::gvsp::{self, ChunkRaw};
-
-/// Known chunk identifiers defined by the GenICam SFNC.
-const KNOWN_CHUNKS: &[KnownChunk] = &[
-    KnownChunk {
-        id: 0x0001,
-        kind: ChunkKind::Timestamp,
-        decoder: ValueDecoder::U64,
-    },
-    KnownChunk {
-        id: 0x1002,
-        kind: ChunkKind::ExposureTime,
-        decoder: ValueDecoder::F64,
-    },
-    KnownChunk {
-        id: 0x1003,
-        kind: ChunkKind::Gain,
-        decoder: ValueDecoder::F64,
-    },
-    KnownChunk {
-        id: 0x0201,
-        kind: ChunkKind::LineStatusAll,
-        decoder: ValueDecoder::U32,
-    },
-];
-
-#[derive(Copy, Clone)]
-struct KnownChunk {
-    id: u16,
-    kind: ChunkKind,
-    decoder: ValueDecoder,
+/// Split a GigE Vision chunk payload into a [`ChunkData`], by chunk ID.
+///
+/// `payload` must end where the camera's data ends. Each chunk is a slice of
+/// `payload`; nothing is copied.
+pub fn chunk_data(payload: &Bytes) -> Result<ChunkData, ChunkError> {
+    let chunks = viva_gige::gvsp::parse_chunks(payload)?;
+    Ok(chunks
+        .into_iter()
+        .map(|chunk| {
+            let end = chunk.offset + chunk.data.len();
+            (u64::from(chunk.id), payload.slice(chunk.offset..end))
+        })
+        .collect())
 }
 
-#[derive(Copy, Clone)]
-enum ValueDecoder {
-    U64,
-    F64,
-    U32,
+/// Whether a block of `payload_type` is made of chunks: chunk data
+/// (`0x0004`), or any type with the extended chunk flag (`0x4000`).
+pub(crate) fn carries_chunks(payload_type: u16) -> bool {
+    has_extended_chunks(payload_type) || payload_type & 0x3FFF == PAYLOAD_TYPE_CHUNK_DATA
 }
 
-/// Typed representation of known chunk kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ChunkKind {
-    Timestamp,
-    ExposureTime,
-    Gain,
-    LineStatusAll,
-    Unknown(u16),
-}
-
-/// Decoded value of a chunk entry.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum ChunkValue {
-    U64(u64),
-    F64(f64),
-    U32(u32),
-    Bytes(Bytes),
-}
-
-pub type ChunkMap = HashMap<ChunkKind, ChunkValue>;
-
-/// Errors that can occur while decoding chunk payloads.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum ChunkError {
-    #[error("chunk {id:#06x} payload length {actual} shorter than required {expected} bytes")]
-    InvalidLength {
-        id: u16,
-        expected: usize,
-        actual: usize,
-    },
-}
-
-fn decode_known(raw: &ChunkRaw, entry: &KnownChunk) -> Result<(ChunkKind, ChunkValue), ChunkError> {
-    let expected = match entry.decoder {
-        ValueDecoder::U64 | ValueDecoder::F64 => 8,
-        ValueDecoder::U32 => 4,
-    };
-    if raw.data.len() < expected {
-        warn!(
-            chunk_id = format_args!("{:#06x}", raw.id),
-            len = raw.data.len(),
-            expected,
-            "truncated chunk payload"
-        );
-        return Err(ChunkError::InvalidLength {
-            id: raw.id,
-            expected,
-            actual: raw.data.len(),
-        });
+/// A block's image and chunks, from its whole payload.
+///
+/// For an image with chunks the image is the first chunk, at offset 0, and is
+/// returned on its own; the chunks come back by ID, the image among them. A
+/// chunk-data block has no image, so its payload comes back whole. A payload
+/// that does not tile into chunks keeps its bytes and has none — the error
+/// says where it went wrong.
+pub(crate) fn split(
+    payload: Bytes,
+    payload_type: u16,
+) -> (Bytes, Option<Result<ChunkData, ChunkError>>) {
+    if !carries_chunks(payload_type) {
+        return (payload, None);
     }
-    let mut cursor = raw.data.clone();
-    let value = match entry.decoder {
-        ValueDecoder::U64 => ChunkValue::U64(cursor.get_u64_le()),
-        ValueDecoder::F64 => ChunkValue::F64(cursor.get_f64_le()),
-        ValueDecoder::U32 => ChunkValue::U32(cursor.get_u32_le()),
-    };
-    debug!(
-        chunk_id = format_args!("{:#06x}", raw.id),
-        len = raw.data.len(),
-        kind = ?entry.kind,
-        "decoded known chunk"
-    );
-    Ok((entry.kind, value))
-}
-
-/// Decode raw chunk entries into typed values.
-pub fn decode_raw_chunks(chunks: &[ChunkRaw]) -> Result<ChunkMap, ChunkError> {
-    let mut map = HashMap::new();
-    for chunk in chunks {
-        if let Some(entry) = KNOWN_CHUNKS
-            .iter()
-            .find(|candidate| candidate.id == chunk.id)
-        {
-            let (kind, value) = decode_known(chunk, entry)?;
-            map.insert(kind, value);
-        } else {
-            debug!(
-                chunk_id = format_args!("{:#06x}", chunk.id),
-                len = chunk.data.len(),
-                "storing unknown chunk"
-            );
-            map.insert(
-                ChunkKind::Unknown(chunk.id),
-                ChunkValue::Bytes(chunk.data.clone()),
-            );
+    match chunk_data(&payload) {
+        Ok(data) => {
+            let image = data
+                .iter()
+                .next()
+                .filter(|_| is_image_payload(payload_type))
+                .map(|(_, first)| first.clone());
+            (image.unwrap_or(payload), Some(Ok(data)))
         }
+        Err(err) => (payload, Some(Err(err))),
     }
-    Ok(map)
-}
-
-/// Parse raw bytes into chunks and decode known values.
-pub fn parse_chunk_bytes(data: &[u8]) -> Result<ChunkMap, ChunkError> {
-    let raw = gvsp::parse_chunks(data);
-    decode_raw_chunks(&raw)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn chunk_buffer(id: u16, payload: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&id.to_be_bytes());
-        buf.extend_from_slice(&0u16.to_be_bytes());
-        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        buf.extend_from_slice(payload);
-        buf
+    /// `[image 4][tag id 1, len 4][value 4][tag id 0x0508000E, len 4]`,
+    /// written out by hand.
+    #[rustfmt::skip]
+    const BLOCK: [u8; 24] = [
+        0xA0, 0xA1, 0xA2, 0xA3,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04,
+        0x2A, 0x00, 0x00, 0x00,
+        0x05, 0x08, 0x00, 0x0E, 0x00, 0x00, 0x00, 0x04,
+    ];
+
+    #[test]
+    fn an_image_with_chunks_splits_into_the_image_and_the_chunks() {
+        let (image, chunks) = split(Bytes::from_static(&BLOCK), 0x4001);
+        assert_eq!(&image[..], &[0xA0, 0xA1, 0xA2, 0xA3]);
+        let chunks = chunks.expect("chunk flag").expect("well-formed");
+        assert_eq!(chunks.ids().collect::<Vec<_>>(), vec![1, 0x0508_000E]);
+        assert_eq!(
+            &chunks.get(0x0508_000E).expect("value")[..],
+            &[0x2A, 0, 0, 0]
+        );
     }
 
     #[test]
-    fn decode_known_chunks() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&chunk_buffer(
-            0x0001,
-            &0x1234_5678_9ABC_DEF0u64.to_le_bytes(),
-        ));
-        data.extend_from_slice(&chunk_buffer(0x1002, &1234.5f64.to_le_bytes()));
-        let map = parse_chunk_bytes(&data).expect("decode");
+    fn a_chunk_data_block_keeps_its_payload_whole() {
+        let (payload, chunks) = split(Bytes::from_static(&BLOCK), 0x0004);
+        assert_eq!(payload.len(), BLOCK.len());
+        assert_eq!(chunks.expect("chunk data").expect("well-formed").len(), 2);
+    }
+
+    #[test]
+    fn a_plain_image_has_no_chunks() {
+        let (payload, chunks) = split(Bytes::from_static(&BLOCK), 0x0001);
+        assert_eq!(payload.len(), BLOCK.len());
+        assert!(chunks.is_none());
+    }
+
+    #[test]
+    fn a_malformed_layout_keeps_the_bytes_and_reports_the_error() {
+        let (payload, chunks) = split(Bytes::from_static(&BLOCK[1..]), 0x4001);
+        assert_eq!(payload.len(), BLOCK.len() - 1);
+        // The image chunk's tag now claims one byte more than precedes it.
         assert!(matches!(
-            map.get(&ChunkKind::Timestamp),
-            Some(ChunkValue::U64(0x1234_5678_9ABC_DEF0))
+            chunks,
+            Some(Err(ChunkError::LengthPastStart {
+                id: 1,
+                tag_offset: 3,
+                length: 4
+            }))
         ));
-        assert!(matches!(
-            map.get(&ChunkKind::ExposureTime),
-            Some(ChunkValue::F64(v)) if (*v - 1234.5).abs() < f64::EPSILON
-        ));
-    }
-
-    #[test]
-    fn invalid_length_errors() {
-        let data = chunk_buffer(0x0001, &[0x12, 0x34]);
-        let err = parse_chunk_bytes(&data).unwrap_err();
-        assert!(matches!(err, ChunkError::InvalidLength { id: 0x0001, .. }));
-    }
-
-    #[test]
-    fn unknown_chunk_kept_as_bytes() {
-        let payload = [0xAA, 0xBB, 0xCC];
-        let data = chunk_buffer(0xDEAD, &payload);
-        let map = parse_chunk_bytes(&data).expect("decode");
-        assert!(matches!(
-            map.get(&ChunkKind::Unknown(0xDEAD)),
-            Some(ChunkValue::Bytes(bytes)) if bytes.as_ref() == payload
-        ));
-    }
-
-    const KNOWN_IDS: &[u16] = &[0x0001, 0x1002, 0x1003, 0x0201];
-
-    #[test]
-    fn random_unknown_chunks_are_stored() {
-        for _ in 0..128 {
-            let mut id = fastrand::u16(..);
-            while KNOWN_IDS.contains(&id) {
-                id = fastrand::u16(..);
-            }
-            let len = fastrand::usize(..16);
-            let mut payload = vec![0u8; len];
-            for byte in &mut payload {
-                *byte = fastrand::u8(..);
-            }
-            let mut buffer = chunk_buffer(id, &payload);
-            let padding_len = fastrand::usize(..8);
-            for _ in 0..padding_len {
-                buffer.push(fastrand::u8(..));
-            }
-            let raw = gvsp::parse_chunks(&buffer);
-            let map = decode_raw_chunks(&raw).expect("decode");
-            match map.get(&ChunkKind::Unknown(id)) {
-                Some(ChunkValue::Bytes(bytes)) => assert_eq!(bytes.as_ref(), payload.as_slice()),
-                Some(other) => panic!("expected raw bytes for unknown chunk, found {other:?}"),
-                None => panic!("unknown chunk missing from map"),
-            }
-        }
     }
 }

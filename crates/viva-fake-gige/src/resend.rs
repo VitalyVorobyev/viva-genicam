@@ -322,7 +322,6 @@ mod tests {
         block_datagrams(
             &BlockSpec::image(id, 10, 1, 0x0108_0001, 28 + 8 + 4),
             &[7u8; 10],
-            &[],
         )
     }
 

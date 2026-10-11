@@ -9,9 +9,7 @@ use viva_genicam::genapi::NodeMap;
 use viva_genicam::gige::GVCP_PORT;
 use viva_genicam::gige::nic::IfaceSelector;
 use viva_genicam::sfnc;
-use viva_genicam::{
-    Camera, ChunkConfig, ChunkKind, ChunkValue, Frame, GenicamError, GigeRegisterIo, StreamOptions,
-};
+use viva_genicam::{Camera, ChunkConfig, Frame, GenicamError, GigeRegisterIo, StreamOptions};
 use viva_genicam::{StreamStats, pfnc::PixelFormat};
 
 #[derive(Debug, Default)]
@@ -141,7 +139,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("Chunk mode enabled for selectors: {:?}", enable_selectors);
 
-    // The receive engine assembles each block and decodes the trailer's chunks.
+    // The receive engine assembles each block and splits off its chunks.
     let mut frames =
         camera.open_stream(StreamOptions::new().iface(iface.clone()).auto_packet_size())?;
 
@@ -166,6 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         frame_index += 1;
         print_frame_summary(frame_index, &frame);
+        print_chunk_features(&mut camera, &frame);
         if last_overlay.elapsed() >= Duration::from_secs(1) {
             print_overlay(&frames.stats());
             last_overlay = Instant::now();
@@ -198,25 +197,24 @@ fn print_frame_summary(index: usize, frame: &Frame) {
         },
         None => println!("  Timestamp (host): <not available>"),
     }
-    match frame.chunk(ChunkKind::ExposureTime) {
-        Some(ChunkValue::F64(exposure)) => println!("  ExposureTime: {exposure:.3} us"),
-        _ => println!("  ExposureTime: <not available>"),
-    }
-    if let Some(chunks) = frame.chunks.as_ref() {
-        for (kind, value) in chunks {
-            if matches!(kind, ChunkKind::Timestamp | ChunkKind::ExposureTime) {
-                continue;
-            }
-            match value {
-                ChunkValue::U32(bits) => println!("  {kind:?}: 0x{bits:08X}"),
-                ChunkValue::U64(value) => println!("  {kind:?}: {value}"),
-                ChunkValue::F64(value) => println!("  {kind:?}: {value}"),
-                ChunkValue::Bytes(bytes) => println!("  {kind:?}: {} raw bytes", bytes.len()),
-                other => println!("  {kind:?}: {other:?}"),
-            }
-        }
-    } else {
+}
+
+/// Every chunk feature this frame carries, read through the camera's own XML:
+/// which chunk holds a value, at which offset, in which byte order.
+fn print_chunk_features(camera: &mut Camera<GigeRegisterIo>, frame: &Frame) {
+    if frame.chunks.is_none() {
         println!("  No chunk data reported.");
+        return;
+    }
+    for (name, value) in camera.chunk_features(frame) {
+        match value {
+            Ok(value) => println!("  {name}: {value}"),
+            Err(err) => println!("  {name}: <{err}>"),
+        }
+    }
+    let exposure = camera.with_chunks(frame, |cam| cam.get("ChunkExposureTime"));
+    if let Ok(exposure) = exposure {
+        println!("  ChunkExposureTime, read alone: {exposure} us");
     }
 }
 

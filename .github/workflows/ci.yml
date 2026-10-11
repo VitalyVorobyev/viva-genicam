@@ -235,3 +235,7 @@ jobs:
       - name: Fuzz block assembly for 60 s
         if: ${{ !cancelled() }}
         run: cargo fuzz run --target "$FUZZ_TARGET" gvsp_assemble -- -max_total_time=60
+
+      - name: Fuzz chunk parsing for 60 s
+        if: ${{ !cancelled() }}
+        run: cargo fuzz run --target "$FUZZ_TARGET" chunk_parse -- -max_total_time=60

@@ -36,12 +36,7 @@ const DEFAULT_CORPUS: &str = "fixtures/vendor-xml";
 ///
 /// Everything else that fails is a regression. Keep this list short and each
 /// entry tied to a `docs/backlog.md` task.
-const EXPECTED_SKIPS: &[(&str, &str)] = &[
-    // XML-01: negative register address (`<Address>-4</Address>`), used for
-    // offsets relative to the end of a chunk block. Our addressing model is
-    // unsigned, so the node is already dropped by the XML layer.
-    ("Baumer_HXG20.xml", "ChunkImageLength"),
-];
+const EXPECTED_SKIPS: &[(&str, &str)] = &[];
 
 /// Node types we cannot represent yet, as `(tag, required error substring)`.
 ///
@@ -891,4 +886,341 @@ fn corpus_registers_read_in_their_declared_byte_order() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// GA-12: registers on chunk and event ports
+// ---------------------------------------------------------------------------
+
+/// What a `<Port>` gives access to, as this test reads the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PortClass {
+    /// `<ChunkID>`: data inside a stream buffer.
+    Chunk,
+    /// `<EventID>`: data inside an event message.
+    Event,
+}
+
+/// A register bound by `<pPort>` to a chunk or event port.
+#[derive(Debug)]
+struct PortRegister {
+    /// Element name: `IntReg`, `MaskedIntReg`, `FloatReg`, `StringReg`,
+    /// `Register`, or `StructEntry`.
+    tag: String,
+    name: String,
+    port: String,
+    class: PortClass,
+    /// The sum of the literal `<Address>` terms, when the register has no
+    /// `<pAddress>` or `<pIndex>`: the address a device-port read would use.
+    literal_address: Option<i64>,
+}
+
+/// Find every register bound to a chunk or event port, with a reader of its
+/// own rather than through `viva-genapi-xml`, so that the test can disagree
+/// with the parser about which registers those are.
+fn port_registers(xml: &str) -> Vec<PortRegister> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    #[derive(Default)]
+    struct Pending {
+        tag: String,
+        name: String,
+        port: Option<String>,
+        address: i64,
+        indirect: bool,
+        entries: Vec<String>,
+    }
+
+    let xml = xml.trim_start_matches('\u{feff}');
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    reader.config_mut().allow_dangling_amp = true;
+    let mut ports: HashMap<String, PortClass> = HashMap::new();
+    let mut registers: Vec<Pending> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut port: Option<String> = None;
+    let mut current: Option<Pending> = None;
+    let mut text = String::new();
+
+    let name_of = |e: &quick_xml::events::BytesStart<'_>| -> Option<String> {
+        e.attributes()
+            .flatten()
+            .find(|a| a.key.as_ref() == "Name")
+            .and_then(|a| {
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .ok()
+                    .map(|v| v.trim().to_string())
+            })
+    };
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let tag = e.name().as_ref().to_string();
+                match tag.as_str() {
+                    "Port" => port = name_of(&e),
+                    "IntReg" | "MaskedIntReg" | "FloatReg" | "StringReg" | "Register"
+                    | "StructReg"
+                        if current.is_none() =>
+                    {
+                        current = Some(Pending {
+                            tag: tag.clone(),
+                            name: name_of(&e).unwrap_or_default(),
+                            ..Pending::default()
+                        });
+                    }
+                    "StructEntry" => {
+                        if let (Some(reg), Some(name)) = (current.as_mut(), name_of(&e)) {
+                            reg.entries.push(name);
+                        }
+                    }
+                    _ => {}
+                }
+                stack.push(tag);
+                text.clear();
+            }
+            Ok(Event::Text(t)) => text.push_str(&t),
+            Ok(Event::End(_)) => {
+                let tag = stack.pop().unwrap_or_default();
+                let value = text.trim().to_string();
+                text.clear();
+                let parent = stack.last().map(String::as_str);
+                match (tag.as_str(), parent) {
+                    ("ChunkID", Some("Port")) => {
+                        if let Some(p) = &port {
+                            ports.insert(p.clone(), PortClass::Chunk);
+                        }
+                    }
+                    ("EventID", Some("Port")) => {
+                        if let Some(p) = &port {
+                            ports.insert(p.clone(), PortClass::Event);
+                        }
+                    }
+                    ("Port", _) => port = None,
+                    ("pPort", _) => {
+                        if let Some(reg) = current.as_mut() {
+                            reg.port = Some(value);
+                        }
+                    }
+                    ("Address", _) => {
+                        if let Some(reg) = current.as_mut() {
+                            let literal = if let Some(hex) = value.strip_prefix("0x") {
+                                u64::from_str_radix(hex, 16).map(|v| v as i64).ok()
+                            } else {
+                                value.parse::<i64>().ok()
+                            };
+                            match literal {
+                                Some(v) => reg.address = reg.address.wrapping_add(v),
+                                None => reg.indirect = true,
+                            }
+                        }
+                    }
+                    ("pAddress" | "pIndex", _) => {
+                        if let Some(reg) = current.as_mut() {
+                            reg.indirect = true;
+                        }
+                    }
+                    (t, _) if current.as_ref().is_some_and(|reg| reg.tag == t) => {
+                        registers.push(current.take().expect("checked"));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    for reg in registers {
+        let Some(port) = reg.port else { continue };
+        let Some(&class) = ports.get(&port) else {
+            continue;
+        };
+        let literal_address = (!reg.indirect).then_some(reg.address);
+        if reg.tag == "StructReg" {
+            for entry in reg.entries {
+                found.push(PortRegister {
+                    tag: "StructEntry".into(),
+                    name: entry,
+                    port: port.clone(),
+                    class,
+                    literal_address,
+                });
+            }
+        } else {
+            found.push(PortRegister {
+                tag: reg.tag,
+                name: reg.name,
+                port,
+                class,
+                literal_address,
+            });
+        }
+    }
+    found
+}
+
+/// A device that answers every read with zeros and remembers each address.
+#[derive(Default)]
+struct RecordingIo {
+    reads: RefCell<Vec<(u64, usize)>>,
+}
+
+impl RegisterIo for RecordingIo {
+    fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+        self.reads.borrow_mut().push((addr, len));
+        Ok(vec![0; len])
+    }
+
+    fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
+        Ok(())
+    }
+}
+
+/// Read `name` through whichever accessor its node kind takes.
+fn read_any(nodemap: &NodeMap, name: &str, io: &dyn RegisterIo) -> Result<(), GenApiError> {
+    use viva_genapi::Node;
+    match nodemap.node(name) {
+        Some(Node::String(_)) => nodemap.get_string(name, io).map(drop),
+        Some(Node::Register(_)) => nodemap.get_register(name, io).map(drop),
+        Some(_) => nodemap
+            .get_float(name, io)
+            .map(drop)
+            .or_else(|_| nodemap.get_integer(name, io).map(drop)),
+        None => Err(GenApiError::NodeNotFound(name.to_string())),
+    }
+}
+
+/// GA-12: a register on a chunk or event port addresses the chunk or the
+/// event, not the device. With nothing attached, reading one must fail — and
+/// must not reach device memory at its port-relative address, which is where
+/// such a read used to land: 294 event-port and 229 chunk-port registers in
+/// 20 vendor documents, `EventExposureEndTimestamp` among them, read GVCP
+/// bootstrap registers at offsets like 0x8 and called it a timestamp.
+#[test]
+fn corpus_port_registers_never_read_device_memory() {
+    let dir = corpus_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        println!("corpus not present at {}; skipping", dir.display());
+        return;
+    };
+    let mut documents: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "xml"))
+        .collect();
+    documents.sort();
+
+    let mut failures = Vec::new();
+    let mut with_ports = 0usize;
+    let mut counts: BTreeMap<(PortClass, String), usize> = BTreeMap::new();
+    let mut not_built = 0usize;
+    for path in &documents {
+        let document = path
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+        let xml = String::from_utf8_lossy(&std::fs::read(path).expect("read")).into_owned();
+        let registers = port_registers(&xml);
+        if registers.is_empty() {
+            continue;
+        }
+        with_ports += 1;
+        let model = viva_genapi_xml::parse(&xml).expect("parse");
+        let mut nodemap = NodeMap::try_from_xml(model).expect("build");
+        let mut device_reads = 0usize;
+        for reg in &registers {
+            *counts.entry((reg.class, reg.tag.clone())).or_default() += 1;
+            if nodemap.node(&reg.name).is_none() {
+                // Dropped by the XML layer for a reason the build test
+                // already polices (a `<Register>` with `<pLength>`).
+                not_built += 1;
+                continue;
+            }
+            let io = RecordingIo::default();
+            let result = read_any(&nodemap, &reg.name, &io);
+            let reads = io.reads.borrow().clone();
+            device_reads += reads.len();
+            let at_own_address = reg
+                .literal_address
+                .is_some_and(|addr| reads.iter().any(|(a, _)| *a as i64 == addr));
+            if at_own_address {
+                failures.push(format!(
+                    "{document}: <{}> {} on {:?} port {} read device memory at {:#x}",
+                    reg.tag,
+                    reg.name,
+                    reg.class,
+                    reg.port,
+                    reg.literal_address.unwrap_or_default()
+                ));
+            } else if result.is_ok() {
+                failures.push(format!(
+                    "{document}: <{}> {} on {:?} port {} read a value with nothing attached",
+                    reg.tag, reg.name, reg.class, reg.port
+                ));
+            }
+        }
+        println!(
+            "{document}: {} port registers, {device_reads} device reads while reading them",
+            registers.len()
+        );
+
+        // With data attached to every chunk and event port, every one of
+        // those registers reads — from the attached bytes, still without
+        // touching the device at its own address.
+        let pattern = bytes::Bytes::from((0..1024u32).map(|i| i as u8).collect::<Vec<u8>>());
+        let mut chunks = viva_genapi::ChunkData::new();
+        let kinds: Vec<viva_genapi::PortKind> =
+            nodemap.ports().into_iter().map(|(_, kind)| kind).collect();
+        for kind in kinds {
+            match kind {
+                viva_genapi::PortKind::Chunk { chunk_id } => chunks.push(chunk_id, pattern.clone()),
+                viva_genapi::PortKind::Event { event_id } => {
+                    nodemap.attach_event(event_id, pattern.clone())
+                }
+                _ => {}
+            }
+        }
+        nodemap.attach_chunks(&chunks);
+        for reg in &registers {
+            if nodemap.node(&reg.name).is_none() {
+                continue;
+            }
+            let io = RecordingIo::default();
+            let result = read_any(&nodemap, &reg.name, &io);
+            let at_own_address = reg
+                .literal_address
+                .is_some_and(|addr| io.reads.borrow().iter().any(|(a, _)| *a as i64 == addr));
+            if at_own_address || result.is_err() {
+                failures.push(format!(
+                    "{document}: <{}> {} with data attached: {result:?}, device read at own \
+                     address: {at_own_address}",
+                    reg.tag, reg.name
+                ));
+            }
+        }
+    }
+
+    let chunk: usize = counts
+        .iter()
+        .filter(|((class, _), _)| *class == PortClass::Chunk)
+        .map(|(_, n)| n)
+        .sum();
+    let event: usize = counts
+        .iter()
+        .filter(|((class, _), _)| *class == PortClass::Event)
+        .map(|(_, n)| n)
+        .sum();
+    println!(
+        "\n{with_ports} documents declare chunk or event ports: {chunk} chunk-port and \
+         {event} event-port registers ({not_built} not built); by tag: {counts:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} port registers reached device memory or read without data:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
 }

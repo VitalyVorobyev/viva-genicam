@@ -75,7 +75,7 @@ implement `std::error::Error`:
 | Error | Crate | Raised by |
 |---|---|---|
 | `GenicamError` | `viva-genicam` | connecting, `Camera`, streams |
-| `ChunkError` | `viva-genicam` | decoding chunk data |
+| `ChunkError` | `viva-gige` (re-exported by `viva-genicam`) | a chunk payload that does not tile into tagged chunks |
 | `GenApiError` | `viva-genapi` | feature access: access mode, range, locks, formulas, register I/O ([the variants](crates/viva-genapi.md#errors)) |
 | `XmlError` | `viva-genapi-xml` | fetching or parsing a GenApi document |
 | `GigeError` | `viva-gige` | GVCP discovery and control, including a status code the camera returned |

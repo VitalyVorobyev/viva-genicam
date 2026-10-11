@@ -135,6 +135,23 @@ pub fn parse_u64(value: &str) -> Result<u64, XmlError> {
     }
 }
 
+/// Parse an `<Address>`: signed decimal, or hex whose bit pattern is kept.
+///
+/// GenICam Standard v2.1.1 §2.8.16 allows a negative address on a chunk port
+/// (`<Address>-4</Address>`, Baumer HXG20). A hex address is read as the
+/// unsigned 64-bit pattern it spells and reinterpreted, so `0xFFFFFFFC`-style
+/// device addresses keep their value and a full-width `0xFF…FC` is `-4`.
+pub fn parse_address(value: &str) -> Result<i64, XmlError> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("0x") {
+        parse_u64(trimmed).map(|v| v as i64)
+    } else {
+        let dec = trimmed.replace('_', "");
+        dec.parse()
+            .map_err(|err| XmlError::Invalid(format!("invalid address {trimmed:?}: {err}")))
+    }
+}
+
 /// Parse a signed 64-bit integer from a string (supports hex with `0x` prefix).
 pub fn parse_i64(value: &str) -> Result<i64, XmlError> {
     let trimmed = value.trim();

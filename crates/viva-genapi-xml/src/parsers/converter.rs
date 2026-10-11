@@ -3,7 +3,10 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{NodeMetaBuilder, TAG_P_VALUE, handle_invalidator_start, handle_predicate_start};
+use super::{
+    NodeMetaBuilder, TAG_P_VALUE, handle_addressing_empty, handle_addressing_start,
+    handle_invalidator_start, handle_predicate_start,
+};
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
 use crate::{
@@ -364,32 +367,15 @@ pub fn parse_string(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                "Address" => {
-                    let text = read_text_start(reader, e)?;
-                    let addr = crate::util::parse_u64(&text)?;
-                    addressing.push_fixed_address(addr);
-                }
-                "Length" => {
-                    let text = read_text_start(reader, e)?;
-                    let value = crate::util::parse_u64(&text)?;
-                    let len = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("length out of range for node {name}"))
-                    })?;
-                    addressing.set_length(len);
-                }
-                "pAddress" => {
-                    let text = read_text_start(reader, e)?;
-                    let target = text.trim();
-                    if !target.is_empty() {
-                        addressing.push_p_address(target);
-                    }
-                }
                 "AccessMode" => {
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
                 _ => {
-                    if handle_predicate_start(reader, e, &mut predicates)?
+                    // `<Address>`, `<pAddress>`, `<pIndex>`, `<Length>` and
+                    // `<pPort>` mean what they mean on any register.
+                    if handle_addressing_start(reader, e, &name, &mut addressing)?
+                        || handle_predicate_start(reader, e, &mut predicates)?
                         || handle_invalidator_start(reader, e, &mut invalidators)?
                     {
                         // handled
@@ -399,14 +385,7 @@ pub fn parse_string(
                 }
             },
             Ok(Event::Empty(ref e)) => {
-                if e.name().as_ref() == "pAddress"
-                    && let Some(value) = attribute_value(e, "Name")?
-                {
-                    let trimmed = value.trim();
-                    if !trimmed.is_empty() {
-                        addressing.push_p_address(trimmed);
-                    }
-                }
+                handle_addressing_empty(e, &mut addressing)?;
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {

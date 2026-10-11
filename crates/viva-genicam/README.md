@@ -27,7 +27,7 @@ and attach `viva-camctl report` output
 - **Feature access** -- `get`/`set` by feature name, parsed and encoded per node type (Integer, Float, Enumeration, Boolean, String, Command), plus typed accessors on the underlying `NodeMap`
 - **Streaming** -- `Camera::open_stream` and `FrameStream`: a receive thread per stream, frames with block id and status, async or blocking, and counters for every block the camera sent
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition
-- **Chunks & timestamps** -- parse chunk data; map device timestamps to host time
+- **Chunks, events & timestamps** -- read a frame's chunk features and an event's features through GenApi; map device timestamps to host time
 - **USB3 Vision** -- optional `u3v` feature for USB3 Vision cameras
 
 ## Usage

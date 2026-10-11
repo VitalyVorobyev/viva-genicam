@@ -141,7 +141,7 @@ fn print_gain_addressing(nodemap: &NodeMap) {
     }
     if let Some(Node::Integer(node)) = nodemap.node(sfnc::GAIN) {
         match &node.addressing {
-            Some(Addressing::Sum { terms, len }) => {
+            Some(Addressing::Sum { terms, len, .. }) => {
                 println!(
                     "Gain address is the sum of {} term(s), {len} bytes:",
                     terms.len()

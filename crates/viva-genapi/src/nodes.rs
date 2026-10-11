@@ -506,10 +506,6 @@ pub struct RegisterNode {
     pub addressing: Addressing,
     /// Declared access rights.
     pub access: AccessMode,
-    /// `<pPort>` target; `None` or `"Device"` means the device port.
-    ///
-    /// Any other port is parsed and listed but cannot be read — see GA-12.
-    pub port: Option<String>,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached payload alongside the generation it was read in.
@@ -523,5 +519,24 @@ impl RegisterNode {
     /// `Addressing`, which is not re-exported (backlog `API-02`).
     pub fn declared_len(&self) -> u32 {
         self.addressing.byte_len()
+    }
+
+    /// The `<pPort>` the register's address is relative to; `None` means the
+    /// device.
+    pub fn port(&self) -> Option<&str> {
+        self.addressing.port()
+    }
+}
+
+/// The addressing of a register-backed node, if it has its own.
+pub(crate) fn node_addressing(node: &Node) -> Option<&Addressing> {
+    match node {
+        Node::Integer(n) => n.addressing.as_ref(),
+        Node::Float(n) => n.addressing.as_ref(),
+        Node::Enum(n) => n.addressing.as_ref(),
+        Node::Boolean(n) => n.addressing.as_ref(),
+        Node::String(n) => Some(&n.addressing),
+        Node::Register(n) => Some(&n.addressing),
+        _ => None,
     }
 }

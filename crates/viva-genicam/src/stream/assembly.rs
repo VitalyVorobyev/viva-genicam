@@ -39,7 +39,7 @@ use bytes::Bytes;
 use tracing::{debug, warn};
 use viva_gige::gvsp::{
     GVSP_EXTENDED_HEADER_SIZE, GVSP_HEADER_SIZE, GvspContent, GvspHeader, GvspLeader, GvspTrailer,
-    PacketBitmap, is_image_payload, parse_header, parse_packet_ref, status,
+    PacketBitmap, is_chunk_data_payload, is_image_payload, parse_header, parse_packet_ref, status,
 };
 
 use crate::frame::FrameStatus;
@@ -157,8 +157,6 @@ pub(crate) struct AssembledBlock {
     pub payload: Bytes,
     /// Size Y from the trailer, 0 without one.
     pub trailer_size_y: u32,
-    /// The trailer's chunk region, if it had one.
-    pub chunk_data: Option<Bytes>,
 }
 
 #[derive(Debug)]
@@ -167,7 +165,6 @@ struct TrailerInfo {
     last_payload_id: u32,
     size_y: u32,
     payload_type: u16,
-    chunk_data: Bytes,
 }
 
 /// How a block in flight was resolved.
@@ -263,7 +260,7 @@ fn classify(last: Option<u64>, next: u64, extended_ids: bool, leader: bool) -> O
 enum Content<'a> {
     Leader(GvspLeader),
     Payload(&'a [u8]),
-    Trailer(GvspTrailer<'a>),
+    Trailer(GvspTrailer),
 }
 
 /// Warnings worth saying once per stream rather than once per packet.
@@ -568,8 +565,8 @@ impl Assembler {
         if !self.warned.unsupported {
             self.warned.unsupported = true;
             warn!(
-                "{what}; the receive engine assembles image payloads (0x0001, 0x4001). \
-                 Such packets are counted in packets_ignored_unsupported"
+                "{what}; the receive engine assembles images (0x0001, 0x4001) and chunk \
+                 data (0x0004, 0x4004). Such packets are counted in packets_ignored_unsupported"
             );
         }
         self.stats.record_ignored_packet(IgnoredPacket::Unsupported);
@@ -668,6 +665,18 @@ impl Assembler {
             return;
         }
         block.leader_payload_type = Some(leader.payload_type);
+        if is_chunk_data_payload(leader.payload_type) {
+            // Chunk data (`0x0004`) has no geometry to size the buffer from:
+            // it is `PayloadSize` when the stream knows it, and otherwise
+            // grows with the packets, as any block's does past an estimate.
+            block.leader = Some(LeaderInfo {
+                timestamp: leader.timestamp,
+                pixel_format: 0,
+                width: 0,
+                height: 0,
+            });
+            return;
+        }
         let Some(image) = leader
             .image
             .filter(|_| is_image_payload(leader.payload_type))
@@ -810,7 +819,7 @@ impl Assembler {
         self.size_mismatch(block_id, packet_id, len, stride);
     }
 
-    fn on_trailer(&mut self, index: usize, header: &GvspHeader, trailer: GvspTrailer<'_>) {
+    fn on_trailer(&mut self, index: usize, header: &GvspHeader, trailer: GvspTrailer) {
         let limit = self.buffer_limit();
         let block = &mut self.in_flight[index];
         if block.trailer.is_some() {
@@ -822,7 +831,6 @@ impl Assembler {
             last_payload_id,
             size_y: trailer.size_y,
             payload_type: trailer.payload_type,
-            chunk_data: Bytes::copy_from_slice(trailer.chunk_data),
         });
         if block.unsupported {
             block.resolved = Some(Resolution::Unsupported);
@@ -911,13 +919,9 @@ impl Assembler {
             };
             let mut buffer = std::mem::take(&mut block.buffer);
             buffer.truncate(block.extent);
-            let (trailer_size_y, chunk_data, trailer_type) = match block.trailer.take() {
-                Some(t) => (
-                    t.size_y,
-                    (!t.chunk_data.is_empty()).then_some(t.chunk_data),
-                    Some(t.payload_type),
-                ),
-                None => (0, None, None),
+            let (trailer_size_y, trailer_type) = match block.trailer.take() {
+                Some(t) => (t.size_y, Some(t.payload_type)),
+                None => (0, None),
             };
             out.push(AssembledBlock {
                 block_id: block.block_id,
@@ -926,7 +930,6 @@ impl Assembler {
                 payload_type: block.leader_payload_type.or(trailer_type).unwrap_or(0),
                 payload: Bytes::from(buffer),
                 trailer_size_y,
-                chunk_data,
             });
         }
     }
@@ -1042,7 +1045,7 @@ mod tests {
         let mut s = spec(7, 64, 32);
         s.timestamp = 0xABCD;
         s.payload_type = 0x4001;
-        let out = feed(&mut asm, &block_datagrams(&s, &img, &[]), Instant::now());
+        let out = feed(&mut asm, &block_datagrams(&s, &img), Instant::now());
         assert_eq!(out.len(), 1);
         let block = &out[0];
         assert_eq!(block.status, FrameStatus::Complete);
@@ -1072,7 +1075,7 @@ mod tests {
         let img = image(64 * 32, 2);
         let mut s = spec(0x0001_0000_0000_0001, 64, 32);
         s.extended_ids = true;
-        let datagrams = block_datagrams(&s, &img, &[]);
+        let datagrams = block_datagrams(&s, &img);
         assert_eq!(datagrams[1].bytes.len(), 20 + 528);
         let out = feed(&mut asm, &datagrams, Instant::now());
         assert_eq!(out.len(), 1);
@@ -1085,7 +1088,7 @@ mod tests {
         let (mut asm, _) = assembler();
         let img = image(64 * 32, 3);
         let script = PacketScript::new().step(ScriptStep::TrailerBeforeLastPayload { block: 1 });
-        let datagrams = script.apply(block_datagrams(&spec(1, 64, 32), &img, &[]));
+        let datagrams = script.apply(block_datagrams(&spec(1, 64, 32), &img));
         let (head, last) = datagrams.split_at(datagrams.len() - 1);
         let t0 = Instant::now();
         assert!(
@@ -1105,7 +1108,7 @@ mod tests {
         let script = PacketScript::new().step(ScriptStep::RepeatLeader { block: 1, after: 2 });
         let out = feed(
             &mut asm,
-            &script.apply(block_datagrams(&spec(1, 64, 32), &img, &[])),
+            &script.apply(block_datagrams(&spec(1, 64, 32), &img)),
             Instant::now(),
         );
         assert_eq!(out.len(), 1);
@@ -1120,7 +1123,7 @@ mod tests {
     fn the_timeout_counts_from_the_last_packet() {
         let (mut asm, stats) = assembler();
         let img = image(216 * 100, 5);
-        let datagrams = block_datagrams(&spec(1, 216, 100), &img, &[]);
+        let datagrams = block_datagrams(&spec(1, 216, 100), &img);
         assert_eq!(datagrams.len(), 42);
         let t0 = Instant::now();
         let mut out = Vec::new();
@@ -1134,7 +1137,7 @@ mod tests {
         assert_eq!(out[0].status, FrameStatus::Complete);
 
         // Silence after packet 5 of the next block closes it 100 ms later.
-        let next = block_datagrams(&spec(2, 216, 100), &img, &[]);
+        let next = block_datagrams(&spec(2, 216, 100), &img);
         let t1 = t0 + Duration::from_secs(10);
         assert!(feed(&mut asm, &next[..6], t1).is_empty());
         assert!(poll(&mut asm, t1 + 99 * MS).is_empty());
@@ -1149,7 +1152,7 @@ mod tests {
     #[test]
     fn a_shorter_timeout_applies_to_blocks_in_flight() {
         let (mut asm, _) = assembler();
-        let datagrams = block_datagrams(&spec(1, 64, 32), &image(64 * 32, 6), &[]);
+        let datagrams = block_datagrams(&spec(1, 64, 32), &image(64 * 32, 6));
         let t0 = Instant::now();
         feed(&mut asm, &datagrams[..2], t0);
         asm.set_config(AssemblyConfig {
@@ -1164,12 +1167,12 @@ mod tests {
     #[test]
     fn a_leader_alone_does_not_time_out_while_it_is_the_newest() {
         let (mut asm, _) = assembler();
-        let first = block_datagrams(&spec(1, 64, 32), &image(64 * 32, 7), &[]);
+        let first = block_datagrams(&spec(1, 64, 32), &image(64 * 32, 7));
         let t0 = Instant::now();
         feed(&mut asm, &first[..1], t0);
         assert!(poll(&mut asm, t0 + Duration::from_secs(5)).is_empty());
         // A newer block makes it an ordinary block, which then times out.
-        let second = block_datagrams(&spec(2, 64, 32), &image(64 * 32, 8), &[]);
+        let second = block_datagrams(&spec(2, 64, 32), &image(64 * 32, 8));
         let t1 = t0 + Duration::from_secs(6);
         feed(&mut asm, &second[..1], t1);
         let closed = poll(&mut asm, t1);
@@ -1184,8 +1187,8 @@ mod tests {
         let a = image(64 * 32, 9);
         let b = image(64 * 32, 10);
         let merged = viva_fake_gige::gvsp::interleave(
-            block_datagrams(&spec(1, 64, 32), &a, &[]),
-            block_datagrams(&spec(2, 64, 32), &b, &[]),
+            block_datagrams(&spec(1, 64, 32), &a),
+            block_datagrams(&spec(2, 64, 32), &b),
         );
         let out = feed(&mut asm, &merged, Instant::now());
         let ids: Vec<u64> = out.iter().map(|b| b.block_id).collect();
@@ -1199,8 +1202,8 @@ mod tests {
     #[test]
     fn a_complete_block_waits_for_an_older_open_one() {
         let (mut asm, _) = assembler();
-        let older = block_datagrams(&spec(1, 64, 32), &image(64 * 32, 11), &[]);
-        let newer = block_datagrams(&spec(2, 64, 32), &image(64 * 32, 12), &[]);
+        let older = block_datagrams(&spec(1, 64, 32), &image(64 * 32, 11));
+        let newer = block_datagrams(&spec(2, 64, 32), &image(64 * 32, 12));
         let t0 = Instant::now();
         // Block 1 loses its trailer; block 2 arrives whole.
         assert!(feed(&mut asm, &older[..older.len() - 1], t0).is_empty());
@@ -1218,11 +1221,11 @@ mod tests {
         let (mut asm, _) = assembler();
         let t0 = Instant::now();
         for id in 1..=3 {
-            let d = block_datagrams(&spec(id, 64, 32), &image(64 * 32, id as u32), &[]);
+            let d = block_datagrams(&spec(id, 64, 32), &image(64 * 32, id as u32));
             assert!(feed(&mut asm, &d[..2], t0).is_empty());
         }
         assert_eq!(asm.in_flight(), MAX_IN_FLIGHT);
-        let d = block_datagrams(&spec(4, 64, 32), &image(64 * 32, 4), &[]);
+        let d = block_datagrams(&spec(4, 64, 32), &image(64 * 32, 4));
         let out = feed(&mut asm, &d[..1], t0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].block_id, 1);
@@ -1278,7 +1281,7 @@ mod tests {
         for id in [65533u64, 65534, 65535, 1, 3, 7] {
             out.extend(feed(
                 &mut asm,
-                &block_datagrams(&spec(id, 32, 32), &image(1024, 1), &[]),
+                &block_datagrams(&spec(id, 32, 32), &image(1024, 1)),
                 t0,
             ));
         }
@@ -1287,7 +1290,7 @@ mod tests {
         // Block 2 turns up after 7: late, not a new block.
         feed(
             &mut asm,
-            &block_datagrams(&spec(2, 32, 32), &image(1024, 1), &[]),
+            &block_datagrams(&spec(2, 32, 32), &image(1024, 1)),
             t0,
         );
         let snap = stats.snapshot();
@@ -1306,7 +1309,7 @@ mod tests {
         let img = image(2048, 13);
         let out = feed(
             &mut asm,
-            &block_datagrams(&spec(1, 64, 32), &img, &[]),
+            &block_datagrams(&spec(1, 64, 32), &img),
             Instant::now(),
         );
         assert_eq!(out[0].status, FrameStatus::Complete);
@@ -1318,7 +1321,7 @@ mod tests {
     #[test]
     fn a_packet_beyond_the_trailer_count_is_out_of_range() {
         let (mut asm, stats) = assembler();
-        let datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 22), &[]);
+        let datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 22));
         let mut extra = datagrams[1].clone();
         // Packet id 9 in a block whose trailer says 4 data packets.
         extra.bytes[7] = 9;
@@ -1356,7 +1359,7 @@ mod tests {
         let img = image(824, 14);
         let out = feed(
             &mut asm,
-            &block_datagrams(&spec(1, 1, 824), &img, &[]),
+            &block_datagrams(&spec(1, 1, 824), &img),
             Instant::now(),
         );
         assert_eq!(out[0].payload.as_ref(), img.as_slice());
@@ -1385,7 +1388,7 @@ mod tests {
         for id in 1..=3 {
             feed(
                 &mut asm,
-                &block_datagrams(&spec(id, 64, 32), &image(2048, 1), &[]),
+                &block_datagrams(&spec(id, 64, 32), &image(2048, 1)),
                 t0,
             );
         }
@@ -1400,7 +1403,7 @@ mod tests {
         let size = image_size(MONO12_PACKED, 64, 32);
         let img = image(size, 15);
         let s = BlockSpec::image(1, 64, 32, MONO12_PACKED, PACKET_SIZE);
-        let out = feed(&mut asm, &block_datagrams(&s, &img, &[]), Instant::now());
+        let out = feed(&mut asm, &block_datagrams(&s, &img), Instant::now());
         assert_eq!(out[0].payload.len(), 3072);
         assert_eq!(out[0].payload.as_ref(), img.as_slice());
         assert_eq!(asm.frame_size_hint(), Some(3072));
@@ -1410,11 +1413,7 @@ mod tests {
     fn a_leader_cannot_allocate_more_than_the_cap() {
         let (mut asm, _) = assembler();
         let s = spec(1, u32::MAX, u32::MAX);
-        feed(
-            &mut asm,
-            &block_datagrams(&s, &[], &[])[..1],
-            Instant::now(),
-        );
+        feed(&mut asm, &block_datagrams(&s, &[])[..1], Instant::now());
         assert_eq!(asm.frame_size_hint(), Some(ESTIMATE_CAP));
     }
 
@@ -1429,7 +1428,7 @@ mod tests {
         s.packet_size = 600;
         let out = feed(
             &mut asm,
-            &block_datagrams(&s, &image(2048, 16), &[]),
+            &block_datagrams(&s, &image(2048, 16)),
             Instant::now(),
         );
         assert!(out.is_empty());
@@ -1442,7 +1441,7 @@ mod tests {
         s.packet_size = 500;
         feed(
             &mut asm,
-            &block_datagrams(&s, &image(2048, 17), &[]),
+            &block_datagrams(&s, &image(2048, 17)),
             Instant::now(),
         );
         // Packets 1..=4 are short, 5 is the last: four mismatches.
@@ -1458,7 +1457,7 @@ mod tests {
         let mut s = spec(1, 64, 32);
         s.packet_size = 500;
         let t0 = Instant::now();
-        let mut out = feed(&mut asm, &block_datagrams(&s, &image(2048, 17), &[]), t0);
+        let mut out = feed(&mut asm, &block_datagrams(&s, &image(2048, 17)), t0);
         out.extend(poll(&mut asm, t0 + Duration::from_secs(1)));
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -1488,7 +1487,7 @@ mod tests {
     #[test]
     fn a_lost_packet_is_asked_for_and_counted_when_it_comes() {
         let (mut asm, stats) = resend_assembler();
-        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 30), &[]);
+        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 30));
         let t0 = Instant::now();
         let lost = datagrams[2].clone();
         let rest: Vec<Datagram> = datagrams
@@ -1518,7 +1517,7 @@ mod tests {
     #[test]
     fn a_packet_marked_as_resent_is_used() {
         let (mut asm, _) = assembler();
-        let mut datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 31), &[]);
+        let mut datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 31));
         datagrams[2].bytes[0] = 0x01;
         let out = feed(&mut asm, &datagrams, Instant::now());
         assert_eq!(out[0].status, FrameStatus::Complete);
@@ -1529,7 +1528,7 @@ mod tests {
     #[test]
     fn an_unavailable_answer_closes_the_range_not_the_frame() {
         let (mut asm, stats) = resend_assembler();
-        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 32), &[]);
+        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 32));
         let t0 = Instant::now();
         let rest: Vec<Datagram> = datagrams
             .iter()
@@ -1561,7 +1560,7 @@ mod tests {
     #[test]
     fn a_transient_answer_leaves_the_range_to_its_retries() {
         let (mut asm, stats) = resend_assembler();
-        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 33), &[]);
+        let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 33));
         let t0 = Instant::now();
         let rest: Vec<Datagram> = datagrams
             .iter()
@@ -1589,7 +1588,7 @@ mod tests {
         let mut s = spec(1, 64, 32);
         s.packet_size = 500;
         let t0 = Instant::now();
-        feed(&mut asm, &block_datagrams(&s, &image(2048, 34), &[]), t0);
+        feed(&mut asm, &block_datagrams(&s, &image(2048, 34)), t0);
         assert!(due(&mut asm, t0 + 10 * MS).is_empty());
         assert_eq!(stats.snapshot().resend_requested, 0);
     }
@@ -1601,7 +1600,7 @@ mod tests {
         let (mut asm, stats) = assembler();
         let mut s = spec(1, 64, 32);
         s.extended_ids = true;
-        let mut datagrams = block_datagrams(&s, &image(2048, 21), &[]);
+        let mut datagrams = block_datagrams(&s, &image(2048, 21));
         let trailer = datagrams.last_mut().unwrap();
         trailer.bytes[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
         let t0 = Instant::now();
@@ -1618,7 +1617,7 @@ mod tests {
         s.trailer_status = 0x8015;
         let out = feed(
             &mut asm,
-            &block_datagrams(&s, &image(2048, 18), &[]),
+            &block_datagrams(&s, &image(2048, 18)),
             Instant::now(),
         );
         assert_eq!(out[0].status, FrameStatus::DeviceStatus(0x8015));
@@ -1627,7 +1626,7 @@ mod tests {
     #[test]
     fn a_data_packet_with_an_error_status_is_ignored() {
         let (mut asm, stats) = assembler();
-        let mut datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 19), &[]);
+        let mut datagrams = block_datagrams(&spec(1, 64, 32), &image(2048, 19));
         datagrams[2].bytes[0] = 0x80;
         datagrams[2].bytes[1] = 0x0C; // PACKET_UNAVAILABLE
         let out = feed(&mut asm, &datagrams, Instant::now());
@@ -1648,7 +1647,7 @@ mod tests {
         s.payload_type = 0x0003; // file
         let out = feed(
             &mut asm,
-            &block_datagrams(&s, &image(2048, 20), &[]),
+            &block_datagrams(&s, &image(2048, 20)),
             Instant::now(),
         );
         assert!(out.is_empty());
@@ -1692,7 +1691,7 @@ mod tests {
             }
             let stride = s.payload_stride();
             let img = image((width * height) as usize, seed as u32);
-            let mut datagrams = block_datagrams(&s, &img, &[]);
+            let mut datagrams = block_datagrams(&s, &img);
 
             let lose = rng.u8(..4) == 0;
             let mut lost: Vec<u32> = Vec::new();
@@ -1749,7 +1748,7 @@ mod tests {
                 .map(|i| image(40 * 30, (seed * 3 + i) as u32))
                 .collect();
             let mut datagrams: Vec<Datagram> = (0..3)
-                .flat_map(|i| block_datagrams(&spec(first + i as u64, 40, 30), &images[i], &[]))
+                .flat_map(|i| block_datagrams(&spec(first + i as u64, 40, 30), &images[i]))
                 .collect();
             // Shuffle within a window, so the first packet of each block still
             // precedes the others' — as on a wire, where reordering is local.

@@ -448,6 +448,7 @@ fn run(
     let mut requests: Vec<ResendRequest> = Vec::new();
     let mut sender = ResendSender::default();
     let mut reset_logged = false;
+    let mut chunk_layout_warned = false;
 
     while !shared.stop.load(Ordering::Acquire) {
         let received = socket.recv_from(&mut buf);
@@ -516,7 +517,14 @@ fn run(
         }
         let deliver_incomplete = shared.deliver_incomplete();
         for block in done.drain(..) {
-            deliver(block, deliver_incomplete, &shared, &stats, &mut silence);
+            deliver(
+                block,
+                deliver_incomplete,
+                &shared,
+                &stats,
+                &mut silence,
+                &mut chunk_layout_warned,
+            );
         }
         silence.tick();
         rcvbuf.ensure(&socket, assembler.frame_size_hint());
@@ -606,6 +614,7 @@ fn deliver(
     shared: &Shared,
     stats: &StreamStatsAccumulator,
     silence: &mut SilenceWatch,
+    chunk_layout_warned: &mut bool,
 ) {
     let complete = block.status.is_complete();
     if complete {
@@ -614,12 +623,21 @@ fn deliver(
         stats.record_incomplete_frame();
         return;
     }
-    let chunks = block.chunk_data.as_ref().and_then(|data| {
-        crate::chunks::parse_chunk_bytes(data)
-            .map_err(|e| debug!(error = %e, "failed to parse chunk data"))
-            .ok()
-    });
-    let item = classify_completed_block(block, chunks);
+    let block_id = block.block_id;
+    let (item, chunk_error) = classify_completed_block(block);
+    if let Some(err) = chunk_error {
+        if !*chunk_layout_warned {
+            *chunk_layout_warned = true;
+            warn!(
+                block_id,
+                error = %err,
+                "a frame's chunk data does not parse; it is delivered with its whole payload \
+                 and no chunks. Further failures are logged at debug"
+            );
+        } else {
+            debug!(block_id, error = %err, "chunk data does not parse");
+        }
+    }
     if shared.queue.push(item).is_some() {
         stats.record_backpressure_drop();
     }

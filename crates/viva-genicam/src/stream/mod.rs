@@ -41,7 +41,7 @@ use tracing::{debug, info, warn};
 use viva_pfnc::PixelFormat;
 
 use crate::GenicamError;
-use crate::chunks::ChunkMap;
+use crate::chunks::ChunkError;
 use crate::evs::EvsBlock;
 use crate::frame::{Frame, FrameStatus};
 use crate::time::TimeSync;
@@ -166,7 +166,23 @@ impl GenericStreamBlock {
 
 /// Turn an assembled block into the application's view of it: event data for
 /// the LUCID EVT formats, an image frame otherwise.
-fn classify_completed_block(block: AssembledBlock, chunks: Option<ChunkMap>) -> GenericStreamBlock {
+///
+/// A complete block whose payload type carries chunks is split into its image
+/// and its chunks (TC-06); a chunk layout that does not parse is returned
+/// alongside, so the receive thread can say so, and the block keeps its bytes.
+/// An incomplete block is not split: its missing packets are zeros, and zeros
+/// read as tags would invent chunks.
+fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Option<ChunkError>) {
+    let (payload, chunks) = if block.status.is_complete() {
+        crate::chunks::split(block.payload, block.payload_type)
+    } else {
+        (block.payload, None)
+    };
+    let (chunks, chunk_error) = match chunks {
+        Some(Ok(chunks)) => (Some(chunks), None),
+        Some(Err(err)) => (None, Some(err)),
+        None => (None, None),
+    };
     let (width, height, pixel_format, ts_dev) = match block.leader {
         Some(leader) => (
             leader.width,
@@ -183,7 +199,7 @@ fn classify_completed_block(block: AssembledBlock, chunks: Option<ChunkMap>) -> 
     };
     let inner = match evs {
         Some(format) => StreamBlock::Evs(EvsBlock {
-            payload: block.payload,
+            payload,
             format,
             ts_dev,
             leader_size_x: width,
@@ -195,7 +211,7 @@ fn classify_completed_block(block: AssembledBlock, chunks: Option<ChunkMap>) -> 
             status: block.status,
         }),
         None => {
-            let mut frame = Frame::new(block.payload, width, height, pixel_format);
+            let mut frame = Frame::new(payload, width, height, pixel_format);
             frame.chunks = chunks;
             frame.ts_dev = ts_dev;
             frame.block_id = block.block_id;
@@ -204,7 +220,7 @@ fn classify_completed_block(block: AssembledBlock, chunks: Option<ChunkMap>) -> 
             StreamBlock::Image(frame)
         }
     };
-    GenericStreamBlock { inner }
+    (GenericStreamBlock { inner }, chunk_error)
 }
 
 /// Smallest GVSP packet size we will configure: the IPv4 minimum reassembly
@@ -1855,7 +1871,6 @@ mod tests {
             payload_type: 0x0001,
             payload,
             trailer_size_y,
-            chunk_data: None,
         }
     }
 
@@ -1911,17 +1926,15 @@ mod tests {
     #[test]
     fn captured_lucid_evt30_metadata_is_classified_as_evs() {
         let payload = Bytes::from_static(&[0x8e, 0x8a, 0xff, 0xe0]);
-        let block = classify_completed_block(
-            assembled(
-                payload.clone(),
-                1,
-                64_000,
-                0x8110_0e30,
-                0x0000_422d_66d4_39c8,
-                824,
-            ),
-            None,
-        );
+        let block = classify_completed_block(assembled(
+            payload.clone(),
+            1,
+            64_000,
+            0x8110_0e30,
+            0x0000_422d_66d4_39c8,
+            824,
+        ))
+        .0;
 
         assert_eq!(block.payload(), &payload);
         assert_eq!(block.width(), None);
@@ -1940,10 +1953,15 @@ mod tests {
 
     #[test]
     fn evt21_is_classified_as_evs() {
-        let block = classify_completed_block(
-            assembled(Bytes::from_static(&[0; 8]), 1, 64_000, 0x8140_0e21, 7, 8),
-            None,
-        );
+        let block = classify_completed_block(assembled(
+            Bytes::from_static(&[0; 8]),
+            1,
+            64_000,
+            0x8140_0e21,
+            7,
+            8,
+        ))
+        .0;
 
         let StreamBlock::Evs(evs) = StreamBlock::from(block) else {
             panic!("EVT 2.1 must not be exposed as an image frame");
@@ -1955,17 +1973,15 @@ mod tests {
     #[test]
     fn unknown_pfnc_code_remains_an_image() {
         let pixel_format = PixelFormat::from_code(0x0220_ffff);
-        let block = classify_completed_block(
-            assembled(
-                Bytes::from_static(&[1, 2, 3, 4]),
-                2,
-                2,
-                pixel_format.code(),
-                9,
-                2,
-            ),
-            None,
-        );
+        let block = classify_completed_block(assembled(
+            Bytes::from_static(&[1, 2, 3, 4]),
+            2,
+            2,
+            pixel_format.code(),
+            9,
+            2,
+        ))
+        .0;
 
         let StreamBlock::Image(frame) = StreamBlock::from(block) else {
             panic!("an unknown PFNC code in an IMAGE leader is still an image");
@@ -1978,35 +1994,80 @@ mod tests {
     #[test]
     fn legacy_frame_api_preserves_evt_wire_metadata() {
         let payload = Bytes::from_static(&[1, 2, 3]);
-        let chunks = [(
-            crate::chunks::ChunkKind::Timestamp,
-            crate::chunks::ChunkValue::U64(11),
-        )]
-        .into_iter()
-        .collect();
-        let block = classify_completed_block(
-            assembled(
-                payload.clone(),
-                1,
-                64_000,
-                PixelFormat::VendorLucidEvsEvt30.code(),
-                11,
-                3,
-            ),
-            Some(chunks),
-        );
+        let block = classify_completed_block(assembled(
+            payload.clone(),
+            1,
+            64_000,
+            PixelFormat::VendorLucidEvsEvt30.code(),
+            11,
+            3,
+        ))
+        .0;
 
         let frame = block.into_legacy_frame();
         assert_eq!(frame.payload, payload);
         assert_eq!((frame.width, frame.height), (1, 64_000));
         assert_eq!(frame.pixel_format, PixelFormat::VendorLucidEvsEvt30);
         assert_eq!(frame.ts_dev, Some(11));
+    }
+
+    /// An image with chunks: the frame's payload is the image chunk alone,
+    /// and the chunks are kept by ID. Bytes written out by hand: an 8-byte
+    /// Mono8 image tagged as chunk 1, then a 4-byte chunk 0x0504_0008.
+    #[test]
+    fn an_image_with_chunks_is_split_into_image_and_chunks() {
+        #[rustfmt::skip]
+        let payload = Bytes::from_static(&[
+            1, 2, 3, 4, 5, 6, 7, 8,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x08,
+            0x88, 0x13, 0x00, 0x00,
+            0x05, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x04,
+        ]);
+        let mut block = assembled(payload, 4, 2, 0x0108_0001, 5, 2);
+        block.payload_type = 0x4001;
+        let (block, error) = classify_completed_block(block);
+        assert!(error.is_none());
+        let StreamBlock::Image(frame) = StreamBlock::from(block) else {
+            panic!("an image");
+        };
+        assert_eq!(frame.payload.as_ref(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let chunks = frame.chunks.expect("chunks");
         assert_eq!(
-            frame
-                .chunks
-                .as_ref()
-                .and_then(|chunks| chunks.get(&crate::chunks::ChunkKind::Timestamp)),
-            Some(&crate::chunks::ChunkValue::U64(11))
+            chunks.get(0x0504_0008).map(|c| c.to_vec()),
+            Some(vec![0x88, 0x13, 0x00, 0x00])
         );
+    }
+
+    /// A layout that does not parse keeps the whole payload, carries no
+    /// chunks, and hands the error back for the receive thread to report.
+    #[test]
+    fn a_malformed_chunk_layout_is_reported_not_guessed() {
+        let mut block = assembled(Bytes::from_static(&[0xFF; 12]), 2, 2, 0x0108_0001, 5, 2);
+        block.payload_type = 0x4001;
+        let (block, error) = classify_completed_block(block);
+        assert!(
+            matches!(error, Some(ChunkError::LengthPastStart { .. })),
+            "{error:?}"
+        );
+        let StreamBlock::Image(frame) = StreamBlock::from(block) else {
+            panic!("an image");
+        };
+        assert_eq!(frame.payload.len(), 12);
+        assert!(frame.chunks.is_none());
+    }
+
+    /// An incomplete block's zeros are not read as chunk tags.
+    #[test]
+    fn an_incomplete_block_is_not_split() {
+        let mut block = assembled(Bytes::from_static(&[0; 16]), 2, 2, 0x0108_0001, 5, 2);
+        block.payload_type = 0x4001;
+        block.status = FrameStatus::Incomplete { missing_packets: 1 };
+        let (block, error) = classify_completed_block(block);
+        assert!(error.is_none());
+        let StreamBlock::Image(frame) = StreamBlock::from(block) else {
+            panic!("an image");
+        };
+        assert!(frame.chunks.is_none());
+        assert_eq!(frame.payload.len(), 16);
     }
 }

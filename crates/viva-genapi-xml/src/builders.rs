@@ -11,6 +11,7 @@ use crate::{AddressTerm, Addressing, BitField, ByteOrder, IndexOffset, XmlError}
 pub struct AddressingBuilder {
     pub(crate) terms: Vec<AddressTerm>,
     pub(crate) length: Option<u32>,
+    pub(crate) port: Option<String>,
 }
 
 impl AddressingBuilder {
@@ -20,19 +21,26 @@ impl AddressingBuilder {
     /// default to the full register.
     pub fn build(self) -> Addressing {
         let len = self.length.unwrap_or(0);
-        if self.terms.is_empty() {
-            Addressing::fixed(0, len)
+        let terms = if self.terms.is_empty() {
+            vec![AddressTerm::Fixed(0)]
         } else {
-            Addressing::Sum {
-                terms: self.terms,
-                len,
-            }
+            self.terms
+        };
+        Addressing::Sum {
+            terms,
+            len,
+            port: self.port,
         }
     }
 
     /// Add a literal `<Address>` term.
-    pub fn push_fixed_address(&mut self, address: u64) {
+    pub fn push_fixed_address(&mut self, address: i64) {
         self.terms.push(AddressTerm::Fixed(address));
+    }
+
+    /// Record the `<pPort>` the address is relative to.
+    pub fn set_port(&mut self, port: &str) {
+        self.port = Some(port.to_string());
     }
 
     /// Set the register length in bytes.
@@ -67,6 +75,7 @@ impl AddressingBuilder {
         Ok(Addressing::Sum {
             terms: self.terms,
             len,
+            port: self.port,
         })
     }
 }

@@ -602,7 +602,8 @@ pub fn best_packet_size(mtu: u32) -> u32 {
 /// Multicast socket options applied while binding.
 #[derive(Debug, Clone)]
 pub struct McOptions {
-    /// Whether multicast packets sent locally should be looped back.
+    /// Whether multicast packets sent locally should be looped back (Unix;
+    /// Windows applies the option to receiving, and keeps it on).
     pub loopback: bool,
     /// IPv4 time-to-live for outbound multicast packets.
     pub ttl: u32,
@@ -719,6 +720,12 @@ pub async fn bind_multicast(
         granted_recv_buffer = granted.granted,
         "configured multicast GVSP receive buffer"
     );
+    // IP_MULTICAST_LOOP governs this socket's sends on Unix but its
+    // *receives* on Windows, where `false` drops every datagram another
+    // socket on this host sends to the group — a camera simulator on the same
+    // machine, or the fake camera in the tests. This socket only receives
+    // multicast, so Windows keeps its default (on).
+    #[cfg(not(windows))]
     socket.set_multicast_loop_v4(opts.loopback)?;
     socket.set_multicast_ttl_v4(opts.ttl)?;
     socket.set_multicast_if_v4(&iface_addr)?;

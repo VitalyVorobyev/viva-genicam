@@ -213,6 +213,9 @@ release opens with what to read before upgrading.
 - Frames whose lines carry padding (the GVSP leader's `padding_x`) were
   converted with every row after the first shifted. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 - A multicast stream leaves its group when it is dropped. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
+- On Windows a multicast stream received nothing sent from the same host (a
+  camera simulator, say): `IP_MULTICAST_LOOP`, off for receivers, filters
+  receiving there. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 - The report printed an assumed 1 500-byte MTU as measured when the lookup
   failed; it now says so. ([#198](https://github.com/VitalyVorobyev/viva-genicam/pull/198))
 

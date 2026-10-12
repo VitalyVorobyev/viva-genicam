@@ -1,3 +1,5 @@
+//! Stream from a GigE Vision camera to a multicast group.
+
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
@@ -11,7 +13,7 @@ use viva_genapi_xml::XmlError;
 use viva_genicam::StreamStats;
 use viva_genicam::genapi::NodeMap;
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::gige::nic::IfaceSelector;
+use viva_genicam::gige::IfaceSelector;
 use viva_genicam::pfnc::PixelFormat;
 use viva_genicam::{Camera, Frame, FrameStream, GigeRegisterIo, StreamBuilder, StreamDest};
 
@@ -170,7 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let mut dev = control.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| XmlError::Transport(err.to_string()))
+                    .map_err(XmlError::transport)
             }
         }
     })

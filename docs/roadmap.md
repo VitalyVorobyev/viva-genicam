@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## X — Errors, public surfaces, services
-
-**Goal**: freeze the surface the GenTL producer will wrap: error source chains, per-transport status codes, curated re-exports, one service for both transports.
-**Rows**: API-02, API-03, API-04, API-07, API-10, GA-30, TC-10, TC-16, SVC-04.
-
 ## T — GenTL producer
 
 **Goal**: a `.cti` through which GenTL consumers use viva-genicam, tested in CI by a consumer we did not write.
@@ -27,6 +22,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, now possible: `PENDING_ACK` is enabled where the camera offers it.
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
 - **TC-27**: USB3 Vision has never met a camera; needs `viva-camctl report --usb 0` from one.
+- **UV-04**: whether a USB rescan still reads the strings of a camera the U3V service holds; a minute of `viva-service-u3v -v` against one settles it.
 - **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.
 - **TC-37**: the chunk and event layouts (ADR-0026) have met no camera; one capture with chunk mode on settles them.
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.

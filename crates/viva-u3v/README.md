@@ -27,7 +27,7 @@ cargo add viva-u3v --features usb
 ```
 
 ```rust
-use viva_u3v::discovery::discover;
+use viva_u3v::discover;
 
 let devices = discover()?;
 for dev in &devices {

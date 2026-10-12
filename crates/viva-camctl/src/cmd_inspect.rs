@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use viva_genicam::Camera;
 use viva_genicam::genapi::{AccessMode, FeatureValue, Node, RegisterIo, Visibility};
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, Target};
 use crate::with_camera;
@@ -464,11 +464,11 @@ mod tests {
 
     impl RegisterIo for Unreachable {
         fn read(&self, _addr: u64, _len: usize) -> Result<Vec<u8>, GenApiError> {
-            Err(GenApiError::Io("timed out".into()))
+            Err(GenApiError::io("timed out"))
         }
 
         fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
-            Err(GenApiError::Io("timed out".into()))
+            Err(GenApiError::io("timed out"))
         }
     }
 

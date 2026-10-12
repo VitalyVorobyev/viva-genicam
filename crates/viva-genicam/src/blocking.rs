@@ -41,23 +41,20 @@ use crate::{Access, Camera, GenicamError, GigeRegisterIo, camera_runtime, connec
 
 /// Refuse to block inside an async runtime, which would stall it — and which
 /// Tokio refuses with a panic.
-fn outside_a_runtime(what: &str) -> Result<(), GenicamError> {
+fn outside_a_runtime(what: &'static str) -> Result<(), GenicamError> {
     match tokio::runtime::Handle::try_current() {
-        Ok(_) => Err(GenicamError::Transport(format!(
-            "blocking::{what} was called inside an async runtime, which it would stall; \
-             use the async API there"
-        ))),
+        Ok(_) => Err(GenicamError::InsideRuntime(what)),
         Err(_) => Ok(()),
     }
 }
 
 /// Run `fut` to completion on a short-lived runtime.
-fn run<F: std::future::Future>(what: &str, fut: F) -> Result<F::Output, GenicamError> {
+fn run<F: std::future::Future>(what: &'static str, fut: F) -> Result<F::Output, GenicamError> {
     outside_a_runtime(what)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| GenicamError::Transport(format!("start a runtime: {err}")))?;
+        .map_err(crate::error::network("start a runtime"))?;
     Ok(runtime.block_on(fut))
 }
 
@@ -78,14 +75,14 @@ pub fn discover_with(
         "discover_with",
         crate::gige::discover_with(timeout, options),
     )?
-    .map_err(|err| GenicamError::Transport(format!("discovery: {err}")))
+    .map_err(crate::error::gige("discovery"))
 }
 
 /// Ask the camera at `ip` directly: [`gige::discover_ip`](crate::gige::discover_ip),
 /// blocking for up to `timeout`.
 pub fn discover_ip(ip: Ipv4Addr, timeout: Duration) -> Result<Option<DeviceInfo>, GenicamError> {
     run("discover_ip", crate::gige::discover_ip(ip, timeout))?
-        .map_err(|err| GenicamError::Transport(format!("discovery: {err}")))
+        .map_err(crate::error::gige("discovery"))
 }
 
 /// Open a GigE Vision camera and take control of it:

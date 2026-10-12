@@ -20,7 +20,10 @@ use crate::{
 };
 
 /// Parse an `<Enumeration>` element into a [`NodeDecl::Enum`].
-pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<NodeDecl, XmlError> {
+pub(crate) fn parse_enum(
+    reader: &mut Reader<&[u8]>,
+    start: BytesStart<'_>,
+) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, "Name")?;
     let mut addressing = AddressingBuilder::default();
     if let Some(addr) = attribute_value(&start, "Address")? {
@@ -29,7 +32,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
         let len = u32::try_from(value)
-            .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            .map_err(|_| XmlError::invalid(&name, "declares a <Length> out of range"))?;
         addressing.set_length(len);
     }
     let mut access = AccessMode::RW;
@@ -98,20 +101,16 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Enumeration node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
     }
 
     if entries.is_empty() {
-        return Err(XmlError::Invalid(format!(
-            "Enumeration node {name} declares no <EnumEntry> elements"
-        )));
+        return Err(XmlError::missing(&name, "<EnumEntry> elements"));
     }
 
     // Addressing is optional: nodes may delegate via pValue, or may exist
@@ -133,7 +132,7 @@ pub fn parse_enum(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<N
 }
 
 /// Parse a `<Boolean>` element into a [`NodeDecl::Boolean`].
-pub fn parse_boolean(
+pub(crate) fn parse_boolean(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -145,7 +144,7 @@ pub fn parse_boolean(
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
         let len = u32::try_from(value)
-            .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            .map_err(|_| XmlError::invalid(&name, "declares a <Length> out of range"))?;
         addressing.set_length(len);
     }
     let mut access = AccessMode::RW;
@@ -197,14 +196,15 @@ pub fn parse_boolean(
                             pending_bit_length = false;
                             handled = true;
                         } else {
-                            return Err(XmlError::Invalid(format!(
-                                "bitfield length out of range for node {name}"
-                            )));
+                            return Err(XmlError::invalid(
+                                &name,
+                                "declares a bit field length out of range",
+                            ));
                         }
                     }
                     if !handled {
                         let len = u32::try_from(value).map_err(|_| {
-                            XmlError::Invalid(format!("length out of range for node {name}"))
+                            XmlError::invalid(&name, "declares a <Length> out of range")
                         })?;
                         addressing.set_length(len);
                     }
@@ -216,25 +216,22 @@ pub fn parse_boolean(
                 TAG_LSB | TAG_LSB_MIXED => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
-                    let lsb = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("<Lsb> out of range for node {name}"))
-                    })?;
+                    let lsb = u32::try_from(value)
+                        .map_err(|_| XmlError::invalid(&name, "declares an <LSB> out of range"))?;
                     bitfield.note_lsb(lsb);
                 }
                 TAG_MSB | TAG_MSB_MIXED => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
-                    let msb = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("<Msb> out of range for node {name}"))
-                    })?;
+                    let msb = u32::try_from(value)
+                        .map_err(|_| XmlError::invalid(&name, "declares an <MSB> out of range"))?;
                     bitfield.note_msb(msb);
                 }
                 TAG_BIT => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
-                    let bit = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("<Bit> out of range for node {name}"))
-                    })?;
+                    let bit = u32::try_from(value)
+                        .map_err(|_| XmlError::invalid(&name, "declares a <Bit> out of range"))?;
                     bitfield.note_bit(bit);
                     pending_bit_length = true;
                 }
@@ -266,7 +263,7 @@ pub fn parse_boolean(
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
                         let parsed = parse_u64(&value)?;
                         let lsb = u32::try_from(parsed).map_err(|_| {
-                            XmlError::Invalid(format!("<Lsb> out of range for node {name}"))
+                            XmlError::invalid(&name, "declares an <LSB> out of range")
                         })?;
                         bitfield.note_lsb(lsb);
                     }
@@ -275,7 +272,7 @@ pub fn parse_boolean(
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
                         let parsed = parse_u64(&value)?;
                         let msb = u32::try_from(parsed).map_err(|_| {
-                            XmlError::Invalid(format!("<Msb> out of range for node {name}"))
+                            XmlError::invalid(&name, "declares an <MSB> out of range")
                         })?;
                         bitfield.note_msb(msb);
                     }
@@ -284,7 +281,7 @@ pub fn parse_boolean(
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
                         let parsed = parse_u64(&value)?;
                         let bit = u32::try_from(parsed).map_err(|_| {
-                            XmlError::Invalid(format!("<Bit> out of range for node {name}"))
+                            XmlError::invalid(&name, "declares a <Bit> out of range")
                         })?;
                         bitfield.note_bit(bit);
                         pending_bit_length = true;
@@ -308,11 +305,9 @@ pub fn parse_boolean(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Boolean node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -330,9 +325,10 @@ pub fn parse_boolean(
                 byte_order: ByteOrder::Little,
             }),
             None => {
-                return Err(XmlError::Invalid(format!(
-                    "Boolean node {name} requires explicit bitfield metadata"
-                )));
+                return Err(XmlError::missing(
+                    &name,
+                    "a bit field (<Bit>, <LSB>/<MSB> or <Mask>)",
+                ));
             }
         };
         (Some(addr), len, bf)
@@ -413,9 +409,12 @@ fn parse_enum_entry(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid("unterminated EnumEntry element".into()));
+                return Err(XmlError::invalid(
+                    "<EnumEntry>",
+                    "ends before its closing tag",
+                ));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -478,9 +477,7 @@ fn build_enum_entry(
     } else if let Some(value) = literal {
         EnumValueSrc::Literal(parse_i64(&value)?)
     } else {
-        return Err(XmlError::Invalid(format!(
-            "EnumEntry {name} is missing <Value> or <pValue>"
-        )));
+        return Err(XmlError::missing(&name, "<Value> or <pValue>"));
     };
 
     Ok(EnumEntryDecl {

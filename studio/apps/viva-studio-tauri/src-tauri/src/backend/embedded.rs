@@ -24,7 +24,7 @@ use bytes::Bytes;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{info, warn};
 use viva_genicam::Camera;
-use viva_genicam::u3v::discovery::U3vDeviceInfo;
+use viva_genicam::u3v::U3vDeviceInfo;
 use viva_streamer::frame::{FrameEncoder, FramePacer};
 use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState};
 
@@ -171,11 +171,11 @@ impl EmbeddedBackend {
     async fn forceip_interface(
         &self,
         mac: &[u8; 6],
-    ) -> Result<Option<viva_genicam::gige::nic::Iface>, String> {
+    ) -> Result<Option<viva_genicam::gige::Iface>, String> {
         let local_ip = self.local_ips.read().await.get(mac).copied();
         local_ip
             .map(|ip| {
-                viva_genicam::gige::nic::Iface::from_ipv4(ip)
+                viva_genicam::gige::Iface::from_ipv4(ip)
                     .map_err(|e| format!("ForceIP: the interface with {ip}: {e}"))
             })
             .transpose()
@@ -806,7 +806,7 @@ async fn discover_gige_devices() -> Vec<viva_genicam::gige::DeviceInfo> {
 /// USB3 Vision cameras on this host. USB enumeration blocks, so on the
 /// blocking pool; a host without USB access finds none.
 async fn discover_u3v_devices() -> Vec<U3vDeviceInfo> {
-    let found = tauri::async_runtime::spawn_blocking(viva_genicam::u3v::discovery::discover).await;
+    let found = tauri::async_runtime::spawn_blocking(viva_genicam::u3v::discover).await;
     match found {
         Ok(Ok(devices)) => devices,
         Ok(Err(e)) => {
@@ -956,8 +956,9 @@ pub(crate) mod fake_camera {
     use std::sync::{Mutex, MutexGuard};
     use std::time::Duration;
 
-    use viva_fake_gige::registers::{CCP, REG_ACQ_STOP};
+    use viva_fake_gige::REG_ACQ_STOP;
     use viva_fake_gige::{FakeCamera, GvcpCommand};
+    use viva_genicam::gige::consts::CONTROL_CHANNEL_PRIVILEGE as CCP;
 
     use super::EmbeddedBackend;
     use crate::backend::DeviceBackend;
@@ -1218,7 +1219,7 @@ mod tests {
     /// them, so nothing had run this path.
     #[test]
     fn network_config_reads_and_writes_the_persistent_address() {
-        use viva_fake_gige::registers::{
+        use viva_genicam::gige::consts::{
             PERSISTENT_DEFAULT_GATEWAY, PERSISTENT_IP_ADDRESS, PERSISTENT_SUBNET_MASK,
         };
         let _port = fake_camera::lock();
@@ -1368,8 +1369,8 @@ mod tests {
     /// when the camera reports none.
     #[test]
     fn a_usb3_vision_camera_is_named_by_serial_or_bus_position() {
-        use viva_genicam::u3v::descriptor::U3vInterfaceInfo;
-        use viva_genicam::u3v::discovery::U3vDeviceInfo;
+        use viva_genicam::u3v::U3vDeviceInfo;
+        use viva_genicam::u3v::U3vInterfaceInfo;
         let info = |serial: Option<&str>| U3vDeviceInfo {
             bus: 2,
             address: 7,
@@ -1452,8 +1453,8 @@ mod tests {
         });
     }
 
-    fn u3v_info(serial: Option<&str>) -> viva_genicam::u3v::discovery::U3vDeviceInfo {
-        viva_genicam::u3v::discovery::U3vDeviceInfo {
+    fn u3v_info(serial: Option<&str>) -> viva_genicam::u3v::U3vDeviceInfo {
+        viva_genicam::u3v::U3vDeviceInfo {
             bus: 2,
             address: 7,
             vendor_id: 0x2676,
@@ -1461,7 +1462,7 @@ mod tests {
             serial: serial.map(str::to_string),
             manufacturer: Some("Vendor".to_string()),
             model: Some("Model".to_string()),
-            interface_info: viva_genicam::u3v::descriptor::U3vInterfaceInfo {
+            interface_info: viva_genicam::u3v::U3vInterfaceInfo {
                 control_iface: 0,
                 control_ep_in: 0x81,
                 control_ep_out: 0x01,
@@ -1483,7 +1484,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
         use std::time::Duration;
         use viva_genicam::u3v::U3vError;
-        use viva_genicam::u3v::usb::UsbTransfer;
+        use viva_genicam::u3v::UsbTransfer;
 
         /// The fake camera, with stream reads that can be made to hang.
         struct Stalling {
@@ -1511,14 +1512,7 @@ mod tests {
                 stall: AtomicBool::new(false),
                 reading: AtomicBool::new(false),
             });
-            let device = viva_genicam::u3v::device::U3vDevice::open(
-                transport.clone(),
-                0x81,
-                0x01,
-                Some(0x82),
-                None,
-            )
-            .expect("open");
+            let device = viva_fake_u3v::open(transport.clone()).expect("open");
             let (camera, _xml) = viva_genicam::open_u3v_device(device).expect("camera");
             let backend = super::EmbeddedBackend::new(Default::default());
             backend.attach(Box::new(camera), "u3v-stall", None).await;
@@ -1549,7 +1543,9 @@ mod tests {
 
     /// The camera's `GevSCPSPacketSize`, low 16 bits.
     async fn packet_size_on(fake: &viva_fake_gige::FakeCamera) -> u32 {
-        use viva_fake_gige::registers::{SCP_PACKET_SIZE, STREAM_CHANNEL_BASE};
+        use viva_genicam::gige::consts::{
+            STREAM_CHANNEL_BASE, STREAM_PACKET_SIZE as SCP_PACKET_SIZE,
+        };
         let bytes = fake.peek(STREAM_CHANNEL_BASE + SCP_PACKET_SIZE, 4).await;
         u32::from_be_bytes(bytes.try_into().unwrap()) & 0xFFFF
     }

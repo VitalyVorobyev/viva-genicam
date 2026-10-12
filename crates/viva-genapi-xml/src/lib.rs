@@ -64,6 +64,7 @@ pub enum CommandValueSrc {
 /// [`PredicateRefs::default()`]. Serde fields use the GenICam XML spelling so
 /// round-trip JSON matches the XML attribute names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PredicateRefs {
     /// Name of a node evaluating to non-zero iff the feature is implemented.
     #[serde(
@@ -106,6 +107,7 @@ impl PredicateRefs {
 
 /// Declaration for a single enumeration entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EnumEntryDecl {
     /// Symbolic entry name exposed to clients.
     pub name: String,
@@ -123,17 +125,126 @@ pub struct EnumEntryDecl {
     pub is_self_clearing: bool,
 }
 
+/// The error a source is carried as when its type is not part of this crate's
+/// API: the XML reader's, a number parser's, a transport's.
+type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Why a GenICam XML document could not be read or fetched.
+///
+/// Every variant names where the problem is and carries the error that caused
+/// it, if any, as its [`source`](std::error::Error::source) — never flattened
+/// into text (ADR-0030).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum XmlError {
-    #[error("xml: {0}")]
-    Xml(String),
-    #[error("invalid descriptor: {0}")]
-    Invalid(String),
-    #[error("transport: {0}")]
-    Transport(String),
-    #[error("unsupported URL: {0}")]
-    Unsupported(String),
+    /// The document is not well-formed XML. The source is the XML reader's
+    /// own error.
+    #[error("malformed XML: {0}")]
+    Malformed(#[source] BoxError),
+    /// A number in the document does not parse as one.
+    #[error("{text:?} is not {expected}: {source}")]
+    Number {
+        /// The text as written.
+        text: String,
+        /// What was expected, such as `"an integer"`.
+        expected: &'static str,
+        /// The number parser's error.
+        #[source]
+        source: BoxError,
+    },
+    /// A node or element lacks something the GenICam schema requires of it.
+    #[error("{node} is missing {what}")]
+    Missing {
+        /// The node's name, or the element's tag when it has no name yet.
+        node: String,
+        /// What is missing, such as `"<Length>"` or `"attribute Name"`.
+        what: &'static str,
+    },
+    /// A node or element is declared in a way the GenICam schema does not
+    /// allow.
+    #[error("{node} {problem}")]
+    Invalid {
+        /// The node's name, or the element's tag when it has no name.
+        node: String,
+        /// What is wrong, such as `"has a zero bit mask"`.
+        problem: &'static str,
+    },
+    /// A node uses an element this crate does not implement yet, such as
+    /// `<pLength>`. The node is skipped; the rest of the document loads.
+    #[error("{node} declares <{element}>{text}</{element}>, which is not supported yet")]
+    Unsupported {
+        /// The node.
+        node: String,
+        /// The element's tag, such as `"pLength"`.
+        element: &'static str,
+        /// The element's text as written: for a `<pLength>`, the node the
+        /// length would be read from.
+        text: String,
+    },
+    /// The document's ZIP archive cannot be read. The source is the archive
+    /// reader's error.
+    #[error("XML ZIP archive: {0}")]
+    Archive(#[source] BoxError),
+    /// The document's ZIP archive holds no file, or one larger than `limit`
+    /// bytes.
+    #[error("XML ZIP archive is empty or exceeds {limit} bytes")]
+    ArchiveSize {
+        /// The largest document accepted, in bytes.
+        limit: u64,
+    },
+    /// The document is not UTF-8.
+    #[error("the XML document is not UTF-8: {0}")]
+    Encoding(#[from] std::string::FromUtf8Error),
+    /// The device's URL register names no document, or one this crate cannot
+    /// read: an HTTP or file URL, or a malformed `local:` one.
+    #[error("XML URL {url:?} {problem}")]
+    Url {
+        /// The URL as the register holds it; empty when the register is.
+        url: String,
+        /// Why it cannot be followed, such as `"is not supported"`.
+        problem: &'static str,
+    },
+    /// Reading the document from the device failed. The source is the
+    /// transport's error.
+    #[error("reading the XML from the device: {0}")]
+    Transport(#[source] BoxError),
+}
+
+impl XmlError {
+    /// A transport failure reading the document; `err` becomes the source.
+    pub fn transport(err: impl Into<BoxError>) -> Self {
+        XmlError::Transport(err.into())
+    }
+
+    pub(crate) fn malformed(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        XmlError::Malformed(Box::new(err))
+    }
+
+    pub(crate) fn missing(node: impl AsRef<str>, what: &'static str) -> Self {
+        XmlError::Missing {
+            node: node.as_ref().to_string(),
+            what,
+        }
+    }
+
+    pub(crate) fn invalid(node: impl AsRef<str>, problem: &'static str) -> Self {
+        XmlError::Invalid {
+            node: node.as_ref().to_string(),
+            problem,
+        }
+    }
+
+    pub(crate) fn number(
+        text: &str,
+        expected: &'static str,
+        err: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        XmlError::Number {
+            text: text.to_string(),
+            expected,
+            source: Box::new(err),
+        }
+    }
 }
 
 /// Visibility level controlling which users see a feature.
@@ -172,10 +283,15 @@ impl Visibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Representation {
+    /// A linear slider.
     Linear,
+    /// A logarithmic slider.
     Logarithmic,
+    /// A check box.
     Boolean,
+    /// A plain number, no slider.
     PureNumber,
+    /// A hexadecimal number.
     HexNumber,
     /// Display as dotted-quad IPv4 address.
     IPV4Address,
@@ -200,6 +316,7 @@ impl Representation {
 
 /// Shared metadata present on every GenICam node.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NodeMeta {
     /// Visibility level (Beginner, Expert, Guru, Invisible).
     pub visibility: Visibility,
@@ -606,6 +723,7 @@ impl Slope {
 /// evaluator never sees them. Declaration order matters: an `<Expression>` may
 /// refer to constants and to expressions declared before it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FormulaBindings {
     /// `<Constant Name="..">literal</Constant>` pairs, in declaration order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -624,6 +742,7 @@ impl FormulaBindings {
 
 /// Declaration of a SwissKnife node consisting of an arithmetic expression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SwissKnifeDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -648,6 +767,7 @@ pub struct SwissKnifeDecl {
 /// Converters expose a floating-point value computed from an underlying
 /// register or node via a formula.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ConverterDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -683,6 +803,7 @@ pub struct ConverterDecl {
 
 /// Declaration of an IntConverter node for integer-specific bidirectional conversion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct IntConverterDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -716,6 +837,7 @@ pub struct IntConverterDecl {
 
 /// Declaration of a StringReg node for string-typed register access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StringDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -744,6 +866,7 @@ pub struct StringDecl {
 /// already reads it from there. When `<pLength>` lands (GA-09 phase two) it
 /// gains a length that overrides that value *after* the address resolves.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RegisterDecl {
     /// Feature name exposed to clients.
     pub name: String,
@@ -830,15 +953,19 @@ pub enum NodeDecl {
     /// Floating point feature backed by an integer register with scaling,
     /// a native IEEE 754 register, or delegated via pValue.
     Float {
+        /// The feature's name.
         name: String,
+        /// Shared metadata: visibility, description, tooltip.
         meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
+        /// Declared access mode.
         access: AccessMode,
         /// `<Min>`; `None` when the XML declares none.
         min: Option<f64>,
         /// `<Max>`; `None` when the XML declares none.
         max: Option<f64>,
+        /// `<Unit>`, such as `"us"`.
         unit: Option<String>,
         /// Optional rational scale applied to the raw register value.
         scale: Option<(i64, i64)>,
@@ -871,12 +998,17 @@ pub enum NodeDecl {
     },
     /// Enumeration feature exposing a list of named integer values.
     Enum {
+        /// The feature's name.
         name: String,
+        /// Shared metadata: visibility, description, tooltip.
         meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
+        /// Declared access mode.
         access: AccessMode,
+        /// The entries, in document order.
         entries: Vec<EnumEntryDecl>,
+        /// The entry selected when nothing else says.
         default: Option<String>,
         /// `<pSelected>`: the features this enumeration selects (GenICam
         /// Standard v2.1.1 §2.8.4).
@@ -894,12 +1026,17 @@ pub enum NodeDecl {
     },
     /// Boolean feature backed by a single bit/byte register or delegated via pValue.
     Boolean {
+        /// The feature's name.
         name: String,
+        /// Shared metadata: visibility, description, tooltip.
         meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
+        /// Register length in bytes.
         len: u32,
+        /// Declared access mode.
         access: AccessMode,
+        /// The bit holding the value, when the register has more.
         bitfield: Option<BitField>,
         /// Node providing the value (delegates read/write to another node).
         pvalue: Option<String>,
@@ -918,10 +1055,13 @@ pub enum NodeDecl {
     },
     /// Command feature that triggers an action when written.
     Command {
+        /// The feature's name.
         name: String,
+        /// Shared metadata: visibility, description, tooltip.
         meta: NodeMeta,
         /// Fixed register address (absent when delegated via `pvalue`).
         address: Option<u64>,
+        /// Register length in bytes.
         len: u32,
         /// Node providing the command register (delegates write).
         pvalue: Option<String>,
@@ -934,8 +1074,11 @@ pub enum NodeDecl {
     },
     /// Category used to organise features.
     Category {
+        /// The category's name.
         name: String,
+        /// Shared metadata: visibility, description, tooltip.
         meta: NodeMeta,
+        /// The features and categories it contains, in document order.
         children: Vec<String>,
         /// Predicate refs gating implementation / availability.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
@@ -1018,6 +1161,7 @@ impl NodeDecl {
 /// loss is visible rather than silent — surface them in a UI, log them, or
 /// assert on them in tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SkippedNode {
     /// XML tag of the node element, e.g. `Integer`.
     pub tag: String,
@@ -1025,6 +1169,18 @@ pub struct SkippedNode {
     pub name: Option<String>,
     /// Rendered parse error explaining why the node was dropped.
     pub error: String,
+}
+
+impl SkippedNode {
+    /// A node dropped from the document: its tag, its name when it had one,
+    /// and why.
+    pub fn new(tag: impl Into<String>, name: Option<String>, error: impl Into<String>) -> Self {
+        Self {
+            tag: tag.into(),
+            name,
+            error: error.into(),
+        }
+    }
 }
 
 /// What a `<Port>` gives access to.
@@ -1055,6 +1211,7 @@ pub enum PortKind {
 
 /// A `<Port>` declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PortDecl {
     /// Port name, as `<pPort>` elements refer to it.
     pub name: String,
@@ -1070,6 +1227,7 @@ pub struct PortDecl {
 /// itself, distinct from the schema version in [`XmlModel::version`]. Empty
 /// strings where the document leaves an attribute out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DocumentIdentity {
     /// `VendorName`.
     pub vendor_name: String,
@@ -1080,8 +1238,24 @@ pub struct DocumentIdentity {
     pub version: String,
 }
 
+impl DocumentIdentity {
+    /// The identity of a document by vendor, model and version.
+    pub fn new(
+        vendor_name: impl Into<String>,
+        model_name: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Self {
+        Self {
+            vendor_name: vendor_name.into(),
+            model_name: model_name.into(),
+            version: version.into(),
+        }
+    }
+}
+
 /// Full XML model describing the GenICam schema version and all declared nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct XmlModel {
     /// Combined schema version extracted from the RegisterDescription attributes.
     pub version: String,
@@ -1101,8 +1275,11 @@ pub struct XmlModel {
 
 /// Minimal metadata extracted from a quick XML scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MinimalXmlInfo {
+    /// `SchemaMajorVersion.SchemaMinorVersion.SchemaSubMinorVersion`, when declared.
     pub schema_version: Option<String>,
+    /// The features the root category lists.
     pub top_level_features: Vec<String>,
 }
 
@@ -1148,7 +1325,7 @@ pub fn parse_into_minimal_nodes(xml: &str) -> Result<MinimalXmlInfo, XmlError> {
                 depth = depth.saturating_sub(1);
             }
             Ok(Event::Eof) => break,
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -1231,7 +1408,7 @@ fn parse_node(
         "StringReg" | "String" => parse_string(reader, start)?,
         "StructReg" => return parse_struct_reg(reader, start),
         other => {
-            return Err(XmlError::Invalid(format!("not a node element: {other}")));
+            return Err(XmlError::invalid(other, "is not a node element"));
         }
     };
     Ok(vec![node])
@@ -1254,9 +1431,9 @@ fn parse_isolated_node(element: &str) -> Result<Vec<NodeDecl>, XmlError> {
                 return parse_node(&mut reader, start);
             }
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid("node element is empty".into()));
+                return Err(XmlError::invalid("node element", "is empty"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             // Leading whitespace or a comment before the start tag.
             _ => {}
         }
@@ -1278,9 +1455,9 @@ fn parse_isolated_port(element: &str) -> Result<PortDecl, XmlError> {
             }
             Ok(Event::Empty(e)) => return parse_port_empty(&e),
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid("port element is empty".into()));
+                return Err(XmlError::invalid("<Port>", "is empty"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
     }
@@ -1328,15 +1505,14 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     let name = attribute_value(e, "Name")?;
                     reader
                         .read_to_end(QName("Port"))
-                        .map_err(|err| XmlError::Xml(err.to_string()))?;
+                        .map_err(XmlError::malformed)?;
                     let element = xml
                         .get(element_start..reader.buffer_position() as usize)
                         .ok_or_else(|| {
-                            XmlError::Invalid(format!(
-                                "reader offset {element_start}..{} is not a character \
-                                 boundary in the document",
-                                reader.buffer_position()
-                            ))
+                            XmlError::invalid(
+                                name.as_deref().unwrap_or("<Port>"),
+                                "does not start and end on character boundaries",
+                            )
                         });
                     match element.and_then(parse_isolated_port) {
                         Ok(port) => ports.push(port),
@@ -1361,7 +1537,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     // makes of it, the document reader stays in step.
                     reader
                         .read_to_end(QName(&tag))
-                        .map_err(|err| XmlError::Xml(err.to_string()))?;
+                        .map_err(XmlError::malformed)?;
                     // `get`, not `[..]`: this slice is built from reader
                     // offsets rather than from `xml` itself, and a byte-order
                     // mark used to desynchronise the two (#122). Indexing
@@ -1371,11 +1547,10 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                     let element = xml
                         .get(element_start..reader.buffer_position() as usize)
                         .ok_or_else(|| {
-                            XmlError::Invalid(format!(
-                                "reader offset {element_start}..{} is not a character \
-                                 boundary in the document",
-                                reader.buffer_position()
-                            ))
+                            XmlError::invalid(
+                                name.as_deref().unwrap_or(&tag),
+                                "does not start and end on character boundaries",
+                            )
                         });
                     match element.and_then(parse_isolated_node) {
                         Ok(parsed) => nodes.extend(parsed),
@@ -1437,7 +1612,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
                 }
             },
             Ok(Event::Eof) => break,
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -2889,7 +3064,7 @@ mod tests {
         assert_eq!(skipped.tag, "Integer");
         assert_eq!(skipped.name.as_deref(), Some("Broken"));
         assert!(
-            skipped.error.contains("invalid hex"),
+            skipped.error.contains("is not a hexadecimal integer"),
             "unexpected error: {}",
             skipped.error
         );

@@ -35,26 +35,19 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
-use crate::gvcp::consts as gvcp;
+use crate::consts as gvcp;
 
-/// Constants related to GVCP message packets.
+/// Constants related to GVCP message packets. Events arrive as commands from
+/// the device, not as acknowledgements — which is why the first two bytes are
+/// the key and the flags, and not a status code.
 mod consts {
+    pub(super) use crate::consts::{FLAG_ACK_REQUIRED, FLAG_EXTENDED_IDS, GVCP_CMD_KEY};
     /// Size of the GVCP message header in bytes.
-    pub const GVCP_HEADER: usize = 8;
+    pub(super) const GVCP_HEADER: usize = crate::consts::GVCP_HEADER_SIZE;
     /// Default receive buffer size requested for the UDP socket (bytes).
-    pub const DEFAULT_RCVBUF: usize = 1 << 20; // 1 MiB.
+    pub(super) const DEFAULT_RCVBUF: usize = 1 << 20; // 1 MiB.
     /// Maximum datagram size accepted on the event channel (bytes).
-    pub const MAX_EVENT_SIZE: usize = 2048;
-    /// GVCP command message key: the first byte of every GVCP *command*.
-    ///
-    /// Events arrive as commands from the device, not as acknowledgements —
-    /// which is why the first two bytes are the key and the flags, and not a
-    /// status code.
-    pub const GVCP_CMD_KEY: u8 = 0x42;
-    /// Flags-byte bit requesting an acknowledgement from the controller.
-    pub const FLAG_ACK_REQUIRED: u8 = 0x01;
-    /// Flags-byte bit marking 64-bit block IDs (GigE Vision 2.0).
-    pub const FLAG_EXTENDED_IDS: u8 = 0x10;
+    pub(super) const MAX_EVENT_SIZE: usize = 2048;
 }
 
 /// Header of a datagram received on the GVCP message channel.

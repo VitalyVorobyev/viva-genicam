@@ -51,10 +51,8 @@ pub fn discover() -> Result<Vec<U3vDeviceInfo>, U3vError> {
     use crate::descriptor::{is_likely_u3v_device, parse_u3v_interfaces};
     use rusb::UsbContext;
 
-    let context = rusb::Context::new().map_err(|e| U3vError::Usb(e.to_string()))?;
-    let devices = context
-        .devices()
-        .map_err(|e| U3vError::Usb(e.to_string()))?;
+    let context = rusb::Context::new().map_err(U3vError::usb)?;
+    let devices = context.devices().map_err(U3vError::usb)?;
 
     let mut found = Vec::new();
 

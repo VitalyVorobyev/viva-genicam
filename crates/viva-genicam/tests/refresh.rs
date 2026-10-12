@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use viva_fake_gige::registers::{REG_DEVICE_TEMPERATURE, REG_TIMESTAMP_VALUE};
+use viva_fake_gige::{REG_DEVICE_TEMPERATURE, REG_TIMESTAMP_VALUE};
 use viva_genicam::genapi::ManualClock;
 use viva_genicam::gige::DeviceInfo;
 use viva_genicam::{Camera, GigeRegisterIo, connect_gige};

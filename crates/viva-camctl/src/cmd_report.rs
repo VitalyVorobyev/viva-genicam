@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use viva_genicam::report::{OpenCamera, ReportRequest, ReportTarget, build_report};
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 pub struct ReportArgs {
     pub ip: Option<Ipv4Addr>,
@@ -76,7 +76,7 @@ pub async fn run(args: ReportArgs) -> Result<()> {
 /// first report is what settles how its registers really read. A camera whose
 /// XML cannot be read is still described.
 fn open_usb(index: usize) -> Result<OpenCamera> {
-    let devices = viva_u3v::discovery::discover().context("USB3 Vision discovery")?;
+    let devices = viva_u3v::discover().context("USB3 Vision discovery")?;
     let info = devices
         .get(index)
         .with_context(|| format!("no USB3 Vision camera [{index}]; {} found", devices.len()))?;
@@ -94,7 +94,7 @@ fn open_usb(index: usize) -> Result<OpenCamera> {
         ("serial".to_string(), opt(&info.serial)),
     ];
     let mut device =
-        viva_u3v::device::U3vDevice::open_device(info).context("open the USB3 Vision camera")?;
+        viva_u3v::U3vDevice::open_device(info).context("open the USB3 Vision camera")?;
     identity.extend(device.describe());
     let xml = device.fetch_xml().unwrap_or_else(|err| {
         identity.push(("XML".to_string(), format!("FAILED to read: {err}")));

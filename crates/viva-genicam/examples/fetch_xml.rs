@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 guard
                     .read_mem(address, length)
                     .await
-                    .map_err(|err| XmlError::Transport(err.to_string()))
+                    .map_err(XmlError::transport)
             }
         })
         .await?

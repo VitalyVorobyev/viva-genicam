@@ -6,7 +6,7 @@ use tracing::info;
 
 use viva_genicam::GenicamError;
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, Target};
 use crate::with_camera;

@@ -38,7 +38,12 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 ///   Nothing else changes, but a version 3 client subscribed only to `image`
 ///   no longer receives anything from an event camera, and the version is
 ///   what tells it why.
-pub const API_VERSION: u32 = 4;
+/// - `5` — a pixel format is `viva-pfnc`'s: [`ImageMeta`] names any PFNC
+///   format by its PFNC name (`RGB8Packed` where version 4 said `RGB8`,
+///   `Coord3D_ABC32f` where it said `Unknown`), and a USB3 Vision camera's
+///   device id names its bus and address ([`u3v_device_id`]). The frame
+///   header's one-byte codes are unchanged.
+pub const API_VERSION: u32 = 5;
 
 /// Periodic announcement published by the camera service.
 ///
@@ -55,6 +60,7 @@ pub struct DeviceAnnounce {
     pub id: String,
     /// Human-readable name: the user-defined name, else the model.
     pub name: String,
+    /// The camera's model name.
     pub model: String,
     /// Serial number as the device reports it; empty when it reports none.
     ///
@@ -155,6 +161,18 @@ pub fn gige_device_id(mac: &[u8; 6]) -> String {
     format!("cam-{hex}")
 }
 
+/// Device id for a USB3 Vision camera: `cam-u3v-`, its vendor and product
+/// ids as eight hex digits, then the bus and address it enumerates at.
+///
+/// USB enumeration is the one identity a USB3 Vision camera has before it is
+/// opened, and the service rescans while it holds the cameras it serves: a
+/// serial number reads only from a device that opens, so an id built on one
+/// would change the moment the camera is in use. Two cameras of one model
+/// differ by bus and address; a camera plugged in again may get a new id.
+pub fn u3v_device_id(vendor_id: u16, product_id: u16, bus: u8, address: u8) -> String {
+    format!("cam-u3v-{vendor_id:04x}{product_id:04x}-{bus}-{address}")
+}
+
 // ── Connection Lifecycle ─────────────────────────────────────────────────────
 
 // Every payload below is `#[non_exhaustive]` and built with its constructor,
@@ -165,7 +183,9 @@ pub fn gige_device_id(mac: &[u8; 6]) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DeviceStatus {
+    /// Whether the service holds the camera.
     pub connected: bool,
+    /// Why it does not, when it does not.
     pub error: Option<String>,
 }
 
@@ -191,6 +211,7 @@ impl DeviceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DeviceXmlResponse {
+    /// The camera's GenICam XML.
     pub xml: String,
 }
 
@@ -223,6 +244,7 @@ impl DeviceReportRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DeviceReportResponse {
+    /// The report, as `viva-camctl report` writes it.
     pub report: String,
 }
 
@@ -250,7 +272,9 @@ impl DeviceReportResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct NodeValueUpdate {
+    /// The value, typed as JSON (`null` for one that cannot be read).
     pub value: serde_json::Value,
+    /// Access mode: `RO`, `RW`, `WO` or `NA`.
     pub access_mode: String,
     /// Optional minimum allowed value for this node at the current camera state.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -290,7 +314,9 @@ impl NodeValueUpdate {
 #[cfg_attr(feature = "ts", ts(optional_fields))]
 #[non_exhaustive]
 pub struct NumericRange {
+    /// Minimum.
     pub min: f64,
+    /// Maximum.
     pub max: f64,
     /// Optional increment (step). Omitted when the feature has no grid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -500,8 +526,10 @@ fn f64_to_json(v: f64) -> serde_json::Value {
 #[cfg_attr(feature = "ts", ts(optional_fields))]
 #[non_exhaustive]
 pub struct CommandResult {
+    /// Whether the command was executed.
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Why not, when it was not.
     pub error: Option<String>,
     /// Map of node name -> refreshed state for nodes affected by this command.
     /// Empty when the service cannot determine side effects.
@@ -536,6 +564,7 @@ impl CommandResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct NodeSetRequest {
+    /// The value to write, typed as JSON.
     pub value: serde_json::Value,
 }
 
@@ -550,7 +579,9 @@ impl NodeSetRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct NodeOpResponse {
+    /// Whether the operation succeeded.
     pub ok: bool,
+    /// Why not, when it did not.
     pub error: Option<String>,
     /// After a successful write or execute: the features whose value or
     /// state the operation may have changed, from
@@ -596,6 +627,7 @@ impl NodeOpResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BulkReadRequest {
+    /// The features to read.
     pub names: Vec<String>,
 }
 
@@ -613,6 +645,7 @@ impl BulkReadRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BulkReadResponse {
+    /// Their values, by name.
     pub values: std::collections::HashMap<String, NodeValueUpdate>,
 }
 
@@ -629,6 +662,7 @@ impl BulkReadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AcquisitionControlRequest {
+    /// Start or stop.
     pub command: AcquisitionCommand,
     /// For `Start`: the GVSP packet size to use, as a ceiling the service's
     /// path probe stays under. Absent, the service negotiates one from the
@@ -650,8 +684,11 @@ impl AcquisitionControlRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+/// What an acquisition control request asks for.
 pub enum AcquisitionCommand {
+    /// Start acquisition and stream.
     Start,
+    /// Stop streaming and acquisition.
     Stop,
 }
 
@@ -660,7 +697,9 @@ pub enum AcquisitionCommand {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct AcquisitionStatus {
+    /// Whether the camera is acquiring.
     pub active: bool,
+    /// Frames per second, when known.
     pub fps: Option<f32>,
     /// Frames the stream did not deliver complete since it started: closed
     /// with packets missing, never seen at all (block-id gaps), or discarded
@@ -691,177 +730,27 @@ impl AcquisitionStatus {
 
 // ── Image ────────────────────────────────────────────────────────────────────
 
-/// SFNC pixel format identifiers.
-///
-/// A projection of [`viva_pfnc::PixelFormat`] onto the formats a viewer can
-/// draw, named as SFNC/PFNC name them. [`PixelFormat::to_pfnc`] and the
-/// `From<viva_pfnc::PixelFormat>` impl are the one map between the two, built
-/// from a single table. A format the wire cannot name travels as `Unknown`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-// Y'CbCr variants keep their PFNC spelling (`YUV422_8_UYVY`).
-#[allow(non_camel_case_types)]
-pub enum PixelFormat {
-    Mono8,
-    Mono10,
-    Mono12,
-    Mono16,
-    BayerRG8,
-    BayerGR8,
-    BayerBG8,
-    BayerGB8,
-    BayerRG10,
-    BayerGR10,
-    BayerBG10,
-    BayerGB10,
-    BayerRG12,
-    BayerGR12,
-    BayerBG12,
-    BayerGB12,
-    BayerRG16,
-    BayerGR16,
-    BayerBG16,
-    BayerGB16,
-    RGB8,
-    BGR8,
-    RGBa8,
-    YCbCr422_8,
-    YCbCr8,
-    #[serde(rename = "Coord3D_C16")]
-    Coord3dC16,
-    Mono14,
-    Mono10p,
-    Mono12p,
-    Mono10Packed,
-    Mono12Packed,
-    BayerRG10p,
-    BayerGR10p,
-    BayerBG10p,
-    BayerGB10p,
-    BayerRG12p,
-    BayerGR12p,
-    BayerBG12p,
-    BayerGB12p,
-    BayerRG10Packed,
-    BayerGR10Packed,
-    BayerBG10Packed,
-    BayerGB10Packed,
-    BayerRG12Packed,
-    BayerGR12Packed,
-    BayerBG12Packed,
-    BayerGB12Packed,
-    BGRa8,
-    YUV422_8,
-    YUV422_8_UYVY,
-    YCbCr422_8_CbYCrY,
-    YUV411_8_UYYVYY,
-    YUV8_UYV,
-    YCbCr8_CbYCr,
-    #[serde(other)]
-    Unknown,
-}
+/// [`ImageMeta::pixel_format`] on the wire: the format's PFNC name
+/// (`"Mono8"`, `"RGB8Packed"`), or `"Unknown"` for a code PFNC does not name.
+/// Reading accepts the older spellings cameras report (`"RGB8"`), as
+/// [`viva_pfnc::PixelFormat::from_name`] does.
+mod pfnc_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use viva_pfnc::PixelFormat;
 
-impl PixelFormat {
-    /// Bytes per pixel, fractional for packed formats: 1.5 for `Mono12p` and
-    /// `Mono12Packed`, 1.25 for `Mono10p`. `Unknown` answers 1.0.
-    ///
-    /// For a payload length use [`viva_pfnc::PixelFormat::image_bytes`] on
-    /// [`PixelFormat::to_pfnc`], which completes a partial packing group.
-    pub fn bytes_per_pixel(&self) -> f32 {
-        self.to_pfnc()
-            .and_then(viva_pfnc::PixelFormat::bits_per_pixel)
-            .map_or(1.0, |bits| bits as f32 / 8.0)
+    pub(crate) fn serialize<S: Serializer>(
+        format: &PixelFormat,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(format.name().unwrap_or("Unknown"))
     }
 
-    /// The PFNC format this names; `None` for `Unknown`.
-    pub fn to_pfnc(&self) -> Option<viva_pfnc::PixelFormat> {
-        wire_to_pfnc(self)
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PixelFormat, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(PixelFormat::from_name(&name))
     }
-}
-
-impl From<viva_pfnc::PixelFormat> for PixelFormat {
-    /// The wire name of a camera's format, `Unknown` for one the wire has no
-    /// name for.
-    fn from(format: viva_pfnc::PixelFormat) -> Self {
-        pfnc_to_wire(format)
-    }
-}
-
-/// The one table between the wire's names and PFNC's, read in both
-/// directions.
-macro_rules! wire_pfnc_table {
-    ($($wire:ident <=> $pfnc:ident,)*) => {
-        fn wire_to_pfnc(format: &PixelFormat) -> Option<viva_pfnc::PixelFormat> {
-            match format {
-                $(PixelFormat::$wire => Some(viva_pfnc::PixelFormat::$pfnc),)*
-                PixelFormat::Unknown => None,
-            }
-        }
-
-        fn pfnc_to_wire(format: viva_pfnc::PixelFormat) -> PixelFormat {
-            match format {
-                $(viva_pfnc::PixelFormat::$pfnc => PixelFormat::$wire,)*
-                _ => PixelFormat::Unknown,
-            }
-        }
-    };
-}
-
-wire_pfnc_table! {
-    Mono8 <=> Mono8,
-    Mono10 <=> Mono10,
-    Mono12 <=> Mono12,
-    Mono14 <=> Mono14,
-    Mono16 <=> Mono16,
-    Mono10p <=> Mono10p,
-    Mono12p <=> Mono12p,
-    Mono10Packed <=> Mono10Packed,
-    Mono12Packed <=> Mono12Packed,
-    BayerRG8 <=> BayerRG8,
-    BayerGR8 <=> BayerGR8,
-    BayerBG8 <=> BayerBG8,
-    BayerGB8 <=> BayerGB8,
-    BayerRG10 <=> BayerRG10,
-    BayerGR10 <=> BayerGR10,
-    BayerBG10 <=> BayerBG10,
-    BayerGB10 <=> BayerGB10,
-    BayerRG12 <=> BayerRG12,
-    BayerGR12 <=> BayerGR12,
-    BayerBG12 <=> BayerBG12,
-    BayerGB12 <=> BayerGB12,
-    BayerRG16 <=> BayerRG16,
-    BayerGR16 <=> BayerGR16,
-    BayerBG16 <=> BayerBG16,
-    BayerGB16 <=> BayerGB16,
-    BayerRG10p <=> BayerRG10p,
-    BayerGR10p <=> BayerGR10p,
-    BayerBG10p <=> BayerBG10p,
-    BayerGB10p <=> BayerGB10p,
-    BayerRG12p <=> BayerRG12p,
-    BayerGR12p <=> BayerGR12p,
-    BayerBG12p <=> BayerBG12p,
-    BayerGB12p <=> BayerGB12p,
-    BayerRG10Packed <=> BayerRG10Packed,
-    BayerGR10Packed <=> BayerGR10Packed,
-    BayerBG10Packed <=> BayerBG10Packed,
-    BayerGB10Packed <=> BayerGB10Packed,
-    BayerRG12Packed <=> BayerRG12Packed,
-    BayerGR12Packed <=> BayerGR12Packed,
-    BayerBG12Packed <=> BayerBG12Packed,
-    BayerGB12Packed <=> BayerGB12Packed,
-    RGB8 <=> RGB8Packed,
-    BGR8 <=> BGR8Packed,
-    RGBa8 <=> RGBa8,
-    BGRa8 <=> BGRa8,
-    YUV422_8 <=> YUV422_8,
-    YUV422_8_UYVY <=> YUV422_8_UYVY,
-    YCbCr422_8 <=> YCbCr422_8,
-    YCbCr422_8_CbYCrY <=> YCbCr422_8_CbYCrY,
-    YUV411_8_UYYVYY <=> YUV411_8_UYYVYY,
-    YUV8_UYV <=> YUV8_UYV,
-    YCbCr8 <=> YCbCr8,
-    YCbCr8_CbYCr <=> YCbCr8_CbYCr,
-    Coord3dC16 <=> Coord3DC16,
 }
 
 /// Image stream metadata published at acquisition start and on format change.
@@ -869,15 +758,28 @@ wire_pfnc_table! {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct ImageMeta {
-    pub pixel_format: PixelFormat,
+    /// The camera's pixel format; on the wire, its PFNC name. `viva-pfnc` is
+    /// the one authority on formats (ADR-0030).
+    #[serde(with = "pfnc_name")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub pixel_format: viva_pfnc::PixelFormat,
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
+    /// Bytes a frame's payload carries: the camera's `PayloadSize`, padding
+    /// and chunk data included.
     pub payload_size: u64,
 }
 
 impl ImageMeta {
     /// Image geometry and the bytes a frame carries.
-    pub fn new(pixel_format: PixelFormat, width: u32, height: u32, payload_size: u64) -> Self {
+    pub fn new(
+        pixel_format: viva_pfnc::PixelFormat,
+        width: u32,
+        height: u32,
+        payload_size: u64,
+    ) -> Self {
         Self {
             pixel_format,
             width,
@@ -908,10 +810,12 @@ pub mod keys {
     /// Wildcard subscription for all device announcements.
     pub const ANNOUNCE_ALL: &str = "genicam/devices/*/announce";
 
+    /// Where a camera is announced.
     pub fn announce(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/announce")
     }
 
+    /// Where its XML is asked for.
     pub fn xml(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/xml")
     }
@@ -922,22 +826,27 @@ pub mod keys {
         format!("genicam/devices/{device_id}/report")
     }
 
+    /// Where its connection status is published.
     pub fn status(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/status")
     }
 
+    /// Where a feature's value is published.
     pub fn node_value(device_id: &str, node_name: &str) -> String {
         format!("genicam/devices/{device_id}/nodes/{node_name}/value")
     }
 
+    /// Every feature value of a camera, for a subscriber.
     pub fn node_value_wildcard(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/nodes/*/value")
     }
 
+    /// Where a feature is written.
     pub fn node_set(device_id: &str, node_name: &str) -> String {
         format!("genicam/devices/{device_id}/nodes/{node_name}/set")
     }
 
+    /// Where a command is executed.
     pub fn node_execute(device_id: &str, node_name: &str) -> String {
         format!("genicam/devices/{device_id}/nodes/{node_name}/execute")
     }
@@ -968,18 +877,22 @@ pub mod keys {
         format!("genicam/devices/{device_id}/nodes/bulk/state")
     }
 
+    /// Where acquisition is started and stopped.
     pub fn acquisition_control(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/acquisition/control")
     }
 
+    /// Where acquisition status is published.
     pub fn acquisition_status(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/acquisition/status")
     }
 
+    /// Where image frames are published.
     pub fn image(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/image")
     }
 
+    /// Where image metadata is published.
     pub fn image_meta(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/image/meta")
     }
@@ -1394,197 +1307,37 @@ mod tests {
         assert!(d.affected_states.contains_key("AcquisitionStatus"));
     }
 
-    /// Every wire variant, by a match with no wildcard: a new variant fails
-    /// to compile here until it is added to the tests below.
-    fn every_wire_format() -> Vec<PixelFormat> {
-        use PixelFormat as W;
-        let all = vec![
-            W::Mono8,
-            W::Mono10,
-            W::Mono12,
-            W::Mono14,
-            W::Mono16,
-            W::Mono10p,
-            W::Mono12p,
-            W::Mono10Packed,
-            W::Mono12Packed,
-            W::BayerRG8,
-            W::BayerGR8,
-            W::BayerBG8,
-            W::BayerGB8,
-            W::BayerRG10,
-            W::BayerGR10,
-            W::BayerBG10,
-            W::BayerGB10,
-            W::BayerRG12,
-            W::BayerGR12,
-            W::BayerBG12,
-            W::BayerGB12,
-            W::BayerRG16,
-            W::BayerGR16,
-            W::BayerBG16,
-            W::BayerGB16,
-            W::BayerRG10p,
-            W::BayerGR10p,
-            W::BayerBG10p,
-            W::BayerGB10p,
-            W::BayerRG12p,
-            W::BayerGR12p,
-            W::BayerBG12p,
-            W::BayerGB12p,
-            W::BayerRG10Packed,
-            W::BayerGR10Packed,
-            W::BayerBG10Packed,
-            W::BayerGB10Packed,
-            W::BayerRG12Packed,
-            W::BayerGR12Packed,
-            W::BayerBG12Packed,
-            W::BayerGB12Packed,
-            W::RGB8,
-            W::BGR8,
-            W::RGBa8,
-            W::BGRa8,
-            W::YUV422_8,
-            W::YUV422_8_UYVY,
-            W::YCbCr422_8,
-            W::YCbCr422_8_CbYCrY,
-            W::YUV411_8_UYYVYY,
-            W::YUV8_UYV,
-            W::YCbCr8,
-            W::YCbCr8_CbYCr,
-            W::Coord3dC16,
-        ];
-        for format in &all {
-            match format {
-                W::Mono8
-                | W::Mono10
-                | W::Mono12
-                | W::Mono14
-                | W::Mono16
-                | W::Mono10p
-                | W::Mono12p
-                | W::Mono10Packed
-                | W::Mono12Packed
-                | W::BayerRG8
-                | W::BayerGR8
-                | W::BayerBG8
-                | W::BayerGB8
-                | W::BayerRG10
-                | W::BayerGR10
-                | W::BayerBG10
-                | W::BayerGB10
-                | W::BayerRG12
-                | W::BayerGR12
-                | W::BayerBG12
-                | W::BayerGB12
-                | W::BayerRG16
-                | W::BayerGR16
-                | W::BayerBG16
-                | W::BayerGB16
-                | W::BayerRG10p
-                | W::BayerGR10p
-                | W::BayerBG10p
-                | W::BayerGB10p
-                | W::BayerRG12p
-                | W::BayerGR12p
-                | W::BayerBG12p
-                | W::BayerGB12p
-                | W::BayerRG10Packed
-                | W::BayerGR10Packed
-                | W::BayerBG10Packed
-                | W::BayerGB10Packed
-                | W::BayerRG12Packed
-                | W::BayerGR12Packed
-                | W::BayerBG12Packed
-                | W::BayerGB12Packed
-                | W::RGB8
-                | W::BGR8
-                | W::RGBa8
-                | W::BGRa8
-                | W::YUV422_8
-                | W::YUV422_8_UYVY
-                | W::YCbCr422_8
-                | W::YCbCr422_8_CbYCrY
-                | W::YUV411_8_UYYVYY
-                | W::YUV8_UYV
-                | W::YCbCr8
-                | W::YCbCr8_CbYCr
-                | W::Coord3dC16
-                | W::Unknown => {}
-            }
-        }
-        all
-    }
-
-    /// The wire names a format by its SFNC/PFNC name, so the PFNC format a
-    /// variant maps to must be the one `viva_pfnc` gives that name.
+    /// `ImageMeta` names the camera's format as PFNC does, every format PFNC
+    /// names: the wire's own enum named 54 and sent the rest as `"Unknown"`
+    /// (backlog API-10).
     #[test]
-    fn every_wire_format_is_the_pfnc_format_of_its_name() {
-        for format in every_wire_format() {
-            let name = serde_json::to_value(&format).unwrap();
-            let name = name.as_str().unwrap();
-            let named = viva_pfnc::PixelFormat::from_name(name);
-            assert!(
-                !matches!(named, viva_pfnc::PixelFormat::Unknown(_)),
-                "{name} is not a PFNC name"
-            );
-            assert_eq!(format.to_pfnc(), Some(named), "{name}");
-            assert_eq!(PixelFormat::from(named), format, "{name}");
-        }
-        assert_eq!(PixelFormat::Unknown.to_pfnc(), None);
-    }
-
-    /// A camera format the wire cannot name travels as `Unknown`.
-    #[test]
-    fn a_format_the_wire_cannot_name_is_unknown() {
-        for format in [
-            viva_pfnc::PixelFormat::Coord3DABC32f,
-            viva_pfnc::PixelFormat::VendorLucidEvsEvt30,
-            viva_pfnc::PixelFormat::from_code(0x0123_4567),
+    fn image_meta_names_the_format_as_pfnc_does() {
+        for (format, name) in [
+            (viva_pfnc::PixelFormat::Mono8, "Mono8"),
+            (viva_pfnc::PixelFormat::RGB8Packed, "RGB8Packed"),
+            (viva_pfnc::PixelFormat::Coord3DC16, "Coord3D_C16"),
+            (viva_pfnc::PixelFormat::Coord3DABC32f, "Coord3D_ABC32f"),
+            (viva_pfnc::PixelFormat::from_code(0x0123_4567), "Unknown"),
         ] {
-            assert_eq!(PixelFormat::from(format), PixelFormat::Unknown);
+            let meta = ImageMeta::new(format, 4, 2, 8);
+            let json = serde_json::to_value(&meta).expect("serialize");
+            assert_eq!(json["pixel_format"], name, "{format}");
         }
     }
 
-    /// Bits 23-16 of each PFNC code, over eight.
+    /// A client reads the name back, the older spellings cameras use too.
     #[test]
-    fn bytes_per_pixel_is_fractional_for_packed_formats() {
-        for (format, bytes) in [
-            (PixelFormat::Mono8, 1.0),
-            (PixelFormat::Mono12, 2.0),
-            (PixelFormat::Mono10p, 1.25),
-            (PixelFormat::Mono12p, 1.5),
-            (PixelFormat::Mono12Packed, 1.5),
-            (PixelFormat::BayerGR10Packed, 1.5),
-            (PixelFormat::YUV422_8_UYVY, 2.0),
-            (PixelFormat::YUV411_8_UYYVYY, 1.5),
-            (PixelFormat::RGB8, 3.0),
-            (PixelFormat::BGRa8, 4.0),
-            (PixelFormat::Coord3dC16, 2.0),
-            (PixelFormat::Unknown, 1.0),
+    fn image_meta_reads_the_pfnc_name_and_its_older_spellings() {
+        for (name, format) in [
+            ("Mono12Packed", viva_pfnc::PixelFormat::Mono12Packed),
+            ("RGB8", viva_pfnc::PixelFormat::RGB8Packed),
+            ("YUV422Packed", viva_pfnc::PixelFormat::YUV422_8_UYVY),
+            ("Fancy42", viva_pfnc::PixelFormat::Unknown(0)),
         ] {
-            assert_eq!(format.bytes_per_pixel(), bytes, "{format:?}");
+            let json =
+                format!(r#"{{"pixel_format":"{name}","width":1,"height":1,"payload_size":1}}"#);
+            let meta: ImageMeta = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(meta.pixel_format, format, "{name}");
         }
-    }
-
-    /// The frame header's one-byte codes cover every variant, and the codes
-    /// published before this table grew keep their meaning.
-    #[test]
-    fn every_wire_format_has_its_own_header_code() {
-        let mut seen = std::collections::HashSet::new();
-        for format in every_wire_format() {
-            let code = frame_header::pixel_format_to_u8(&format);
-            assert_ne!(code, 0, "{format:?} has no header code");
-            assert!(seen.insert(code), "{format:?} reuses code {code}");
-            assert_eq!(frame_header::u8_to_pixel_format(code), format);
-        }
-        assert_eq!(
-            frame_header::pixel_format_to_u8(&PixelFormat::Coord3dC16),
-            26
-        );
-        assert_eq!(
-            frame_header::pixel_format_to_u8(&PixelFormat::YCbCr422_8),
-            24
-        );
     }
 }

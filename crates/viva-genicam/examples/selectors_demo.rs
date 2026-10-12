@@ -1,3 +1,5 @@
+//! A selector and the feature it selects (`<pSelected>`, `<pIndex>`), on an in-memory register map or (`--real`) a camera.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -5,7 +7,6 @@ use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use viva_genapi_xml::{AddressTerm, Addressing};
 use viva_genicam::genapi::{GenApiError, Node, NodeMap, RegisterIo};
 use viva_genicam::gige::GigeDevice;
 use viva_genicam::sfnc;
@@ -62,7 +63,6 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
     let mut camera = Camera::new(transport, nodemap);
 
     println!("-- mock Gain selector demo --");
-    print_gain_addressing(camera.nodemap());
 
     let scenarios = ["All", "Red", "Blue"];
     for selector in scenarios {
@@ -70,6 +70,7 @@ fn run_mock() -> Result<(), Box<dyn Error>> {
             camera.set(sfnc::GAIN_SELECTOR, selector)?;
         }
         println!("\nSelector -> {}", camera.get(sfnc::GAIN_SELECTOR)?);
+        print_gain_address(&camera);
         println!("Gain ({selector}) -> {}", camera.get(sfnc::GAIN)?);
     }
 
@@ -101,7 +102,7 @@ fn run_real() -> Result<(), Box<dyn Error>> {
                 let mut dev = device.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     }))?;
@@ -116,7 +117,7 @@ fn run_real() -> Result<(), Box<dyn Error>> {
     let mut camera = Camera::new(transport, nodemap);
 
     println!("-- real Gain selector demo --");
-    print_gain_addressing(camera.nodemap());
+    print_gain_address(&camera);
 
     let selectors = ["All", "Red"];
     for selector in selectors {
@@ -137,31 +138,19 @@ fn run_real() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn print_gain_addressing(nodemap: &NodeMap) {
-    if let Some(Node::Enum(selector)) = nodemap.node(sfnc::GAIN_SELECTOR) {
+/// Where `Gain` is for the selector's current entry: its address moves with
+/// the selector, through `<pIndex>` on the selector's register. Resolved by
+/// name; how the XML spells the address is the node map's business.
+fn print_gain_address<T: RegisterIo>(camera: &Camera<T>) {
+    if let Some(Node::Enum(selector)) = camera.nodemap().node(sfnc::GAIN_SELECTOR) {
         println!("GainSelector selects {:?}", selector.selected);
     }
-    if let Some(Node::Integer(node)) = nodemap.node(sfnc::GAIN) {
-        match &node.addressing {
-            Some(Addressing::Sum { terms, len, .. }) => {
-                println!(
-                    "Gain address is the sum of {} term(s), {len} bytes:",
-                    terms.len()
-                );
-                for term in terms {
-                    match term {
-                        AddressTerm::Fixed(address) => println!("  + 0x{address:08X}"),
-                        AddressTerm::Node(node) => println!("  + value of {node}"),
-                        AddressTerm::Index { node, offset } => {
-                            println!("  + {node} * {offset:?}")
-                        }
-                    }
-                }
-            }
-            None => {
-                println!("Gain has no direct addressing (pValue-backed)");
-            }
-        }
+    match camera
+        .nodemap()
+        .register_address(sfnc::GAIN, camera.transport())
+    {
+        Ok((address, len)) => println!("Gain is {len} bytes at 0x{address:08X}"),
+        Err(err) => println!("Gain has no register of its own: {err}"),
     }
 }
 
@@ -186,9 +175,9 @@ impl RegisterIo for MockIo {
         let regs = self.regs.borrow();
         let data = regs
             .get(&addr)
-            .ok_or_else(|| GenApiError::Io(format!("read miss at 0x{addr:08X}")))?;
+            .ok_or_else(|| GenApiError::io(format!("read miss at 0x{addr:08X}")))?;
         if data.len() != len {
-            return Err(GenApiError::Io(format!(
+            return Err(GenApiError::io(format!(
                 "length mismatch at 0x{addr:08X}: expected {len}, have {}",
                 data.len()
             )));

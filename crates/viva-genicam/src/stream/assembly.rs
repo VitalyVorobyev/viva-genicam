@@ -37,9 +37,10 @@ use super::resend::{Answer, ResendConfig, ResendRequest, ResendState};
 use super::stats::{IgnoredPacket, StreamStatsAccumulator};
 use bytes::Bytes;
 use tracing::{debug, warn};
-use viva_gige::gvsp::{
+use viva_gige::GigeStatus;
+use viva_gige::{
     GVSP_EXTENDED_HEADER_SIZE, GVSP_HEADER_SIZE, GvspContent, GvspHeader, GvspLeader, GvspTrailer,
-    PacketBitmap, is_chunk_data_payload, is_image_payload, parse_header, parse_packet_ref, status,
+    PacketBitmap, is_chunk_data_payload, is_image_payload, parse_header, parse_packet_ref,
 };
 
 use crate::frame::FrameStatus;
@@ -79,7 +80,7 @@ pub(crate) fn payload_stride(packet_size: u32, header_len: usize) -> usize {
 /// `ceil(size_x × bits / 8) + padding_x` bytes, plus `padding_y`. Bits 23–16
 /// of the PFNC code are the pixel depth, which is what makes packed formats
 /// (12 bits a pixel) come out right.
-fn geometry_size(image: &viva_gige::gvsp::ImageLeader) -> usize {
+fn geometry_size(image: &viva_gige::ImageLeader) -> usize {
     let bits = ((image.pixel_format >> 16) & 0xFF) as u64;
     let bits = if bits == 0 { 8 } else { bits };
     let line = (image.width as u64 * bits).div_ceil(8) + u64::from(image.padding_x);
@@ -278,10 +279,12 @@ struct Warned {
 /// gone-with-previous close the range; "not yet available" and "temporarily
 /// unavailable" leave it to its retries.
 fn resend_answer(status: u16) -> Option<Option<Answer>> {
-    match status {
-        status::PACKET_UNAVAILABLE | status::PACKET_REMOVED_FROM_MEMORY => Some(Some(Answer::Gone)),
-        status::PACKET_AND_PREVIOUS_REMOVED_FROM_MEMORY => Some(Some(Answer::GoneWithPrevious)),
-        status::PACKET_NOT_YET_AVAILABLE | status::PACKET_TEMPORARILY_UNAVAILABLE => Some(None),
+    match GigeStatus::from_raw(status) {
+        GigeStatus::PacketUnavailable | GigeStatus::PacketRemovedFromMemory => {
+            Some(Some(Answer::Gone))
+        }
+        GigeStatus::PacketAndPreviousRemovedFromMemory => Some(Some(Answer::GoneWithPrevious)),
+        GigeStatus::PacketNotYetAvailable | GigeStatus::PacketTemporarilyUnavailable => Some(None),
         _ => None,
     }
 }
@@ -841,7 +844,9 @@ impl Assembler {
             return;
         }
         if header.status & STATUS_ERROR != 0 {
-            block.resolved = Some(Resolution::Frame(FrameStatus::DeviceStatus(header.status)));
+            block.resolved = Some(Resolution::Frame(FrameStatus::DeviceStatus(
+                GigeStatus::from_raw(header.status),
+            )));
             self.stats
                 .record_missing_packets(missing_with_trailer(block) as u64);
             return;
@@ -999,7 +1004,7 @@ mod tests {
 
     use super::*;
     use crate::stream::resend::ResendRequest;
-    use viva_fake_gige::gvsp::{BlockSpec, Datagram, PacketKind, block_datagrams, image_size};
+    use viva_fake_gige::{BlockSpec, Datagram, PacketKind, block_datagrams, image_size};
     use viva_fake_gige::{MONO8, MONO12_PACKED, PacketScript, ScriptStep};
 
     const PACKET_SIZE: u32 = 576;
@@ -1190,7 +1195,7 @@ mod tests {
         let (mut asm, _) = assembler();
         let a = image(64 * 32, 9);
         let b = image(64 * 32, 10);
-        let merged = viva_fake_gige::gvsp::interleave(
+        let merged = viva_fake_gige::interleave(
             block_datagrams(&spec(1, 64, 32), &a),
             block_datagrams(&spec(2, 64, 32), &b),
         );
@@ -1624,7 +1629,10 @@ mod tests {
             &block_datagrams(&s, &image(2048, 18)),
             Instant::now(),
         );
-        assert_eq!(out[0].status, FrameStatus::DeviceStatus(0x8015));
+        assert_eq!(
+            out[0].status,
+            FrameStatus::DeviceStatus(GigeStatus::Overflow)
+        );
     }
 
     #[test]

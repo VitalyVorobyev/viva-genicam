@@ -1,3 +1,6 @@
+//! Event-vision blocks: what an event camera streams instead of images (a
+//! LUCID TRT009S-E's EVT 3.0 or 2.1 words), kept apart from [`Frame`](crate::Frame).
+
 use std::time::SystemTime;
 
 use bytes::Bytes;

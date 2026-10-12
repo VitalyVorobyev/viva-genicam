@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS};
 

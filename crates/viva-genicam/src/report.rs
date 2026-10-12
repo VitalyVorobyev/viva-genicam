@@ -24,9 +24,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use viva_genapi::NodeMap;
 use viva_genapi_xml::{XmlError, XmlModel};
-use viva_gige::gvcp::{GigeDevice, consts};
-use viva_gige::nic::{Iface, IfaceSelector};
 use viva_gige::{DeviceInfo, GVCP_PORT};
+use viva_gige::{GigeDevice, consts};
+use viva_gige::{Iface, IfaceSelector};
 
 /// What to put in a report.
 #[derive(Debug, Clone)]
@@ -65,6 +65,7 @@ impl ReportRequest {
 
 /// The camera a report describes in detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReportTarget {
     /// None: the report covers the host and discovery only.
     None,
@@ -112,19 +113,35 @@ enum Fmt {
 /// the capability words, the IP configuration that #57 turned on, and the
 /// channel registers whose addresses we had wrong until TC-13.
 const BOOTSTRAP: &[(u64, &str, Fmt)] = &[
-    (0x0000, "Version", Fmt::Bits),
-    (0x0004, "DeviceMode", Fmt::Bits),
-    (0x0008, "DeviceMACAddressHigh", Fmt::Bits),
-    (0x000C, "DeviceMACAddressLow", Fmt::Bits),
-    (0x0010, "SupportedIPConfiguration", Fmt::Bits),
+    (consts::VERSION, "Version", Fmt::Bits),
+    (consts::DEVICE_MODE, "DeviceMode", Fmt::Bits),
+    (
+        consts::DEVICE_MAC_ADDRESS_HIGH,
+        "DeviceMACAddressHigh",
+        Fmt::Bits,
+    ),
+    (
+        consts::DEVICE_MAC_ADDRESS_LOW,
+        "DeviceMACAddressLow",
+        Fmt::Bits,
+    ),
+    (
+        consts::SUPPORTED_IP_CONFIG,
+        "SupportedIPConfiguration",
+        Fmt::Bits,
+    ),
     (
         consts::CURRENT_IP_CONFIG,
         "CurrentIPConfiguration",
         Fmt::Bits,
     ),
-    (0x0024, "CurrentIPAddress", Fmt::Ipv4),
-    (0x0034, "CurrentSubnetMask", Fmt::Ipv4),
-    (0x0044, "CurrentDefaultGateway", Fmt::Ipv4),
+    (consts::CURRENT_IP_ADDRESS, "CurrentIPAddress", Fmt::Ipv4),
+    (consts::CURRENT_SUBNET_MASK, "CurrentSubnetMask", Fmt::Ipv4),
+    (
+        consts::CURRENT_DEFAULT_GATEWAY,
+        "CurrentDefaultGateway",
+        Fmt::Ipv4,
+    ),
     (
         consts::PERSISTENT_IP_ADDRESS,
         "PersistentIPAddress",
@@ -140,10 +157,18 @@ const BOOTSTRAP: &[(u64, &str, Fmt)] = &[
         "PersistentDefaultGateway",
         Fmt::Ipv4,
     ),
-    (0x0900, "GevNumberOfMessageChannels", Fmt::Dec),
-    (0x0904, "GevNumberOfStreamChannels", Fmt::Dec),
+    (
+        consts::NUMBER_OF_MESSAGE_CHANNELS,
+        "GevNumberOfMessageChannels",
+        Fmt::Dec,
+    ),
+    (
+        consts::NUMBER_OF_STREAM_CHANNELS,
+        "GevNumberOfStreamChannels",
+        Fmt::Dec,
+    ),
     (consts::GVCP_CAPABILITY, "GevGVCPCapability", Fmt::Bits),
-    (0x0938, "GevHeartbeatTimeout", Fmt::Dec),
+    (consts::HEARTBEAT_TIMEOUT, "GevHeartbeatTimeout", Fmt::Dec),
     (
         consts::TIMESTAMP_TICK_FREQUENCY_HIGH,
         "GevTimestampTickFrequencyHigh",
@@ -265,7 +290,7 @@ fn interfaces(out: &mut String) {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                let mtu = viva_gige::nic::mtu(&iface).to_string();
+                let mtu = viva_gige::mtu(&iface).to_string();
                 let _ = writeln!(
                     out,
                     "{:<16} index={:<5} mtu={:<9} ipv4=[{}]",
@@ -362,7 +387,7 @@ async fn usb_devices(out: &mut String) {
     let _ = writeln!(out, "## USB3 Vision devices");
     let _ = writeln!(out);
     // USB enumeration blocks.
-    match tokio::task::spawn_blocking(viva_u3v::discovery::discover).await {
+    match tokio::task::spawn_blocking(viva_u3v::discover).await {
         Ok(Ok(devices)) if devices.is_empty() => {
             let _ = writeln!(out, "none found");
         }
@@ -456,7 +481,7 @@ async fn fetch_xml(control: Arc<Mutex<GigeDevice>>) -> Result<String, XmlError> 
             guard
                 .read_mem(address, length)
                 .await
-                .map_err(|err| XmlError::Transport(err.to_string()))
+                .map_err(XmlError::transport)
         }
     })
     .await

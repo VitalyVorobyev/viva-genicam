@@ -36,3 +36,6 @@ viva-pfnc = { version = "0.8", path = "../viva-pfnc" }
 [dev-dependencies]
 # Builds a node map for the `genapi` conversion test.
 viva-genapi-xml = { path = "../viva-genapi-xml" }
+
+[lints]
+workspace = true

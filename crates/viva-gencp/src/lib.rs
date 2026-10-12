@@ -2,7 +2,7 @@
 //! GenCP: generic control protocol encode/decode (transport-agnostic).
 
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use thiserror::Error;
 
 /// Size of the GenCP header (in bytes).
@@ -67,7 +67,7 @@ pub mod ccd_flags {
 /// pending-ack is `SUCCESS`, so a receiver that only inspects the status
 /// cannot tell one from a real answer and will hand the timeout bytes back as
 /// payload. GVCP models the same mechanism the same way, as opcode `0x0089`
-/// (`viva_gige::gvcp::consts::PENDING_ACK`).
+/// (`viva_gige::consts::PENDING_ACK`).
 pub const PENDING_ACK_COMMAND: u16 = command_id::PENDING_ACK;
 
 /// GVCP operation codes for the GenCP-style operations GigE Vision carries.
@@ -126,16 +126,24 @@ impl OpCode {
 
 /// Status codes shared by the GVCP and GenCP acknowledgement tables.
 ///
-/// Only the codes **both** protocols define identically live here:
-/// `0x0000`, `0x8001`–`0x8007` and `0x8FFF`. Above that the tables diverge,
-/// and at `0x800B` they actively disagree — GVCP calls it `NO_MSG`
-/// (deprecated), GenCP calls it `MSG_TIMEOUT` — so a transport-specific code
-/// must be decoded by that transport, not here. See ADR-0020.
+/// Only the codes **both** protocols define, under the same name and meaning,
+/// live here: `0x0000`, `0x8001`–`0x8007`, `0x800E`, `0x800F` and `0x8FFF`.
+/// Elsewhere the tables diverge, and at `0x800B` they actively disagree —
+/// GVCP calls it `NO_MSG` (deprecated), GenCP calls it `MSG_TIMEOUT` — so
+/// each transport decodes its acknowledgements with a status type of its own
+/// that wraps this one: `viva_gige::GigeStatus` and `viva_u3v::U3vStatus`
+/// (ADR-0020).
+///
+/// There is no `Unknown` here: [`StatusCode::from_raw`] returns `None` for a
+/// code outside the shared core, and the transport's own type names it or
+/// keeps it as unknown.
 ///
 /// Values corroborated by Wireshark's GVCP dissector
 /// (`epan/dissectors/packet-gvcp.c`, `GEV_STATUS_*`) and aravis
-/// (`arvgvcpprivate.h`, `arvuvcpprivate.h`), which agree with each other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// (`arvgvcpprivate.h`, `arvgvspprivate.h`, `arvuvcpprivate.h`), which agree
+/// with each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum StatusCode {
     /// Command completed successfully.
     Success,
@@ -161,17 +169,21 @@ pub enum StatusCode {
     ///
     /// The only status in this table worth a retry.
     Busy,
+    /// The command's header is invalid: its fields, or its length against
+    /// the bytes that arrived.
+    InvalidHeader,
+    /// The device's current configuration does not allow the command.
+    /// Deprecated in GigE Vision.
+    WrongConfig,
     /// The device reported a generic error with nothing more specific.
     GenericError,
-    /// A status code not known to this implementation, or specific to one
-    /// transport. Carries the raw value so a caller can still report it.
-    Unknown(u16),
 }
 
 impl StatusCode {
-    /// Convert from the raw status field in an acknowledgement header.
-    pub fn from_raw(raw: u16) -> Self {
-        match raw {
+    /// The shared meaning of a raw status, or `None` for a code outside the
+    /// shared core — one a transport defines, or one nobody does.
+    pub const fn from_raw(raw: u16) -> Option<Self> {
+        Some(match raw {
             0x0000 => StatusCode::Success,
             0x8001 => StatusCode::NotImplemented,
             0x8002 => StatusCode::InvalidParameter,
@@ -180,9 +192,11 @@ impl StatusCode {
             0x8005 => StatusCode::BadAlignment,
             0x8006 => StatusCode::AccessDenied,
             0x8007 => StatusCode::Busy,
+            0x800E => StatusCode::InvalidHeader,
+            0x800F => StatusCode::WrongConfig,
             0x8FFF => StatusCode::GenericError,
-            other => StatusCode::Unknown(other),
-        }
+            _ => return None,
+        })
     }
 
     /// Convert to the raw value stored in the packet header.
@@ -196,8 +210,9 @@ impl StatusCode {
             StatusCode::BadAlignment => 0x8005,
             StatusCode::AccessDenied => 0x8006,
             StatusCode::Busy => 0x8007,
+            StatusCode::InvalidHeader => 0x800E,
+            StatusCode::WrongConfig => 0x800F,
             StatusCode::GenericError => 0x8FFF,
-            StatusCode::Unknown(code) => code,
         }
     }
 
@@ -212,8 +227,9 @@ impl StatusCode {
             StatusCode::BadAlignment => "BAD_ALIGNMENT",
             StatusCode::AccessDenied => "ACCESS_DENIED",
             StatusCode::Busy => "BUSY",
+            StatusCode::InvalidHeader => "INVALID_HEADER",
+            StatusCode::WrongConfig => "WRONG_CONFIG",
             StatusCode::GenericError => "ERROR",
-            StatusCode::Unknown(_) => "unknown status",
         }
     }
 
@@ -238,51 +254,133 @@ impl std::fmt::Display for StatusCode {
     }
 }
 
+/// Defines a transport's status type: the shared [`StatusCode`] core, the
+/// transport's own codes, and `Unknown` for the rest (ADR-0020).
+///
+/// Used by `viva-gige` and `viva-u3v`, so the two types are built the same
+/// way and print the same way: the name and the raw hex, never bare decimal.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! transport_status {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident = $raw:literal, $spec:literal;
+            )*
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
+        $vis enum $name {
+            /// A code GenCP and GigE Vision share: see
+            /// `viva_gencp::StatusCode`.
+            Common($crate::StatusCode),
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )*
+            /// A code neither this transport's table nor the shared core
+            /// names. Carries the raw value so it can still be reported.
+            Unknown(u16),
+        }
+
+        impl $name {
+            /// Decode the raw status field of an acknowledgement.
+            pub const fn from_raw(raw: u16) -> Self {
+                match raw {
+                    $($raw => $name::$variant,)*
+                    _ => match $crate::StatusCode::from_raw(raw) {
+                        Some(common) => $name::Common(common),
+                        None => $name::Unknown(raw),
+                    },
+                }
+            }
+
+            /// The raw value, as the acknowledgement carries it.
+            pub const fn to_raw(self) -> u16 {
+                match self {
+                    $name::Common(common) => common.to_raw(),
+                    $($name::$variant => $raw,)*
+                    $name::Unknown(raw) => raw,
+                }
+            }
+
+            /// The specification's name for this code, for diagnostics.
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $name::Common(common) => common.name(),
+                    $($name::$variant => $spec,)*
+                    $name::Unknown(_) => "unknown status",
+                }
+            }
+
+            /// The shared meaning, for a code in the core both transports
+            /// define.
+            pub const fn common(self) -> Option<$crate::StatusCode> {
+                match self {
+                    $name::Common(common) => Some(common),
+                    _ => None,
+                }
+            }
+
+            /// Whether this is `SUCCESS`.
+            pub const fn is_success(self) -> bool {
+                matches!(self, $name::Common($crate::StatusCode::Success))
+            }
+
+            /// Whether retrying the command could plausibly succeed: only
+            /// `BUSY`.
+            pub const fn is_retryable(self) -> bool {
+                matches!(self, $name::Common($crate::StatusCode::Busy))
+            }
+        }
+
+        impl From<$crate::StatusCode> for $name {
+            fn from(common: $crate::StatusCode) -> Self {
+                $name::Common(common)
+            }
+        }
+
+        /// Prints the specification name and the raw hex value.
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                write!(f, "{} (0x{:04X})", self.name(), self.to_raw())
+            }
+        }
+    };
+}
+
 /// Errors that can occur when dealing with GenCP packets.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GenCpError {
     #[error("invalid packet: {0}")]
+    /// The packet is malformed: too short, or its length field disagrees.
     InvalidPacket(&'static str),
     #[error("unknown opcode: {0:#06x}")]
+    /// An acknowledgement carries a command id this crate does not know.
     UnknownOpcode(u16),
     #[error("io: {0}")]
+    /// A socket operation failed.
     Io(#[from] std::io::Error),
 }
 
-/// Command header for GenCP requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommandHeader {
-    /// Request flags (ack required, broadcast, …).
-    pub flags: CommandFlags,
-    /// Operation code for the request.
-    pub opcode: OpCode,
-    /// Length of the payload in bytes.
-    pub length: u16,
-    /// Request identifier chosen by the client.
-    pub request_id: u16,
-}
-
-/// Header for GenCP acknowledgements.
+/// Header of a GVCP acknowledgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckHeader {
-    /// Status returned by the device.
-    pub status: StatusCode,
+    /// Status returned by the device, raw: GigE Vision decodes it with its own
+    /// table (`viva_gige::GigeStatus`), which [`StatusCode`] is the shared
+    /// core of.
+    pub status: u16,
     /// Operation code associated with the acknowledgement.
     pub opcode: OpCode,
     /// Length of the payload in bytes.
     pub length: u16,
     /// Request identifier that this acknowledgement answers.
     pub request_id: u16,
-}
-
-/// GenCP command packet.
-#[derive(Debug, Clone)]
-pub struct GenCpCmd {
-    /// Packet header fields.
-    pub header: CommandHeader,
-    /// Command payload.
-    pub payload: Bytes,
 }
 
 /// GenCP acknowledgement packet.
@@ -292,20 +390,6 @@ pub struct GenCpAck {
     pub header: AckHeader,
     /// Payload data (command specific).
     pub payload: Bytes,
-}
-
-/// Encode a GenCP command into the on-the-wire representation.
-///
-/// The returned buffer is ready to be transmitted by the transport layer.
-pub fn encode_cmd(cmd: &GenCpCmd) -> Bytes {
-    debug_assert_eq!(cmd.header.length as usize, cmd.payload.len());
-    let mut buffer = BytesMut::with_capacity(HEADER_SIZE + cmd.payload.len());
-    buffer.put_u16(cmd.header.flags.bits());
-    buffer.put_u16(cmd.header.opcode.command_code());
-    buffer.put_u16(cmd.header.length);
-    buffer.put_u16(cmd.header.request_id);
-    buffer.extend_from_slice(&cmd.payload);
-    buffer.freeze()
 }
 
 /// Decode a GenCP acknowledgement from raw bytes.
@@ -325,12 +409,11 @@ pub fn decode_ack(buf: &[u8]) -> Result<GenCpAck, GenCpError> {
     }
 
     let opcode = OpCode::from_ack(opcode_raw)?;
-    let status = StatusCode::from_raw(status_raw);
 
     let payload = Bytes::copy_from_slice(&buf[HEADER_SIZE..]);
     Ok(GenCpAck {
         header: AckHeader {
-            status,
+            status: status_raw,
             opcode,
             length,
             request_id,
@@ -342,6 +425,7 @@ pub fn decode_ack(buf: &[u8]) -> Result<GenCpAck, GenCpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{BufMut, BytesMut};
 
     /// The shared status table, written as literal values rather than derived
     /// from `to_raw` — per ADR-0019, a fixture that reuses our own encoder
@@ -356,6 +440,8 @@ mod tests {
         (0x8005, StatusCode::BadAlignment, "BAD_ALIGNMENT"),
         (0x8006, StatusCode::AccessDenied, "ACCESS_DENIED"),
         (0x8007, StatusCode::Busy, "BUSY"),
+        (0x800E, StatusCode::InvalidHeader, "INVALID_HEADER"),
+        (0x800F, StatusCode::WrongConfig, "WRONG_CONFIG"),
         (0x8FFF, StatusCode::GenericError, "ERROR"),
     ];
 
@@ -364,7 +450,7 @@ mod tests {
         for &(raw, expected, name) in SPEC_STATUS_TABLE {
             assert_eq!(
                 StatusCode::from_raw(raw),
-                expected,
+                Some(expected),
                 "decoding {raw:#06x} ({name})"
             );
             assert_eq!(expected.to_raw(), raw, "re-encoding {name}");
@@ -376,20 +462,20 @@ mod tests {
     fn regression_the_three_codes_we_used_to_mislabel() {
         // 0x8004 was `DeviceBusy`, so a write to a read-only register reported
         // "device busy" and the GVCP retry loop kept retrying it.
-        assert_eq!(StatusCode::from_raw(0x8004), StatusCode::WriteProtect);
-        assert!(!StatusCode::from_raw(0x8004).is_retryable());
+        assert_eq!(StatusCode::from_raw(0x8004), Some(StatusCode::WriteProtect));
+        assert!(!StatusCode::WriteProtect.is_retryable());
 
         // 0x8005 was the catch-all `Error`.
-        assert_eq!(StatusCode::from_raw(0x8005), StatusCode::BadAlignment);
+        assert_eq!(StatusCode::from_raw(0x8005), Some(StatusCode::BadAlignment));
 
         // 0x8006 had no variant at all: #45's FLIR returned it on a locked
         // node and the user saw `Unknown(32774)` — 32774 being 0x8006.
-        assert_eq!(StatusCode::from_raw(0x8006), StatusCode::AccessDenied);
-        assert_eq!(StatusCode::from_raw(32774), StatusCode::AccessDenied);
+        assert_eq!(StatusCode::from_raw(0x8006), Some(StatusCode::AccessDenied));
+        assert_eq!(StatusCode::from_raw(32774), Some(StatusCode::AccessDenied));
 
         // 0x8007 is the one status a retry can help.
-        assert!(StatusCode::from_raw(0x8007).is_retryable());
-        assert!(!StatusCode::from_raw(0x0000).is_retryable());
+        assert!(StatusCode::Busy.is_retryable());
+        assert!(!StatusCode::Success.is_retryable());
     }
 
     #[test]
@@ -398,25 +484,54 @@ mod tests {
             StatusCode::AccessDenied.to_string(),
             "ACCESS_DENIED (0x8006)"
         );
-        // An unrecognised code still prints as hex, never bare decimal.
-        assert_eq!(
-            StatusCode::from_raw(0x800C).to_string(),
-            "unknown status (0x800C)"
-        );
     }
 
     #[test]
-    fn transport_specific_codes_stay_unknown_here() {
+    fn transport_specific_codes_are_not_in_the_shared_core() {
         // 0x800B is the reason this enum holds only the shared core: GVCP
         // calls it NO_MSG (deprecated), GenCP calls it MSG_TIMEOUT. Decoding
         // it here would have to pick one and be wrong for the other
-        // transport, so it is deliberately left to the transport (ADR-0020).
-        assert_eq!(StatusCode::from_raw(0x800B), StatusCode::Unknown(0x800B));
-        // Likewise the GVCP packet-resend family and the GenCP 0xA0xx range.
-        assert_eq!(StatusCode::from_raw(0x800C), StatusCode::Unknown(0x800C));
-        assert_eq!(StatusCode::from_raw(0xA001), StatusCode::Unknown(0xA001));
-        // Round-tripping an unknown code must not lose it.
-        assert_eq!(StatusCode::from_raw(0x800B).to_raw(), 0x800B);
+        // transport, so it is left to the transport's own type (ADR-0020).
+        assert_eq!(StatusCode::from_raw(0x800B), None);
+        // Likewise the GVCP packet-resend family and the USB3 Vision 0xA0xx
+        // range.
+        assert_eq!(StatusCode::from_raw(0x800C), None);
+        assert_eq!(StatusCode::from_raw(0xA001), None);
+    }
+
+    // The macro's methods are `pub` for the transports' public types; on a
+    // test's private one they are unreachable, which is the point.
+    #[allow(unreachable_pub)]
+    mod example {
+        transport_status! {
+            /// A transport with one code of its own, to check the macro.
+            pub(crate) enum Example {
+                /// `0x800B`, as the example transport names it.
+                Mine = 0x800B, "MINE";
+            }
+        }
+    }
+    use example::Example;
+
+    #[test]
+    fn a_transport_status_wraps_the_core_and_keeps_the_rest() {
+        assert_eq!(Example::from_raw(0x800B), Example::Mine);
+        assert_eq!(
+            Example::from_raw(0x8006),
+            Example::Common(StatusCode::AccessDenied)
+        );
+        assert_eq!(Example::from_raw(0x8123), Example::Unknown(0x8123));
+        for raw in [0x0000, 0x800B, 0x8006, 0x8123] {
+            assert_eq!(Example::from_raw(raw).to_raw(), raw, "{raw:#06x}");
+        }
+        assert_eq!(Example::Mine.to_string(), "MINE (0x800B)");
+        assert_eq!(
+            Example::Unknown(0x8123).to_string(),
+            "unknown status (0x8123)"
+        );
+        assert!(Example::from_raw(0x8007).is_retryable());
+        assert!(Example::from_raw(0).is_success());
+        assert_eq!(Example::Mine.common(), None);
     }
 
     #[test]
@@ -430,63 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_read_register_roundtrip() {
-        let payload = {
-            let mut p = BytesMut::with_capacity(4);
-            p.put_u32(0x0000_0a00);
-            p.freeze()
-        };
-        let cmd = GenCpCmd {
-            header: CommandHeader {
-                flags: CommandFlags::ACK_REQUIRED,
-                opcode: OpCode::ReadRegister,
-                length: payload.len() as u16,
-                request_id: 0x41,
-            },
-            payload,
-        };
-
-        let encoded = encode_cmd(&cmd);
-        assert_eq!(
-            &encoded[..2],
-            &CommandFlags::ACK_REQUIRED.bits().to_be_bytes()
-        );
-        assert_eq!(&encoded[2..4], &0x0080u16.to_be_bytes());
-        assert_eq!(&encoded[4..6], &(cmd.payload.len() as u16).to_be_bytes());
-        assert_eq!(&encoded[6..8], &0x0041u16.to_be_bytes());
-        assert_eq!(&encoded[8..], &cmd.payload[..]);
-    }
-
-    #[test]
-    fn encode_write_register_roundtrip() {
-        let payload = {
-            let mut p = BytesMut::with_capacity(8);
-            p.put_u32(0x0000_0a00);
-            p.put_u32(0x0000_0002);
-            p.freeze()
-        };
-        let cmd = GenCpCmd {
-            header: CommandHeader {
-                flags: CommandFlags::ACK_REQUIRED,
-                opcode: OpCode::WriteRegister,
-                length: payload.len() as u16,
-                request_id: 0x43,
-            },
-            payload,
-        };
-
-        let encoded = encode_cmd(&cmd);
-        assert_eq!(
-            &encoded[..2],
-            &CommandFlags::ACK_REQUIRED.bits().to_be_bytes()
-        );
-        assert_eq!(&encoded[2..4], &0x0082u16.to_be_bytes());
-        assert_eq!(&encoded[4..6], &(cmd.payload.len() as u16).to_be_bytes());
-        assert_eq!(&encoded[6..8], &0x0043u16.to_be_bytes());
-        assert_eq!(&encoded[8..], &cmd.payload[..]);
-    }
-
-    #[test]
     fn decode_read_register_ack() {
         let value = 0x0000_0002u32;
         let mut buf = BytesMut::with_capacity(HEADER_SIZE + 4);
@@ -497,7 +555,7 @@ mod tests {
         buf.put_u32(value);
 
         let ack = decode_ack(&buf).expect("decode");
-        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.status, StatusCode::Success.to_raw());
         assert_eq!(ack.header.opcode, OpCode::ReadRegister);
         assert_eq!(ack.header.length, 4);
         assert_eq!(ack.header.request_id, 0x4141);
@@ -515,40 +573,11 @@ mod tests {
         buf.put_u32(index);
 
         let ack = decode_ack(&buf).expect("decode");
-        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.status, StatusCode::Success.to_raw());
         assert_eq!(ack.header.opcode, OpCode::WriteRegister);
         assert_eq!(ack.header.length, 4);
         assert_eq!(ack.header.request_id, 0x4343);
         assert_eq!(&ack.payload[..], &index.to_be_bytes());
-    }
-
-    #[test]
-    fn encode_read_mem_roundtrip() {
-        let payload = {
-            let mut p = BytesMut::with_capacity(12);
-            p.put_u64(0x0010_0200);
-            p.put_u32(64);
-            p.freeze()
-        };
-        let cmd = GenCpCmd {
-            header: CommandHeader {
-                flags: CommandFlags::ACK_REQUIRED,
-                opcode: OpCode::ReadMem,
-                length: payload.len() as u16,
-                request_id: 0x42,
-            },
-            payload,
-        };
-
-        let encoded = encode_cmd(&cmd);
-        assert_eq!(
-            &encoded[..2],
-            &CommandFlags::ACK_REQUIRED.bits().to_be_bytes()
-        );
-        assert_eq!(&encoded[2..4], &0x0084u16.to_be_bytes());
-        assert_eq!(&encoded[4..6], &(cmd.payload.len() as u16).to_be_bytes());
-        assert_eq!(&encoded[6..8], &0x0042u16.to_be_bytes());
-        assert_eq!(&encoded[8..], &cmd.payload[..]);
     }
 
     #[test]
@@ -562,7 +591,7 @@ mod tests {
         buf.extend_from_slice(&payload);
 
         let ack = decode_ack(&buf).expect("decode");
-        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.status, StatusCode::Success.to_raw());
         assert_eq!(ack.header.opcode, OpCode::ReadMem);
         assert_eq!(ack.header.length as usize, payload.len());
         assert_eq!(ack.header.request_id, 0x4242);
@@ -579,7 +608,7 @@ mod tests {
         buf.put_u16(0x1001);
         let ack = decode_ack(&buf).expect("decode");
         assert_eq!(ack.header.opcode, OpCode::WriteMem);
-        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.status, StatusCode::Success.to_raw());
         assert_eq!(ack.payload.len(), 0);
     }
 
@@ -620,7 +649,7 @@ mod tests {
         assert_eq!(HEADER_SIZE, 8, "the payload begins at offset 8");
 
         let ack = decode_ack(b).expect("decode the golden ack");
-        assert_eq!(ack.header.status, StatusCode::Success);
+        assert_eq!(ack.header.status, StatusCode::Success.to_raw());
         assert_eq!(ack.header.opcode, OpCode::ReadRegister);
         assert_eq!(ack.header.length, 4);
         assert_eq!(ack.header.request_id, 0x1234);
@@ -684,27 +713,5 @@ mod tests {
             decode_ack(&pending).is_err(),
             "0x0805 is not an acknowledgement command id"
         );
-    }
-
-    /// The command header uses the same four fields in the same order, so the
-    /// encoder is pinned by offset too.
-    #[test]
-    fn command_header_fields_sit_at_the_specified_offsets() {
-        let cmd = GenCpCmd {
-            header: CommandHeader {
-                flags: CommandFlags::ACK_REQUIRED,
-                opcode: OpCode::ReadMem,
-                length: 8,
-                request_id: 0x00AB,
-            },
-            payload: Bytes::from_static(&[0, 0, 0x0D, 0x04, 0, 0, 0, 4]),
-        };
-        let b = encode_cmd(&cmd);
-
-        assert_eq!(u16::from_be_bytes([b[0], b[1]]), 0x0001, "flags at 0");
-        assert_eq!(u16::from_be_bytes([b[2], b[3]]), 0x0084, "READMEM_CMD at 2");
-        assert_eq!(u16::from_be_bytes([b[4], b[5]]), 8, "payload length at 4");
-        assert_eq!(u16::from_be_bytes([b[6], b[7]]), 0x00AB, "request id at 6");
-        assert_eq!(b.len(), HEADER_SIZE + 8);
     }
 }

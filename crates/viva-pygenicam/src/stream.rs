@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tokio::time::timeout as tokio_timeout;
 
-use viva_genicam::gige::nic::Iface;
+use viva_genicam::gige::Iface;
 use viva_genicam::{
     FrameStream, GenicamError, ResendPolicy, StreamOptions, StreamStats,
     U3vFrameStream as U3vStream, U3vStreamBuilder,
@@ -246,6 +246,9 @@ pub(crate) fn build_u3v_stream(
         let cam = guard
             .as_mut()
             .expect("lock_open checked the camera is open");
+        // The stream's reader is a runtime task; started outside the runtime
+        // it panicked ("no reactor running").
+        let _runtime = runtime().enter();
         U3vStreamBuilder::new(cam).build().into_py_err()
     })?;
     Ok(PyFrameStream::u3v(stream))

@@ -753,9 +753,9 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::watch;
-    use viva_genicam::gige::nic::Iface;
-    use viva_service::device::DeviceHandle;
-    use viva_service::serve::{derive_device_id, publish_announce, serve_device};
+    use viva_genicam::gige::Iface;
+    use viva_service::DeviceHandle;
+    use viva_service::{derive_device_id, publish_announce, serve_device};
 
     use super::RemoteBackend;
     use crate::backend::DeviceBackend;
@@ -862,7 +862,9 @@ mod tests {
             };
             let streamer = backend.start_acquisition(options).await.expect("start");
             let scps = {
-                use viva_fake_gige::registers::{SCP_PACKET_SIZE, STREAM_CHANNEL_BASE};
+                use viva_genicam::gige::consts::{
+                    STREAM_CHANNEL_BASE, STREAM_PACKET_SIZE as SCP_PACKET_SIZE,
+                };
                 let bytes = fake.peek(STREAM_CHANNEL_BASE + SCP_PACKET_SIZE, 4).await;
                 u32::from_be_bytes(bytes.try_into().unwrap()) & 0xFFFF
             };

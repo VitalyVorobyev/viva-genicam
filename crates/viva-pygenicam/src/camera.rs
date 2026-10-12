@@ -19,12 +19,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 use viva_genapi::RegisterIo;
-use viva_genicam::gige::nic::{Iface, IfaceSelector};
+use viva_genicam::gige::{Iface, IfaceSelector};
 use viva_genicam::{
-    connect_gige_as, connect_u3v_with_xml, Access, Camera, ChunkConfig, ControlState, GenicamError,
+    connect_gige_as, open_u3v_device, Access, Camera, ChunkConfig, ControlState, GenicamError,
     GigeRegisterIo, Roi, U3vRegisterIo,
 };
-use viva_u3v::usb::RusbTransfer;
+use viva_u3v::{RusbTransfer, U3vDevice, U3vError, UsbTransfer};
 
 use crate::discovery::{PyGigeDeviceInfo, PyU3vDeviceInfo};
 use crate::errors::{genicam_error, gige_only, parse_error, to_py, transport_error, IntoPyErr};
@@ -38,7 +38,47 @@ use crate::runtime::runtime;
 use crate::stream::{build_gige_stream, build_u3v_stream, GigeStreamRequest, PyFrameStream};
 
 pub(crate) type GigeCamera = Camera<GigeRegisterIo>;
-pub(crate) type U3vCamera = Camera<U3vRegisterIo<RusbTransfer>>;
+pub(crate) type U3vCamera = Camera<U3vRegisterIo<UsbLink>>;
+
+/// A USB3 Vision camera's link: a USB device, or the in-process fake
+/// (`viva_genicam.testing.FakeU3vCamera`), behind one type so Python sees
+/// one `Camera` class.
+pub(crate) enum UsbLink {
+    Usb(RusbTransfer),
+    Fake(Arc<viva_fake_u3v::FakeU3vTransport>),
+}
+
+impl UsbTransfer for UsbLink {
+    fn bulk_write(&self, endpoint: u8, data: &[u8], timeout: Duration) -> Result<usize, U3vError> {
+        match self {
+            UsbLink::Usb(usb) => usb.bulk_write(endpoint, data, timeout),
+            UsbLink::Fake(fake) => fake.bulk_write(endpoint, data, timeout),
+        }
+    }
+
+    fn bulk_read(
+        &self,
+        endpoint: u8,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, U3vError> {
+        match self {
+            UsbLink::Usb(usb) => usb.bulk_read(endpoint, buf, timeout),
+            UsbLink::Fake(fake) => fake.bulk_read(endpoint, buf, timeout),
+        }
+    }
+}
+
+/// Open a USB3 Vision camera over `device`, reading its XML.
+pub(crate) fn open_u3v(device: U3vDevice<UsbLink>) -> Result<PyCamera, GenicamError> {
+    let (camera, xml) = open_u3v_device(device)?;
+    Ok(PyCamera {
+        inner: CameraInner::U3v {
+            xml,
+            camera: Arc::new(Mutex::new(Some(camera))),
+        },
+    })
+}
 
 /// Pick the NIC whose subnet contains `device_ip`. Returns `None` if no
 /// interface matches; the caller should raise a user-actionable error.
@@ -74,14 +114,14 @@ pub(crate) fn lock_open<T>(camera: &Mutex<Option<T>>) -> PyResult<MutexGuard<'_,
 
 pub(crate) enum CameraInner {
     Gige {
-        device_info: viva_genicam::gige::DeviceInfo,
+        // Boxed: a GigE camera's description outweighs the rest of either
+        // variant.
+        device_info: Box<viva_genicam::gige::DeviceInfo>,
         iface: Mutex<Option<Iface>>,
         xml: String,
         camera: Arc<Mutex<Option<GigeCamera>>>,
     },
     U3v {
-        #[allow(dead_code)]
-        device_info: viva_u3v::discovery::U3vDeviceInfo,
         xml: String,
         camera: Arc<Mutex<Option<U3vCamera>>>,
     },
@@ -205,7 +245,7 @@ fn connect_gige(
         .into_py_err()?;
     Ok(PyCamera {
         inner: CameraInner::Gige {
-            device_info: device_info.inner,
+            device_info: Box::new(device_info.inner),
             iface: Mutex::new(iface_resolved),
             xml,
             camera: Arc::new(Mutex::new(Some(camera))),
@@ -215,15 +255,26 @@ fn connect_gige(
 
 #[pyfunction]
 fn connect_u3v(py: Python<'_>, device_info: PyU3vDeviceInfo) -> PyResult<PyCamera> {
-    let info = device_info.inner.clone();
-    let (camera, xml) = py.detach(|| connect_u3v_with_xml(&info)).into_py_err()?;
-    Ok(PyCamera {
-        inner: CameraInner::U3v {
-            device_info: device_info.inner,
-            xml,
-            camera: Arc::new(Mutex::new(Some(camera))),
-        },
+    let info = device_info.inner;
+    py.detach(|| {
+        let iface = &info.interface_info;
+        let device = RusbTransfer::open(&info)
+            .and_then(|usb| {
+                U3vDevice::open(
+                    Arc::new(UsbLink::Usb(usb)),
+                    iface.control_ep_in,
+                    iface.control_ep_out,
+                    iface.stream_ep_in,
+                    iface.event_ep_in,
+                )
+            })
+            .map_err(|source| GenicamError::U3v {
+                during: "open the device",
+                source,
+            })?;
+        open_u3v(device)
     })
+    .into_py_err()
 }
 
 impl PyCamera {
@@ -886,6 +937,10 @@ impl PyCamera {
                     },
                 )
             }
+            // USB3 Vision has no read-only access: one application opens
+            // the device, and a monitor stream would wait for an acquisition
+            // nobody starts.
+            CameraInner::U3v { .. } if monitor => Err(gige_only("a monitor stream")),
             CameraInner::U3v { camera, .. } => build_u3v_stream(py, camera.clone()),
         }
     }

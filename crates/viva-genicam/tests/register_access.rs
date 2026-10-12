@@ -16,13 +16,12 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use viva_fake_gige::registers::{
-    CCP, FIRST_URL_REG, REG_ACQ_START, REG_EXPOSURE_TIME, REG_SOFTWARE_SIGNAL_PULSE, REG_WIDTH,
-};
 use viva_fake_gige::{FakeCamera, GvcpCommand, RegisterCommandRefusal};
+use viva_fake_gige::{REG_ACQ_START, REG_EXPOSURE_TIME, REG_SOFTWARE_SIGNAL_PULSE, REG_WIDTH};
 use viva_genicam::genapi::GenApiError;
 use viva_genicam::gencp::StatusCode;
-use viva_genicam::gige::gvcp::GigeError;
+use viva_genicam::gige::GigeError;
+use viva_genicam::gige::consts::{CONTROL_CHANNEL_PRIVILEGE as CCP, FIRST_URL as FIRST_URL_REG};
 use viva_genicam::{Camera, GenicamError, GigeRegisterIo, connect_gige, gige};
 
 type SharedCamera = Arc<Mutex<Camera<GigeRegisterIo>>>;
@@ -228,7 +227,12 @@ async fn fake_refuses_reads_of_write_only_registers() {
     let mut device = gige::GigeDevice::open(addr).await.expect("open");
 
     let denied = |result: Result<_, GigeError>| {
-        matches!(result, Err(GigeError::Status(StatusCode::AccessDenied)))
+        matches!(
+            result,
+            Err(GigeError::Status(gige::GigeStatus::Common(
+                StatusCode::AccessDenied
+            )))
+        )
     };
     assert!(denied(device.read_mem(REG_ACQ_START, 4).await.map(drop)));
     assert!(denied(
@@ -269,7 +273,7 @@ async fn open_stream_claims_control_before_configuring_the_stream_channel() {
     let commands = cam.fake().commands();
     commands.reset();
 
-    let iface = gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback");
+    let iface = gige::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback");
     let options = viva_genicam::StreamOptions::new()
         .iface(iface)
         .multicast(std::net::Ipv4Addr::new(239, 192, 1, 10));

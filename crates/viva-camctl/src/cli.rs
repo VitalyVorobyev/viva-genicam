@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::cmd_bench::{self, BenchArgs};
 use crate::cmd_chunks;
@@ -21,7 +21,7 @@ use crate::cmd_usb;
 use crate::cmd_xml::{self, XmlArgs};
 use crate::common::{self, SaveFormat, Target};
 use crate::{cmd_action, cmd_config, cmd_inspect, cmd_registers};
-use viva_gige::action::ActionParams;
+use viva_gige::ActionParams;
 
 /// A 32-bit value, decimal or `0x` hexadecimal.
 fn parse_word(text: &str) -> Result<u32, String> {

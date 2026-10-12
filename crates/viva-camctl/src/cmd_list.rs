@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use tracing::info;
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 use viva_gige::{DeviceInfo, DiscoveryOptions};
 
 use crate::common;

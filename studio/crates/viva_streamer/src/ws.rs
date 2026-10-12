@@ -30,10 +30,7 @@ pub struct StreamInfo {
 
 impl StreamInfo {
     pub fn from_image_meta(meta: &viva_zenoh_api::ImageMeta) -> Self {
-        let pixel_format = serde_json::to_string(&meta.pixel_format)
-            .unwrap_or_else(|_| "\"Unknown\"".to_owned())
-            .trim_matches('"')
-            .to_owned();
+        let pixel_format = meta.pixel_format.name().unwrap_or("Unknown").to_owned();
         Self {
             width: meta.width,
             height: meta.height,
@@ -168,7 +165,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viva_zenoh_api::{ImageMeta, PixelFormat};
+    use viva_pfnc::PixelFormat;
+    use viva_zenoh_api::ImageMeta;
 
     fn make_meta(pixel_format: PixelFormat, width: u32, height: u32) -> ImageMeta {
         ImageMeta::new(
@@ -202,11 +200,11 @@ mod tests {
 
     #[test]
     fn test_stream_info_to_json_rgb8() {
-        let meta = make_meta(PixelFormat::RGB8, 1920, 1080);
+        let meta = make_meta(PixelFormat::RGB8Packed, 1920, 1080);
         let info = StreamInfo::from_image_meta(&meta);
         let json = info.to_json();
         assert!(
-            json.contains("\"pixel_format\":\"RGB8\""),
+            json.contains("\"pixel_format\":\"RGB8Packed\""),
             "pixel_format wrong: {json}"
         );
         assert!(json.contains("\"width\":1920"), "width wrong: {json}");
@@ -215,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_stream_info_to_json_unknown() {
-        let meta = make_meta(PixelFormat::Unknown, 320, 240);
+        let meta = make_meta(PixelFormat::Unknown(0), 320, 240);
         // Must not panic — serialisation of Unknown variant falls back gracefully.
         let info = StreamInfo::from_image_meta(&meta);
         let json = info.to_json();

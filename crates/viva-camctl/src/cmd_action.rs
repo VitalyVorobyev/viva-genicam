@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use viva_gige::GVCP_PORT;
-use viva_gige::action::{AckSummary, ActionParams, send_action};
+use viva_gige::{AckSummary, ActionParams, send_action};
 
 use crate::common;
 

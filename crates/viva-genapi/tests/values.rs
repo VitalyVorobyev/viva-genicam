@@ -383,7 +383,7 @@ fn is_done_on_a_feature_that_is_not_a_command_is_a_type_error() {
     let err = nodemap
         .is_done("ExposureTime", &MemIo::default())
         .expect_err("not a command");
-    assert!(matches!(err, GenApiError::Type(_)), "{err:?}");
+    assert!(matches!(err, GenApiError::Type { .. }), "{err:?}");
 }
 
 // ── Limits ──────────────────────────────────────────────────────────────────
@@ -412,7 +412,10 @@ fn limits_on_a_pvalue_integer_bound_its_writes() {
         let err = nodemap
             .set_integer("Width", refused, &io)
             .expect_err("outside Min/Max/Inc");
-        assert!(matches!(err, GenApiError::Range(_)), "{refused}: {err:?}");
+        assert!(
+            matches!(err, GenApiError::Range { .. }),
+            "{refused}: {err:?}"
+        );
     }
     assert!(io.writes().is_empty(), "{:?}", io.writes());
     nodemap.set_integer("Width", 20, &io).expect("16 + 1 * 4");
@@ -455,7 +458,7 @@ fn dynamic_bounds_bind_a_write() {
             let err = nodemap
                 .set_integer(name, refused, &io)
                 .expect_err("outside [32, 1024]");
-            assert!(matches!(err, GenApiError::Range(_)), "{name}: {err:?}");
+            assert!(matches!(err, GenApiError::Range { .. }), "{name}: {err:?}");
         }
         nodemap.set_integer(name, 512, &io).expect(name);
     }
@@ -497,7 +500,7 @@ fn an_integer_p_inc_binds_the_write_and_the_reported_range() {
     let err = nodemap
         .set_integer("OffsetX", 20, &io)
         .expect_err("16 + 4 is not a step of 8");
-    assert!(matches!(err, GenApiError::Range(_)), "{err:?}");
+    assert!(matches!(err, GenApiError::Range { .. }), "{err:?}");
     nodemap.set_integer("OffsetX", 24, &io).expect("16 + 8");
     assert_eq!(io.writes(), [(0x100, be32(24))]);
 }
@@ -548,7 +551,10 @@ fn float_dynamic_bounds_bind_the_write_and_the_reported_range() {
         let err = nodemap
             .set_float("ExposureTime", refused, &io)
             .expect_err("outside [12.5, 30000]");
-        assert!(matches!(err, GenApiError::Range(_)), "{refused}: {err:?}");
+        assert!(
+            matches!(err, GenApiError::Range { .. }),
+            "{refused}: {err:?}"
+        );
     }
     assert!(io.writes().is_empty(), "{:?}", io.writes());
     nodemap
@@ -679,7 +685,10 @@ fn a_floating_integer_holds_what_is_written_within_its_limits() {
         let err = nodemap
             .set_integer("Index", refused, &io)
             .expect_err("outside the restriction parameters");
-        assert!(matches!(err, GenApiError::Range(_)), "{refused}: {err:?}");
+        assert!(
+            matches!(err, GenApiError::Range { .. }),
+            "{refused}: {err:?}"
+        );
     }
     assert_eq!(nodemap.get_integer("Index", &io).expect("unchanged"), 4);
     // A floating value lives in the nodemap, not in the device: invalidation

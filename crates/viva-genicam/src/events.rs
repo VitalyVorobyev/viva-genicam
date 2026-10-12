@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use tracing::{debug, info, warn};
-use viva_gige::gvcp::consts as gvcp_consts;
-use viva_gige::message::{EventPacket, EventSocket};
+use tracing::{debug, info};
+use viva_gige::consts as gvcp_consts;
+use viva_gige::{EventPacket, EventSocket};
 
 use crate::GenicamError;
-use crate::time::TimeSync;
+use viva_gige::TimeSync;
 
 /// Public representation of a GigE Vision event.
 ///
@@ -28,8 +28,11 @@ pub struct Event {
     pub block_id: u64,
     /// Device timestamp associated with the event (ticks).
     pub ts_dev: u64,
-    /// Host timestamp mapped from the device ticks when synchronisation is available.
-    pub ts_host: SystemTime,
+    /// Host time the device timestamp maps to: `None` until the camera's
+    /// clock is fitted ([`Camera::time_calibrate`](crate::Camera::time_calibrate)),
+    /// as for a frame. Never the time the event arrived, passed off as the
+    /// device's (backlog API-20).
+    pub ts_host: Option<SystemTime>,
     /// Event data following the event header; empty for an `EVENT_CMD`.
     pub data: Bytes,
     /// The whole event as the device sent it, header included: what the
@@ -54,7 +57,7 @@ impl EventStream {
             .socket
             .recv()
             .await
-            .map_err(|err| GenicamError::transport(format!("gvcp message recv: {err}")))?;
+            .map_err(crate::error::network("receive a GVCP event"))?;
         debug!(
             event_id = packet.event_id,
             ts_dev = packet.timestamp_dev,
@@ -67,21 +70,12 @@ impl EventStream {
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, GenicamError> {
         self.socket
             .local_addr()
-            .map_err(|err| GenicamError::transport(format!("gvcp local addr: {err}")))
+            .map_err(crate::error::network("read the event socket's address"))
     }
 
     fn map_packet(packet: EventPacket, sync: Option<Arc<TimeSync>>) -> Event {
-        let ts_host = match sync {
-            Some(sync) if sync.len() > 1 => sync
-                .to_host_time(packet.timestamp_dev)
-                .unwrap_or_else(SystemTime::now),
-            Some(sync) => {
-                warn!("insufficient time sync samples; using current system time");
-                let _ = sync; // keep `sync` alive for future samples
-                SystemTime::now()
-            }
-            None => SystemTime::now(),
-        };
+        // A host time only from a fitted clock, as a frame's (DOC-11).
+        let ts_host = sync.and_then(|sync| sync.to_host_time(packet.timestamp_dev));
         Event {
             id: packet.event_id,
             stream_channel: packet.stream_channel,
@@ -103,7 +97,7 @@ pub(crate) fn configure_message_channel_raw<T: crate::genapi::RegisterIo>(
     let addr = gvcp_consts::MESSAGE_DESTINATION_ADDRESS;
     transport
         .write(addr, &ip.octets())
-        .map_err(|err| GenicamError::transport(format!("write message addr: {err}")))?;
+        .map_err(GenicamError::from)?;
     // GevMCP is 32-bit with the port in the low half; a bare `u16` write puts
     // it in the high half.
     transport
@@ -111,7 +105,7 @@ pub(crate) fn configure_message_channel_raw<T: crate::genapi::RegisterIo>(
             gvcp_consts::MESSAGE_DESTINATION_PORT,
             &u32::from(port).to_be_bytes(),
         )
-        .map_err(|err| GenicamError::transport(format!("write message port: {err}")))?;
+        .map_err(GenicamError::from)?;
     info!(%ip, port, "configured message channel via raw registers");
     Ok(())
 }
@@ -130,7 +124,7 @@ pub(crate) fn configure_message_channel_raw<T: crate::genapi::RegisterIo>(
 pub(crate) async fn bind_socket(ip: IpAddr, port: u16) -> Result<EventSocket, GenicamError> {
     EventSocket::bind(ip, port)
         .await
-        .map_err(|err| GenicamError::transport(format!("bind event socket: {err}")))
+        .map_err(crate::error::network("bind the event socket"))
 }
 
 #[cfg(test)]
@@ -155,5 +149,47 @@ mod tests {
         assert_eq!(event.data, packet.payload);
         assert_eq!((event.stream_channel, event.block_id), (3, 9));
         assert_eq!(event.raw, packet.raw);
+    }
+
+    fn packet(timestamp_dev: u64) -> EventPacket {
+        EventPacket {
+            src: SocketAddr::from(([127, 0, 0, 1], 4000)),
+            event_id: 0x9001,
+            timestamp_dev,
+            stream_channel: 0,
+            block_id: 1,
+            payload: Bytes::new(),
+            raw: Bytes::new(),
+        }
+    }
+
+    /// API-20: without a fitted clock an event has no host time. It used to
+    /// get the time it arrived, passed off as the device's.
+    #[test]
+    fn an_event_has_no_host_time_without_a_fitted_clock() {
+        assert_eq!(EventStream::map_packet(packet(42), None).ts_host, None);
+
+        let mut one_sample = TimeSync::new();
+        one_sample.update(10, std::time::Instant::now());
+        assert_eq!(
+            EventStream::map_packet(packet(42), Some(Arc::new(one_sample))).ts_host,
+            None
+        );
+    }
+
+    /// With a fitted clock, the host time is the fit's mapping of the
+    /// event's ticks.
+    #[test]
+    fn an_event_maps_its_ticks_through_a_fitted_clock() {
+        let mut sync = TimeSync::new();
+        let start = std::time::Instant::now();
+        for (ticks, ms) in [(0u64, 0u64), (1_000_000, 1), (2_000_000, 2)] {
+            sync.update(ticks, start + std::time::Duration::from_millis(ms));
+        }
+        sync.fit(Some(1e9));
+        let expected = sync.to_host_time(5_000_000);
+        assert!(expected.is_some());
+        let event = EventStream::map_packet(packet(5_000_000), Some(Arc::new(sync)));
+        assert_eq!(event.ts_host, expected);
     }
 }

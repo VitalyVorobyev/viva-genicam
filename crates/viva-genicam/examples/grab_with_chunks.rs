@@ -1,3 +1,5 @@
+//! Grab frames with chunk data on and read the chunks through the camera's XML.
+
 use std::env;
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -7,7 +9,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 use viva_genicam::genapi::NodeMap;
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::gige::nic::IfaceSelector;
+use viva_genicam::gige::IfaceSelector;
 use viva_genicam::sfnc;
 use viva_genicam::{Camera, ChunkConfig, Frame, GenicamError, GigeRegisterIo, StreamOptions};
 use viva_genicam::{StreamStats, pfnc::PixelFormat};
@@ -86,7 +88,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let mut dev = control.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     })

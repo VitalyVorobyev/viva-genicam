@@ -2,6 +2,9 @@
 //! `save`/`load`, raw registers, `action`, and the USB3 Vision `execute` and
 //! `bench` — against the in-process fake cameras.
 //!
+//! A unit-test module rather than an integration test: the commands are the
+//! crate's internals, and its only public API is [`crate::run`] (ADR-0030).
+//!
 //! What a command writes is checked in the fake's own state, past the
 //! protocol; what it reads, against the fake's own constants.
 
@@ -9,16 +12,16 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use viva_camctl::{cmd_action, cmd_execute, cmd_inspect, cmd_registers, cmd_usb};
+use crate::{cmd_action, cmd_execute, cmd_inspect, cmd_registers, cmd_usb};
 use viva_fake_gige::FakeCamera;
-use viva_fake_gige::registers::{HEARTBEAT_TIMEOUT, REG_BLACK_LEVEL, REG_WIDTH};
 use viva_fake_gige::{FAKE_DEVICE_KEY, FAKE_GROUP_KEY, FAKE_GROUP_MASK};
+use viva_fake_gige::{REG_BLACK_LEVEL, REG_WIDTH};
 use viva_fake_u3v::FakeU3vTransport;
-use viva_genicam::gige::action::ActionParams;
-use viva_genicam::gige::gvcp::GigeDevice;
+use viva_genicam::gige::ActionParams;
+use viva_genicam::gige::GigeDevice;
+use viva_genicam::gige::consts::HEARTBEAT_TIMEOUT;
 use viva_genicam::gige::{DeviceInfo, GVCP_PORT};
 use viva_genicam::{Camera, GigeRegisterIo, U3vRegisterIo, connect_gige, open_u3v_device};
-use viva_u3v::device::U3vDevice;
 
 /// One fake on UDP 3956 at a time.
 static PORT: Mutex<()> = Mutex::new(());
@@ -207,7 +210,7 @@ fn save_and_load_go_through_the_command_line() {
         camera.set("Width", "320").unwrap();
     }
     assert_eq!(
-        viva_camctl::run(["viva-camctl", "save", "--ip", "127.0.0.1", "--out", path]),
+        crate::run(["viva-camctl", "save", "--ip", "127.0.0.1", "--out", path]),
         0
     );
     let text = std::fs::read_to_string(&file).unwrap();
@@ -217,14 +220,14 @@ fn save_and_load_go_through_the_command_line() {
         camera.set("Width", "640").unwrap();
     }
     assert_eq!(
-        viva_camctl::run(["viva-camctl", "load", "--ip", "127.0.0.1", "--file", path]),
+        crate::run(["viva-camctl", "load", "--ip", "127.0.0.1", "--file", path]),
         0
     );
     assert_eq!(fake.peek_word(REG_WIDTH), 320);
 
     std::fs::write(&file, "NoSuchFeature\t1\nWidth\t400\n").unwrap();
     assert_eq!(
-        viva_camctl::run(["viva-camctl", "load", "--ip", "127.0.0.1", "--file", path]),
+        crate::run(["viva-camctl", "load", "--ip", "127.0.0.1", "--file", path]),
         1,
         "a value that could not be written fails the command"
     );
@@ -292,8 +295,8 @@ fn usb_camera() -> (
     Camera<U3vRegisterIo<FakeU3vTransport>>,
 ) {
     let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
-    let device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None)
-        .expect("open the fake USB3 Vision device");
+    let device =
+        viva_fake_u3v::open(Arc::clone(&transport)).expect("open the fake USB3 Vision device");
     let (camera, _xml) = open_u3v_device(device).expect("open the camera");
     (transport, camera)
 }
@@ -301,7 +304,7 @@ fn usb_camera() -> (
 #[test]
 fn usb3_vision_registers_are_little_endian() {
     let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
-    let mut device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None).unwrap();
+    let mut device = viva_fake_u3v::open(Arc::clone(&transport)).unwrap();
     let read =
         cmd_registers::read_usb(&mut device, viva_fake_u3v::registers::REG_WIDTH, 4).expect("read");
     let shown = cmd_registers::RegisterRead::new(0, &read, cmd_registers::WordOrder::Little);
@@ -340,8 +343,8 @@ fn usb3_vision_executes_and_benchmarks() {
 
 #[test]
 fn every_new_command_parses_with_either_transport() {
+    use crate::cli::Cli;
     use clap::Parser;
-    use viva_camctl::cli::Cli;
     for args in [
         &[
             "viva-camctl",

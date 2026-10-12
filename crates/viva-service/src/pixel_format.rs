@@ -1,25 +1,26 @@
 //! Sizing a camera frame from its PFNC pixel format.
 //!
-//! The wire name of a format is `viva_zenoh_api::PixelFormat::from`, one table
-//! shared with Viva Studio.
+//! The format itself is `viva-pfnc`'s; the Zenoh wire carries it by name in
+//! `ImageMeta` and by a one-byte code in the frame header.
 
 use viva_genicam::pfnc;
 
 /// How many payload bytes a frame of this geometry should carry, if we can say.
 ///
-/// Sized from the **PFNC** code, never from the Zenoh projection. The wire
-/// enum collapses every format it cannot name down to `Unknown`, and
-/// `viva_zenoh_api::PixelFormat::Unknown.bytes_per_pixel()` answers `1.0` —
-/// so a `Coord3D_ABC32f` profile used to size at one twelfth of itself and be
-/// trimmed to that, published as valid with a single warning and silence
-/// afterwards (backlog `DC-01`). The camera's own format is the authority here;
-/// what the bridge can name is a separate question, and a narrower one.
+/// Sized from the **PFNC** code. The wire's own format enum, gone since
+/// (ADR-0030), collapsed every format it could not name to `Unknown`, sized
+/// at one byte a pixel — so a `Coord3D_ABC32f` profile used to size at one
+/// twelfth of itself and be trimmed to that (backlog `DC-01`).
 ///
 /// `None` means the frame cannot be length-checked at all — a packed format, or
 /// an event stream whose leader fields are not image geometry. Callers must
 /// publish such a payload unmodified: an expected length we cannot compute must
 /// not become a length we enforce.
-pub fn expected_payload_len(pf: pfnc::PixelFormat, width: u32, height: u32) -> Option<usize> {
+pub(crate) fn expected_payload_len(
+    pf: pfnc::PixelFormat,
+    width: u32,
+    height: u32,
+) -> Option<usize> {
     if matches!(
         pf,
         pfnc::PixelFormat::VendorLucidEvsEvt30 | pfnc::PixelFormat::VendorLucidEvsEvt21
@@ -33,15 +34,13 @@ pub fn expected_payload_len(pf: pfnc::PixelFormat, width: u32, height: u32) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viva_zenoh_api::PixelFormat as ZenohPixelFormat;
 
+    /// A format the frame header has no code for is still sized as itself:
+    /// twelve bytes a pixel, not the one byte `Unknown` would suggest.
     #[test]
-    fn a_3d_profile_is_sized_from_its_pfnc_code_not_the_zenoh_projection() {
+    fn a_3d_profile_is_sized_from_its_pfnc_code() {
         let pf = pfnc::PixelFormat::Coord3DABC32f;
-        // The bridge cannot name it...
-        assert_eq!(ZenohPixelFormat::from(pf), ZenohPixelFormat::Unknown);
-        assert_eq!(ZenohPixelFormat::Unknown.bytes_per_pixel(), 1.0);
-        // ...but it is still twelve bytes per pixel, not one.
+        assert_eq!(viva_zenoh_api::frame_header::pixel_format_to_u8(pf), 0);
         assert_eq!(expected_payload_len(pf, 1280, 1), Some(15_360));
     }
 

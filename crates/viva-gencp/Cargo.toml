@@ -21,3 +21,6 @@ bitflags = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+
+[lints]
+workspace = true

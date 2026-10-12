@@ -23,13 +23,13 @@ use std::time::{Duration, Instant};
 use super::resend::{ResendConfig, ResendRequest};
 use super::stats::{IgnoredPacket, StreamStatsAccumulator};
 use tracing::{debug, warn};
-use viva_gige::nic::{self, DEFAULT_RCVBUF_BYTES, RecvBuffer};
+use viva_gige::{DEFAULT_RCVBUF_BYTES, RecvBuffer};
 
 use super::assembly::{
     AssembledBlock, Assembler, AssemblyConfig, DEFAULT_BLOCK_TIMEOUT, payload_stride,
 };
 use super::{GenericStreamBlock, classify_completed_block};
-use viva_gige::gvsp::GVSP_HEADER_SIZE;
+use viva_gige::GVSP_HEADER_SIZE;
 
 /// How long one socket read waits. It is the resolution of every timer the
 /// thread runs: block timeouts, the silence warning, and how soon it sees a
@@ -43,10 +43,11 @@ pub(crate) const DELIVERY_CAPACITY: usize = 4;
 const DATAGRAM_MAX: usize = 65_536;
 
 /// The end of a stream as the queue reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum End {
-    /// The receive thread failed; the message is reported once.
-    Failed(String),
+    /// The receive thread failed, doing what, with which socket error; reported
+    /// once.
+    Failed(&'static str, std::io::Error),
     /// The receive thread stopped.
     Finished,
 }
@@ -55,7 +56,7 @@ enum End {
 #[derive(Debug)]
 pub(crate) enum Popped<T> {
     Item(T),
-    Failed(String),
+    Failed(&'static str, std::io::Error),
     Finished,
     /// Nothing within the time allowed.
     Empty,
@@ -119,11 +120,11 @@ impl<T> DeliveryQueue<T> {
 
     /// Record that the stream failed. Items already queued are still handed
     /// out first.
-    pub(crate) fn fail(&self, message: String) {
+    pub(crate) fn fail(&self, during: &'static str, err: std::io::Error) {
         {
             let mut state = self.lock();
             if state.end.is_none() {
-                state.end = Some(End::Failed(message));
+                state.end = Some(End::Failed(during, err));
             }
         }
         self.wake();
@@ -144,14 +145,16 @@ impl<T> DeliveryQueue<T> {
         if let Some(item) = state.items.pop_front() {
             return Popped::Item(item);
         }
-        match &state.end {
-            Some(End::Failed(message)) => {
-                let message = message.clone();
+        match state.end.take() {
+            Some(End::Failed(during, err)) => {
                 // Report the failure once; after that the stream has ended.
                 state.end = Some(End::Finished);
-                Popped::Failed(message)
+                Popped::Failed(during, err)
             }
-            Some(End::Finished) => Popped::Finished,
+            Some(End::Finished) => {
+                state.end = Some(End::Finished);
+                Popped::Finished
+            }
             None => Popped::Empty,
         }
     }
@@ -383,7 +386,7 @@ impl RecvBufferSizer {
             return;
         }
         self.requested = target;
-        match nic::set_recv_buffer(socket, target) {
+        match viva_gige::set_recv_buffer(socket, target) {
             Ok(granted) => self.report(granted),
             Err(err) => {
                 debug!(error = %err, requested = target, "could not size the GVSP receive buffer")
@@ -423,7 +426,7 @@ pub(crate) fn spawn(
 ) -> std::io::Result<JoinHandle<()>> {
     // Wait for readiness, then read without blocking: not a receive timeout,
     // whose expiry Windows documents as leaving the socket indeterminate —
-    // a datagram arriving as it fires can be lost (`nic::wait_readable`).
+    // a datagram arriving as it fires can be lost (`viva_gige::wait_readable`).
     socket.set_nonblocking(true)?;
     thread::Builder::new()
         .name("viva-gvsp-rx".into())
@@ -453,7 +456,7 @@ fn run(
     let mut chunk_layout_warned = false;
 
     while !shared.stop.load(Ordering::Acquire) {
-        let received = match nic::wait_readable(&socket, TICK) {
+        let received = match viva_gige::wait_readable(&socket, TICK) {
             Ok(true) => socket.recv_from(&mut buf),
             Ok(false) => Err(ErrorKind::WouldBlock.into()),
             Err(err) => Err(err),
@@ -506,9 +509,7 @@ fn run(
             }
             Err(err) => {
                 warn!(error = %err, "GVSP socket receive failed; the stream has ended");
-                shared
-                    .queue
-                    .fail(format!("stream socket receive failed: {err}"));
+                shared.queue.fail("receive from the stream socket", err);
                 return;
             }
         }
@@ -569,7 +570,7 @@ impl ResendSender {
         let id = self.request_id;
         // Request id 0 is not used on GVCP.
         self.request_id = self.request_id.checked_add(1).unwrap_or(1);
-        let bytes = viva_gige::gvcp::encode_packet_resend(
+        let bytes = viva_gige::encode_packet_resend(
             id,
             channel,
             request.block_id,
@@ -841,10 +842,10 @@ mod tests {
     fn a_failure_is_reported_once_after_the_queued_items() {
         let queue = DeliveryQueue::new(4);
         queue.push(7);
-        queue.fail("boom".into());
+        queue.fail("boom", std::io::Error::other("boom"));
         queue.finish();
         assert!(matches!(queue.try_pop(), Popped::Item(7)));
-        assert!(matches!(queue.try_pop(), Popped::Failed(m) if m == "boom"));
+        assert!(matches!(queue.try_pop(), Popped::Failed("boom", _)));
         assert!(matches!(queue.try_pop(), Popped::Finished));
         assert!(matches!(queue.try_pop(), Popped::Finished));
     }

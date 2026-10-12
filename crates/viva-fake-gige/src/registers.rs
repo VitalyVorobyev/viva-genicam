@@ -75,83 +75,30 @@ use std::time::{Duration, Instant};
 
 use crate::gvcp_server::FAKE_MAC;
 
-/// Bootstrap register addresses (GigE Vision specification).
-pub const VERSION: u64 = 0x0000;
-pub const DEVICE_MODE: u64 = 0x0004;
-/// Top two MAC bytes, right-aligned in the 32-bit register.
-pub const DEVICE_MAC_HIGH: u64 = 0x0008;
-/// Bottom four MAC bytes.
-pub const DEVICE_MAC_LOW: u64 = 0x000C;
-pub const SUPPORTED_IP_CONFIG: u64 = 0x0010;
-pub const CURRENT_IP_CONFIG: u64 = 0x0014;
-pub const CURRENT_IP_ADDRESS: u64 = 0x0024;
-pub const CURRENT_SUBNET_MASK: u64 = 0x0034;
-pub const CURRENT_DEFAULT_GATEWAY: u64 = 0x0044;
-/// `GevNumberOfMessageChannels` — the fake implements one.
-pub const NUMBER_OF_MESSAGE_CHANNELS: u64 = 0x0900;
-/// `GevNumberOfStreamChannels` — the fake implements one.
-pub const NUMBER_OF_STREAM_CHANNELS: u64 = 0x0904;
+// Bootstrap register addresses and bits are GigE Vision's vocabulary, imported
+// rather than copied (ADR-0030). What each register holds, and how the fake
+// answers it, is still this file's own reading of the specification.
+pub(crate) use viva_gige::consts::{
+    CAPABILITY_CCP_APPLICATION_PORT_IP, CAPABILITY_CONCATENATION, CAPABILITY_PACKET_RESEND,
+    CAPABILITY_PENDING_ACK, CAPABILITY_WRITEMEM, CCP_CONTROL, CCP_EXCLUSIVE,
+    CONFIGURATION_PENDING_ACK_ENABLE, CONTROL_CHANNEL_PRIVILEGE, CURRENT_DEFAULT_GATEWAY,
+    CURRENT_IP_ADDRESS, CURRENT_IP_CONFIG, CURRENT_SUBNET_MASK, DEVICE_MAC_ADDRESS_HIGH,
+    DEVICE_MAC_ADDRESS_LOW, DEVICE_MODE, FIRST_URL, GVCP_CAPABILITY, GVCP_CONFIGURATION,
+    HEARTBEAT_TIMEOUT, MESSAGE_DESTINATION_ADDRESS, MESSAGE_DESTINATION_PORT,
+    NUMBER_OF_MESSAGE_CHANNELS, NUMBER_OF_STREAM_CHANNELS, PERSISTENT_DEFAULT_GATEWAY,
+    PERSISTENT_IP_ADDRESS, PERSISTENT_SUBNET_MASK, PRIMARY_APPLICATION_IP,
+    PRIMARY_APPLICATION_PORT, SCPS_DO_NOT_FRAGMENT, SCPS_FIRE_TEST_PACKET, STREAM_CHANNEL_BASE,
+    STREAM_CHANNEL_STRIDE, STREAM_DESTINATION_ADDRESS, STREAM_DESTINATION_PORT,
+    STREAM_PACKET_DELAY, STREAM_PACKET_SIZE, STREAM_PACKET_SIZE_MASK, SUPPORTED_IP_CONFIG,
+    TIMESTAMP_TICK_FREQUENCY_HIGH, TIMESTAMP_TICK_FREQUENCY_LOW, URL_LEN, VERSION,
+};
 
 /// `DeviceMode`: big-endian (bit 31), character set 1 (UTF-8), class
 /// Transmitter (0).
 pub const DEVICE_MODE_VALUE: u32 = 0x8000_0001;
-pub const PERSISTENT_IP_ADDRESS: u64 = 0x064C;
-pub const PERSISTENT_SUBNET_MASK: u64 = 0x065C;
-pub const PERSISTENT_DEFAULT_GATEWAY: u64 = 0x066C;
-pub const CCP: u64 = 0x0a00;
-/// `GVCP Capability`: which optional commands the device implements.
-pub const GVCP_CAPABILITY: u64 = 0x0934;
-/// Capability bit 29, counted from the MSB as bit 0: `PACKETRESEND_CMD`
-/// supported. Mask from Wireshark's `hf_gvcp_capability_packetresend`.
-pub const CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004;
-/// Capability bit 30: `WRITEMEM_CMD` supported.
-pub const CAPABILITY_WRITEMEM: u32 = 0x0000_0002;
-/// Capability bit 31: several registers in one READREG/WRITEREG.
-pub const CAPABILITY_CONCATENATION: u32 = 0x0000_0001;
-/// Capability bit 26: the device can answer a slow command with `PENDING_ACK`.
-/// Mask from Wireshark's `hf_gvcp_capability_pending`.
-pub const CAPABILITY_PENDING_ACK: u32 = 0x0000_0020;
-/// `GVCP Configuration`: what the controller has switched on.
-pub const GVCP_CONFIGURATION: u64 = 0x0954;
-/// Configuration bit 30: `PENDING_ACK` enabled. A device sends one only once
-/// the controller has set it. Mask from Wireshark's
-/// `hf_gvcp_configuration_pending_ack_enable`.
-pub const CONFIGURATION_PENDING_ACK_ENABLE: u32 = 0x0000_0002;
-/// Capability bit 4: the primary application's port and IP are readable at
-/// [`PRIMARY_APPLICATION_PORT`] and [`PRIMARY_APPLICATION_IP`]. Mask from
-/// Wireshark's `hf_gvcp_capability_ccp_application_portip`.
-pub const CAPABILITY_CCP_APPLICATION_PORT_IP: u32 = 0x0800_0000;
-/// The UDP port of the application holding control, in the low half; 0 while
-/// nobody holds it.
-pub const PRIMARY_APPLICATION_PORT: u64 = 0x0A04;
-/// The IPv4 address of the application holding control; 0 while nobody does.
-pub const PRIMARY_APPLICATION_IP: u64 = 0x0A14;
-/// CCP bit 31: exclusive access. No other application may read or write.
-pub const CCP_EXCLUSIVE_ACCESS: u32 = 0x0000_0001;
-/// CCP bit 30: control access. Other applications may still read.
-pub const CCP_CONTROL_ACCESS: u32 = 0x0000_0002;
-pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
-/// `GevTimestampTickFrequencyHigh`: upper 32 bits of the tick frequency.
-pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
-/// `GevTimestampTickFrequencyLow`: lower 32 bits of the tick frequency.
-pub const TIMESTAMP_TICK_FREQUENCY_LOW: u64 = 0x0940;
+
 /// The fake's timestamp clock: nanoseconds, so 1 GHz.
 pub const TICK_FREQUENCY_HZ: u64 = 1_000_000_000;
-/// Message channel destination port (`GevMCP`), port in the low 16 bits.
-pub const MESSAGE_CHANNEL_PORT: u64 = 0x0b00;
-/// Message channel destination address (`GevMCDA`).
-pub const MESSAGE_CHANNEL_ADDRESS: u64 = 0x0b10;
-pub const STREAM_CHANNEL_BASE: u64 = 0x0d00;
-/// Address stride between GigE Vision stream channel register blocks.
-pub const STREAM_CHANNEL_STRIDE: u64 = 0x40;
-pub const SCP_HOST_PORT: u64 = 0x00;
-pub const SCP_PACKET_SIZE: u64 = 0x04;
-pub const SCP_PACKET_DELAY: u64 = 0x08;
-pub const SCP_DEST_ADDR: u64 = 0x18;
-
-/// First XML URL register address and length.
-pub const FIRST_URL_REG: u64 = 0x0200;
-pub const URL_REG_LEN: usize = 512;
 
 /// Address where the actual XML blob is stored in the register space.
 pub const XML_BLOB_BASE: u64 = 0x1_0000;
@@ -1552,13 +1499,6 @@ const USER_SET_REGISTERS: &[u64] = &[
     REG_GAIN_AUTO,
 ];
 
-/// `GevSCPSPacketSize` bit 31: send one test packet of the requested size.
-pub const SCPS_FIRE_TEST_PACKET: u32 = 0x8000_0000;
-/// `GevSCPSPacketSize` bit 30: set do-not-fragment on transmitted packets.
-pub const SCPS_DO_NOT_FRAGMENT: u32 = 0x4000_0000;
-/// The bits of `GevSCPSPacketSize` that hold the size itself.
-pub const STREAM_PACKET_SIZE_MASK: u32 = 0xFFFF;
-
 /// Compress the GenApi XML into a single-entry ZIP archive (deflate).
 fn zip_xml_blob(xml: &[u8]) -> Vec<u8> {
     use std::io::Write;
@@ -1596,13 +1536,13 @@ impl RegisterMap {
         regs.insert(VERSION, 0x0002_0000u32.to_be_bytes().to_vec()); // GEV 2.0
         regs.insert(DEVICE_MODE, DEVICE_MODE_VALUE.to_be_bytes().to_vec());
         regs.insert(
-            DEVICE_MAC_HIGH,
+            DEVICE_MAC_ADDRESS_HIGH,
             u32::from(u16::from_be_bytes([FAKE_MAC[0], FAKE_MAC[1]]))
                 .to_be_bytes()
                 .to_vec(),
         );
         regs.insert(
-            DEVICE_MAC_LOW,
+            DEVICE_MAC_ADDRESS_LOW,
             u32::from_be_bytes([FAKE_MAC[2], FAKE_MAC[3], FAKE_MAC[4], FAKE_MAC[5]])
                 .to_be_bytes()
                 .to_vec(),
@@ -1614,7 +1554,7 @@ impl RegisterMap {
         regs.insert(CURRENT_DEFAULT_GATEWAY, vec![0, 0, 0, 0]);
         regs.insert(NUMBER_OF_MESSAGE_CHANNELS, 1u32.to_be_bytes().to_vec());
         regs.insert(NUMBER_OF_STREAM_CHANNELS, 1u32.to_be_bytes().to_vec());
-        regs.insert(CCP, vec![0, 0, 0, 0]);
+        regs.insert(CONTROL_CHANNEL_PRIVILEGE, vec![0, 0, 0, 0]);
         regs.insert(
             GVCP_CAPABILITY,
             (CAPABILITY_CCP_APPLICATION_PORT_IP
@@ -1635,8 +1575,8 @@ impl RegisterMap {
             TIMESTAMP_TICK_FREQUENCY_LOW,
             (TICK_FREQUENCY_HZ as u32).to_be_bytes().to_vec(),
         );
-        regs.insert(MESSAGE_CHANNEL_PORT, 0u32.to_be_bytes().to_vec());
-        regs.insert(MESSAGE_CHANNEL_ADDRESS, vec![0, 0, 0, 0]);
+        regs.insert(MESSAGE_DESTINATION_PORT, 0u32.to_be_bytes().to_vec());
+        regs.insert(MESSAGE_DESTINATION_ADDRESS, vec![0, 0, 0, 0]);
 
         // IP configuration: DHCP + persistent + LLA = 0x07
         regs.insert(CURRENT_IP_CONFIG, 0x0000_0005u32.to_be_bytes().to_vec());
@@ -1646,17 +1586,17 @@ impl RegisterMap {
 
         // Stream channel 0
         let base = STREAM_CHANNEL_BASE;
-        regs.insert(base + SCP_HOST_PORT, vec![0, 0, 0, 0]);
-        regs.insert(base + SCP_PACKET_SIZE, 1500u32.to_be_bytes().to_vec());
+        regs.insert(base + STREAM_DESTINATION_PORT, vec![0, 0, 0, 0]);
+        regs.insert(base + STREAM_PACKET_SIZE, 1500u32.to_be_bytes().to_vec());
         // A second channel, so a `<pIndex>` term that is ignored is visible:
         // its packet size differs from channel 0's.
         regs.insert(
-            base + STREAM_CHANNEL_STRIDE + SCP_PACKET_SIZE,
+            base + STREAM_CHANNEL_STRIDE + STREAM_PACKET_SIZE,
             9000u32.to_be_bytes().to_vec(),
         );
         regs.insert(REG_STREAM_CHANNEL_SELECTOR, 0u32.to_be_bytes().to_vec());
-        regs.insert(base + SCP_PACKET_DELAY, vec![0, 0, 0, 0]);
-        regs.insert(base + SCP_DEST_ADDR, vec![0, 0, 0, 0]);
+        regs.insert(base + STREAM_PACKET_DELAY, vec![0, 0, 0, 0]);
+        regs.insert(base + STREAM_DESTINATION_ADDRESS, vec![0, 0, 0, 0]);
 
         // ── Device info (read-only strings) ─────────────────────────────
         regs.insert(REG_DEVICE_MODEL_NAME, pad_string("VivaCam Fake", 32));
@@ -1767,10 +1707,10 @@ impl RegisterMap {
             XML_BLOB_BASE,
             xml_blob.len()
         );
-        let mut url_bytes = vec![0u8; URL_REG_LEN];
+        let mut url_bytes = vec![0u8; URL_LEN];
         let src = url.as_bytes();
         url_bytes[..src.len()].copy_from_slice(src);
-        regs.insert(FIRST_URL_REG, url_bytes);
+        regs.insert(FIRST_URL, url_bytes);
 
         Self {
             regs,
@@ -1839,7 +1779,7 @@ impl RegisterMap {
         // configured with a cap never reports a size above it.
         let current = self.stream_packet_size();
         if current > max {
-            self.write(STREAM_CHANNEL_BASE + SCP_PACKET_SIZE, &max.to_be_bytes());
+            self.write(STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE, &max.to_be_bytes());
         }
     }
 
@@ -1873,7 +1813,8 @@ impl RegisterMap {
     /// heartbeat expires: CCP reads 0 and nobody is the controller.
     pub fn revoke_control(&mut self) {
         self.controller = None;
-        self.regs.insert(CCP, 0u32.to_be_bytes().to_vec());
+        self.regs
+            .insert(CONTROL_CHANNEL_PRIVILEGE, 0u32.to_be_bytes().to_vec());
     }
 
     /// The application holding control privilege, if any.
@@ -1893,7 +1834,7 @@ impl RegisterMap {
             None => true,
             Some(controller) if controller == peer => true,
             Some(_) if write => false,
-            Some(_) => self.read_u32_be(CCP) & CCP_EXCLUSIVE_ACCESS == 0,
+            Some(_) => self.read_u32_be(CONTROL_CHANNEL_PRIVILEGE) & CCP_EXCLUSIVE == 0,
         }
     }
 
@@ -1905,10 +1846,11 @@ impl RegisterMap {
         if self.controller.is_some_and(|controller| controller != peer) {
             return false;
         }
-        if value & (CCP_CONTROL_ACCESS | CCP_EXCLUSIVE_ACCESS) != 0 {
+        if value & (CCP_CONTROL | CCP_EXCLUSIVE) != 0 {
             self.controller = Some(peer);
             self.last_register_command = Instant::now();
-            self.regs.insert(CCP, value.to_be_bytes().to_vec());
+            self.regs
+                .insert(CONTROL_CHANNEL_PRIVILEGE, value.to_be_bytes().to_vec());
         } else {
             self.revoke_control();
         }
@@ -1960,8 +1902,9 @@ impl RegisterMap {
         let high = u32::from(u16::from_be_bytes([mac[0], mac[1]]));
         let low = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
         self.regs
-            .insert(DEVICE_MAC_HIGH, high.to_be_bytes().to_vec());
-        self.regs.insert(DEVICE_MAC_LOW, low.to_be_bytes().to_vec());
+            .insert(DEVICE_MAC_ADDRESS_HIGH, high.to_be_bytes().to_vec());
+        self.regs
+            .insert(DEVICE_MAC_ADDRESS_LOW, low.to_be_bytes().to_vec());
     }
 
     /// Report `hz` as the timestamp tick frequency, the unit of `GevSCPD`.
@@ -2094,7 +2037,7 @@ impl RegisterMap {
         // the caller and stripped here.
         let stripped;
         let mut data = data;
-        if addr == STREAM_CHANNEL_BASE + SCP_PACKET_SIZE && data.len() >= 4 {
+        if addr == STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE && data.len() >= 4 {
             let raw = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             self.pending_test_packet =
                 (raw & SCPS_FIRE_TEST_PACKET != 0).then_some(raw & STREAM_PACKET_SIZE_MASK);
@@ -2109,7 +2052,7 @@ impl RegisterMap {
         let clamped;
         let data = match self.max_packet_size {
             Some(max)
-                if addr == STREAM_CHANNEL_BASE + SCP_PACKET_SIZE
+                if addr == STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE
                     && data.len() >= 4
                     && u32::from_be_bytes([data[0], data[1], data[2], data[3]]) > max =>
             {
@@ -2327,25 +2270,25 @@ impl RegisterMap {
 
     /// Stream destination IP address.
     pub fn stream_dest_ip(&self) -> Ipv4Addr {
-        let data = self.read(STREAM_CHANNEL_BASE + SCP_DEST_ADDR, 4);
+        let data = self.read(STREAM_CHANNEL_BASE + STREAM_DESTINATION_ADDRESS, 4);
         Ipv4Addr::new(data[0], data[1], data[2], data[3])
     }
 
     /// Stream destination port.
     pub fn stream_dest_port(&self) -> u16 {
-        let data = self.read(STREAM_CHANNEL_BASE + SCP_HOST_PORT, 4);
+        let data = self.read(STREAM_CHANNEL_BASE + STREAM_DESTINATION_PORT, 4);
         u16::from_be_bytes([data[2], data[3]])
     }
 
     /// Message channel destination address (`GevMCDA`).
     pub fn message_dest_ip(&self) -> Ipv4Addr {
-        let data = self.read(MESSAGE_CHANNEL_ADDRESS, 4);
+        let data = self.read(MESSAGE_DESTINATION_ADDRESS, 4);
         Ipv4Addr::new(data[0], data[1], data[2], data[3])
     }
 
     /// Message channel destination port (`GevMCP`), low 16 bits of the register.
     pub fn message_dest_port(&self) -> u16 {
-        let data = self.read(MESSAGE_CHANNEL_PORT, 4);
+        let data = self.read(MESSAGE_DESTINATION_PORT, 4);
         u16::from_be_bytes([data[2], data[3]])
     }
 
@@ -2366,13 +2309,13 @@ impl RegisterMap {
 
     /// Stream packet size.
     pub fn stream_packet_size(&self) -> u32 {
-        let data = self.read(STREAM_CHANNEL_BASE + SCP_PACKET_SIZE, 4);
+        let data = self.read(STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE, 4);
         u32::from_be_bytes([data[0], data[1], data[2], data[3]])
     }
 
     /// `GevSCPD`: the delay between stream packets, in timestamp ticks.
     pub fn stream_packet_delay_ticks(&self) -> u32 {
-        let data = self.read(STREAM_CHANNEL_BASE + SCP_PACKET_DELAY, 4);
+        let data = self.read(STREAM_CHANNEL_BASE + STREAM_PACKET_DELAY, 4);
         u32::from_be_bytes([data[0], data[1], data[2], data[3]])
     }
 
@@ -2498,8 +2441,8 @@ mod tests {
     #[test]
     fn the_bootstrap_mac_matches_the_discovery_mac() {
         let regs = map();
-        let high = regs.read(DEVICE_MAC_HIGH, 4);
-        let low = regs.read(DEVICE_MAC_LOW, 4);
+        let high = regs.read(DEVICE_MAC_ADDRESS_HIGH, 4);
+        let low = regs.read(DEVICE_MAC_ADDRESS_LOW, 4);
         assert_eq!(&high[..2], &[0, 0], "top two bytes are reserved");
         let mac = [high[2], high[3], low[0], low[1], low[2], low[3]];
         assert_eq!(mac, FAKE_MAC);
@@ -2510,8 +2453,8 @@ mod tests {
         let mut regs = map();
         let other = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
         regs.set_mac(other);
-        let high = regs.read(DEVICE_MAC_HIGH, 4);
-        let low = regs.read(DEVICE_MAC_LOW, 4);
+        let high = regs.read(DEVICE_MAC_ADDRESS_HIGH, 4);
+        let low = regs.read(DEVICE_MAC_ADDRESS_LOW, 4);
         assert_eq!(&high[..2], &[0, 0], "top two bytes are reserved");
         assert_eq!([high[2], high[3], low[0], low[1], low[2], low[3]], other);
     }
@@ -2570,7 +2513,7 @@ mod tests {
         let other: SocketAddr = "127.0.0.1:50002".parse().unwrap();
         let mut regs = map();
         assert!(regs.may_access(other, true), "nobody controls yet");
-        assert!(regs.write_ccp(owner, CCP_CONTROL_ACCESS));
+        assert!(regs.write_ccp(owner, CCP_CONTROL));
         assert_eq!(regs.controller(), Some(owner));
         assert_eq!(
             regs.read(PRIMARY_APPLICATION_PORT, 4),
@@ -2579,14 +2522,14 @@ mod tests {
         assert_eq!(regs.read(PRIMARY_APPLICATION_IP, 4), [127, 0, 0, 1]);
         assert!(regs.may_access(other, false));
         assert!(!regs.may_access(other, true));
-        assert!(!regs.write_ccp(other, CCP_CONTROL_ACCESS));
+        assert!(!regs.write_ccp(other, CCP_CONTROL));
         assert!(!regs.write_ccp(other, 0), "only the owner releases");
-        assert!(regs.write_ccp(owner, CCP_CONTROL_ACCESS | CCP_EXCLUSIVE_ACCESS));
+        assert!(regs.write_ccp(owner, CCP_CONTROL | CCP_EXCLUSIVE));
         assert!(!regs.may_access(other, false));
         assert!(regs.write_ccp(owner, 0));
         assert_eq!(regs.controller(), None);
         assert_eq!(regs.read(PRIMARY_APPLICATION_IP, 4), [0, 0, 0, 0]);
-        assert_eq!(regs.read(CCP, 4), vec![0, 0, 0, 0]);
+        assert_eq!(regs.read(CONTROL_CHANNEL_PRIVILEGE, 4), vec![0, 0, 0, 0]);
     }
 
     #[test]

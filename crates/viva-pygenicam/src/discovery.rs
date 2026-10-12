@@ -79,11 +79,11 @@ pub(crate) struct PyU3vDeviceInfo {
     manufacturer: Option<String>,
     #[pyo3(get)]
     model: Option<String>,
-    pub(crate) inner: viva_u3v::discovery::U3vDeviceInfo,
+    pub(crate) inner: viva_u3v::U3vDeviceInfo,
 }
 
-impl From<viva_u3v::discovery::U3vDeviceInfo> for PyU3vDeviceInfo {
-    fn from(info: viva_u3v::discovery::U3vDeviceInfo) -> Self {
+impl From<viva_u3v::U3vDeviceInfo> for PyU3vDeviceInfo {
+    fn from(info: viva_u3v::U3vDeviceInfo) -> Self {
         Self {
             bus: info.bus,
             address: info.address,
@@ -142,7 +142,7 @@ fn discover_gige(
 #[pyfunction]
 fn discover_u3v(py: Python<'_>) -> PyResult<Vec<PyU3vDeviceInfo>> {
     let devices = py
-        .detach(viva_u3v::discovery::discover)
+        .detach(viva_u3v::discover)
         .map_err(|e| transport_error(e.to_string()))?;
     Ok(devices.into_iter().map(PyU3vDeviceInfo::from).collect())
 }

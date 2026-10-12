@@ -1,3 +1,5 @@
+//! A register whose address another node supplies (`<pAddress>`), on an in-memory register map or (`--real`) a camera.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -55,7 +57,7 @@ fn run_mock() -> Result<()> {
     ]);
 
     println!("-- mock pAddress demo --");
-    print_indirect_nodes(nodemap.node("Gain"));
+    print_gain_address(&nodemap, &transport);
 
     let reg_addr = nodemap.get_integer("RegAddr", &transport)? as u64;
     let gain = nodemap.get_integer("Gain", &transport)?;
@@ -63,6 +65,7 @@ fn run_mock() -> Result<()> {
     println!("Gain[0x{reg_addr:04X}] -> {gain}");
 
     nodemap.set_integer("RegAddr", 0x3100, &transport)?;
+    print_gain_address(&nodemap, &transport);
     let reg_addr = nodemap.get_integer("RegAddr", &transport)? as u64;
     let gain = nodemap.get_integer("Gain", &transport)?;
     println!("RegAddr -> 0x{reg_addr:04X}");
@@ -96,7 +99,7 @@ fn run_real() -> Result<()> {
                 let mut dev = device.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     }))?;
@@ -165,20 +168,13 @@ fn collect_indirect_integers(model: &viva_genapi_xml::XmlModel) -> Vec<(String, 
     result
 }
 
-fn print_indirect_nodes(node: Option<&Node>) {
-    if let Some(Node::Integer(viva_genicam::genapi::IntegerNode {
-        addressing: Some(addressing),
-        ..
-    })) = node
-    {
-        let providers = addressing.referenced_nodes();
-        if !providers.is_empty() {
-            println!(
-                "Gain resolves its address through {} ({:?} bytes)",
-                providers.join(" + "),
-                addressing.byte_len()
-            );
-        }
+/// Where `Gain` is now: its `<pAddress>` reads `RegAddr`, so the address
+/// moves when `RegAddr` does. Resolved by name; how the XML spells the
+/// address is the node map's business.
+fn print_gain_address(nodemap: &NodeMap, io: &dyn RegisterIo) {
+    match nodemap.register_address("Gain", io) {
+        Ok((address, len)) => println!("Gain is {len} bytes at 0x{address:08X}"),
+        Err(err) => println!("Gain has no register of its own: {err}"),
     }
 }
 
@@ -203,9 +199,9 @@ impl RegisterIo for MockIo {
         let regs = self.regs.borrow();
         let data = regs
             .get(&addr)
-            .ok_or_else(|| GenApiError::Io(format!("read miss at 0x{addr:08X}")))?;
+            .ok_or_else(|| GenApiError::io(format!("read miss at 0x{addr:08X}")))?;
         if data.len() != len {
-            return Err(GenApiError::Io(format!(
+            return Err(GenApiError::io(format!(
                 "length mismatch at 0x{addr:08X}: expected {len}, have {}",
                 data.len()
             )));

@@ -9,9 +9,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
-use viva_fake_gige::gvsp::{
-    BlockSpec, Datagram, block_datagrams, chunk_payload, image_size, interleave,
-};
+use viva_fake_gige::{BlockSpec, Datagram, block_datagrams, chunk_payload, image_size, interleave};
 use viva_fake_gige::{MONO8, MONO12_PACKED, PacketScript, ScriptStep};
 use viva_genicam::StreamStats;
 use viva_genicam::{FrameStatus, FrameStream, GenicamError};
@@ -726,7 +724,7 @@ async fn a_range_the_camera_no_longer_holds_is_not_asked_for_again() {
     h.send(&[Datagram {
         block_id: 9,
         packet_id: 2,
-        kind: viva_fake_gige::gvsp::PacketKind::Payload,
+        kind: viva_fake_gige::PacketKind::Payload,
         bytes: vec![0x80, 0x0C, 0x00, 0x09, 0x03, 0x00, 0x00, 0x02],
     }]);
     // Four retry intervals: a stream still asking would have asked again.
@@ -783,7 +781,7 @@ fn foreign_source() -> UdpSocket {
     if let Ok(socket) = UdpSocket::bind("127.0.0.2:0") {
         return socket;
     }
-    let addr = viva_genicam::gige::nic::Iface::list()
+    let addr = viva_genicam::gige::Iface::list()
         .expect("interfaces")
         .iter()
         .flat_map(|iface| iface.all_ipv4().unwrap_or_default())
@@ -856,7 +854,7 @@ async fn a_leaders_line_padding_reaches_the_frame_and_its_conversion() {
 async fn an_image_with_chunks_arrives_as_its_image_and_its_chunks() {
     let mut h = Harness::new(576);
     let mut spec = BlockSpec::image(1, 64, 32, MONO8, 576);
-    spec.payload_type = viva_fake_gige::gvsp::PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK;
+    spec.payload_type = viva_fake_gige::PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK;
     let img = image(64 * 32, 4);
     let frame_id = 7u64.to_le_bytes();
     let info = [0, 0, 0, 64, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 8, 0];

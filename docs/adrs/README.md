@@ -31,7 +31,7 @@ of the record.
 | [0017](adr0017-studio-monorepo-two-workspaces.md) | Studio Monorepo with Two Cargo Workspaces | Accepted; CI trigger amended by 0024 |
 | [0018](adr0018-genapi-conformance-over-convenience.md) | GenApi Conformance over Convenient Approximations | Accepted |
 | [0019](adr0019-transport-conformance-and-spec-derived-fakes.md) | Transport Conformance and Spec-Derived Fakes | Accepted |
-| [0020](adr0020-per-transport-status-codes.md) | Per-Transport Status Codes over a Shared Table | Proposed |
+| [0020](adr0020-per-transport-status-codes.md) | Per-Transport Status Codes over a Shared Table | Accepted |
 | [0021](adr0021-gvsp-packet-size-policy.md) | GVSP Packet-Size Policy (Preserve, `--auto`, Explicit) | Accepted |
 | [0022](adr0022-integer-register-decoding.md) | Reinterpret Full-Width Unsigned Registers Rather Than Refuse Them | Accepted |
 | [0023](adr0023-inflight-gvcp-heartbeats.md) | Heartbeats during GVCP acknowledgement waits | Proposed |
@@ -41,6 +41,7 @@ of the record.
 | [0027](adr0027-blocking-api-and-transport-runtimes.md) | The blocking API, and a GigE transport that can own its runtime | Accepted |
 | [0028](adr0028-configuration-persistence.md) | Saving and restoring a configuration in GenApi's feature-file layout | Accepted |
 | [0029](adr0029-caching-polling-and-refresh.md) | Caching modes, polling and a changed-since query | Accepted |
+| [0030](adr0030-errors-and-public-surface.md) | Errors carry their causes; the public surface is chosen | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

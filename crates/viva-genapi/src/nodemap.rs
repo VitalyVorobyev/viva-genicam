@@ -29,7 +29,7 @@ use crate::swissknife::{
     collect_identifiers, evaluate as eval_ast, is_builtin_constant, parse_expression,
     split_qualified, substitute,
 };
-use crate::{GenApiError, RegisterIo, SkOutput};
+use crate::{AccessDirection, GenApiError, RangeViolation, RegisterIo, SkOutput};
 
 /// Runtime nodemap built from an [`XmlModel`] capable of reading and writing
 /// feature values via a [`RegisterIo`] transport.
@@ -126,7 +126,7 @@ fn register_selection_dependencies(
 
 fn ensure_readable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
     if matches!(access, AccessMode::WO) {
-        return Err(GenApiError::Access(name.to_string()));
+        return Err(GenApiError::access(name, AccessDirection::Read));
     }
     Ok(())
 }
@@ -169,7 +169,7 @@ struct FromFormula<'a> {
 
 fn ensure_writable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
     if matches!(access, AccessMode::RO) {
-        return Err(GenApiError::Access(name.to_string()));
+        return Err(GenApiError::access(name, AccessDirection::Write));
     }
     Ok(())
 }
@@ -383,11 +383,7 @@ impl NodeMap {
                         error = %err,
                         "dropping GenApi node"
                     );
-                    skipped.push(SkippedNode {
-                        tag,
-                        name,
-                        error: err.to_string(),
-                    });
+                    skipped.push(SkippedNode::new(tag, name, err.to_string()));
                 }
             }
         }
@@ -486,7 +482,11 @@ impl NodeMap {
                     let value = self.evaluate_swissknife(node, io, &mut stack)?;
                     sk_to_i64(name, value)
                 }
-                SkOutput::Float => Err(GenApiError::Type(name.to_string())),
+                SkOutput::Float => Err(GenApiError::wrong_kind(
+                    name,
+                    "SwissKnife",
+                    "an integer formula",
+                )),
             };
         }
         let node = self.get_integer_node(name)?;
@@ -503,7 +503,7 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         let location = self.locate(name, addressing, io)?;
         if self.may_serve(name)
             && let Some(value) = *node.cache.borrow()
@@ -568,7 +568,7 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         let (address, len) = self.locate_for_write(name, addressing, io)?;
         if let Some(bitfield) = node.bitfield {
             let encoded = encode_bitfield_value(
@@ -586,18 +586,12 @@ impl NodeMap {
             let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
             insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
             debug!(node = %name, raw = value, "write integer feature");
-            io.write(address, &raw).map_err(|err| match err {
-                GenApiError::Io(_) => err,
-                other => other,
-            })?;
+            io.write(address, &raw)?;
             self.after_register_write(name, &node.cache, value, &node.raw_cache, raw, readable);
         } else {
             let bytes = i64_to_bytes(name, value, len, integer_sign(node), node.byte_order)?;
             debug!(node = %name, raw = value, "write integer feature");
-            io.write(address, &bytes).map_err(|err| match err {
-                GenApiError::Io(_) => err,
-                other => other,
-            })?;
+            io.write(address, &bytes)?;
             let readable = !matches!(node.access, AccessMode::WO);
             self.after_register_write(name, &node.cache, value, &node.raw_cache, bytes, readable);
         }
@@ -641,7 +635,7 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         let location = self.locate(name, addressing, io)?;
         if self.may_serve(name)
             && let Some(value) = *node.cache.borrow()
@@ -697,7 +691,7 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         let (address, len) = self.locate_for_write(name, addressing, io)?;
         let bytes = match node.encoding {
             FloatEncoding::Ieee754 => {
@@ -712,10 +706,7 @@ impl NodeMap {
                 bytes
             }
         };
-        io.write(address, &bytes).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        io.write(address, &bytes)?;
         // `WriteAround` — a `<FloatReg>`'s default — keeps nothing: the camera
         // may store something else, a gain it rounded.
         if self.keeps_written(name) {
@@ -770,7 +761,7 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         let location = self.locate(name, addressing, io)?;
         if !active
             && self.may_serve(name)
@@ -843,7 +834,7 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         let (address, len) = self.locate_for_write(name, addressing, io)?;
         let entry_decl = node
             .entries
@@ -857,10 +848,7 @@ impl NodeMap {
         let self_clearing = entry_decl.is_self_clearing;
         let bytes = i64_to_bytes(name, raw, len, Sign::Signed, ByteOrder::Big)?;
         debug!(node = %name, raw, entry, "write enum feature");
-        io.write(address, &bytes).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        io.write(address, &bytes)?;
         node.value_cache.replace(None);
         self.note_entry(name, self_clearing);
         self.invalidate_dependents(name);
@@ -947,7 +935,12 @@ impl NodeMap {
     /// (Codex review of #186).
     fn ensure_not_imposed(&self, name: &str, forbidden: AccessMode) -> Result<(), GenApiError> {
         if self.imposed_access(name) == Some(forbidden) {
-            return Err(GenApiError::Access(name.to_string()));
+            let refused = if forbidden == AccessMode::WO {
+                AccessDirection::Read
+            } else {
+                AccessDirection::Write
+            };
+            return Err(GenApiError::access(name, refused));
         }
         Ok(())
     }
@@ -957,7 +950,7 @@ impl NodeMap {
     fn ensure_readable_now(&self, access: &AccessMode, name: &str) -> Result<(), GenApiError> {
         ensure_readable(access, name)?;
         if self.imposed_access(name) == Some(AccessMode::WO) {
-            return Err(GenApiError::Access(name.to_string()));
+            return Err(GenApiError::access(name, AccessDirection::Read));
         }
         Ok(())
     }
@@ -970,7 +963,7 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         ensure_writable(access, name)?;
         if self.imposed_access(name) == Some(AccessMode::RO) {
-            return Err(GenApiError::Access(name.to_string()));
+            return Err(GenApiError::access(name, AccessDirection::Write));
         }
         if !self.is_available(name, io)? {
             return Err(GenApiError::Unavailable(name.to_string()));
@@ -1154,10 +1147,10 @@ impl NodeMap {
         io: &dyn RegisterIo,
     ) -> Result<bool, GenApiError> {
         if provider == ctx {
-            return Err(GenApiError::ExprEval {
-                name: ctx.to_string(),
-                msg: "predicate references the node it gates".into(),
-            });
+            return Err(GenApiError::eval(
+                ctx,
+                SkEvalError::Cycle(provider.to_string()),
+            ));
         }
         let mut stack = HashSet::new();
         stack.insert(ctx.to_string());
@@ -1186,10 +1179,10 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let bitfield = node
-            .bitfield
-            .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
+        let bitfield = node.bitfield.ok_or_else(|| {
+            GenApiError::declaration(name, "is a Boolean over a register with no bit field")
+        })?;
         let location = self.locate(name, addressing, io)?;
         if self.may_serve(name)
             && let Some(value) = *node.cache.borrow()
@@ -1243,10 +1236,10 @@ impl NodeMap {
         let addressing = node
             .addressing
             .as_ref()
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
-        let bitfield = node
-            .bitfield
-            .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
+        let bitfield = node.bitfield.ok_or_else(|| {
+            GenApiError::declaration(name, "is a Boolean over a register with no bit field")
+        })?;
         let (address, len) = self.locate_for_write(name, addressing, io)?;
         let encoded = if value { 1 } else { 0 };
         let readable = !matches!(node.access, AccessMode::WO);
@@ -1256,10 +1249,7 @@ impl NodeMap {
         let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
         insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
         debug!(node = %name, raw = encoded, value, "write boolean feature");
-        io.write(address, &raw).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        io.write(address, &raw)?;
         self.after_register_write(name, &node.cache, value, &node.raw_cache, raw, readable);
         self.invalidate_dependents(name);
         Ok(())
@@ -1296,18 +1286,16 @@ impl NodeMap {
 
         let address = node
             .address
-            .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no address or pValue")))?;
+            .ok_or_else(|| GenApiError::no_value_source(name))?;
         if node.len == 0 {
-            return Err(GenApiError::Parse(format!(
-                "command node {name} has zero length"
-            )));
+            return Err(GenApiError::declaration(
+                name,
+                "is a Command with a zero <Length>",
+            ));
         }
         let data = i64_to_bytes(name, value, node.len, Sign::Signed, ByteOrder::Big)?;
         debug!(node = %name, value, "execute command");
-        io.write(address, &data).map_err(|err| match err {
-            GenApiError::Io(_) => err,
-            other => other,
-        })?;
+        io.write(address, &data)?;
         self.invalidate_dependents(name);
         Ok(())
     }
@@ -1377,7 +1365,11 @@ impl NodeMap {
     fn get_integer_node(&self, name: &str) -> Result<&IntegerNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Integer(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "an Integer",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -1385,7 +1377,7 @@ impl NodeMap {
     fn get_float_node(&self, name: &str) -> Result<&FloatNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Float(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(name, other.kind_name(), "a Float")),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -1393,7 +1385,11 @@ impl NodeMap {
     fn get_enum_node(&self, name: &str) -> Result<&EnumNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Enum(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "an Enumeration",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -1401,7 +1397,11 @@ impl NodeMap {
     fn get_bool_node(&self, name: &str) -> Result<&BooleanNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Boolean(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "a Boolean",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -1409,7 +1409,11 @@ impl NodeMap {
     fn get_command_node(&self, name: &str) -> Result<&CommandNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Command(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "a Command",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -1512,11 +1516,12 @@ impl NodeMap {
     /// `get_integer` and friends, so a caller does not have to reimplement
     /// GenICam addressing.
     ///
-    /// Returns [`GenApiError::Unavailable`] for a node that has no addressing
-    /// of its own because it delegates through `<pValue>`, and for a register
-    /// on a chunk or event port: its address counts from the start of a chunk
-    /// or an event, and handing it out as a device address is how such
-    /// registers ended up reading device memory (GA-12).
+    /// Returns [`GenApiError::Type`] for a node that has no addressing of its
+    /// own because it delegates through `<pValue>`, and
+    /// [`GenApiError::NotDeviceMemory`] for a register on a chunk or event
+    /// port: its address counts from the start of a chunk or an event, and
+    /// handing it out as a device address is how such registers ended up
+    /// reading device memory (GA-12).
     pub fn register_address(
         &self,
         name: &str,
@@ -1526,14 +1531,13 @@ impl NodeMap {
             .node(name)
             .ok_or_else(|| GenApiError::NodeNotFound(name.to_string()))?;
         let addressing = crate::nodes::node_addressing(node).ok_or_else(|| {
-            GenApiError::Unavailable(format!("node '{name}' has no register addressing"))
+            GenApiError::wrong_kind(name, node.kind_name(), "a node with a register of its own")
         })?;
         self.locate_for_write(name, addressing, io)
             .map_err(|err| match err {
-                GenApiError::PortNotWritable { node, port } => GenApiError::Unavailable(format!(
-                    "register '{node}' is on port '{port}': its address is relative to a chunk \
-                     or an event, not a device address"
-                )),
+                GenApiError::PortNotWritable { node, port } => {
+                    GenApiError::NotDeviceMemory { node, port }
+                }
                 other => other,
             })
     }
@@ -1653,10 +1657,10 @@ impl NodeMap {
         }
         if !stack.insert(node.name.clone()) {
             stack.remove(&node.name);
-            return Err(GenApiError::ExprEval {
-                name: node.name.clone(),
-                msg: "cyclic dependency".into(),
-            });
+            return Err(GenApiError::eval(
+                &node.name,
+                SkEvalError::Cycle(node.name.clone()),
+            ));
         }
         let current_gen = self.generation.get();
         let result = self.eval_formula(
@@ -1710,7 +1714,11 @@ impl NodeMap {
                 self.evaluate_int_converter(node, io, stack)
                     .map(SkValue::Int)
             }
-            Some(_) => Err(GenApiError::Type(provider.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                provider,
+                other.kind_name(),
+                "a node with a value",
+            )),
             None => Err(GenApiError::NodeNotFound(provider.to_string())),
         }
     }
@@ -1729,7 +1737,13 @@ impl NodeMap {
             VarAttr::Entry(entry) => {
                 let node = match self.nodes.get(&var.provider) {
                     Some(Node::Enum(node)) => node,
-                    Some(_) => return Err(GenApiError::Type(var.provider.clone())),
+                    Some(other) => {
+                        return Err(GenApiError::wrong_kind(
+                            &var.provider,
+                            other.kind_name(),
+                            "an Enumeration",
+                        ));
+                    }
                     None => return Err(GenApiError::NodeNotFound(var.provider.clone())),
                 };
                 let decl = node
@@ -1771,27 +1785,25 @@ impl NodeMap {
         let integral = match self.nodes.get(provider) {
             Some(Node::Integer(_) | Node::IntConverter(_)) => true,
             Some(Node::Float(_) | Node::Converter(_)) => false,
-            Some(other) => {
-                return Err(GenApiError::ExprEval {
-                    name: formula.to_string(),
-                    msg: format!(
-                        "{}: {} {provider} has no minimum, maximum or increment",
-                        var.name,
-                        other.kind_name()
-                    ),
-                });
+            Some(_) => {
+                return Err(GenApiError::eval(
+                    formula,
+                    SkEvalError::NoLimit {
+                        var: var.name.clone(),
+                        provider: provider.to_string(),
+                        limit: "minimum, maximum or increment",
+                    },
+                ));
             }
             None => return Err(GenApiError::NodeNotFound(provider.to_string())),
         };
         let limit = self
             .limit(provider, which, io, stack)
             .map_err(|err| match err {
-                GenApiError::ExprEval { msg, .. } if msg.starts_with("cyclic") => {
-                    GenApiError::ExprEval {
-                        name: formula.to_string(),
-                        msg: format!("{}: {msg}", var.name),
-                    }
-                }
+                GenApiError::ExprEval {
+                    source: cycle @ SkEvalError::Cycle(_),
+                    ..
+                } => GenApiError::eval(formula, cycle),
                 other => other,
             })?;
         match (limit, integral) {
@@ -1805,10 +1817,14 @@ impl NodeMap {
             (None, false) => match which {
                 Limit::Min => Ok(SkValue::Float(f64::MIN)),
                 Limit::Max => Ok(SkValue::Float(f64::MAX)),
-                Limit::Inc => Err(GenApiError::ExprEval {
-                    name: formula.to_string(),
-                    msg: format!("{}: Float {provider} declares no increment", var.name),
-                }),
+                Limit::Inc => Err(GenApiError::eval(
+                    formula,
+                    SkEvalError::NoLimit {
+                        var: var.name.clone(),
+                        provider: provider.to_string(),
+                        limit: "increment",
+                    },
+                )),
             },
         }
     }
@@ -1837,10 +1853,10 @@ impl NodeMap {
         let mut visited = HashSet::new();
         loop {
             if !visited.insert(current) {
-                return Err(GenApiError::ExprEval {
-                    name: name.to_string(),
-                    msg: format!("cyclic <pValue> chain at {current}"),
-                });
+                return Err(GenApiError::eval(
+                    name,
+                    SkEvalError::Cycle(current.to_string()),
+                ));
             }
             let next = match self.nodes.get(current) {
                 Some(Node::Integer(node)) => {
@@ -1929,10 +1945,10 @@ impl NodeMap {
         }
         if !stack.insert(formula.name.to_string()) {
             stack.remove(formula.name);
-            return Err(GenApiError::ExprEval {
-                name: formula.name.to_string(),
-                msg: "cyclic dependency".into(),
-            });
+            return Err(GenApiError::eval(
+                formula.name,
+                SkEvalError::Cycle(formula.name.to_string()),
+            ));
         }
         let result = self.converter_limit_unguarded(formula, which, io, stack);
         stack.remove(formula.name);
@@ -2015,25 +2031,31 @@ impl NodeMap {
         if let Some(min) = min
             && value < min
         {
-            return Err(GenApiError::Range(format!(
-                "{name}: {value} is below the minimum {min}"
-            )));
+            return Err(GenApiError::range(
+                name,
+                SkValue::Int(value),
+                RangeViolation::BelowMin(SkValue::Int(min)),
+            ));
         }
         if let Some(max) = max
             && value > max
         {
-            return Err(GenApiError::Range(format!(
-                "{name}: {value} is above the maximum {max}"
-            )));
+            return Err(GenApiError::range(
+                name,
+                SkValue::Int(value),
+                RangeViolation::AboveMax(SkValue::Int(max)),
+            ));
         }
         if let Some(inc) = inc
             && inc > 1
         {
             let base = min.unwrap_or(0);
             if (i128::from(value) - i128::from(base)) % i128::from(inc) != 0 {
-                return Err(GenApiError::Range(format!(
-                    "{name}: {value} is not {base} plus a multiple of {inc}"
-                )));
+                return Err(GenApiError::range(
+                    name,
+                    SkValue::Int(value),
+                    RangeViolation::OffIncrement { base, inc },
+                ));
             }
         }
         Ok(())
@@ -2052,16 +2074,20 @@ impl NodeMap {
         if let Some(min) = min.map(SkValue::as_f64)
             && value < min
         {
-            return Err(GenApiError::Range(format!(
-                "{name}: {value} is below the minimum {min}"
-            )));
+            return Err(GenApiError::range(
+                name,
+                SkValue::Float(value),
+                RangeViolation::BelowMin(SkValue::Float(min)),
+            ));
         }
         if let Some(max) = max.map(SkValue::as_f64)
             && value > max
         {
-            return Err(GenApiError::Range(format!(
-                "{name}: {value} is above the maximum {max}"
-            )));
+            return Err(GenApiError::range(
+                name,
+                SkValue::Float(value),
+                RangeViolation::AboveMax(SkValue::Float(max)),
+            ));
         }
         Ok(())
     }
@@ -2195,7 +2221,11 @@ impl NodeMap {
     fn get_converter_node(&self, name: &str) -> Result<&ConverterNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Converter(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "a Converter",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -2203,7 +2233,11 @@ impl NodeMap {
     fn get_int_converter_node(&self, name: &str) -> Result<&IntConverterNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::IntConverter(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "an IntConverter",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -2211,7 +2245,7 @@ impl NodeMap {
     fn get_string_node(&self, name: &str) -> Result<&StringNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::String(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(name, other.kind_name(), "a String")),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -2219,7 +2253,11 @@ impl NodeMap {
     fn get_register_node(&self, name: &str) -> Result<&RegisterNode, GenApiError> {
         match self.nodes.get(name) {
             Some(Node::Register(node)) => Ok(node),
-            Some(_) => Err(GenApiError::Type(name.to_string())),
+            Some(other) => Err(GenApiError::wrong_kind(
+                name,
+                other.kind_name(),
+                "a Register",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -2445,10 +2483,11 @@ impl NodeMap {
         self.ensure_writable_now(name, &node.access, io)?;
         let (address, len) = self.locate_for_write(name, &node.addressing, io)?;
         if data.len() != len as usize {
-            return Err(GenApiError::Range(format!(
-                "register '{name}' is {len} bytes; got {}",
-                data.len()
-            )));
+            return Err(GenApiError::RegisterLength {
+                name: name.to_string(),
+                len,
+                got: data.len(),
+            });
         }
         io.write(address, data)?;
         self.invalidate_dependents(name);
@@ -2472,10 +2511,10 @@ impl NodeMap {
     ) -> Result<SkValue, GenApiError> {
         if !stack.insert(node.name.clone()) {
             stack.remove(&node.name);
-            return Err(GenApiError::ExprEval {
-                name: node.name.clone(),
-                msg: "cyclic dependency".into(),
-            });
+            return Err(GenApiError::eval(
+                &node.name,
+                SkEvalError::Cycle(node.name.clone()),
+            ));
         }
         let result = self.eval_formula(
             &node.name,
@@ -2501,10 +2540,10 @@ impl NodeMap {
     ) -> Result<i64, GenApiError> {
         if !stack.insert(node.name.clone()) {
             stack.remove(&node.name);
-            return Err(GenApiError::ExprEval {
-                name: node.name.clone(),
-                msg: "cyclic dependency".into(),
-            });
+            return Err(GenApiError::eval(
+                &node.name,
+                SkEvalError::Cycle(node.name.clone()),
+            ));
         }
         let result = self.eval_formula(
             &node.name,
@@ -2788,10 +2827,7 @@ fn build_node(
             let variables = decl.variables;
             let output = decl.output;
             let predicates = decl.predicates;
-            let mut ast = parse_expression(&expr).map_err(|err| GenApiError::ExprParse {
-                name: name.clone(),
-                msg: err.to_string(),
-            })?;
+            let mut ast = parse_formula(&name, &expr)?;
             substitute(&mut ast, &formula_bindings(&name, &decl.bindings)?);
             let vars = formula_vars(&name, &variables, &[&ast])?;
             let mut used = HashSet::new();
@@ -2826,17 +2862,9 @@ fn build_node(
         NodeDecl::Converter(decl) => {
             let name = decl.name;
             let bindings = formula_bindings(&name, &decl.bindings)?;
-            let mut ast_to =
-                parse_expression(&decl.formula_to).map_err(|err| GenApiError::ExprParse {
-                    name: name.clone(),
-                    msg: format!("FormulaTo: {err}"),
-                })?;
+            let mut ast_to = parse_formula(&name, &decl.formula_to)?;
             substitute(&mut ast_to, &bindings);
-            let mut ast_from =
-                parse_expression(&decl.formula_from).map_err(|err| GenApiError::ExprParse {
-                    name: name.clone(),
-                    msg: format!("FormulaFrom: {err}"),
-                })?;
+            let mut ast_from = parse_formula(&name, &decl.formula_from)?;
             substitute(&mut ast_from, &bindings);
             let vars_to = formula_vars(&name, &decl.variables_to, &[&ast_to])?;
             let vars_from = formula_vars(&name, &decl.variables_from, &[&ast_from])?;
@@ -2869,17 +2897,9 @@ fn build_node(
         NodeDecl::IntConverter(decl) => {
             let name = decl.name;
             let bindings = formula_bindings(&name, &decl.bindings)?;
-            let mut ast_to =
-                parse_expression(&decl.formula_to).map_err(|err| GenApiError::ExprParse {
-                    name: name.clone(),
-                    msg: format!("FormulaTo: {err}"),
-                })?;
+            let mut ast_to = parse_formula(&name, &decl.formula_to)?;
             substitute(&mut ast_to, &bindings);
-            let mut ast_from =
-                parse_expression(&decl.formula_from).map_err(|err| GenApiError::ExprParse {
-                    name: name.clone(),
-                    msg: format!("FormulaFrom: {err}"),
-                })?;
+            let mut ast_from = parse_formula(&name, &decl.formula_from)?;
             substitute(&mut ast_from, &bindings);
             let vars_to = formula_vars(&name, &decl.variables_to, &[&ast_to])?;
             let vars_from = formula_vars(&name, &decl.variables_from, &[&ast_from])?;
@@ -2943,12 +2963,10 @@ fn build_node(
         // a variant is added. Fail loudly rather than defaulting: a node type
         // the XML layer understands but this one silently drops is precisely
         // the class of defect GA-02 existed to end.
-        other => Err(GenApiError::Unsupported(format!(
-            "node '{}' has declaration kind '{}', which this nodemap cannot build; \
-             viva-genapi-xml understands it but viva-genapi has no arm for it",
-            other.name(),
-            other.kind()
-        ))),
+        other => Err(GenApiError::Unsupported {
+            name: other.name().to_string(),
+            kind: other.kind(),
+        }),
     }
 }
 
@@ -3061,21 +3079,24 @@ fn formula_bindings(
 ) -> Result<HashMap<String, SkAst>, GenApiError> {
     let mut bindings: HashMap<String, SkAst> = HashMap::new();
     for (name, literal) in &declared.constants {
-        let value = parse_expression(literal).map_err(|err| GenApiError::ExprParse {
-            name: node.to_string(),
-            msg: format!("Constant {name}: {err}"),
-        })?;
+        let value = parse_formula(node, literal)?;
         bindings.insert(name.clone(), value);
     }
     for (name, formula) in &declared.expressions {
-        let mut ast = parse_expression(formula).map_err(|err| GenApiError::ExprParse {
-            name: node.to_string(),
-            msg: format!("Expression {name}: {err}"),
-        })?;
+        let mut ast = parse_formula(node, formula)?;
         substitute(&mut ast, &bindings);
         bindings.insert(name.clone(), ast);
     }
     Ok(bindings)
+}
+
+/// Parse `text`, a formula, constant or expression of the node `node`.
+fn parse_formula(node: &str, text: &str) -> Result<SkAst, GenApiError> {
+    parse_expression(text).map_err(|source| GenApiError::ExprParse {
+        name: node.to_string(),
+        formula: text.to_string(),
+        source,
+    })
 }
 
 /// Narrow a formula result to `i64` for an integer-typed feature.
@@ -3105,22 +3126,7 @@ fn expr_error(name: &str, err: SkEvalError) -> GenApiError {
             name: name.to_string(),
             var,
         },
-        SkEvalError::DivisionByZero => GenApiError::ExprEval {
-            name: name.to_string(),
-            msg: "division by zero".into(),
-        },
-        SkEvalError::UnknownFunction(func) => GenApiError::ExprEval {
-            name: name.to_string(),
-            msg: format!("unknown function: {func}"),
-        },
-        SkEvalError::ArityMismatch {
-            name: func,
-            expected,
-            got,
-        } => GenApiError::ExprEval {
-            name: name.to_string(),
-            msg: format!("function {func} expects {expected} args, got {got}"),
-        },
+        other => GenApiError::eval(name, other),
     }
 }
 

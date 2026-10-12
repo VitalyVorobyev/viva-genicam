@@ -43,11 +43,11 @@ impl PyEvent {
         self.inner.ts_dev
     }
 
-    /// The device timestamp mapped to host time, as POSIX seconds; the time
-    /// it was received when the camera's clock was not calibrated.
+    /// The device timestamp mapped to host time, as POSIX seconds; `None`
+    /// until the camera's clock is calibrated (`Camera.time_calibrate`).
     #[getter]
     fn ts_host(&self) -> Option<f64> {
-        posix_secs(self.inner.ts_host)
+        self.inner.ts_host.and_then(posix_secs)
     }
 
     /// The event's data after its header; empty for an `EVENT_CMD`.

@@ -47,6 +47,7 @@ pub const MAX_SELECTOR_COMBINATIONS: usize = 65_536;
 
 /// One feature as a configuration holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PlannedFeature {
     /// The feature.
     pub name: String,
@@ -124,15 +125,17 @@ pub struct Configuration {
 /// A configuration file that could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("line {line}: {message}")]
+#[non_exhaustive]
 pub struct ParseConfigurationError {
     /// 1-based line number.
     pub line: usize,
     /// What was wrong with it.
-    pub message: String,
+    pub message: &'static str,
 }
 
 /// A value [`NodeMap::load_configuration`] could not write.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct LoadFailure {
     /// The value, as the configuration holds it.
     pub value: SavedValue,
@@ -142,6 +145,7 @@ pub struct LoadFailure {
 
 /// What [`NodeMap::load_configuration`] did.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct LoadReport {
     /// Values written.
     pub written: usize,
@@ -260,9 +264,9 @@ impl Configuration {
     pub fn parse(text: &str) -> Result<Self, ParseConfigurationError> {
         let mut configuration = Configuration::default();
         for (index, line) in text.lines().enumerate() {
-            let error = |message: &str| ParseConfigurationError {
+            let error = |message: &'static str| ParseConfigurationError {
                 line: index + 1,
-                message: message.to_string(),
+                message,
             };
             if line.trim().is_empty() {
                 continue;
@@ -804,10 +808,10 @@ fn is_permanent(err: &GenApiError) -> bool {
     matches!(
         err,
         GenApiError::NodeNotFound(_)
-            | GenApiError::Type(_)
-            | GenApiError::Access(_)
+            | GenApiError::Type { .. }
+            | GenApiError::Access { .. }
             | GenApiError::InvalidText { .. }
-            | GenApiError::Unsupported(_)
+            | GenApiError::Unsupported { .. }
     )
 }
 

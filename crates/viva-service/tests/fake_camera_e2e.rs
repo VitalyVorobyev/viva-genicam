@@ -10,8 +10,8 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use viva_service::device::{DeviceHandle, DeviceOps};
-use viva_service::serve::serve_device;
+use viva_service::serve_device;
+use viva_service::{DeviceHandle, DeviceOps};
 
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use viva_fake_gige::{FakeCamera, FakeCameraBuilder, GvcpCommand};
@@ -79,9 +79,8 @@ impl Drop for TestCamera {
 }
 
 /// Resolve the loopback interface (platform-independent).
-fn loopback_iface() -> viva_genicam::gige::nic::Iface {
-    viva_genicam::gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST)
-        .expect("loopback iface")
+fn loopback_iface() -> viva_genicam::gige::Iface {
+    viva_genicam::gige::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback iface")
 }
 
 // ---------------------------------------------------------------------------
@@ -622,7 +621,7 @@ async fn e2e_snapshot_reports_write_only_and_command_nodes_without_reading_them(
     // Ordinary features still carry their values.
     assert_eq!(states["Width"].value, serde_json::json!(640));
 
-    for &addr in viva_fake_gige::registers::WRITE_ONLY_REGISTERS {
+    for &addr in viva_fake_gige::WRITE_ONLY_REGISTERS {
         for command in [GvcpCommand::ReadReg, GvcpCommand::ReadMem] {
             assert_eq!(
                 fake.commands().at(command, addr),

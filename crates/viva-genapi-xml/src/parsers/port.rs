@@ -25,7 +25,10 @@ use crate::{PortDecl, PortKind, XmlError};
 /// forbids the first for schema 1.1 and later (§3.1.1), and the second only
 /// keeps a chunk readable after its buffer is gone, which this crate's
 /// consumer deliberately does not do.
-pub fn parse_port(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<PortDecl, XmlError> {
+pub(crate) fn parse_port(
+    reader: &mut Reader<&[u8]>,
+    start: BytesStart<'_>,
+) -> Result<PortDecl, XmlError> {
     let name = attribute_value_required(&start, "Name")?;
     let mut chunk_id = None;
     let mut event_id = None;
@@ -42,9 +45,12 @@ pub fn parse_port(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<P
                     event_id = Some(parse_hex_id(&name, "EventID", &text)?);
                 }
                 "pChunkID" => {
-                    return Err(XmlError::Invalid(format!(
-                        "port {name} takes its chunk id from <pChunkID>, which is not supported"
-                    )));
+                    let text = read_text_start(reader, e)?;
+                    return Err(XmlError::Unsupported {
+                        node: name,
+                        element: "pChunkID",
+                        text: text.trim().to_string(),
+                    });
                 }
                 tag @ ("SwapEndianess" | "CacheChunkData") => {
                     let tag = tag.to_string();
@@ -60,9 +66,9 @@ pub fn parse_port(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<P
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == "Port" => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!("unterminated Port {name}")));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -72,16 +78,17 @@ pub fn parse_port(reader: &mut Reader<&[u8]>, start: BytesStart<'_>) -> Result<P
         (Some(chunk_id), None) => PortKind::Chunk { chunk_id },
         (None, Some(event_id)) => PortKind::Event { event_id },
         (Some(_), Some(_)) => {
-            return Err(XmlError::Invalid(format!(
-                "port {name} declares both a <ChunkID> and an <EventID>"
-            )));
+            return Err(XmlError::invalid(
+                &name,
+                "declares both a <ChunkID> and an <EventID>",
+            ));
         }
     };
     Ok(PortDecl { name, kind })
 }
 
 /// A port with no children: `<Port Name="Device"/>`.
-pub fn parse_port_empty(start: &BytesStart<'_>) -> Result<PortDecl, XmlError> {
+pub(crate) fn parse_port_empty(start: &BytesStart<'_>) -> Result<PortDecl, XmlError> {
     Ok(PortDecl {
         name: attribute_value_required(start, "Name")?,
         kind: PortKind::Device,
@@ -90,15 +97,14 @@ pub fn parse_port_empty(start: &BytesStart<'_>) -> Result<PortDecl, XmlError> {
 
 /// A `<ChunkID>` or `<EventID>`: hexadecimal, written without a prefix in
 /// every corpus document (`0508000E`, `9C43`); a `0x` prefix is tolerated.
-fn parse_hex_id(port: &str, element: &str, text: &str) -> Result<u64, XmlError> {
+fn parse_hex_id(port: &str, element: &'static str, text: &str) -> Result<u64, XmlError> {
     let trimmed = text.trim();
     let digits = trimmed
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
     u64::from_str_radix(digits, 16).map_err(|err| {
-        XmlError::Invalid(format!(
-            "port {port}: <{element}>{trimmed}</{element}> is not hexadecimal: {err}"
-        ))
+        tracing::debug!(port, element, "chunk or event id is not hexadecimal");
+        XmlError::number(trimmed, "a hexadecimal chunk or event id", err)
     })
 }

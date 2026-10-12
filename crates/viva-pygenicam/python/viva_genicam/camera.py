@@ -564,8 +564,10 @@ class Camera:
         up, claiming and writing nothing — the only stream a camera opened
         with ``connect_gige(..., monitor=True)`` can open. The stream then
         starts and stops no acquisition; the controlling application does.
+        A USB3 Vision camera has no monitor access — one application opens
+        the device — so ``monitor=True`` raises ``GenicamError`` on one.
 
-        GigE-only parameters are ignored for U3V cameras.
+        The other GigE-only parameters are ignored for U3V cameras.
         """
         native = self._native.open_stream(
             iface,

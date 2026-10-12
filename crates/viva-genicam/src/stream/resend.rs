@@ -124,7 +124,7 @@ pub(crate) enum Answer {
 
 impl ResendState {
     /// Packet `id` arrived at `now`. Returns whether it had been asked for.
-    pub fn arrived(&mut self, id: u32, now: Instant, delay: Duration) -> bool {
+    pub(super) fn arrived(&mut self, id: u32, now: Instant, delay: Duration) -> bool {
         if id >= self.frontier {
             if id > self.frontier {
                 self.gaps.push(Gap {
@@ -163,7 +163,7 @@ impl ResendState {
 
     /// The trailer, packet `id`, arrived: nothing beyond it belongs to the
     /// block.
-    pub fn trailer(&mut self, id: u32) {
+    pub(super) fn trailer(&mut self, id: u32) {
         self.gaps.retain(|g| g.first < id);
         if let Some(last) = self.gaps.last_mut() {
             last.last = last.last.min(id.saturating_sub(1));
@@ -179,7 +179,7 @@ impl ResendState {
     /// counted as recovered, so each packet asked for ends in one outcome
     /// (Codex review of #195). An earlier gap not yet asked for closes
     /// uncounted.
-    pub fn unavailable(&mut self, id: u32, answer: Answer) -> u64 {
+    pub(super) fn unavailable(&mut self, id: u32, answer: Answer) -> u64 {
         let mut gone = match self.gaps.iter().position(|g| g.contains(id)) {
             Some(at) if self.gaps[at].requests > 0 => self.gaps.remove(at).len(),
             _ => 0,
@@ -198,7 +198,7 @@ impl ResendState {
 
     /// Append the requests due at `now` for block `block_id`, whose packets —
     /// leader and trailer included — number `packets`.
-    pub fn due(
+    pub(super) fn due(
         &mut self,
         now: Instant,
         config: &ResendConfig,
@@ -238,7 +238,7 @@ impl ResendState {
     }
 
     /// The next packet id not yet seen.
-    pub fn frontier(&self) -> u32 {
+    pub(super) fn frontier(&self) -> u32 {
         self.frontier
     }
 }

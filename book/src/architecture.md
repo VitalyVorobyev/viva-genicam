@@ -68,9 +68,13 @@ short block is acceptable, such as a blocking-pool task. The reasoning is in
 ## Errors and logs
 
 The facade returns `GenicamError`: it carries a `GenApiError` from the NodeMap
-as it is, and a transport failure as a message (`GenicamError::Transport`).
-Below the facade, each crate has an error type of its own, and all of them
-implement `std::error::Error`:
+as it is, and a transport failure with what it was doing and the transport's
+own error as its source — `GenicamError::Gige { during: "claim control", source }`,
+whose `source` is a `GigeError`, and a `GigeError::Status` holds the camera's
+`GigeStatus`. Every error prints its cause, and every error enum is
+`#[non_exhaustive]`, so a `match` needs a wildcard arm. Below the facade, each
+crate has an error type of its own, and all of them implement
+`std::error::Error`:
 
 | Error | Crate | Raised by |
 |---|---|---|
@@ -78,10 +82,9 @@ implement `std::error::Error`:
 | `ChunkError` | `viva-gige` (re-exported by `viva-genicam`) | a chunk payload that does not tile into tagged chunks |
 | `GenApiError` | `viva-genapi` | feature access: access mode, range, locks, formulas, register I/O ([the variants](crates/viva-genapi.md#errors)) |
 | `XmlError` | `viva-genapi-xml` | fetching or parsing a GenApi document |
-| `GigeError` | `viva-gige` | GVCP discovery and control, including a status code the camera returned |
+| `GigeError` | `viva-gige` | GVCP discovery and control, including a status code the camera returned (`GigeStatus`) |
 | `GvspError` | `viva-gige` | malformed or unsupported GVSP packets |
-| `TimeError` | `viva-gige` | the timestamp registers |
-| `U3vError` | `viva-u3v` | USB I/O, timeouts and device status on USB3 Vision |
+| `U3vError` | `viva-u3v` | USB I/O, timeouts and device status on USB3 Vision (`U3vStatus`) |
 | `GenCpError` | `viva-gencp` | decoding a control message |
 
 Everything logs through [`tracing`](https://docs.rs/tracing). Install a

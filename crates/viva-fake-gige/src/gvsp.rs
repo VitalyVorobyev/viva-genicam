@@ -26,10 +26,12 @@
 //! [`PacketScript`] reorders, repeats or drops datagrams by block and packet
 //! id, never by time, so a test that uses it behaves the same on every runner.
 
-/// Standard GVSP header length.
-pub const STANDARD_HEADER_LEN: usize = 8;
-/// Extended-ID GVSP header length (GigE Vision 2.0).
-pub const EXTENDED_HEADER_LEN: usize = 20;
+// GVSP vocabulary, imported (ADR-0030): header sizes and payload types.
+// The packets themselves are laid out below from the specification.
+use viva_gige::{
+    GVSP_EXTENDED_HEADER_SIZE as EXTENDED_HEADER_LEN, GVSP_HEADER_SIZE as STANDARD_HEADER_LEN,
+};
+pub use viva_gige::{PAYLOAD_TYPE_CHUNK_DATA, PAYLOAD_TYPE_IMAGE};
 /// IPv4 header counted by `GevSCPSPacketSize`.
 const IPV4_HEADER_LEN: usize = 20;
 /// UDP header counted by `GevSCPSPacketSize`.
@@ -44,14 +46,10 @@ const FORMAT_PAYLOAD: u8 = 0x03;
 /// Bit 7 of the packet-format byte: extended ids.
 const EXTENDED_ID_FLAG: u8 = 0x80;
 
-/// Payload type: image.
-pub const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
-/// Payload type: image with extended chunk data (bit 14 set on image).
-pub const PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK: u16 = 0x4001;
-/// Payload type: chunk data, a block made only of chunks.
-pub const PAYLOAD_TYPE_CHUNK_DATA: u16 = 0x0004;
 /// Bit 14 of the payload type: extended chunk data.
-const EXTENDED_CHUNK_FLAG: u16 = 0x4000;
+const EXTENDED_CHUNK_FLAG: u16 = viva_gige::PAYLOAD_TYPE_EXTENDED_CHUNK;
+/// Payload type: image with extended chunk data (bit 14 set on image).
+pub const PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK: u16 = PAYLOAD_TYPE_IMAGE | EXTENDED_CHUNK_FLAG;
 /// Bits of the payload type that name the type.
 const PAYLOAD_TYPE_MASK: u16 = 0x3FFF;
 /// A chunk's tag: its ID, then its data length, both 32-bit big-endian.

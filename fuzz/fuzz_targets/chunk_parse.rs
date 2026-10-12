@@ -4,7 +4,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use viva_gige::gvsp::parse_chunks;
+use viva_gige::parse_chunks;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(chunks) = parse_chunks(data) else {

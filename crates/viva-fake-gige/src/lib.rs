@@ -35,10 +35,30 @@ pub use gvcp_server::{
     FAKE_MANUFACTURER, FAKE_MODEL, FAKE_SERIAL, FAKE_SUBNET_MASK, FAKE_USER_NAME, FAKE_VERSION,
     GvcpCommand, RegisterCommandRefusal,
 };
-pub mod gvsp;
+mod gvsp;
 mod gvsp_sender;
-pub mod registers;
-pub mod resend;
+mod registers;
+mod resend;
+
+// The modules are private; what tests and demos use is re-exported here
+// (ADR-0030). GigE Vision's own register addresses are `viva_gige::consts`;
+// the ones below are this fake camera's feature registers.
+pub use gvsp::{
+    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketKind, block_datagrams,
+    chunk_payload, image_size, interleave,
+};
+pub use registers::{
+    CHUNK_ID_EXPOSURE_TIME, CHUNK_ID_FRAME_ID, CHUNK_ID_IMAGE, CHUNK_ID_IMAGE_INFO,
+    CHUNK_ID_TIMESTAMP, DEFAULT_EXPOSURE_US, EVENT_EXPOSURE_END, FAKE_XML, REG_ACQ_FRAME_RATE,
+    REG_ACQ_FRAME_RATE_ENABLE, REG_ACQ_MODE, REG_ACQ_START, REG_ACQ_STOP, REG_BINNING_HORIZONTAL,
+    REG_BINNING_VERTICAL, REG_BLACK_LEVEL, REG_CHUNK_MODE_ACTIVE, REG_DEVICE_MODEL_NAME,
+    REG_DEVICE_TEMPERATURE, REG_DEVICE_USER_BUFFER, REG_DEVICE_USER_ID, REG_EXPOSURE_AUTO,
+    REG_EXPOSURE_TIME, REG_GAIN, REG_GAIN_AUTO, REG_GAIN_RAW, REG_HEIGHT, REG_OFFSET_X,
+    REG_OFFSET_Y, REG_PIXEL_FORMAT, REG_SENSOR_TYPE, REG_SOFTWARE_SIGNAL_PULSE,
+    REG_TIMESTAMP_VALUE, REG_TRIGGER_MODE, REG_TRIGGER_SELECTOR, REG_TRIGGER_SOURCE,
+    REG_USER_SET_DEFAULT, REG_USER_SET_SAVE, REG_USER_SET_SELECTOR, REG_WIDTH,
+    TRIGGER_SOURCE_LINE1, TRIGGER_SOURCE_SOFTWARE, WRITE_ONLY_REGISTERS,
+};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -55,6 +75,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::info;
+use viva_pfnc::PixelFormat;
 
 /// Builder for configuring and starting a fake GigE Vision camera.
 pub struct FakeCameraBuilder {
@@ -80,13 +101,15 @@ pub struct FakeCameraBuilder {
     profile: registers::XmlProfile,
 }
 
-/// PFNC pixel format codes.
-pub const MONO8: u32 = 0x0108_0001;
-pub const RGB8: u32 = 0x0218_0014;
+/// PFNC `Mono8`, the fake's default pixel format. PFNC codes are
+/// vocabulary, from `viva-pfnc` (ADR-0030).
+pub const MONO8: u32 = PixelFormat::Mono8.code();
+/// PFNC `RGB8` (`RGB8Packed`).
+pub const RGB8: u32 = PixelFormat::RGB8Packed.code();
 /// GigE Vision `Mono12Packed`: two 12-bit pixels in three bytes.
-pub const MONO12_PACKED: u32 = 0x010C_0006;
+pub const MONO12_PACKED: u32 = PixelFormat::Mono12Packed.code();
 /// PFNC `Mono12p`: 12-bit pixels packed LSB-first.
-pub const MONO12P: u32 = 0x010C_0047;
+pub const MONO12P: u32 = PixelFormat::Mono12p.code();
 
 impl Default for FakeCameraBuilder {
     fn default() -> Self {
@@ -166,8 +189,9 @@ impl FakeCameraBuilder {
     /// Release control privilege when the controller stops sending GVCP commands
     /// for longer than `GevHeartbeatTimeout` (default: off).
     ///
-    /// See [`registers::RegisterMap::enforce_heartbeat`] for why this is not the
-    /// default even though every real device behaves this way.
+    /// Every real device behaves this way; it is off by default because it
+    /// makes every test that holds control sensitive to a 3 s stall, a flake
+    /// on a loaded CI runner. Tests that are about the keepalive turn it on.
     pub fn enforce_heartbeat(mut self, enable: bool) -> Self {
         self.enforce_heartbeat = enable;
         self

@@ -1,5 +1,31 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //! GenApi node system: typed feature access backed by register IO.
+//!
+//! What a node caches, and how its register is addressed, are the node map's
+//! business, not the API's (ADR-0030): read a value through [`NodeMap`], and
+//! a register's address with [`NodeMap::register_address`].
+//!
+//! ```compile_fail
+//! // A formula's cached value and generation are private (backlog API-07).
+//! fn peek(node: &viva_genapi::SkNode) -> bool {
+//!     node.cache.borrow().is_some()
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! // So is a register's.
+//! fn peek(node: &viva_genapi::RegisterNode) -> bool {
+//!     node.cache.borrow().is_some()
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! // A node's addressing is `viva_genapi_xml::Addressing`, which keeps
+//! // changing; it is not part of this crate's API (backlog API-02).
+//! fn terms(node: &viva_genapi::IntegerNode) -> bool {
+//!     node.addressing.is_some()
+//! }
+//! ```
 
 mod bitops;
 mod clock;
@@ -14,18 +40,24 @@ pub mod swissknife;
 mod text;
 
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use error::GenApiError;
+pub use error::{AccessDirection, GenApiError, RangeViolation};
 pub use io::{NullIo, RegisterIo};
 pub use nodemap::{ChunkData, NodeMap};
 pub use nodes::{
-    BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, FormulaVar, IntegerNode, Node,
-    NodeMeta, RegisterNode, Representation, SkNode, Visibility,
+    BooleanNode, CategoryNode, CommandNode, ConverterNode, EnumNode, FloatNode, FormulaVar,
+    IntConverterNode, IntegerNode, Node, RegisterNode, SkNode, StringNode,
 };
 pub use persistence::{Configuration, LoadReport, PersistencePlan};
 pub use state::{FeatureState, FeatureValue, ValueRange};
 pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
+// The XML layer's types a node's public fields hold, so every type in this
+// crate's API can be named from it. `Addressing` is deliberately not among
+// them: it keeps changing, and is reached by name through
+// `NodeMap::register_address` instead (ADR-0030).
 pub use viva_genapi_xml::{
-    AccessMode, CachingMode, DocumentIdentity, PortKind, SkOutput, SkippedNode,
+    AccessMode, BitField, ByteOrder, CachingMode, CommandValueSrc, DocumentIdentity, EnumEntryDecl,
+    EnumValueSrc, FloatEncoding, NodeMeta, PortKind, PredicateRefs, Representation, Sign, SkOutput,
+    SkippedNode, Slope, Visibility,
 };
 
 #[cfg(test)]
@@ -241,9 +273,9 @@ mod tests {
             let regs = self.regs.borrow();
             let data = regs
                 .get(&addr)
-                .ok_or_else(|| GenApiError::Io(format!("read miss at 0x{addr:08X}")))?;
+                .ok_or_else(|| GenApiError::io(format!("read miss at 0x{addr:08X}")))?;
             if data.len() != len {
-                return Err(GenApiError::Io(format!(
+                return Err(GenApiError::io(format!(
                     "length mismatch at 0x{addr:08X}: expected {len}, have {}",
                     data.len()
                 )));
@@ -384,8 +416,8 @@ mod tests {
             .set_register("FileAccessBuffer", &[1, 2, 3], &io)
             .expect_err("a 3-byte write into an 8-byte register must fail");
         assert!(
-            matches!(err, GenApiError::Range(_)),
-            "expected a range error, got {err:?}"
+            matches!(err, GenApiError::RegisterLength { len: 8, got: 3, .. }),
+            "expected a length error, got {err:?}"
         );
         assert_eq!(
             io.read(0x2000, 8).expect("register untouched"),
@@ -468,7 +500,7 @@ mod tests {
 
         assert!(matches!(
             nodemap.get_register("DeviceVendorName", &io),
-            Err(GenApiError::Type(_))
+            Err(GenApiError::Type { .. })
         ));
         assert!(matches!(
             nodemap.get_register("NoSuchNode", &io),
@@ -1108,7 +1140,7 @@ mod tests {
         let mut nodemap = build_nodemap();
         let io = MockIo::with_registers(&[(0x100, vec![0, 0, 0, 16])]);
         let err = nodemap.set_integer("Width", 17, &io).unwrap_err();
-        assert!(matches!(err, GenApiError::Range(_)));
+        assert!(matches!(err, GenApiError::Range { .. }));
     }
 
     #[test]
@@ -2231,9 +2263,9 @@ mod tests {
             .get_float("DivideByZero", &io)
             .expect_err("division by zero");
         match err {
-            GenApiError::ExprEval { name, msg } => {
+            GenApiError::ExprEval { name, source } => {
                 assert_eq!(name, "DivideByZero");
-                assert_eq!(msg, "division by zero");
+                assert_eq!(source, crate::swissknife::EvalError::DivisionByZero);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -2482,8 +2514,10 @@ mod tests {
             .get_float("ExposureInc", &io)
             .expect_err("a Float without an increment");
         assert!(
-            matches!(err, GenApiError::ExprEval { ref name, ref msg }
-                if name == "ExposureInc" && msg.contains("no increment")),
+            matches!(err, GenApiError::ExprEval {
+                ref name,
+                source: crate::swissknife::EvalError::NoLimit { limit: "increment", .. },
+            } if name == "ExposureInc"),
             "got {err:?}"
         );
     }

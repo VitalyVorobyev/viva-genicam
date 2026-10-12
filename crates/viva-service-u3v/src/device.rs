@@ -1,122 +1,130 @@
-//! USB3 Vision device handle for the Zenoh service.
+//! A USB3 Vision camera the service serves.
 
-use std::sync::{Arc, Mutex};
-
-use viva_genicam::{Camera, GenicamError, U3vFrameStream, U3vRegisterIo, U3vStreamBuilder};
-use viva_service::device::{
-    DeviceOps, camera_acquisition, camera_execute, camera_feature_state, camera_invalidated_by,
+use viva_genicam::report::{OpenCamera, ReportTarget};
+use viva_genicam::{
+    Camera, GenicamError, StreamBlock, U3vFrameStream, U3vRegisterIo, U3vStreamBuilder,
 };
-use viva_u3v::usb::UsbTransfer;
-use viva_zenoh_api::FeatureState;
+use viva_service::{BlockStream, DeviceOps, SharedCamera, StreamSource};
+use viva_u3v::UsbTransfer;
+use viva_zenoh_api::DeviceAnnounce;
 
-/// Device handle for a USB3 Vision camera, generic over the USB transport.
-pub struct U3vDeviceHandle<T: UsbTransfer + 'static> {
-    camera: Arc<Mutex<Camera<U3vRegisterIo<T>>>>,
+/// A USB3 Vision camera, generic over the USB transport so the same service
+/// code runs against `FakeU3vTransport` and `RusbTransfer`.
+pub(crate) struct U3vDeviceHandle<T: UsbTransfer + 'static> {
+    camera: SharedCamera<U3vRegisterIo<T>>,
     raw_xml: String,
-    device_id: String,
+    announce: DeviceAnnounce,
 }
 
 impl<T: UsbTransfer + Send + 'static> U3vDeviceHandle<T> {
-    /// Create a handle from a pre-built Camera + XML.
-    pub fn new(camera: Camera<U3vRegisterIo<T>>, xml: String, device_id: String) -> Self {
+    /// A handle on `camera`, published as `announce` says.
+    pub(crate) fn new(
+        camera: Camera<U3vRegisterIo<T>>,
+        xml: String,
+        announce: DeviceAnnounce,
+    ) -> Self {
         Self {
-            camera: Arc::new(Mutex::new(camera)),
+            camera: SharedCamera::new(camera),
             raw_xml: xml,
-            device_id,
+            announce,
         }
     }
 
     /// The camera's bootstrap registers, decoded and raw, for the report:
     /// nothing about USB3 Vision has met a camera yet (backlog TC-27).
-    pub async fn bootstrap(&self) -> Vec<(String, String)> {
-        let camera = self.camera.clone();
-        tokio::task::spawn_blocking(move || {
-            let camera = camera.lock().ok()?;
-            let mut device = camera.transport().lock_device().ok()?;
-            Some(device.describe())
-        })
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-    }
-
-    /// Open the camera's frame stream as the library does: sized by the
-    /// device's SIRM, with the transfer layout configured and streaming
-    /// enabled. The service built a `U3vStream` itself, which skipped the
-    /// SIRM and sized a packed format's frames at one byte a pixel (backlog
-    /// SVC-03).
-    pub async fn open_frame_stream(&self) -> Result<U3vFrameStream, GenicamError> {
-        let camera = self.camera.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut camera = camera
-                .lock()
-                .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
-            U3vStreamBuilder::new(&mut camera).build()
-        })
-        .await
-        .map_err(|e| GenicamError::Transport(e.to_string()))?
+    pub(crate) async fn bootstrap(&self) -> Vec<(String, String)> {
+        self.camera
+            .with(|camera| {
+                let mut device = camera.transport().lock_device()?;
+                Ok(device.describe())
+            })
+            .await
+            .unwrap_or_default()
     }
 }
 
 #[async_trait::async_trait]
-impl<T: UsbTransfer + 'static> DeviceOps for U3vDeviceHandle<T> {
+impl<T: UsbTransfer + Send + 'static> DeviceOps for U3vDeviceHandle<T> {
+    type Transport = U3vRegisterIo<T>;
+
     fn device_id(&self) -> &str {
-        &self.device_id
+        &self.announce.id
     }
 
     fn raw_xml(&self) -> &str {
         &self.raw_xml
     }
 
-    async fn get_feature(&self, name: &str) -> Result<String, GenicamError> {
-        let cam = self.camera.clone();
-        let name = name.to_string();
-        tokio::task::spawn_blocking(move || {
-            let cam = cam
-                .lock()
-                .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
-            cam.get(&name)
+    fn camera(&self) -> &SharedCamera<U3vRegisterIo<T>> {
+        &self.camera
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: UsbTransfer + Send + 'static> StreamSource for U3vDeviceHandle<T> {
+    /// The stream as the library opens it: sized by the device's SIRM, with
+    /// the transfer layout configured and streaming enabled. The service
+    /// built a `U3vStream` itself once, which skipped the SIRM and sized a
+    /// packed format's frames at one byte a pixel (backlog SVC-03).
+    async fn open_stream(
+        &self,
+        _packet_size: Option<u32>,
+    ) -> Result<Box<dyn BlockStream>, GenicamError> {
+        let frames = self
+            .camera
+            .with(|camera| U3vStreamBuilder::new(camera).build())
+            .await?;
+        Ok(Box::new(U3vBlocks(frames)))
+    }
+
+    /// The report cannot open the camera this service holds — a USB device
+    /// admits one owner — so it describes it from what the service read
+    /// (backlog DX-06).
+    async fn report_target(&self) -> ReportTarget {
+        let announce = &self.announce;
+        let identity = [
+            ("name", announce.name.clone()),
+            ("model", announce.model.clone()),
+            ("serial", announce.serial.clone()),
+            (
+                "manufacturer",
+                announce
+                    .manufacturer
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .chain(self.bootstrap().await)
+        .collect();
+        ReportTarget::Open(OpenCamera {
+            transport: "USB3 Vision".to_string(),
+            identity,
+            xml: self.raw_xml.clone(),
         })
-        .await
-        .map_err(|e| GenicamError::Transport(e.to_string()))?
     }
 
-    async fn set_feature(&self, name: &str, value: &str) -> Result<(), GenicamError> {
-        let cam = self.camera.clone();
-        let name = name.to_string();
-        let value = value.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut cam = cam
-                .lock()
-                .map_err(|_| GenicamError::Transport("camera mutex poisoned".into()))?;
-            cam.set(&name, &value)
-        })
-        .await
-        .map_err(|e| GenicamError::Transport(e.to_string()))?
+    fn service_name(&self) -> &'static str {
+        "viva-service-u3v"
+    }
+}
+
+/// A USB3 Vision frame stream as the frame loop reads it. Reading is the
+/// library's: a reader thread that waits out idle periods (trigger mode) and
+/// is joined on [`BlockStream::close`].
+struct U3vBlocks(U3vFrameStream);
+
+#[async_trait::async_trait]
+impl BlockStream for U3vBlocks {
+    async fn next_block(&mut self) -> Result<Option<StreamBlock>, GenicamError> {
+        Ok(self.0.next_frame().await?.map(StreamBlock::Image))
     }
 
-    async fn exec_command(&self, name: &str) -> Result<(), GenicamError> {
-        camera_execute(&self.camera, name).await
-    }
-
-    async fn acquisition_start(&self) -> Result<(), GenicamError> {
-        camera_acquisition(&self.camera, true).await
-    }
-
-    async fn acquisition_stop(&self) -> Result<(), GenicamError> {
-        camera_acquisition(&self.camera, false).await
-    }
-
-    /// The same typed NodeMap snapshot GigE serves: real kind, access mode,
-    /// ranges and enum entries, and no read of a write-only node or of a
-    /// command's register (backlog `SVC-02`).
-    async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
-        camera_feature_state(&self.camera, name).await
-    }
-
-    async fn invalidated_by(&self, name: &str) -> Vec<String> {
-        camera_invalidated_by(&self.camera, name).await
+    async fn close(self: Box<Self>) {
+        // The reader thread lets go of the endpoint before this returns.
+        let U3vBlocks(frames) = *self;
+        frames.shutdown().await;
     }
 }
 
@@ -126,17 +134,17 @@ mod tests {
 
     use viva_fake_u3v::{FakeU3vTransport, REG_TRIGGER_SOFTWARE, WRITE_ONLY_REGISTERS};
     use viva_genicam::open_u3v_device;
-    use viva_service::device::DeviceOps;
-    use viva_u3v::device::U3vDevice;
+    use viva_service::DeviceOps;
+    use viva_zenoh_api::DeviceAnnounce;
 
     use super::U3vDeviceHandle;
 
     fn open_fake() -> (U3vDeviceHandle<FakeU3vTransport>, Arc<FakeU3vTransport>) {
         let transport = Arc::new(FakeU3vTransport::new(640, 480, 0x0108_0001));
-        let device =
-            U3vDevice::open(transport.clone(), 0x81, 0x01, Some(0x82), None).expect("open");
+        let device = viva_fake_u3v::open(transport.clone()).expect("open");
         let (camera, xml) = open_u3v_device(device).expect("camera");
-        let handle = U3vDeviceHandle::new(camera, xml, "cam-fake-u3v".to_string());
+        let announce = DeviceAnnounce::new("cam-fake-u3v", "FakeU3V", "FakeU3V", "FAKE-001");
+        let handle = U3vDeviceHandle::new(camera, xml, announce);
         (handle, transport)
     }
 
@@ -196,10 +204,11 @@ mod tests {
     #[tokio::test]
     async fn a_snapshot_reads_neither_write_only_nodes_nor_command_registers() {
         let (handle, transport) = open_fake();
-        let names: Vec<String> = {
-            let camera = handle.camera.lock().unwrap();
-            camera.nodemap().node_names().map(str::to_string).collect()
-        };
+        let names: Vec<String> = handle
+            .camera()
+            .with(|camera| Ok(camera.nodemap().node_names().map(str::to_string).collect()))
+            .await
+            .expect("node names");
         transport.clear_reads();
 
         for name in &names {

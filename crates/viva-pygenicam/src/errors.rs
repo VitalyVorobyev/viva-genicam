@@ -2,6 +2,7 @@
 
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use viva_genicam::genapi::GenApiError;
 use viva_genicam::GenicamError;
 
 /// The exception classes, named — and printed in a traceback — as the
@@ -40,16 +41,42 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     Ok(())
 }
 
+/// The Python class for a Rust error, by what went wrong; the message is the
+/// Rust error's, which carries its cause.
 pub(crate) fn to_py(err: GenicamError) -> PyErr {
+    let message = err.to_string();
     match err {
-        GenicamError::GenApi(e) => GenApiErrorPy::new_err(e.to_string()),
-        GenicamError::Transport(msg) => TransportErrorPy::new_err(msg),
-        GenicamError::Parse(msg) => ParseErrorPy::new_err(msg),
+        // Text that does not parse as the feature's type.
+        GenicamError::GenApi(GenApiError::InvalidText { .. }) => ParseErrorPy::new_err(message),
+        GenicamError::GenApi(_) => GenApiErrorPy::new_err(message),
+        GenicamError::Xml(_)
+        | GenicamError::Configuration(_)
+        | GenicamError::Convert(_)
+        | GenicamError::NoBinningFactor { .. }
+        | GenicamError::NoBinningEntry { .. }
+        | GenicamError::UnsizedFrame { .. } => ParseErrorPy::new_err(message),
+        GenicamError::Gige { .. }
+        | GenicamError::U3v { .. }
+        | GenicamError::Network { .. }
+        | GenicamError::Io(_)
+        | GenicamError::Timeout(_)
+        | GenicamError::NotInControl(_)
+        | GenicamError::PacketTooSmall { .. }
+        | GenicamError::PacketTooLarge { .. }
+        | GenicamError::StreamChannel { .. }
+        | GenicamError::PacketDelay { .. }
+        | GenicamError::NoInterface
+        | GenicamError::InterfaceWithoutIpv4(_)
+        | GenicamError::NoRoute { .. }
+        | GenicamError::NotMulticast(_)
+        | GenicamError::TimeSync(_)
+        | GenicamError::Task { .. }
+        | GenicamError::Panicked(_) => TransportErrorPy::new_err(message),
         GenicamError::MissingChunkFeature(name) => MissingChunkFeatureErrorPy::new_err(name),
         GenicamError::UnsupportedPixelFormat(fmt) => {
             UnsupportedPixelFormatErrorPy::new_err(fmt.to_string())
         }
-        other => GenicamErrorPy::new_err(other.to_string()),
+        _ => GenicamErrorPy::new_err(message),
     }
 }
 

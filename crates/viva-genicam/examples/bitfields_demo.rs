@@ -1,3 +1,5 @@
+//! Read and write bit fields (`<Bit>`, `<LSB>`/`<MSB>`, `<Mask>`) through the node map, on an in-memory register map.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -59,9 +61,9 @@ impl RegisterIo for MockIo {
         let regs = self.regs.borrow();
         let data = regs
             .get(&addr)
-            .ok_or_else(|| GenApiError::Io(format!("read miss at 0x{addr:08X}")))?;
+            .ok_or_else(|| GenApiError::io(format!("read miss at 0x{addr:08X}")))?;
         if data.len() != len {
-            return Err(GenApiError::Io(format!(
+            return Err(GenApiError::io(format!(
                 "length mismatch at 0x{addr:08X}: expected {len}, have {}",
                 data.len()
             )));

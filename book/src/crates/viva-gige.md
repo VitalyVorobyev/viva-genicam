@@ -9,17 +9,19 @@ bytes. Applications normally reach it through `viva-genicam`.
 
 ---
 
-## Module map
+## What it exports
 
-| Module | Contents |
+The modules are private; everything public is at the crate root, and
+`viva_gige::consts` holds the protocol's vocabulary.
+
+| Area | Items |
 |---|---|
-| `gvcp` | `discover`, `discover_on_interface`, `discover_all`, `force_ip`, `DeviceInfo`, `GigeDevice`, `GigeError` |
-| `gvsp` | Zero-copy packet parsing, `StreamDest`, `StreamConfig`, chunk extraction |
-| `nic` | `Iface` — interface enumeration and selection |
-| `action` | `send_action`, `ActionParams`, `AckSummary` |
-| `message` | The event/message channel |
-| `stats` | Event, action and time-sync counters (stream counters live with the receive engine in `viva-genicam`) |
-| `time` | `TimeSync` — device ticks to host time |
+| Discovery and control (GVCP) | `discover`, `discover_on_interface`, `discover_all`, `discover_ip`, `discover_with`, `force_ip`, `DeviceInfo`, `GigeDevice`, `GvcpCapability`, `GigeError`, `GigeStatus` |
+| Streaming (GVSP) | Zero-copy packet parsing (`parse_packet_ref`, `parse_header`), `StreamDest`, `StreamConfig`, `StreamParams`, chunk extraction (`parse_chunks`), `encode_packet_resend` |
+| Interfaces | `Iface`, `IfaceSelector`, `mtu`, `best_packet_size` |
+| Actions and events | `send_action`, `ActionParams`, `AckSummary`; `EventSocket`, `EventPacket` |
+| Time | `TimeSync` — device ticks to host time |
+| `consts` | GVCP opcodes, flags, bootstrap register addresses and protocol limits |
 
 ---
 
@@ -29,7 +31,7 @@ On a multi-NIC host, bind to the NIC that reaches the camera. `Iface` offers
 four ways to get one, and they are easy to confuse:
 
 ```rust,ignore
-use viva_gige::nic::Iface;
+use viva_gige::Iface;
 
 Iface::from_system("eth0")?;                  // by interface name
 Iface::from_ipv4("192.168.0.5".parse()?)?;    // by *host* address
@@ -85,7 +87,7 @@ cargo run -p viva-camctl -- list --iface 192.168.0.5
 `GigeDevice` owns one control channel:
 
 ```rust,ignore
-use viva_gige::gvcp::{GigeDevice, GVCP_PORT};
+use viva_gige::{GigeDevice, GVCP_PORT};
 
 let mut device = GigeDevice::open(SocketAddr::new(camera_ip.into(), GVCP_PORT)).await?;
 device.claim_control().await?;
@@ -152,7 +154,7 @@ consistent — see `TimeSync` below.
 
 ## Streaming (GVSP)
 
-This crate parses GVSP: `gvsp::parse_packet_ref` reads one datagram without
+This crate parses GVSP: `parse_packet_ref` reads one datagram without
 copying it — the standard 8-byte header or the 20-byte extended-ID one, and the
 payload type as all 16 bits, so `0x4001` (image with extended chunks) keeps its
 chunk bit. The receive engine in `viva-genicam` assembles the blocks, on a
@@ -211,14 +213,15 @@ belong to this layer:
 
 ### Resend
 
-`gvcp::encode_packet_resend` builds `PACKETRESEND_CMD` (`0x0040`): 12 bytes of
+`encode_packet_resend` builds `PACKETRESEND_CMD` (`0x0040`): 12 bytes of
 stream channel, 16-bit block id and 24-bit first and last packet ids, or 20
 bytes with extended ids (flag `0x10`): channel, a reserved half-word, 32-bit
 packet ids and the 64-bit block id. It asks for no acknowledgement — the answer
 is the packets themselves. The receive engine sends it from the stream socket
 to the camera's control port, when `GigeDevice::gvcp_capability` has bit `0x4`
-set; `gvsp::status` names the statuses a camera answers with when it cannot,
-and `gvsp::parse_header` reads such an answer, which is a header and nothing
+set; `GigeStatus` names the statuses a camera answers with when it cannot
+(`PACKET_UNAVAILABLE` and the rest of GVCP's own range), and `parse_header`
+reads such an answer, which is a header and nothing
 else. When and how often the engine asks is in
 [Streaming → Packet resend](../tutorials/streaming.md#46-packet-resend).
 

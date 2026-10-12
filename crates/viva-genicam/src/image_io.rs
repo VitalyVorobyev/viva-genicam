@@ -61,9 +61,29 @@ pub enum ImageIoError {
     /// The frame's pixels could not be converted.
     #[error(transparent)]
     Convert(#[from] ConvertError),
-    /// `pixels` is not `width × height` samples, or the encoder refused it.
+    /// `pixels` is not `width × height` samples (of `channels` each).
+    #[error("{samples} samples for a {width}×{height} image with {channels} channel(s)")]
+    Size {
+        /// The samples given.
+        samples: usize,
+        /// The image's width.
+        width: u32,
+        /// Its height.
+        height: u32,
+        /// Samples per pixel: 1 for grey, 3 for colour.
+        channels: usize,
+    },
+    /// A pixel layout this encoder does not write.
+    #[error("cannot encode this pixel layout")]
+    Layout,
+    /// The path does not name a format: it ends in none of `.png`, `.tif`,
+    /// `.tiff`.
+    #[error("{0} does not end in .png, .tif or .tiff")]
+    Extension(std::path::PathBuf),
+    /// The PNG or TIFF encoder refused the image. The source is the
+    /// encoder's error.
     #[error("cannot encode image: {0}")]
-    Encode(String),
+    Encode(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     /// Writing the file failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -84,12 +104,8 @@ pub fn encode_frame(frame: &Frame, format: ImageFormat) -> Result<Vec<u8>, Image
 
 /// Write a frame to `path`, in the format its extension names.
 pub fn save_frame(frame: &Frame, path: &Path) -> Result<(), ImageIoError> {
-    let format = ImageFormat::from_path(path).ok_or_else(|| {
-        ImageIoError::Encode(format!(
-            "{} does not end in .png, .tif or .tiff",
-            path.display()
-        ))
-    })?;
+    let format =
+        ImageFormat::from_path(path).ok_or_else(|| ImageIoError::Extension(path.to_path_buf()))?;
     std::fs::write(path, encode_frame(frame, format)?)?;
     Ok(())
 }
@@ -134,7 +150,7 @@ impl<'a> Image<'a> {
             Pixels::Rgb16 { samples, bits } => {
                 (true, Samples::Sixteen(scale(samples, *bits)), *bits)
             }
-            _ => return Err(ImageIoError::Encode("unknown pixel layout".into())),
+            _ => return Err(ImageIoError::Layout),
         };
         let channels = if rgb { 3 } else { 1 };
         let expected = (width as usize)
@@ -145,9 +161,12 @@ impl<'a> Image<'a> {
             Samples::Sixteen(v) => v.len(),
         };
         if expected != Some(actual) {
-            return Err(ImageIoError::Encode(format!(
-                "{actual} samples for a {width}×{height} image with {channels} channel(s)"
-            )));
+            return Err(ImageIoError::Size {
+                samples: actual,
+                width,
+                height,
+                channels,
+            });
         }
         Ok(Image {
             width,
@@ -159,7 +178,7 @@ impl<'a> Image<'a> {
     }
 
     fn png(&self) -> Result<Vec<u8>, ImageIoError> {
-        let failed = |e: png::EncodingError| ImageIoError::Encode(e.to_string());
+        let failed = |e: png::EncodingError| ImageIoError::Encode(Box::new(e));
         let mut file = Vec::new();
         let mut encoder = png::Encoder::new(&mut file, self.width, self.height);
         encoder.set_color(if self.rgb {
@@ -193,7 +212,7 @@ impl<'a> Image<'a> {
 
     fn tiff(&self) -> Result<Vec<u8>, ImageIoError> {
         use tiff::encoder::{TiffEncoder, colortype};
-        let failed = |e: tiff::TiffError| ImageIoError::Encode(e.to_string());
+        let failed = |e: tiff::TiffError| ImageIoError::Encode(Box::new(e));
         let mut file = Cursor::new(Vec::new());
         let mut encoder = TiffEncoder::new(&mut file).map_err(failed)?;
         let (w, h) = (self.width, self.height);

@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use viva_genicam::genapi::RegisterIo;
-use viva_genicam::u3v::usb::UsbTransfer;
+use viva_genicam::u3v::UsbTransfer;
 use viva_genicam::{
     COMMAND_TIMEOUT, Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
     U3vFrameStream, U3vRegisterIo, U3vStreamBuilder,

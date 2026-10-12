@@ -103,6 +103,7 @@ pub enum EvalMode {
 
 /// Parsed GenApi formula represented as an abstract syntax tree.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AstNode {
     /// Numeric literal.
     Literal(Value),
@@ -144,43 +145,69 @@ pub enum AstNode {
 
 /// Binary operator kinds supported by the GenApi formula language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BinaryOp {
     // Arithmetic
+    /// `+`
     Add,
+    /// `-`
     Sub,
+    /// `*`
     Mul,
+    /// `/`: truncating in integer mode.
     Div,
+    /// `%`
     Mod,
+    /// `**`
     Pow,
     // Comparison
+    /// `<`
     Lt,
+    /// `<=`
     Le,
+    /// `>`
     Gt,
+    /// `>=`
     Ge,
+    /// `=` (and the tolerated `==`)
     Eq,
+    /// `<>` (and the tolerated `!=`)
     Ne,
     // Logical
+    /// `&&`
     And,
+    /// `||`
     Or,
     // Bitwise
+    /// `&`
     BitAnd,
+    /// `|`
     BitOr,
+    /// `^`
     BitXor,
+    /// `<<`
     Shl,
+    /// `>>`
     Shr,
 }
 
 /// Unary operator kinds supported by the GenApi formula language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnaryOp {
+    /// Unary `+`.
     Plus,
+    /// Unary `-`.
     Minus,
+    /// `!`: logical not.
     Not,
+    /// `~`: bitwise not.
     BitNot,
 }
 
 /// Error produced while parsing a GenApi formula.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ParseError {
     msg: String,
     offset: usize,
@@ -208,41 +235,50 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// Error produced while evaluating a GenApi formula.
-#[derive(Debug, Clone)]
+/// Error produced while evaluating a GenApi formula, or the nodes its
+/// variables read.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum EvalError {
     /// Variable referenced by the expression has no bound value.
+    #[error("unknown variable {0}")]
     UnknownVariable(String),
     /// Division by zero occurred.
+    #[error("division by zero")]
     DivisionByZero,
     /// Unknown function name.
+    #[error("unknown function {0}")]
     UnknownFunction(String),
     /// Wrong number of arguments to function.
+    #[error("function {name} expects {expected} args, got {got}")]
     ArityMismatch {
+        /// The function.
         name: String,
+        /// The arguments it takes.
         expected: usize,
+        /// The arguments given.
         got: usize,
     },
+    /// An integer was needed and the result is not one: not finite, beyond
+    /// `i64`, or not whole.
+    #[error("{0} is not a representable integer")]
+    NotAnInteger(f64),
+    /// A value depends on itself: through formula variables, `<pValue>`
+    /// delegation, or a predicate that reads the node it gates.
+    #[error("cyclic dependency through {0}")]
+    Cycle(String),
+    /// A variable reads the `.Min`, `.Max` or `.Inc` of a node that declares
+    /// none.
+    #[error("{var}: {provider} declares no {limit}")]
+    NoLimit {
+        /// The variable as the formula names it.
+        var: String,
+        /// The node it reads.
+        provider: String,
+        /// `"minimum"`, `"maximum"` or `"increment"`.
+        limit: &'static str,
+    },
 }
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EvalError::UnknownVariable(var) => write!(f, "unknown variable {var}"),
-            EvalError::DivisionByZero => write!(f, "division by zero"),
-            EvalError::UnknownFunction(name) => write!(f, "unknown function {name}"),
-            EvalError::ArityMismatch {
-                name,
-                expected,
-                got,
-            } => {
-                write!(f, "function {name} expects {expected} args, got {got}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvalError {}
 
 /// Parse a GenApi formula into an [`AstNode`].
 pub fn parse_expression(input: &str) -> Result<AstNode, ParseError> {

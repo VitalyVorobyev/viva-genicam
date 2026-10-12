@@ -1,6 +1,6 @@
 # ADR-0020: Per-Transport Status Codes over a Shared Table
 
-**Status:** Proposed
+**Status:** Accepted (amended 2026-10-12)
 **Date:** 2026-07-30
 
 ## Context
@@ -110,11 +110,36 @@ hierarchy that is strong enough to correct a clear defect and to choose the
 structure, but the individual code meanings must be checked against GigE
 Vision §18.4 and the GenCP status table before this ADR moves to Accepted.
 
-### What is implemented so far
+### Amendment (2026-10-12): implemented
 
 Points 3, 4 and 5 landed with this ADR, together with the corrected shared
-`StatusCode`. Points 1 and 2 — the per-transport types — are backlog **TC-16**,
-which tracks what remains ([`docs/backlog.md`](../backlog.md)).
+`StatusCode`; points 1 and 2 landed with backlog TC-16, in the shape decided
+above and with three refinements:
+
+- **The shared core is `0x0000`, `0x8001`–`0x8007`, `0x800E`, `0x800F` and
+  `0x8FFF`.** `INVALID_HEADER` (`0x800E`) and `WRONG_CONFIG` (`0x800F`) carry
+  the same name and meaning in both tables — aravis `arvgvcpprivate.h` and
+  `arvuvcpprivate.h`, Wireshark `packet-gvcp.c` — so they are shared, not
+  owned by GVCP as the Context's list has it.
+- **The core has no `Unknown`.** `StatusCode::from_raw` returns `None`
+  outside it; `GigeStatus` and `U3vStatus` each wrap the core
+  (`Common(StatusCode)`), add their own range, and keep `Unknown(u16)` for a
+  code neither table names. GVSP's packet status decodes with `GigeStatus`
+  too, so a frame's `DeviceStatus` names `PACKET_UNAVAILABLE` as an
+  acknowledgement does.
+- **One macro writes both transport types** (`viva_gencp::transport_status!`,
+  hidden from the docs): the `Display` of point 3, `from_raw`/`to_raw`,
+  `is_error` and the round trip through the core, so the two cannot drift.
+
+`GigeError::Status` holds a `GigeStatus`, `U3vError::Status` a `U3vStatus`
+([ADR-0030](adr0030-errors-and-public-surface.md)). `0x800B` decodes as
+`NO_MSG` over GVCP and `MSG_TIMEOUT` over USB3 Vision, each tested against a
+literal acknowledgement.
+
+**Evidence standing, unchanged.** The individual code meanings rest on
+aravis and Wireshark, which agree, and on #45's `0x8006`; the specification's
+tables have still not been read here. A device that contradicts a name is
+evidence above both, and the name is corrected when one does.
 
 ## Consequences
 

@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 
+use viva_u3v::registers::{abrm, sbrm, sirm};
+
 // Feature register addresses (same layout as viva-fake-gige).
 pub const REG_WIDTH: u64 = 0x20000;
 pub const REG_HEIGHT: u64 = 0x20004;
@@ -57,24 +59,27 @@ pub const WRITE_ONLY_REGISTERS: &[u64] = &[REG_ACQ_START, REG_ACQ_STOP, REG_ACTI
 /// XML blob address in the register space, just past the ABRM's 64 KiB.
 pub const XML_BLOB_BASE: u64 = 0x1_0000;
 
-// ABRM, GenCP 1.2 Table 15.
-pub const ABRM_GENCP_VERSION: u64 = 0x0000;
-pub const ABRM_MANUFACTURER_NAME: u64 = 0x0004;
-pub const ABRM_MODEL_NAME: u64 = 0x0044;
-pub const ABRM_FAMILY_NAME: u64 = 0x0084;
-pub const ABRM_DEVICE_VERSION: u64 = 0x00C4;
-pub const ABRM_MANUFACTURER_INFO: u64 = 0x0104;
-pub const ABRM_SERIAL_NUMBER: u64 = 0x0144;
-pub const ABRM_USER_DEFINED_NAME: u64 = 0x0184;
-pub const ABRM_DEVICE_CAPABILITY: u64 = 0x01C4;
-pub const ABRM_MAX_DEVICE_RESPONSE_TIME: u64 = 0x01CC;
-pub const ABRM_MANIFEST_TABLE_ADDRESS: u64 = 0x01D0;
-pub const ABRM_SBRM_ADDRESS: u64 = 0x01D8;
-pub const ABRM_DEVICE_CONFIGURATION: u64 = 0x01E0;
-pub const ABRM_HEARTBEAT_TIMEOUT: u64 = 0x01E8;
-pub const ABRM_MESSAGE_CHANNEL_ID: u64 = 0x01EC;
-pub const ABRM_ACCESS_PRIVILEGE: u64 = 0x0204;
-pub const ABRM_IMPLEMENTATION_ENDIANNESS: u64 = 0x020C;
+// The bootstrap register maps' offsets are vocabulary, from `viva-u3v`
+// (ADR-0030): the ABRM (GenCP 1.2 Table 15) at 0, the SBRM and SIRM where
+// this device puts them. What the fake keeps in each, and how it answers, is
+// its own reading of the standards.
+pub const ABRM_GENCP_VERSION: u64 = abrm::GENCP_VERSION;
+pub const ABRM_MANUFACTURER_NAME: u64 = abrm::MANUFACTURER_NAME;
+pub const ABRM_MODEL_NAME: u64 = abrm::MODEL_NAME;
+pub const ABRM_FAMILY_NAME: u64 = abrm::FAMILY_NAME;
+pub const ABRM_DEVICE_VERSION: u64 = abrm::DEVICE_VERSION;
+pub const ABRM_MANUFACTURER_INFO: u64 = abrm::MANUFACTURER_INFO;
+pub const ABRM_SERIAL_NUMBER: u64 = abrm::SERIAL_NUMBER;
+pub const ABRM_USER_DEFINED_NAME: u64 = abrm::USER_DEFINED_NAME;
+pub const ABRM_DEVICE_CAPABILITY: u64 = abrm::DEVICE_CAPABILITY;
+pub const ABRM_MAX_DEVICE_RESPONSE_TIME: u64 = abrm::MAX_DEVICE_RESPONSE_TIME;
+pub const ABRM_MANIFEST_TABLE_ADDRESS: u64 = abrm::MANIFEST_TABLE_ADDRESS;
+pub const ABRM_SBRM_ADDRESS: u64 = abrm::SBRM_ADDRESS;
+pub const ABRM_DEVICE_CONFIGURATION: u64 = abrm::DEVICE_CONFIGURATION;
+pub const ABRM_HEARTBEAT_TIMEOUT: u64 = abrm::HEARTBEAT_TIMEOUT;
+pub const ABRM_MESSAGE_CHANNEL_ID: u64 = abrm::MESSAGE_CHANNEL_ID;
+pub const ABRM_ACCESS_PRIVILEGE: u64 = abrm::ACCESS_PRIVILEGE;
+pub const ABRM_IMPLEMENTATION_ENDIANNESS: u64 = abrm::IMPLEMENTATION_ENDIANNESS;
 
 /// Device capability (GenCP 1.2 Table 17): a user defined name (bit 0),
 /// UTF-8 strings (bits 4-7 = 1), a family name (8), an SBRM (9), the
@@ -85,32 +90,32 @@ pub const DEVICE_CAPABILITY: u64 =
 
 /// Where the SBRM sits.
 pub const SBRM_BASE: u64 = 0x1_0000_0000;
-pub const SBRM_U3V_VERSION: u64 = SBRM_BASE;
-pub const SBRM_U3VCP_CAPABILITY: u64 = SBRM_BASE + 0x04;
-pub const SBRM_U3VCP_CONFIGURATION: u64 = SBRM_BASE + 0x0C;
-pub const SBRM_MAX_CMD_TRANSFER: u64 = SBRM_BASE + 0x14;
-pub const SBRM_MAX_ACK_TRANSFER: u64 = SBRM_BASE + 0x18;
-pub const SBRM_NUM_STREAM_CHANNELS: u64 = SBRM_BASE + 0x1C;
-pub const SBRM_SIRM_ADDRESS: u64 = SBRM_BASE + 0x20;
-pub const SBRM_SIRM_LENGTH: u64 = SBRM_BASE + 0x28;
-pub const SBRM_EIRM_ADDRESS: u64 = SBRM_BASE + 0x2C;
-pub const SBRM_EIRM_LENGTH: u64 = SBRM_BASE + 0x34;
-pub const SBRM_IIDC2_ADDRESS: u64 = SBRM_BASE + 0x38;
-pub const SBRM_CURRENT_SPEED: u64 = SBRM_BASE + 0x40;
+pub const SBRM_U3V_VERSION: u64 = SBRM_BASE + sbrm::U3V_VERSION;
+pub const SBRM_U3VCP_CAPABILITY: u64 = SBRM_BASE + sbrm::U3VCP_CAPABILITY;
+pub const SBRM_U3VCP_CONFIGURATION: u64 = SBRM_BASE + sbrm::U3VCP_CONFIGURATION;
+pub const SBRM_MAX_CMD_TRANSFER: u64 = SBRM_BASE + sbrm::MAX_CMD_TRANSFER;
+pub const SBRM_MAX_ACK_TRANSFER: u64 = SBRM_BASE + sbrm::MAX_ACK_TRANSFER;
+pub const SBRM_NUM_STREAM_CHANNELS: u64 = SBRM_BASE + sbrm::NUM_STREAM_CHANNELS;
+pub const SBRM_SIRM_ADDRESS: u64 = SBRM_BASE + sbrm::SIRM_ADDRESS;
+pub const SBRM_SIRM_LENGTH: u64 = SBRM_BASE + sbrm::SIRM_LENGTH;
+pub const SBRM_EIRM_ADDRESS: u64 = SBRM_BASE + sbrm::EIRM_ADDRESS;
+pub const SBRM_EIRM_LENGTH: u64 = SBRM_BASE + sbrm::EIRM_LENGTH;
+pub const SBRM_IIDC2_ADDRESS: u64 = SBRM_BASE + sbrm::IIDC2_ADDRESS;
+pub const SBRM_CURRENT_SPEED: u64 = SBRM_BASE + sbrm::CURRENT_SPEED;
 
 /// Where the SIRM sits.
 pub const SIRM_BASE: u64 = 0x2_0000_0000;
-pub const SIRM_INFO: u64 = SIRM_BASE;
-pub const SIRM_CONTROL: u64 = SIRM_BASE + 0x04;
-pub const SIRM_REQUIRED_PAYLOAD_SIZE: u64 = SIRM_BASE + 0x08;
-pub const SIRM_REQUIRED_LEADER_SIZE: u64 = SIRM_BASE + 0x10;
-pub const SIRM_REQUIRED_TRAILER_SIZE: u64 = SIRM_BASE + 0x14;
-pub const SIRM_MAX_LEADER_SIZE: u64 = SIRM_BASE + 0x18;
-pub const SIRM_PAYLOAD_TRANSFER_SIZE: u64 = SIRM_BASE + 0x1C;
-pub const SIRM_PAYLOAD_TRANSFER_COUNT: u64 = SIRM_BASE + 0x20;
-pub const SIRM_FINAL_TRANSFER1_SIZE: u64 = SIRM_BASE + 0x24;
-pub const SIRM_FINAL_TRANSFER2_SIZE: u64 = SIRM_BASE + 0x28;
-pub const SIRM_MAX_TRAILER_SIZE: u64 = SIRM_BASE + 0x2C;
+pub const SIRM_INFO: u64 = SIRM_BASE + sirm::INFO;
+pub const SIRM_CONTROL: u64 = SIRM_BASE + sirm::CONTROL;
+pub const SIRM_REQUIRED_PAYLOAD_SIZE: u64 = SIRM_BASE + sirm::REQUIRED_PAYLOAD_SIZE;
+pub const SIRM_REQUIRED_LEADER_SIZE: u64 = SIRM_BASE + sirm::REQUIRED_LEADER_SIZE;
+pub const SIRM_REQUIRED_TRAILER_SIZE: u64 = SIRM_BASE + sirm::REQUIRED_TRAILER_SIZE;
+pub const SIRM_MAX_LEADER_SIZE: u64 = SIRM_BASE + sirm::MAX_LEADER_SIZE;
+pub const SIRM_PAYLOAD_TRANSFER_SIZE: u64 = SIRM_BASE + sirm::PAYLOAD_TRANSFER_SIZE;
+pub const SIRM_PAYLOAD_TRANSFER_COUNT: u64 = SIRM_BASE + sirm::PAYLOAD_TRANSFER_COUNT;
+pub const SIRM_FINAL_TRANSFER1_SIZE: u64 = SIRM_BASE + sirm::FINAL_TRANSFER1_SIZE;
+pub const SIRM_FINAL_TRANSFER2_SIZE: u64 = SIRM_BASE + sirm::FINAL_TRANSFER2_SIZE;
+pub const SIRM_MAX_TRAILER_SIZE: u64 = SIRM_BASE + sirm::MAX_TRAILER_SIZE;
 
 /// Transfers must be multiples of 2^10 bytes, a SuperSpeed bulk packet: big
 /// enough that a small frame's payload does not fill whole transfers, so

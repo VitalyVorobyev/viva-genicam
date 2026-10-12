@@ -7,7 +7,7 @@ use viva_genapi_xml::{
     AccessMode, Addressing, BitField, ByteOrder, CommandValueSrc, EnumEntryDecl, FloatEncoding,
     Sign, Slope,
 };
-pub use viva_genapi_xml::{NodeMeta, PredicateRefs, Representation, SkOutput, Visibility};
+use viva_genapi_xml::{NodeMeta, PredicateRefs, Representation, SkOutput, Visibility};
 
 use crate::swissknife::{AstNode, Value, VarAttr};
 
@@ -250,8 +250,9 @@ pub struct IntegerNode {
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
-    /// Register addressing metadata (absent when delegated via `pvalue`).
-    pub addressing: Option<Addressing>,
+    /// Register addressing (absent when delegated via `pvalue`); resolve it
+    /// with [`NodeMap::register_address`](crate::NodeMap::register_address).
+    pub(crate) addressing: Option<Addressing>,
     /// Nominal register length in bytes.
     pub len: u32,
     /// Declared access rights.
@@ -297,17 +298,21 @@ pub struct IntegerNode {
 /// Floating point feature metadata.
 #[derive(Debug)]
 pub struct FloatNode {
+    /// Unique feature name.
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
-    /// Register addressing metadata (absent when delegated via `pvalue`).
-    pub addressing: Option<Addressing>,
+    /// Register addressing (absent when delegated via `pvalue`); resolve it
+    /// with [`NodeMap::register_address`](crate::NodeMap::register_address).
+    pub(crate) addressing: Option<Addressing>,
+    /// Declared access rights.
     pub access: AccessMode,
     /// `<Min>`, when declared. The bound in force is what
     /// [`NodeMap::feature_state`](crate::NodeMap::feature_state) reports.
     pub min: Option<f64>,
     /// `<Max>`, when declared.
     pub max: Option<f64>,
+    /// Optional engineering unit such as "us".
     pub unit: Option<String>,
     /// Optional rational scale `(numerator, denominator)` applied to the raw value.
     pub scale: Option<(i64, i64)>,
@@ -331,18 +336,24 @@ pub struct FloatNode {
 /// Enumeration feature metadata and mapping tables.
 #[derive(Debug)]
 pub struct EnumNode {
+    /// Unique feature name.
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
-    /// Register addressing metadata (absent when delegated via `pvalue`).
-    pub addressing: Option<Addressing>,
+    /// Register addressing (absent when delegated via `pvalue`); resolve it
+    /// with [`NodeMap::register_address`](crate::NodeMap::register_address).
+    pub(crate) addressing: Option<Addressing>,
+    /// Declared access rights.
     pub access: AccessMode,
     /// Node providing the integer value (delegates register read/write).
     pub pvalue: Option<String>,
+    /// The entries, in document order.
     pub entries: Vec<EnumEntryDecl>,
+    /// The entry selected when nothing else says.
     pub default: Option<String>,
     /// `<pSelected>`: the features this enumeration selects.
     pub selected: Vec<String>,
+    /// The nodes the entries' `<pValue>`s read.
     pub providers: Vec<String>,
     /// `<Value>`: the start value of an enumeration with no register behind
     /// it — a selector the host keeps, as AVT's `GainSelector` is.
@@ -372,12 +383,16 @@ impl EnumNode {
 /// Boolean feature metadata.
 #[derive(Debug)]
 pub struct BooleanNode {
+    /// Unique feature name.
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
-    /// Register addressing metadata (absent when delegated via `pvalue`).
-    pub addressing: Option<Addressing>,
+    /// Register addressing (absent when delegated via `pvalue`); resolve it
+    /// with [`NodeMap::register_address`](crate::NodeMap::register_address).
+    pub(crate) addressing: Option<Addressing>,
+    /// Register length in bytes.
     pub len: u32,
+    /// Declared access rights.
     pub access: AccessMode,
     /// Optional bitfield (absent for pValue-backed booleans).
     pub bitfield: Option<BitField>,
@@ -437,17 +452,19 @@ pub struct SkNode {
     /// Predicate refs gating implementation / availability.
     pub predicates: PredicateRefs,
     /// Cached value alongside the generation it was computed in.
-    pub cache: RefCell<Option<(Value, u64)>>,
+    pub(crate) cache: RefCell<Option<(Value, u64)>>,
 }
 
 /// Command feature metadata.
 #[derive(Debug)]
 pub struct CommandNode {
+    /// Unique feature name.
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
     /// Fixed register address (absent when delegated via `pvalue`).
     pub address: Option<u64>,
+    /// Register length in bytes.
     pub len: u32,
     /// Node providing the command register.
     pub pvalue: Option<String>,
@@ -461,9 +478,11 @@ pub struct CommandNode {
 /// Category node describing child feature names.
 #[derive(Debug)]
 pub struct CategoryNode {
+    /// Unique category name.
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
+    /// The features and categories it contains, in document order.
     pub children: Vec<String>,
     /// Predicate refs gating implementation / availability.
     pub predicates: PredicateRefs,
@@ -507,7 +526,7 @@ pub struct ConverterNode {
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached user-facing value alongside the generation it was computed in.
-    pub cache: RefCell<Option<(Value, u64)>>,
+    pub(crate) cache: RefCell<Option<(Value, u64)>>,
 }
 
 /// IntConverter node transforming a raw register value to/from an integer
@@ -538,7 +557,7 @@ pub struct IntConverterNode {
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached user-facing value alongside the generation it was computed in.
-    pub cache: RefCell<Option<(i64, u64)>>,
+    pub(crate) cache: RefCell<Option<(i64, u64)>>,
 }
 
 /// StringReg node for string-typed register access.
@@ -549,13 +568,13 @@ pub struct StringNode {
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
     /// Register addressing metadata.
-    pub addressing: Addressing,
+    pub(crate) addressing: Addressing,
     /// Declared access rights.
     pub access: AccessMode,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached string value alongside the generation it was computed in.
-    pub cache: RefCell<Option<(String, u64)>>,
+    pub(crate) cache: RefCell<Option<(String, u64)>>,
 }
 
 /// `<Register>` node: raw byte-array access to a register block.
@@ -569,13 +588,27 @@ pub struct RegisterNode {
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
     /// Register addressing metadata, including the block length.
-    pub addressing: Addressing,
+    pub(crate) addressing: Addressing,
     /// Declared access rights.
     pub access: AccessMode,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     /// Cached payload alongside the generation it was read in.
-    pub cache: RefCell<Option<(Vec<u8>, u64)>>,
+    pub(crate) cache: RefCell<Option<(Vec<u8>, u64)>>,
+}
+
+impl StringNode {
+    /// Declared length of the string register in bytes: the longest string
+    /// it holds, its terminating NUL included.
+    pub fn declared_len(&self) -> u32 {
+        self.addressing.byte_len()
+    }
+
+    /// The `<pPort>` the register's address is relative to; `None` means the
+    /// device.
+    pub fn port(&self) -> Option<&str> {
+        self.addressing.port()
+    }
 }
 
 impl RegisterNode {

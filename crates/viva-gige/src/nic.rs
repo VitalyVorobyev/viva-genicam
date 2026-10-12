@@ -366,6 +366,7 @@ impl Iface {
 /// and a user who had discovered a camera with one tool could not stream it
 /// with the other ([#109](https://github.com/VitalyVorobyev/viva-genicam/issues/109)).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IfaceSelector {
     /// One of the interface's own IPv4 addresses, e.g. `169.254.105.106`.
     Ipv4(Ipv4Addr),
@@ -744,14 +745,6 @@ pub async fn bind_multicast(
     UdpSocket::from_std(std_socket)
 }
 
-/// Subscribe the provided socket to a multicast group on the supplied interface.
-pub fn join_multicast(sock: &UdpSocket, group: Ipv4Addr, iface: &Iface) -> io::Result<()> {
-    let socket = SockRef::from(sock);
-    let iface_addr = iface.ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED);
-    socket.join_multicast_v4(&group, &iface_addr)?;
-    Ok(())
-}
-
 /// Wait up to `timeout` for `socket` to have a datagram — or a pending error
 /// — to read. `Ok(false)` when the time ran out.
 ///
@@ -805,11 +798,6 @@ pub fn wait_readable(socket: &StdUdpSocket, timeout: Duration) -> io::Result<boo
             _ => Ok(true),
         }
     }
-}
-
-/// Helper returning the default bind address for discovery convenience.
-pub fn default_bind_addr() -> IpAddr {
-    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
 }
 
 #[cfg(test)]

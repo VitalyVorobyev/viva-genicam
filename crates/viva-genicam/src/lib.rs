@@ -53,7 +53,7 @@
 //!
 //! ```rust,no_run
 //! # async fn action_example() -> Result<(), std::io::Error> {
-//! use viva_genicam::gige::action::{send_action, ActionParams};
+//! use viva_genicam::gige::{send_action, ActionParams};
 //! use std::net::SocketAddr;
 //! let params = ActionParams {
 //!     device_key: 0,
@@ -78,17 +78,17 @@ pub use viva_sfnc as sfnc;
 pub use viva_u3v as u3v;
 
 pub mod blocking;
-pub mod chunks;
-pub mod events;
-pub mod evs;
-pub mod frame;
+mod chunks;
+mod error;
+mod events;
+mod evs;
+mod frame;
 #[cfg(feature = "image-io")]
 #[cfg_attr(docsrs, doc(cfg(feature = "image-io")))]
 pub mod image_io;
 pub mod report;
 mod standard;
-pub mod stream;
-pub mod time;
+mod stream;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -100,82 +100,27 @@ use crate::events::{
 };
 use crate::genapi::{GenApiError, Node, NodeMap, PortKind, RegisterIo};
 use gige::GigeDevice;
-use gige::gvcp::consts as gvcp_consts;
-use thiserror::Error;
+use gige::consts as gvcp_consts;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 pub use chunks::{ChunkData, ChunkError, chunk_data};
+pub use error::{GenicamError, WriteRefused};
 pub use events::{Event, EventStream};
 pub use evs::{EvsBlock, EvsFormat};
 pub use frame::{Frame, FrameStatus};
-pub use gige::action::{AckSummary, ActionParams};
+pub use gige::{AckSummary, ActionParams};
 pub use standard::{ResolvedFeature, Roi, StandardFeature};
+#[cfg(fuzzing)]
+pub use stream::fuzz_assemble;
 pub use stream::{
     FrameStream, GenericStreamBlock, ResendPolicy, Stream, StreamBlock, StreamBuilder, StreamDest,
-    StreamOptions, StreamStats,
+    StreamOptions, StreamStats, StreamStatsAccumulator,
 };
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub use stream::{U3vFrameStream, U3vStreamBuilder};
-pub use time::TimeSync;
-
-/// Error type produced by the high level GenICam facade.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum GenicamError {
-    /// Wrapper around GenApi errors produced by the nodemap.
-    #[error(transparent)]
-    GenApi(#[from] GenApiError),
-    /// Transport level failure while accessing registers.
-    #[error("transport: {0}")]
-    Transport(String),
-    /// Parsing a user supplied value failed.
-    #[error("parse error: {0}")]
-    Parse(String),
-    /// Required chunk feature missing from the nodemap.
-    #[error("chunk feature '{0}' not found; verify camera supports chunk data")]
-    MissingChunkFeature(String),
-    /// The camera reported a pixel format without a conversion path.
-    #[error("unsupported pixel format: {0}")]
-    UnsupportedPixelFormat(viva_pfnc::PixelFormat),
-    /// A command was written but the camera did not report it finished
-    /// (GenICam `IsDone`) within the time allowed.
-    ///
-    /// The write itself was acknowledged: the camera may still be acting on
-    /// it, or its command register may never clear.
-    #[error("command {name} was executed but did not report completion within {waited:?}")]
-    CommandNotDone {
-        /// The command node.
-        name: String,
-        /// How long [`Camera::execute_and_wait`] polled.
-        waited: Duration,
-    },
-    /// Nothing arrived within the time a blocking call was given.
-    #[error("timed out after {0:?}")]
-    Timeout(Duration),
-    /// Reading or writing a file or stream failed.
-    #[error("i/o: {0}")]
-    Io(#[from] std::io::Error),
-    /// The camera declares none of the names a standard feature goes by.
-    #[error("the camera has no {what}: it declares none of {}", tried.join(", "))]
-    MissingFeature {
-        /// What was looked for, such as `"exposure time"`.
-        what: &'static str,
-        /// Every name tried, in the order tried.
-        tried: &'static [&'static str],
-    },
-}
-
-impl GenicamError {
-    fn parse<S: Into<String>>(msg: S) -> Self {
-        GenicamError::Parse(msg.into())
-    }
-
-    fn transport<S: Into<String>>(msg: S) -> Self {
-        GenicamError::Transport(msg.into())
-    }
-}
+pub use viva_gige::TimeSync;
 
 /// How often [`Camera::execute_and_wait`] asks a command whether it has
 /// finished, when the command declares no `<PollingTime>`.
@@ -363,10 +308,12 @@ impl<T: RegisterIo> Camera<T> {
     /// A category has no value and a command none to read: both are errors.
     pub fn get(&self, name: &str) -> Result<String, GenicamError> {
         if let Some(Node::Command(_)) = self.nodemap.node(name) {
-            return Err(GenApiError::Type(format!(
-                "{name} is a command, which has no value; run it with \
-                 Camera::execute_command or execute_and_wait"
-            ))
+            return Err(GenApiError::Type {
+                name: name.to_string(),
+                kind: "Command",
+                expected: "a feature with a value (run a command with execute_command or \
+                           execute_and_wait)",
+            }
             .into());
         }
         Ok(self.nodemap.get_text(name, &self.transport)?)
@@ -374,23 +321,23 @@ impl<T: RegisterIo> Camera<T> {
 
     /// Write a feature from text, parsed by its type: the counterpart of
     /// [`Camera::get`]. Text that does not parse as the feature's type is
-    /// [`GenicamError::Parse`], and nothing is written.
+    /// [`GenApiError::InvalidText`] (in [`GenicamError::GenApi`]), and nothing
+    /// is written.
     ///
     /// A command is not set but executed, with [`Camera::execute_command`] or
     /// [`Camera::execute_and_wait`]: setting one is an error, and nothing is
     /// written. So is setting a category.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), GenicamError> {
         if let Some(Node::Command(_)) = self.nodemap.node(name) {
-            return Err(GenApiError::Type(format!(
-                "{name} is a command, which is executed, not set; run it with \
-                 Camera::execute_command or execute_and_wait"
-            ))
+            return Err(GenApiError::Type {
+                name: name.to_string(),
+                kind: "Command",
+                expected: "a feature that is set (run a command with execute_command or \
+                           execute_and_wait)",
+            }
             .into());
         }
-        match self.nodemap.set_text(name, value, &self.transport) {
-            Err(err @ GenApiError::InvalidText { .. }) => Err(GenicamError::parse(err.to_string())),
-            other => Ok(other?),
-        }
+        Ok(self.nodemap.set_text(name, value, &self.transport)?)
     }
 
     /// Save the camera's configuration — every feature its XML marks
@@ -429,8 +376,7 @@ impl<T: RegisterIo> Camera<T> {
     ) -> Result<genapi::LoadReport, GenicamError> {
         let mut text = String::new();
         input.read_to_string(&mut text)?;
-        let configuration = genapi::Configuration::parse(&text)
-            .map_err(|err| GenicamError::parse(format!("configuration file: {err}")))?;
+        let configuration = genapi::Configuration::parse(&text)?;
         Ok(self
             .nodemap
             .load_configuration(&configuration, &self.transport))
@@ -443,9 +389,7 @@ impl<T: RegisterIo> Camera<T> {
         interval_ms: u64,
     ) -> Result<(), GenicamError> {
         if samples < 2 {
-            return Err(GenicamError::transport(
-                "time calibration requires at least two samples",
-            ));
+            return Err(GenicamError::TimeSync("it takes at least two samples"));
         }
 
         let cap = samples.max(self.time_sync.capacity());
@@ -490,9 +434,8 @@ impl<T: RegisterIo> Camera<T> {
                 .nodemap
                 .get_integer(value_node, &self.transport)
                 .map_err(GenicamError::from)?;
-            let dev_ticks = u64::try_from(raw_ticks).map_err(|_| {
-                GenicamError::transport("timestamp value is negative; unsupported camera")
-            })?;
+            let dev_ticks = u64::try_from(raw_ticks)
+                .map_err(|_| GenicamError::TimeSync("the camera's timestamp reads negative"))?;
             let host = Instant::now();
             self.time_sync.update(dev_ticks, host);
             if idx == 0 {
@@ -528,10 +471,9 @@ impl<T: RegisterIo> Camera<T> {
             }
         }
 
-        let (a, b) = self
-            .time_sync
-            .fit(freq_hz)
-            .ok_or_else(|| GenicamError::transport("insufficient samples for timestamp fit"))?;
+        let (a, b) = self.time_sync.fit(freq_hz).ok_or(GenicamError::TimeSync(
+            "the samples do not fit a clock: too few, or all at one instant",
+        ))?;
 
         if let Some(freq) = freq_hz {
             info!(freq_hz = freq, a, b, "time calibration complete");
@@ -960,12 +902,9 @@ impl Camera<GigeRegisterIo> {
             // but which events a device emits is a GenApi decision with no
             // bootstrap equivalent. Say so rather than writing somewhere
             // hopeful.
-            return Err(GenicamError::transport(format!(
-                "cannot enable events {enable_ids:?}: camera exposes neither \
-                 `{}` nor `{}`, and event selection has no bootstrap register",
-                viva_sfnc::EVENT_SELECTOR,
-                viva_sfnc::EVENT_NOTIFICATION,
-            )));
+            return Err(GenicamError::NoEventSelection {
+                events: enable_ids.iter().map(ToString::to_string).collect(),
+            });
         }
 
         Ok(())
@@ -1027,10 +966,10 @@ fn configure_multicast<T: RegisterIo>(
     group: Ipv4Addr,
     port: u16,
 ) -> Result<(), GenicamError> {
-    if (group.octets()[0] & 0xF0) != 0xE0 {
-        return Err(GenicamError::transport(
-            "multicast group must be within 224.0.0.0/4",
-        ));
+    if !group.is_multicast() {
+        return Err(GenicamError::NotMulticast(std::net::SocketAddrV4::new(
+            group, port,
+        )));
     }
     info!(stream_idx, %group, port, "configuring multicast stream");
 
@@ -1079,7 +1018,7 @@ fn configure_multicast<T: RegisterIo>(
         camera
             .transport
             .write(addr_reg, &group.octets())
-            .map_err(|err| GenicamError::transport(format!("write multicast addr: {err}")))?;
+            .map_err(GenicamError::from)?;
         // GevSCPHostPort is a 32-bit register with the port in its low
         // half. The two port bytes alone land in the high half (SR-20),
         // the bug already fixed for GevMCP.
@@ -1087,7 +1026,7 @@ fn configure_multicast<T: RegisterIo>(
         camera
             .transport
             .write(port_reg, &u32::from(port).to_be_bytes())
-            .map_err(|err| GenicamError::transport(format!("write multicast port: {err}")))?;
+            .map_err(GenicamError::from)?;
         info!(
             stream_idx,
             %group,
@@ -1289,8 +1228,7 @@ impl GigeRegisterIo {
                 }
                 Ok::<_, gige::GigeError>(())
             };
-            self.block_on(fut)?
-                .map_err(|err| GenicamError::transport(format!("claim control: {err}")))?;
+            self.block_on(fut)?.map_err(error::gige("claim control"))?;
             if device.inflight_keepalive_period().is_none() {
                 device.set_inflight_keepalive_period(Some(keepalive_period(None)));
             }
@@ -1316,9 +1254,8 @@ impl GigeRegisterIo {
         let result = {
             let mut device = self.lock_device()?;
             let fut = device.release_control();
-            self.block_on(fut).and_then(|released| {
-                released.map_err(|err| GenicamError::transport(format!("release control: {err}")))
-            })
+            self.block_on(fut)
+                .and_then(|released| released.map_err(error::gige("release control")))
         };
         match result {
             Ok(()) => {
@@ -1340,13 +1277,15 @@ impl GigeRegisterIo {
     pub fn lock_device(&self) -> Result<MutexGuard<'_, GigeDevice>, GenicamError> {
         self.device
             .lock()
-            .map_err(|_| GenicamError::transport("gige device mutex poisoned"))
+            .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, GigeDevice>, GenApiError> {
-        self.device
-            .lock()
-            .map_err(|_| GenApiError::Io("gige device mutex poisoned".into()))
+        self.device.lock().map_err(|_| {
+            GenApiError::io(GenicamError::Panicked(
+                "a thread holding the camera's device lock",
+            ))
+        })
     }
 
     /// Spawn the keepalive unless one is running.
@@ -1445,14 +1384,14 @@ impl GigeRegisterIo {
     fn check_refusal(&self, device: &mut GigeDevice, err: &gige::GigeError) {
         if !matches!(
             err,
-            gige::GigeError::Status(gencp::StatusCode::AccessDenied)
+            gige::GigeError::Status(gige::GigeStatus::Common(gencp::StatusCode::AccessDenied))
         ) || self.control_state() != ControlState::Held
         {
             return;
         }
         match self
             .block_on(device.ping_control_channel())
-            .and_then(|pinged| pinged.map_err(|err| GenicamError::transport(err.to_string())))
+            .and_then(|pinged| pinged.map_err(error::gige("read the control channel")))
         {
             Ok(false) => {
                 self.control.send_replace(ControlState::Lost);
@@ -1507,7 +1446,7 @@ impl GigeRegisterIo {
                     && self.handle.runtime_flavor() != CurrentThread =>
             {
                 std::thread::scope(|scope| scope.spawn(|| self.handle.block_on(fut)).join())
-                    .map_err(|_| GenicamError::transport("register access thread panicked"))
+                    .map_err(|_| GenicamError::Panicked("the register access thread"))
             }
             Ok(_) => Ok(tokio::task::block_in_place(|| self.handle.block_on(fut))),
             Err(_) => Ok(self.handle.block_on(fut)),
@@ -1523,7 +1462,7 @@ pub(crate) fn camera_runtime() -> Result<tokio::runtime::Runtime, GenicamError> 
         .thread_name("viva-gige")
         .enable_all()
         .build()
-        .map_err(|err| GenicamError::transport(format!("start the camera's runtime: {err}")))
+        .map_err(error::network("start the camera's runtime"))
 }
 
 impl RegisterIo for GigeRegisterIo {
@@ -1531,8 +1470,8 @@ impl RegisterIo for GigeRegisterIo {
         let mut device = self.lock()?;
         let fut = device.read_register_or_mem(addr, len);
         self.block_on(fut)
-            .map_err(|err| GenApiError::Io(err.to_string()))?
-            .map_err(|err| GenApiError::Io(err.to_string()))
+            .map_err(GenApiError::io)?
+            .map_err(GenApiError::io)
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
@@ -1541,32 +1480,14 @@ impl RegisterIo for GigeRegisterIo {
         // controls refuses it anyway.
         match self.control_state() {
             ControlState::Held => {}
-            ControlState::Monitor => {
-                return Err(GenApiError::Access(format!(
-                    "the camera was opened as a read-only monitor, so nothing is written \
-                     (0x{addr:08x}); open it with Access::Control, or reclaim_control, to write"
-                )));
-            }
-            state => {
-                let why = if state == ControlState::Released {
-                    "was released"
-                } else {
-                    "was lost"
-                };
-                return Err(GenApiError::Access(format!(
-                    "control of the camera {why}, so nothing is written (0x{addr:08x}); \
-                     reclaim_control takes it again"
-                )));
-            }
+            state => return Err(GenApiError::io(WriteRefused::new(state, addr))),
         }
         let mut device = self.lock()?;
         let fut = device.write_register_or_mem(addr, data);
-        self.block_on(fut)
-            .map_err(|err| GenApiError::Io(err.to_string()))?
-            .map_err(|err| {
-                self.check_refusal(&mut device, &err);
-                GenApiError::Io(err.to_string())
-            })
+        self.block_on(fut).map_err(GenApiError::io)?.map_err(|err| {
+            self.check_refusal(&mut device, &err);
+            GenApiError::io(err)
+        })
     }
 }
 
@@ -1808,7 +1729,7 @@ pub async fn connect_gige_as(
         .await
     {
         Ok(opened) => opened,
-        Err(err) => Err(GenicamError::transport(format!("connect task: {err}"))),
+        Err(err) => Err(error::task("connect")(err)),
     };
     let (mut camera, xml) = opened?;
     camera.transport.adopt_runtime(runtime.into_inner());
@@ -1851,7 +1772,6 @@ pub(crate) async fn connect_here(
     access: Access,
 ) -> Result<(Camera<GigeRegisterIo>, String), GenicamError> {
     use std::net::{IpAddr, SocketAddr};
-    use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
 
     let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
@@ -1859,14 +1779,14 @@ pub(crate) async fn connect_here(
 
     let mut device = gige::GigeDevice::open(control_addr)
         .await
-        .map_err(|e| GenicamError::transport(e.to_string()))?;
+        .map_err(error::gige("open the control channel"))?;
 
     if access == Access::Control {
         // Claim control privilege (required before configuration and streaming).
         device
             .claim_control()
             .await
-            .map_err(|e| GenicamError::transport(e.to_string()))?;
+            .map_err(error::gige("claim control"))?;
         match device.enable_pending_ack().await {
             Ok(enabled) => debug!(enabled, "PENDING_ACK"),
             Err(err) => {
@@ -1875,30 +1795,24 @@ pub(crate) async fn connect_here(
         }
     }
 
-    let control = Arc::new(AsyncMutex::new(device));
+    let control = AsyncMutex::new(device);
 
     // Fetch and parse the GenApi XML.
-    let fetched = viva_genapi_xml::fetch_and_load_xml({
-        let control = control.clone();
-        move |address, length| {
-            let control = control.clone();
-            async move {
-                let mut dev = control.lock().await;
-                dev.read_mem(address, length)
-                    .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
-            }
+    let fetched = viva_genapi_xml::fetch_and_load_xml(|address, length| {
+        let control = &control;
+        async move {
+            let mut dev = control.lock().await;
+            dev.read_mem(address, length)
+                .await
+                .map_err(viva_genapi_xml::XmlError::transport)
         }
     })
-    .await
-    .map_err(|e| GenicamError::transport(e.to_string()));
+    .await;
 
     // Extract the device and create the blocking adapter. It owns the release
     // of control from here, so a failure below still gives control back.
     let handle = tokio::runtime::Handle::current();
-    let control_device = Arc::try_unwrap(control)
-        .map_err(|_| GenicamError::transport("control connection still in use"))?
-        .into_inner();
+    let control_device = control.into_inner();
     let transport = match access {
         Access::Control => GigeRegisterIo::new(handle, control_device),
         Access::Monitor => GigeRegisterIo::monitor(handle, control_device),
@@ -1954,7 +1868,7 @@ pub async fn connect_gige_with_xml(
 // USB3 Vision transport (behind `u3v` feature)
 // ---------------------------------------------------------------------------
 
-/// Blocking [`RegisterIo`] adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
+/// Blocking [`RegisterIo`] adapter wrapping a [`U3vDevice`](u3v::U3vDevice).
 ///
 /// Generic over `T: UsbTransfer` so that real hardware (`RusbTransfer`) and
 /// test doubles (`MockUsbTransfer`, `FakeU3vTransport`) all work through the
@@ -1962,54 +1876,52 @@ pub async fn connect_gige_with_xml(
 /// simply forwards calls through a `Mutex` for thread safety.
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
-pub struct U3vRegisterIo<T: u3v::usb::UsbTransfer + 'static> {
+pub struct U3vRegisterIo<T: u3v::UsbTransfer + 'static> {
     /// Shared with a [`U3vFrameStream`](crate::U3vFrameStream), which clears
     /// StreamEnable through it when it stops.
-    device: Arc<Mutex<u3v::device::U3vDevice<T>>>,
+    device: Arc<Mutex<u3v::U3vDevice<T>>>,
 }
 
 #[cfg(feature = "u3v")]
-impl<T: u3v::usb::UsbTransfer + 'static> U3vRegisterIo<T> {
-    /// Create a new adapter wrapping a [`U3vDevice`](u3v::device::U3vDevice).
-    pub fn new(device: u3v::device::U3vDevice<T>) -> Self {
+impl<T: u3v::UsbTransfer + 'static> U3vRegisterIo<T> {
+    /// Create a new adapter wrapping a [`U3vDevice`](u3v::U3vDevice).
+    pub fn new(device: u3v::U3vDevice<T>) -> Self {
         Self {
             device: Arc::new(Mutex::new(device)),
         }
     }
 
     /// Lock the underlying device for direct access (e.g. stream configuration).
-    pub fn lock_device(&self) -> Result<MutexGuard<'_, u3v::device::U3vDevice<T>>, GenicamError> {
+    pub fn lock_device(&self) -> Result<MutexGuard<'_, u3v::U3vDevice<T>>, GenicamError> {
         self.device
             .lock()
-            .map_err(|_| GenicamError::transport("u3v device mutex poisoned"))
+            .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))
     }
 
     /// The device, shared: a frame stream holds it to stop the stream.
-    pub(crate) fn shared_device(&self) -> Arc<Mutex<u3v::device::U3vDevice<T>>> {
+    pub(crate) fn shared_device(&self) -> Arc<Mutex<u3v::U3vDevice<T>>> {
         Arc::clone(&self.device)
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, u3v::device::U3vDevice<T>>, GenApiError> {
-        self.device
-            .lock()
-            .map_err(|_| GenApiError::Io("u3v device mutex poisoned".into()))
+    fn lock(&self) -> Result<MutexGuard<'_, u3v::U3vDevice<T>>, GenApiError> {
+        self.device.lock().map_err(|_| {
+            GenApiError::io(GenicamError::Panicked(
+                "a thread holding the camera's device lock",
+            ))
+        })
     }
 }
 
 #[cfg(feature = "u3v")]
-impl<T: u3v::usb::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
+impl<T: u3v::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
         let mut device = self.lock()?;
-        device
-            .read_mem(addr, len)
-            .map_err(|e| GenApiError::Io(e.to_string()))
+        device.read_mem(addr, len).map_err(GenApiError::io)
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
         let mut device = self.lock()?;
-        device
-            .write_mem(addr, data)
-            .map_err(|e| GenApiError::Io(e.to_string()))
+        device.write_mem(addr, data).map_err(GenApiError::io)
     }
 }
 
@@ -2026,7 +1938,7 @@ impl<T: u3v::usb::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
 /// ```rust,ignore
 /// use viva_genicam::{u3v, connect_u3v};
 ///
-/// let devices = u3v::discovery::discover()?;
+/// let devices = u3v::discover()?;
 /// let device = devices.into_iter().next().expect("no U3V camera found");
 /// let mut camera = connect_u3v(&device)?;
 /// camera.set("ExposureTime", "5000")?;
@@ -2034,8 +1946,8 @@ impl<T: u3v::usb::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
 #[cfg(feature = "u3v-usb")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v-usb")))]
 pub fn connect_u3v(
-    device: &u3v::discovery::U3vDeviceInfo,
-) -> Result<Camera<U3vRegisterIo<u3v::usb::RusbTransfer>>, GenicamError> {
+    device: &u3v::U3vDeviceInfo,
+) -> Result<Camera<U3vRegisterIo<u3v::RusbTransfer>>, GenicamError> {
     let (camera, _xml) = connect_u3v_with_xml(device)?;
     Ok(camera)
 }
@@ -2045,20 +1957,18 @@ pub fn connect_u3v(
 #[cfg(feature = "u3v-usb")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v-usb")))]
 pub fn connect_u3v_with_xml(
-    device_info: &u3v::discovery::U3vDeviceInfo,
-) -> Result<(Camera<U3vRegisterIo<u3v::usb::RusbTransfer>>, String), GenicamError> {
+    device_info: &u3v::U3vDeviceInfo,
+) -> Result<(Camera<U3vRegisterIo<u3v::RusbTransfer>>, String), GenicamError> {
     info!(
         vendor_id = device_info.vendor_id,
         product_id = device_info.product_id,
         "connecting to USB3 Vision camera"
     );
 
-    let mut device = u3v::device::U3vDevice::open_device(device_info)
-        .map_err(|e| GenicamError::transport(e.to_string()))?;
+    let mut device =
+        u3v::U3vDevice::open_device(device_info).map_err(error::u3v("open the device"))?;
 
-    let xml = device
-        .fetch_xml()
-        .map_err(|e| GenicamError::transport(e.to_string()))?;
+    let xml = device.fetch_xml().map_err(error::u3v("fetch the XML"))?;
 
     let nodemap = build_nodemap(&xml)?;
     let transport = U3vRegisterIo::new(device);
@@ -2067,20 +1977,18 @@ pub fn connect_u3v_with_xml(
     Ok((Camera::new(transport, nodemap), xml))
 }
 
-/// Create a [`Camera`] from an already-opened [`U3vDevice`](u3v::device::U3vDevice)
-/// with any [`UsbTransfer`](u3v::usb::UsbTransfer) backend.
+/// Create a [`Camera`] from an already-opened [`U3vDevice`](u3v::U3vDevice)
+/// with any [`UsbTransfer`](u3v::UsbTransfer) backend.
 ///
 /// This is the generic entry point for testing with fake or mock transports.
 /// The device must have been opened and bootstrapped (ABRM/SBRM read)
 /// before calling this function.
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
-pub fn open_u3v_device<T: u3v::usb::UsbTransfer + 'static>(
-    mut device: u3v::device::U3vDevice<T>,
+pub fn open_u3v_device<T: u3v::UsbTransfer + 'static>(
+    mut device: u3v::U3vDevice<T>,
 ) -> Result<(Camera<U3vRegisterIo<T>>, String), GenicamError> {
-    let xml = device
-        .fetch_xml()
-        .map_err(|e| GenicamError::transport(e.to_string()))?;
+    let xml = device.fetch_xml().map_err(error::u3v("fetch the XML"))?;
     let nodemap = build_nodemap(&xml)?;
     let transport = U3vRegisterIo::new(device);
     Ok((Camera::new(transport, nodemap), xml))
@@ -2094,11 +2002,9 @@ pub fn open_u3v_device<T: u3v::usb::UsbTransfer + 'static>(
 /// every dropped node is logged here, and a summary line goes out at `warn`
 /// so a user hitting an unsupported construct has something to report.
 fn build_nodemap(xml: &str) -> Result<NodeMap, GenicamError> {
-    let model =
-        viva_genapi_xml::parse(xml).map_err(|e| GenicamError::parse(format!("GenApi XML: {e}")))?;
+    let model = viva_genapi_xml::parse(xml)?;
     // The nodemap absorbs the XML layer's losses, so one list covers both.
-    let nodemap = NodeMap::try_from_xml(model)
-        .map_err(|e| GenicamError::parse(format!("GenApi model: {e}")))?;
+    let nodemap = NodeMap::try_from_xml(model)?;
     for skipped in nodemap.skipped() {
         debug!(
             kind = %skipped.tag,
@@ -2473,7 +2379,7 @@ mod tests {
         assert!(
             matches!(
                 camera.get_float("Width"),
-                Err(GenicamError::GenApi(GenApiError::Type(_)))
+                Err(GenicamError::GenApi(GenApiError::Type { .. }))
             ),
             "an Integer is not read as a float"
         );

@@ -507,7 +507,7 @@ fn register_address_refuses_a_chunk_register() {
     let io = MemIo::default();
     assert!(matches!(
         map.register_address("ChunkTimestamp_Val", &io),
-        Err(GenApiError::Unavailable(_))
+        Err(GenApiError::NotDeviceMemory { .. })
     ));
     assert_eq!(
         map.register_address("WidthReg", &io).expect("device"),

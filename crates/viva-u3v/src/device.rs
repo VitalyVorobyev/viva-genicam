@@ -20,17 +20,16 @@ const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
 /// Extract the first file of a ZIP archive.
 fn unzip_first(data: &[u8]) -> Result<Vec<u8>, U3vError> {
     let cursor = std::io::Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| U3vError::Protocol(format!("bad ZIP: {e}")))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| U3vError::Xml(Box::new(e)))?;
     if archive.is_empty() {
-        return Err(U3vError::Protocol("ZIP archive is empty".into()));
+        return Err(U3vError::Device("serves an empty XML ZIP archive"));
     }
     let mut file = archive
         .by_index(0)
-        .map_err(|e| U3vError::Protocol(format!("cannot read ZIP entry: {e}")))?;
+        .map_err(|e| U3vError::Xml(Box::new(e)))?;
     let mut xml = Vec::with_capacity(file.size() as usize);
     file.read_to_end(&mut xml)
-        .map_err(|e| U3vError::Protocol(format!("ZIP decompression failed: {e}")))?;
+        .map_err(|e| U3vError::Xml(Box::new(e)))?;
     Ok(xml)
 }
 
@@ -121,8 +120,8 @@ impl<T: UsbTransfer> U3vDevice<T> {
     /// Read the device's half of the SIRM (Streaming Interface Register Map).
     pub fn read_sirm(&mut self) -> Result<Sirm, U3vError> {
         if self.sbrm.sirm_address == 0 {
-            return Err(U3vError::Protocol(
-                "the device has no streaming interface (SIRM address 0)".into(),
+            return Err(U3vError::Device(
+                "has no streaming interface (SIRM address 0)",
             ));
         }
         Sirm::read_from(&mut self.control, self.sbrm.sirm_address)
@@ -141,8 +140,7 @@ impl<T: UsbTransfer> U3vDevice<T> {
             .read_mem(entry.file_address, entry.file_size as usize)?;
         let zipped = entry.format == FileFormat::Zip || raw.starts_with(ZIP_MAGIC);
         let xml_bytes = if zipped { unzip_first(&raw)? } else { raw };
-        String::from_utf8(xml_bytes)
-            .map_err(|e| U3vError::Protocol(format!("XML is not valid UTF-8: {e}")))
+        String::from_utf8(xml_bytes).map_err(|e| U3vError::Xml(Box::new(e)))
     }
 
     /// The bulk IN endpoint for streaming data, if the device has one.
@@ -165,7 +163,7 @@ impl<T: UsbTransfer> U3vDevice<T> {
     pub fn open_stream(&mut self, payload_hint: u64) -> Result<U3vStream<T>, U3vError> {
         let ep = self
             .stream_ep
-            .ok_or_else(|| U3vError::Protocol("device has no streaming endpoint".into()))?;
+            .ok_or(U3vError::Device("has no streaming endpoint"))?;
 
         let sirm = self.read_sirm()?;
         let payload_size = match sirm.required_payload_size {
@@ -279,39 +277,9 @@ impl U3vDevice<crate::usb::RusbTransfer> {
     /// Open a USB3 Vision device from a [`U3vDeviceInfo`](crate::discovery::U3vDeviceInfo)
     /// obtained via [`discover()`](crate::discovery::discover).
     pub fn open_device(info: &crate::discovery::U3vDeviceInfo) -> Result<Self, U3vError> {
-        use rusb::UsbContext;
-        let context = rusb::Context::new().map_err(|e| U3vError::Usb(e.to_string()))?;
-        let devices = context
-            .devices()
-            .map_err(|e| U3vError::Usb(e.to_string()))?;
-
-        let device = devices
-            .iter()
-            .find(|d| d.bus_number() == info.bus && d.address() == info.address)
-            .ok_or_else(|| {
-                U3vError::Usb(format!(
-                    "device not found at bus={} addr={}",
-                    info.bus, info.address
-                ))
-            })?;
-
-        let handle = device.open().map_err(|e| U3vError::Usb(e.to_string()))?;
-
-        // Claim all U3V interfaces.
         let iface = &info.interface_info;
-        handle
-            .claim_interface(iface.control_iface)
-            .map_err(|e| U3vError::Usb(format!("claim control interface: {e}")))?;
-        if let Some(si) = iface.stream_iface {
-            let _ = handle.claim_interface(si);
-        }
-        if let Some(ei) = iface.event_iface {
-            let _ = handle.claim_interface(ei);
-        }
-
-        let transport = Arc::new(crate::usb::RusbTransfer::new(Arc::new(handle)));
         Self::open(
-            transport,
+            Arc::new(crate::usb::RusbTransfer::open(info)?),
             iface.control_ep_in,
             iface.control_ep_out,
             iface.stream_ep_in,

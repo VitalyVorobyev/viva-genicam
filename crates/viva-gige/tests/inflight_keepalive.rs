@@ -6,7 +6,7 @@ mod sensor;
 use std::time::Duration;
 use tokio::time;
 use viva_gige::GigeDevice;
-use viva_gige::gvcp::GigeError;
+use viva_gige::GigeError;
 
 #[tokio::test]
 async fn long_read_wait_sends_heartbeats_and_drains_their_late_replies() {

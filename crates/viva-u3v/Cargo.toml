@@ -21,3 +21,6 @@ zip.workspace = true
 [features]
 default = []
 usb = ["rusb"]
+
+[lints]
+workspace = true

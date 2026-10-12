@@ -6,11 +6,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
-use viva_genicam::evs::{EvsBlock, EvsFormat};
-use viva_genicam::stream::StreamBlock;
+use viva_genicam::{EvsBlock, EvsFormat, StreamBlock};
 use viva_genicam::{Frame, ResendPolicy, StreamOptions};
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS};
 

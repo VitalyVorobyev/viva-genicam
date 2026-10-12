@@ -3,7 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use viva_gige::gvsp::{GvspContent, parse_packet_ref};
+use viva_gige::{GvspContent, parse_packet_ref};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(packet) = parse_packet_ref(data) else {

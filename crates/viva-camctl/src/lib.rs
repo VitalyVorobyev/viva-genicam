@@ -1,32 +1,36 @@
 //! `viva-camctl` — the GenICam diagnostic CLI, as a library.
 //!
-//! The command-line surface lives in [`cli`] and is driven by [`run`], so there
+//! The command-line surface lives in a private `cli` module, driven by [`run`], so there
 //! is exactly one implementation of it. The `viva-camctl` binary calls [`run`],
 //! and so does the `viva-camctl` console script that `pip install viva-genicam`
 //! installs — the Python users we most often ask for a `viva-camctl report` are
 //! the ones least able to build it from source, and a second entry point would
 //! be a second thing to keep in step.
 
-pub mod cli;
-pub mod cmd_action;
-pub mod cmd_bench;
-pub mod cmd_chunks;
-pub mod cmd_config;
-pub mod cmd_events;
-pub mod cmd_execute;
-pub mod cmd_get;
-pub mod cmd_inspect;
-pub mod cmd_list;
-pub mod cmd_registers;
-pub mod cmd_report;
-pub mod cmd_set;
-pub mod cmd_set_ip;
-pub mod cmd_stream;
-pub mod cmd_usb;
-pub mod cmd_xml;
-pub mod common;
+mod cli;
+mod cmd_action;
+mod cmd_bench;
+mod cmd_chunks;
+mod cmd_config;
+mod cmd_events;
+mod cmd_execute;
+mod cmd_get;
+mod cmd_inspect;
+mod cmd_list;
+mod cmd_registers;
+mod cmd_report;
+mod cmd_set;
+mod cmd_set_ip;
+mod cmd_stream;
+mod cmd_usb;
+mod cmd_xml;
+mod common;
+#[cfg(test)]
+mod field_engineer;
 
 use std::ffi::OsString;
+
+use common::with_camera;
 
 use clap::Parser;
 

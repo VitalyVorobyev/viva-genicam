@@ -1,3 +1,5 @@
+//! Stream for a long time and report what the receive engine counted.
+
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -11,7 +13,7 @@ use tracing::{info, warn};
 use viva_genapi_xml::XmlError;
 use viva_genicam::genapi::NodeMap;
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::gige::nic::IfaceSelector;
+use viva_genicam::gige::IfaceSelector;
 use viva_genicam::{Camera, FrameStream, GigeRegisterIo, StreamBuilder, StreamDest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +242,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let mut dev = control.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| XmlError::Transport(err.to_string()))
+                    .map_err(XmlError::transport)
             }
         }
     })

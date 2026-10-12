@@ -286,10 +286,10 @@ impl NodeMap {
                 id: *event_id,
             }),
             None if port.eq_ignore_ascii_case("Device") => Ok(Route::Device),
-            _ => Err(GenApiError::Unavailable(format!(
-                "register '{node}' is on port '{port}', which this document does not declare \
-                 or this crate cannot route"
-            ))),
+            _ => Err(GenApiError::UnknownPort {
+                node: node.to_string(),
+                port: port.to_string(),
+            }),
         }
     }
 

@@ -199,9 +199,12 @@ fn nearest_integer(name: &str, value: f64) -> Result<i64, GenicamError> {
     if rounded.is_finite() && rounded >= i64::MIN as f64 && rounded < i64::MAX as f64 {
         Ok(rounded as i64)
     } else {
-        Err(GenicamError::Parse(format!(
-            "{name} holds an integer, and {value} has none near it"
-        )))
+        Err(GenApiError::Range {
+            name: name.to_string(),
+            value: crate::genapi::swissknife::Value::Float(value),
+            violation: crate::genapi::RangeViolation::Unrepresentable,
+        }
+        .into())
     }
 }
 
@@ -457,11 +460,11 @@ impl<T: RegisterIo> Camera<T> {
         if off == 0 {
             return Ok(());
         }
-        Err(GenApiError::Range(format!(
-            "{name}: {value} is not {min} plus a multiple of {inc}; {} and {} are",
-            value - off,
-            value - off + inc
-        ))
+        Err(GenApiError::Range {
+            name: name.to_string(),
+            value: crate::genapi::swissknife::Value::Int(value),
+            violation: crate::genapi::RangeViolation::OffIncrement { base: min, inc },
+        }
         .into())
     }
 
@@ -479,11 +482,9 @@ impl<T: RegisterIo> Camera<T> {
             return self.get_integer(resolved.name);
         }
         let entry = self.get_enum(resolved.name)?;
-        factor_of(&entry).ok_or_else(|| {
-            GenicamError::Parse(format!(
-                "{}: entry {entry} names no binning factor",
-                resolved.name
-            ))
+        factor_of(&entry).ok_or_else(|| GenicamError::NoBinningFactor {
+            feature: resolved.name,
+            entry: entry.clone(),
         })
     }
 
@@ -522,12 +523,10 @@ impl<T: RegisterIo> Camera<T> {
             .iter()
             .find(|entry| factor_of(entry) == Some(factor))
             .cloned()
-            .ok_or_else(|| {
-                GenicamError::Parse(format!(
-                    "{}: no entry names a binning factor of {factor}; its entries are {}",
-                    resolved.name,
-                    entries.join(", ")
-                ))
+            .ok_or_else(|| GenicamError::NoBinningEntry {
+                feature: resolved.name,
+                factor,
+                entries: entries.clone(),
             })?;
         Ok(BinningWrite::Entry(resolved.name, entry))
     }

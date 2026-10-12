@@ -17,7 +17,7 @@ use crate::util::{
 use crate::{AccessMode, ByteOrder, FloatEncoding, NodeDecl, PredicateRefs, Sign, XmlError};
 
 /// Parse an `<Integer>` element into a [`NodeDecl::Integer`].
-pub fn parse_integer(
+pub(crate) fn parse_integer(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -29,7 +29,7 @@ pub fn parse_integer(
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
         let len = u32::try_from(value)
-            .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            .map_err(|_| XmlError::invalid(&name, "declares a <Length> out of range"))?;
         addressing.set_length(len);
     }
     let mut access = AccessMode::RW;
@@ -103,14 +103,15 @@ pub fn parse_integer(
                             pending_bit_length = false;
                             handled = true;
                         } else {
-                            return Err(XmlError::Invalid(format!(
-                                "bitfield length out of range for node {name}"
-                            )));
+                            return Err(XmlError::invalid(
+                                &name,
+                                "declares a bit field length out of range",
+                            ));
                         }
                     }
                     if !handled {
                         let len = u32::try_from(value).map_err(|_| {
-                            XmlError::Invalid(format!("length out of range for node {name}"))
+                            XmlError::invalid(&name, "declares a <Length> out of range")
                         })?;
                         addressing.set_length(len);
                     }
@@ -147,25 +148,22 @@ pub fn parse_integer(
                 TAG_LSB | TAG_LSB_MIXED => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
-                    let lsb = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("<Lsb> out of range for node {name}"))
-                    })?;
+                    let lsb = u32::try_from(value)
+                        .map_err(|_| XmlError::invalid(&name, "declares an <LSB> out of range"))?;
                     bitfield.note_lsb(lsb);
                 }
                 TAG_MSB | TAG_MSB_MIXED => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
-                    let msb = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("<Msb> out of range for node {name}"))
-                    })?;
+                    let msb = u32::try_from(value)
+                        .map_err(|_| XmlError::invalid(&name, "declares an <MSB> out of range"))?;
                     bitfield.note_msb(msb);
                 }
                 TAG_BIT => {
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
-                    let bit = u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("<Bit> out of range for node {name}"))
-                    })?;
+                    let bit = u32::try_from(value)
+                        .map_err(|_| XmlError::invalid(&name, "declares a <Bit> out of range"))?;
                     bitfield.note_bit(bit);
                     pending_bit_length = true;
                 }
@@ -205,7 +203,7 @@ pub fn parse_integer(
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
                         let parsed = parse_u64(&value)?;
                         let lsb = u32::try_from(parsed).map_err(|_| {
-                            XmlError::Invalid(format!("<Lsb> out of range for node {name}"))
+                            XmlError::invalid(&name, "declares an <LSB> out of range")
                         })?;
                         bitfield.note_lsb(lsb);
                     }
@@ -214,7 +212,7 @@ pub fn parse_integer(
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
                         let parsed = parse_u64(&value)?;
                         let msb = u32::try_from(parsed).map_err(|_| {
-                            XmlError::Invalid(format!("<Msb> out of range for node {name}"))
+                            XmlError::invalid(&name, "declares an <MSB> out of range")
                         })?;
                         bitfield.note_msb(msb);
                     }
@@ -223,7 +221,7 @@ pub fn parse_integer(
                     if let Some(value) = attribute_value(e, TAG_VALUE)? {
                         let parsed = parse_u64(&value)?;
                         let bit = u32::try_from(parsed).map_err(|_| {
-                            XmlError::Invalid(format!("<Bit> out of range for node {name}"))
+                            XmlError::invalid(&name, "declares a <Bit> out of range")
                         })?;
                         bitfield.note_bit(bit);
                         pending_bit_length = true;
@@ -248,11 +246,9 @@ pub fn parse_integer(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Integer node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -300,7 +296,7 @@ pub fn parse_integer(
 /// and no `<Scale>`/`<Offset>`; otherwise scaled-integer (the historical
 /// default, which preserves compatibility with XMLs that rely on scale-only
 /// semantics).
-pub fn parse_float(
+pub(crate) fn parse_float(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -314,7 +310,7 @@ pub fn parse_float(
     if let Some(len) = attribute_value(&start, "Length")? {
         let value = parse_u64(&len)?;
         let len = u32::try_from(value)
-            .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+            .map_err(|_| XmlError::invalid(&name, "declares a <Length> out of range"))?;
         addressing.set_length(len);
     }
     let mut access = AccessMode::RW;
@@ -422,9 +418,9 @@ pub fn parse_float(
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!("unterminated Float node {name}")));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();

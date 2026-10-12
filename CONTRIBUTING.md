@@ -81,7 +81,8 @@ cargo test -p viva-genicam --test facade             # standard-feature helpers,
 cargo test -p viva-genicam --test blocking           # the blocking API, and a camera opened from a current-thread runtime
 cargo test -p viva-genicam --test persistence        # saving and restoring a configuration (ADR-0028)
 cargo test -p viva-genicam --test refresh            # values the camera changes on its own: NoCache, polling, invalidate (ADR-0029)
-cargo test -p viva-camctl  --test field_engineer     # features, describe, dump, save/load, registers, action, USB3 Vision
+cargo test -p viva-camctl  --lib field_engineer      # features, describe, dump, save/load, registers, action, USB3 Vision
+cargo test -p viva-gige    --test status_codes       # GVCP status codes from literal acknowledgements (ADR-0020)
 # Control-channel keepalive, against fixtures that withhold or delay ACKs
 cargo test -p viva-genicam --test heartbeat          # idle keepalive, with a negative control
 cargo test -p viva-genicam --test inflight_keepalive # probes continue while register I/O holds the mutex (against the fake)
@@ -100,6 +101,7 @@ cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva
 cargo test -p viva-u3v     --test gencp_conformance  # wire layouts from GenCP 1.2 and vendor XML
 # Services
 cargo test -p viva-service --test fake_camera_e2e    # viva-service end to end over Zenoh
+cargo test -p viva-service-u3v                       # the USB3 Vision service over Zenoh: serving, cameras coming and going
 # Documentation
 cargo test -p viva-genicam --test book_includes      # every code include in the book resolves
 cargo test -p viva-genicam --test doc_links          # every relative Markdown link resolves
@@ -115,8 +117,12 @@ time. For logs: `RUST_LOG=debug cargo test --workspace -- --nocapture`.
 
 **Fakes must be able to disagree with the client.** A fake written from the
 same reading as the code it tests only proves the two agree; ours are built
-from the specifications, with constants of their own
+from the specifications
 ([ADR-0019](docs/adrs/adr0019-transport-conformance-and-spec-derived-fakes.md)).
+They import the transport crates' vocabulary — register addresses, opcodes,
+status codes — but encode and decode every packet and register themselves, so
+they can still disagree about what lives at an address
+([ADR-0030](docs/adrs/adr0030-errors-and-public-surface.md)).
 A fix starts with a test that fails without it.
 
 ### Vendor XML corpus

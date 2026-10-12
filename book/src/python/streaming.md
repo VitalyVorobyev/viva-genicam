@@ -154,7 +154,8 @@ with vg.connect_gige(info, monitor=True) as watcher:
 ```
 
 The group, port and packet size come from the camera; only `iface=` may be
-given. See [Networking → One camera, several applications](../networking.md#61-one-camera-several-applications).
+given. A USB3 Vision camera has no monitor access — one application opens the
+device — so `stream(monitor=True)` on one raises `GenicamError`. See [Networking → One camera, several applications](../networking.md#61-one-camera-several-applications).
 
 ## Chunks
 

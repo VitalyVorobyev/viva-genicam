@@ -3430,6 +3430,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "viva-gencp",
+ "viva-gige",
+ "viva-pfnc",
  "zip",
 ]
 
@@ -3505,7 +3508,6 @@ dependencies = [
 name = "viva-gige"
 version = "0.8.0"
 dependencies = [
- "async-trait",
  "bytes",
  "fastrand",
  "if-addrs",
@@ -3552,11 +3554,8 @@ dependencies = [
  "clap",
  "serde_json",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "viva-fake-u3v",
  "viva-genicam",
- "viva-pfnc",
  "viva-service",
  "viva-u3v",
  "viva-zenoh-api",

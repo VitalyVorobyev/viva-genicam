@@ -37,7 +37,6 @@ fn render() -> String {
         viva_zenoh_api::CommandResult,
         viva_zenoh_api::AcquisitionStatus,
         viva_zenoh_api::ImageMeta,
-        viva_zenoh_api::PixelFormat,
         // The UiGraph contract (`viva_xml_model`).
         viva_xml_model::UiGraph,
         viva_xml_model::UiNode,

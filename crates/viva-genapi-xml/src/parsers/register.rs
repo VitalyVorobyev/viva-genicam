@@ -31,7 +31,7 @@ use crate::{AccessMode, NodeDecl, PredicateRefs, RegisterDecl, XmlError};
 /// `<pLength>`, which `parse` records as a [`crate::SkippedNode`]. Per ADR-0018
 /// an incomplete implementation is acceptable where the gap is *visible*; this
 /// is what makes it visible.
-pub fn parse_register(
+pub(crate) fn parse_register(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -71,21 +71,21 @@ pub fn parse_register(
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Register node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
     }
 
     if let Some(target) = p_length {
-        return Err(XmlError::Invalid(format!(
-            "node {name} declares <pLength>{target}</pLength>; \
-             a register length resolved from another node is not supported yet (GA-09)"
-        )));
+        // GA-09: a register length resolved from another node at runtime.
+        return Err(XmlError::Unsupported {
+            node: name,
+            element: "pLength",
+            text: target,
+        });
     }
 
     Ok(NodeDecl::Register(RegisterDecl {
@@ -117,7 +117,7 @@ mod tests {
                     };
                 }
                 Ok(Event::Eof) => panic!("no <Register> element in fixture"),
-                Err(err) => return Err(XmlError::Xml(err.to_string())),
+                Err(err) => return Err(XmlError::malformed(err)),
                 _ => {}
             }
             buf.clear();

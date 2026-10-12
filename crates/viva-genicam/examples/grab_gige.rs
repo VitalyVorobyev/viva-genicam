@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tracing::warn;
 use viva_genicam::StreamStats;
-use viva_genicam::gige::nic::{Iface, IfaceSelector};
+use viva_genicam::gige::{Iface, IfaceSelector};
 use viva_genicam::pfnc::PixelFormat;
 use viva_genicam::{Frame, StreamOptions, connect_gige};
 

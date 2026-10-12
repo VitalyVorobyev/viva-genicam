@@ -1,3 +1,5 @@
+//! Enumerations whose entries take their values from other nodes (`<pValue>` on an `<EnumEntry>`), on an in-memory register map.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -101,7 +103,7 @@ fn run_real() -> Result<(), Box<dyn Error>> {
                 let mut dev = device.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     }))?;
@@ -195,7 +197,7 @@ impl RegisterIo for MockIo {
         let regs = self.regs.borrow();
         let data = regs.get(&addr).cloned().unwrap_or_else(|| vec![0; len]);
         if data.len() != len {
-            return Err(GenApiError::Io(format!(
+            return Err(GenApiError::io(format!(
                 "length mismatch at 0x{addr:08X}: expected {len}, have {}",
                 data.len()
             )));

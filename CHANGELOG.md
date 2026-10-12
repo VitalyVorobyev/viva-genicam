@@ -12,6 +12,64 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **Errors carry their causes, typed** (ADR-0030), so every error enum changed
+  shape, and every one is `#[non_exhaustive]`: a `match` needs a wildcard arm.
+  `GenicamError::Transport(String)` and `Parse(String)` are gone: a transport
+  failure is `Gige { during, source }`, `U3v { during, source }` or
+  `Network { during, source }`, an XML failure `Xml(XmlError)`, and the
+  facade's own refusals have variants of their own (`NotInControl`,
+  `NoEventSelection`, `NoBinningFactor`, …). `GenApiError::Parse` is split into
+  `RegisterEncoding` (the camera's bytes do not convert) and `Declaration` (the
+  XML cannot be evaluated); `Io` holds the transport's error as its source;
+  `Access` says which way it refused (`AccessDirection`); `Type` and `Range`
+  have typed fields (`RangeViolation`); a node that declares nothing to read is
+  `NoValueSource`, no longer `NodeNotFound`. `XmlError`, `GigeError`
+  (`Protocol` → `MalformedAck`, `AckLength`, …) and `U3vError` (`Usb`,
+  `Protocol`, `Descriptor` → `Usb(source)`, `NotFound`, `Malformed`, `Length`,
+  …) likewise; `TimeError` is removed. Every error still prints its cause. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **Status codes are per transport** (ADR-0020): `viva_gencp::StatusCode` holds
+  only the codes GVCP and GenCP share, has no `Unknown`, and `from_raw` returns
+  an `Option`; `AckHeader::status` is the wire value. `GigeError::Status` holds
+  a `viva_gige::GigeStatus`, `U3vError::Status` a `viva_u3v::U3vStatus`, and
+  `FrameStatus::DeviceStatus` a `GigeStatus` (the `gvsp::status` module is
+  gone). `encode_cmd`, `GenCpCmd` and `CommandHeader` are removed: nothing sent
+  what they encoded. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **Modules are private; the crate root re-exports what is public** (ADR-0030).
+  `viva_gige::gvcp::X`, `gvsp::X`, `nic::X`, `action::X`, `message::X`,
+  `time::X` are `viva_gige::X` (so `viva_genicam::gige::nic::Iface` is
+  `viva_genicam::gige::Iface`), and GVCP's constants are in `viva_gige::consts`;
+  `viva_u3v`'s items are at its root and its register offsets in
+  `viva_u3v::registers`; `viva_genicam::stream::X`, `frame::X`, `events::X`,
+  `chunks::X`, `evs::X` and `time::X` are `viva_genicam::X`; `viva-camctl` exports
+  only `run`; `viva-fake-gige` its root. Removed as unused: `viva_gige`'s
+  `stats` module, the timestamp latch and reset helpers, `join_multicast` and
+  `default_bind_addr`. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **`viva-genapi` hides what kept changing**: node caches and addressing are
+  private; a register's address comes from `NodeMap::register_address`, a
+  `StringNode`'s length and port from `declared_len()` and `port()`. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **More types are `#[non_exhaustive]`**: the XML layer's model and
+  declarations (`XmlModel`, `NodeMeta`, `RegisterDecl`, …; build a
+  `SkippedNode` or `DocumentIdentity` with `new`), `LoadReport`,
+  `AckSummary`, `IfaceSelector`, `ReportTarget`, the SwissKnife AST, and
+  USB3 Vision's `FileFormat`, `StreamLayout` and `RawFrame`. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **An event's `ts_host` is `Option<SystemTime>`**, `None` until the camera's
+  clock is fitted (`time_calibrate`), as a frame's is; it was the time the event
+  arrived. Python's `Event.ts_host` is `None` then, and `viva-camctl events`
+  prints `-` (`null` in JSON). ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **Zenoh API version 5: pixel formats are `viva-pfnc`'s.**
+  `viva_zenoh_api::PixelFormat` is removed; `ImageMeta::pixel_format` and
+  `FrameHeader::pixel_format` are `viva_pfnc::PixelFormat`. `image/meta` names
+  any PFNC format by its PFNC name — `RGB8Packed` where it said `RGB8`,
+  `Coord3D_ABC32f` where it said `Unknown`; the frame header's byte codes are
+  unchanged. Studio's generated `ImageMeta.pixel_format` is a `string`. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **A USB3 Vision camera's device id names its bus and address**:
+  `cam-u3v-1e10300a-2-7`, so two identical cameras are two devices. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **`viva-service`'s library is the service, not its parts**: `Discovery`,
+  `run_discovery`, `run_service`, `DeviceOps`, `StreamSource`, `serve_device`
+  and the GigE implementation; its `config`, `acquisition`, `nodes` and other
+  modules are private. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+
+
 - **Python's `Frame.to_numpy()` returns the camera's values, in their own
   depth**: 10- to 16-bit monochrome, packed formats included, is `(H, W)`
   `uint16` (it was the payload as flat `uint8`, except `Mono16`); a Bayer frame
@@ -138,6 +196,16 @@ release opens with what to read before upgrading.
   counts every frame not delivered complete. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
 
 ### Added
+
+- **`viva-service-u3v` follows cameras as `viva-service` does**: it rescans
+  USB, serves every USB3 Vision camera it finds, and publishes one that
+  disappears as disconnected; it took the first camera once and never let go.
+  `--fake-count` serves several fake cameras, `--pixel-format` takes any PFNC
+  name, and `--discovery-interval-s` sets the rescan. Both services now run
+  one implementation of the Zenoh API. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **`viva_genicam.testing.FakeU3vCamera`**: an in-process USB3 Vision camera
+  for Python, opened with `connect()` and reporting whether it is acquiring
+  and what its registers hold. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
 
 - **Python offers what the Rust `Camera` does**: features by type, the
   standard-feature helpers (exposure, gain, triggers, region of interest,
@@ -305,6 +373,17 @@ release opens with what to read before upgrading.
   ([#192](https://github.com/VitalyVorobyev/viva-genicam/pull/192))
 
 ### Fixed
+
+- **Python could not stream from a USB3 Vision camera**: opening the stream
+  panicked (`there is no reactor running`). Found with the new fake camera;
+  no USB3 Vision camera has run it. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **Python's `stream(monitor=True)` on a USB3 Vision camera raises**
+  `GenicamError`; it returned a stream that waited for an acquisition nobody
+  started. USB3 Vision has no read-only access to a camera. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **Status codes have their names on both transports**: `0x800B` is `NO_MSG`
+  over GigE Vision and `MSG_TIMEOUT` over USB3 Vision, GVCP's packet-resend
+  codes and USB3 Vision's `0xA0xx` codes are named, and every status prints its
+  name with its hex value — a USB3 Vision status printed as `Unknown(32779)`. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
 
 - **Python cameras and frames work from any thread**; touching one from a
   second thread panicked. Calls to one camera from several threads take turns,

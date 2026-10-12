@@ -13,6 +13,11 @@ name = "viva-fake-gige"
 path = "src/main.rs"
 
 [dependencies]
+# Vocabulary only: opcodes, register addresses and status codes (ADR-0030).
+# The fake encodes and decodes every packet from the specification itself.
+viva-gige = { path = "../viva-gige" }
+viva-gencp = { path = "../viva-gencp" }
+viva-pfnc = { path = "../viva-pfnc" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
 bytes = { workspace = true }
 tracing = { workspace = true }

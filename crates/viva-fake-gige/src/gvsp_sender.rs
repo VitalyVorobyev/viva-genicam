@@ -26,12 +26,10 @@ const IPV4_HEADER_SIZE: usize = 20;
 /// UDP header size counted by `GevSCPSPacketSize` per the GigE Vision spec.
 const UDP_HEADER_SIZE: usize = 8;
 
-/// GVCP command message key byte.
-const GVCP_CMD_KEY: u8 = 0x42;
-/// GVCP `EVENT_CMD` opcode.
-const EVENT_CMD: u16 = 0x00C0;
-/// GVCP `EVENTDATA_CMD` opcode: one event followed by device data.
-const EVENTDATA_CMD: u16 = 0x00C2;
+// GVCP vocabulary, imported (ADR-0030).
+use viva_gige::consts::{
+    EVENT_COMMAND as EVENT_CMD, EVENTDATA_COMMAND as EVENTDATA_CMD, GVCP_CMD_KEY,
+};
 /// `GEV_EVENT_START_OF_TRANSFER`, emitted as each frame begins.
 const GEV_EVENT_START_OF_TRANSFER: u16 = 0x0005;
 /// Size of one 16-bit-block-id event entry.

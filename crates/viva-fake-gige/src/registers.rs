@@ -65,6 +65,7 @@
 //! | `0x20240`   | 16     | DeviceSerialNumber (RO)         | string   |
 //! | `0x20260`   | 32     | DeviceFirmwareVersion (RO)      | string   |
 //! | `0x20280`   | 32     | DeviceID (RO)                   | string   |
+//! | `0x20300`   | 4      | DeviceTemperature_Val (RO)      | i32 BE, °C × 256 |
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -391,6 +392,22 @@ pub const REG_DEVICE_SERIAL_NUMBER: u64 = 0x20240;
 pub const REG_DEVICE_FIRMWARE_VERSION: u64 = 0x20260;
 pub const REG_DEVICE_ID: u64 = 0x20280;
 
+/// `DeviceTemperature_Val`: the sensor temperature in 1/256 °C, which the
+/// camera changes on its own — no write moves it. The XML declares it the
+/// way FLIR's BFS does (`FLIR_BFS_PGE_31S4C_C.xml`): `NoCache`, with a
+/// `<PollingTime>` of 500 ms, behind a `<Converter>` and a `<Float>`. A client
+/// that caches it shows the first reading forever (backlog GA-05).
+pub const REG_DEVICE_TEMPERATURE: u64 = 0x20300;
+/// The temperature the fake starts at, in °C.
+pub const DEVICE_TEMPERATURE_START_C: f64 = 40.0;
+/// How far the temperature rises each [`DEVICE_TEMPERATURE_PERIOD`], in °C.
+pub const DEVICE_TEMPERATURE_STEP_C: f64 = 0.25;
+/// How often the temperature moves.
+pub const DEVICE_TEMPERATURE_PERIOD: Duration = Duration::from_millis(200);
+/// Steps before the temperature falls back to the start: a sawtooth from 40
+/// to 60 °C every 16 s, so a viewer polling it sees it move.
+pub const DEVICE_TEMPERATURE_STEPS: u64 = 80;
+
 // ── GenApi XML ──────────────────────────────────────────────────────────────
 
 /// GenApi XML describing a realistic fake camera following SFNC conventions.
@@ -453,6 +470,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>DeviceSerialNumber</pFeature>
     <pFeature>DeviceFirmwareVersion</pFeature>
     <pFeature>DeviceID</pFeature>
+    <pFeature>DeviceTemperature</pFeature>
   </Category>
 
   <Category Name="ImageFormatControl">
@@ -562,6 +580,31 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Length>32</Length>
     <AccessMode>RO</AccessMode>
   </String>
+
+  <!-- A value the camera changes on its own, declared as FLIR's BFS declares
+       it (FLIR_BFS_PGE_31S4C_C.xml): a Float over a Converter over an IntReg
+       that is NoCache and polled every 500 ms (GA-05). -->
+  <Float Name="DeviceTemperature" NameSpace="Standard">
+    <ToolTip>Device temperature in degrees Celsius</ToolTip>
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>DeviceTemperature_FloatVal</pValue>
+    <Unit>C</Unit>
+  </Float>
+  <Converter Name="DeviceTemperature_FloatVal">
+    <FormulaTo>FROM*256</FormulaTo>
+    <FormulaFrom>TO/256</FormulaFrom>
+    <pValue>DeviceTemperature_Val</pValue>
+    <Slope>Increasing</Slope>
+  </Converter>
+  <IntReg Name="DeviceTemperature_Val">
+    <Address>0x20300</Address>
+    <Length>4</Length>
+    <AccessMode>RO</AccessMode>
+    <Cachable>NoCache</Cachable>
+    <PollingTime>500</PollingTime>
+    <Sign>Signed</Sign>
+    <Endianess>BigEndian</Endianess>
+  </IntReg>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Image Format Control Features
@@ -1966,6 +2009,13 @@ impl RegisterMap {
             return result;
         }
 
+        // The temperature moves with time, not with writes.
+        if addr == REG_DEVICE_TEMPERATURE {
+            let mut result = self.device_temperature_raw().to_be_bytes().to_vec();
+            result.resize(len, 0);
+            return result;
+        }
+
         // `EventNotification` reports the selected event, not a stored word.
         if addr == REG_EVENT_NOTIFICATION {
             let on = u32::from(self.event_notification_on(self.event_selector()));
@@ -2232,6 +2282,17 @@ impl RegisterMap {
     /// Current device timestamp in nanoseconds since creation.
     pub fn device_timestamp(&self) -> u64 {
         self.clock_origin.elapsed().as_nanos() as u64
+    }
+
+    /// `DeviceTemperature_Val` now, in 1/256 °C: [`DEVICE_TEMPERATURE_START_C`]
+    /// plus [`DEVICE_TEMPERATURE_STEP_C`] for every
+    /// [`DEVICE_TEMPERATURE_PERIOD`] since the fake started, falling back to
+    /// the start after [`DEVICE_TEMPERATURE_STEPS`] steps.
+    pub fn device_temperature_raw(&self) -> i32 {
+        let periods =
+            self.clock_origin.elapsed().as_nanos() / DEVICE_TEMPERATURE_PERIOD.as_nanos().max(1);
+        let step = (periods % u128::from(DEVICE_TEMPERATURE_STEPS)) as f64;
+        ((DEVICE_TEMPERATURE_START_C + step * DEVICE_TEMPERATURE_STEP_C) * 256.0) as i32
     }
 
     /// Stream destination IP address.

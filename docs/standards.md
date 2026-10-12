@@ -7,7 +7,7 @@ how the crates layer, in [design.md](design.md).
 
 | Standard | What it defines | Crate |
 |---|---|---|
-| **GenApi** | The camera's XML self-description: typed feature nodes, their registers and the ports those live on (device, chunk, event), formulas (`SwissKnife`, `Converter`), selectors and `pValue` delegation; `<Streamable>` features saved to a file and restored (ADR-0028) | `viva-genapi-xml` parses it; `viva-genapi` builds the node map, evaluates it and routes each register to its port |
+| **GenApi** | The camera's XML self-description: typed feature nodes, their registers and the ports those live on (device, chunk, event), formulas (`SwissKnife`, `Converter`), selectors and `pValue` delegation; `<Streamable>` features saved to a file and restored (ADR-0028); `<Cachable>` and `<PollingTime>`, what may be cached and for how long (ADR-0029) | `viva-genapi-xml` parses it; `viva-genapi` builds the node map, evaluates it and routes each register to its port |
 | **GenCP** | Register-map access: `READMEM`/`WRITEMEM`, `PENDING_ACK`, events, request ids, status codes, and the ABRM at address 0 | `viva-gencp` (vocabulary); `viva-u3v` (framing) |
 | **GVCP** | GigE Vision control: discovery, register and memory access, events, action commands; cameras listen on UDP 3956 | `viva-gencp` (opcodes, headers); `viva-gige` |
 | **GVSP** | GigE Vision streaming: image transfer in UDP packets, reassembled by the host, which may ask for lost ones again (`PACKETRESEND_CMD`, a GVCP command); chunk data travels in the payload, tagged from the end | `viva-gige` (packets, the chunk layout, the resend request); `viva-genicam` (the receive engine); known gaps in [#191](https://github.com/VitalyVorobyev/viva-genicam/issues/191) |

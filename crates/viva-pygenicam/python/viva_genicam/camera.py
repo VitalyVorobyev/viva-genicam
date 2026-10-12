@@ -73,6 +73,22 @@ class Camera:
         """List allowed entries for an enumeration feature."""
         return self._native.enum_entries(name)
 
+    def invalidate(self, name: str) -> None:
+        """Forget the cached value of ``name`` — and of the registers it is
+        read through and of everything that depends on it — so the next read
+        asks the camera.
+
+        For a value the camera changed in a way its XML does not describe. A
+        feature the XML declares ``NoCache`` is read from the camera every
+        time anyway, and one with a ``PollingTime`` once that has passed.
+        """
+        self._native.invalidate(name)
+
+    def invalidate_all(self) -> None:
+        """Forget every cached value, after something that may have changed
+        the camera wholesale."""
+        self._native.invalidate_all()
+
     # ── introspection ────────────────────────────────────────────────────
 
     def nodes(self) -> list[str]:

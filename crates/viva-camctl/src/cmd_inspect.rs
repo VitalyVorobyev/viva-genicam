@@ -195,8 +195,9 @@ pub struct Description {
     pub access: Option<String>,
     /// What its XML declares, along its `<pValue>` chain.
     pub declared_access: Option<String>,
-    pub implemented: bool,
-    pub available: bool,
+    /// `None` when the feature's state could not be read: see `state_error`.
+    pub implemented: Option<bool>,
+    pub available: Option<bool>,
     pub value: Option<String>,
     pub unit: Option<String>,
     pub min: Option<f64>,
@@ -215,6 +216,9 @@ pub struct Description {
     /// The nodes this one is computed or gated from: its `<pValue>`, its
     /// bounds' providers, its predicates, its address's terms.
     pub depends_on: Vec<String>,
+    /// Why the feature's live state — value, access, availability — could
+    /// not be read: a transport error, say. The rest is the XML's.
+    pub state_error: Option<String>,
 }
 
 /// Describe `name`: its documentation, access, value, bounds, entries,
@@ -224,7 +228,13 @@ pub fn describe<T: RegisterIo>(camera: &Camera<T>, name: &str) -> Result<Descrip
     let node = nodemap
         .node(name)
         .ok_or_else(|| anyhow!("the camera has no feature named {name}"))?;
-    let state = camera.feature_state(name).ok();
+    // A failed read is said, not passed off as "not implemented" (Codex
+    // review of #200): the description of a feature the link lost is still
+    // worth printing, its documentation and dependencies come from the XML.
+    let (state, state_error) = match camera.feature_state(name) {
+        Ok(state) => (Some(state), None),
+        Err(err) => (None, Some(err.to_string())),
+    };
     let meta = node.meta();
     let entries = match node {
         Node::Enum(_) => nodemap.enum_entries(name).unwrap_or_default(),
@@ -247,8 +257,8 @@ pub fn describe<T: RegisterIo>(camera: &Camera<T>, name: &str) -> Result<Descrip
         declared_access: nodemap
             .declared_access_mode(name)
             .map(|mode| access_text(Some(mode)).to_string()),
-        implemented: state.as_ref().is_some_and(|s| s.is_implemented),
-        available: state.as_ref().is_some_and(|s| s.is_available),
+        implemented: state.as_ref().map(|s| s.is_implemented),
+        available: state.as_ref().map(|s| s.is_available),
         value: state.as_ref().and_then(|s| value_text(&s.value)),
         unit: node.unit().map(str::to_string),
         min: range.map(|r| r.min),
@@ -268,6 +278,7 @@ pub fn describe<T: RegisterIo>(camera: &Camera<T>, name: &str) -> Result<Descrip
             .map(str::to_string)
             .collect(),
         depends_on,
+        state_error,
     })
 }
 
@@ -294,22 +305,31 @@ pub fn render_description(d: &Description, out: &mut dyn Write) -> std::io::Resu
             d.declared_access.as_deref().unwrap_or("none")
         ),
     )?;
-    line(
-        "State:",
-        format!(
-            "{}, {}",
-            if d.implemented {
-                "implemented"
-            } else {
-                "not implemented"
+    match (d.implemented, d.available) {
+        (Some(implemented), Some(available)) => line(
+            "State:",
+            format!(
+                "{}, {}",
+                if implemented {
+                    "implemented"
+                } else {
+                    "not implemented"
+                },
+                if available {
+                    "available"
+                } else {
+                    "not available"
+                }
+            ),
+        )?,
+        _ => line(
+            "State:",
+            match &d.state_error {
+                Some(error) => format!("unknown — reading it failed: {error}"),
+                None => "unknown".into(),
             },
-            if d.available {
-                "available"
-            } else {
-                "not available"
-            }
-        ),
-    )?;
+        )?,
+    }
     if let Some(v) = &d.value {
         line("Value:", v.clone())?;
     }
@@ -407,10 +427,16 @@ pub async fn run_describe(
         .context("open camera for describe")?;
     let description = with_camera!(&camera, camera => describe(camera, &name))?;
     if json {
-        return common::print_json(&description);
+        common::print_json(&description)?;
+    } else {
+        render_description(&description, &mut std::io::stdout().lock())?;
     }
-    render_description(&description, &mut std::io::stdout().lock())?;
-    Ok(())
+    // Printed, and still a failure: a script must not take the description
+    // of a feature it could not read for one it could.
+    match &description.state_error {
+        Some(error) => Err(anyhow!("could not read the state of {name}: {error}")),
+        None => Ok(()),
+    }
 }
 
 pub async fn run_dump(target: Target, iface: Option<IfaceSelector>, json: bool) -> Result<()> {
@@ -426,4 +452,48 @@ pub async fn run_dump(target: Target, iface: Option<IfaceSelector>, json: bool) 
         writeln!(out, "{} = {}", value.name, value.value)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use viva_genicam::genapi::{GenApiError, NodeMap};
+
+    /// A camera whose every register read fails, as a dropped link does.
+    struct Unreachable;
+
+    impl RegisterIo for Unreachable {
+        fn read(&self, _addr: u64, _len: usize) -> Result<Vec<u8>, GenApiError> {
+            Err(GenApiError::Io("timed out".into()))
+        }
+
+        fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
+            Err(GenApiError::Io("timed out".into()))
+        }
+    }
+
+    /// Codex review of #200: a feature whose state cannot be read is
+    /// described as such — not as "not implemented, not available".
+    #[test]
+    fn describe_says_when_the_state_could_not_be_read() {
+        let xml = r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Width"><ToolTip>Image width</ToolTip><Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode><Min>1</Min><Max>4096</Max></Integer>
+        </RegisterDescription>"#;
+        let nodemap = NodeMap::try_from_xml(viva_genapi_xml::parse(xml).unwrap()).unwrap();
+        let camera = Camera::new(Unreachable, nodemap);
+        let d = describe(&camera, "Width").expect("the XML still describes it");
+        assert_eq!(d.tooltip.as_deref(), Some("Image width"));
+        let error = d.state_error.as_deref().expect("the failure is reported");
+        assert!(error.contains("timed out"), "{error}");
+        assert_eq!(
+            (d.implemented, d.available, d.value.as_deref()),
+            (None, None, None)
+        );
+
+        let mut text = Vec::new();
+        render_description(&d, &mut text).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(!text.contains("not implemented"), "{text}");
+        assert!(text.contains("timed out"), "{text}");
+    }
 }

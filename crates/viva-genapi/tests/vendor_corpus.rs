@@ -1433,3 +1433,71 @@ fn corpus_save_plans_respect_dependencies_and_put_selectors_back() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// GA-05: every value a document declares `NoCache` — on its register, or on
+/// a register it is read through — is read from the device every time, not
+/// answered from a cache. Before 0.9 every one of them was cached until
+/// something invalidated it, so a temperature or an auto-adjusted exposure
+/// read twice came back the same.
+#[test]
+fn corpus_no_cache_values_are_read_from_the_device_every_time() {
+    use viva_genapi::CachingMode;
+    let dir = corpus_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        println!("corpus not present at {}; skipping", dir.display());
+        return;
+    };
+    let mut documents: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "xml"))
+        .collect();
+    documents.sort();
+
+    let mut failures = Vec::new();
+    let (mut checked, mut inherited, mut polled) = (0usize, 0usize, 0usize);
+    for path in &documents {
+        let document = path
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+        let xml = String::from_utf8_lossy(&std::fs::read(path).expect("read")).into_owned();
+        let model = viva_genapi_xml::parse(&xml).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build");
+        let io = RecordingIo::default();
+        for name in nodemap.node_names() {
+            polled += usize::from(nodemap.polling_time(name).is_some());
+            if nodemap.caching_mode(name) != Some(CachingMode::NoCache)
+                || nodemap.command_targets().contains(name)
+                || nodemap.is_write_only(name)
+            {
+                continue;
+            }
+            // A value on a chunk or event port, or one zeros do not decode,
+            // is not a read this test can repeat.
+            if read_any(&nodemap, name, &io).is_err() {
+                continue;
+            }
+            let before = io.reads.borrow().len();
+            if read_any(&nodemap, name, &io).is_err() {
+                continue;
+            }
+            checked += 1;
+            let declared = nodemap.node(name).and_then(|node| node.meta().cachable);
+            inherited += usize::from(declared != Some(CachingMode::NoCache));
+            if io.reads.borrow().len() == before {
+                failures.push(format!("{document}: {name} answered from a cache"));
+            }
+        }
+    }
+    println!(
+        "=== NoCache: {checked} values read twice, {inherited} of them NoCache through a \
+         register they read; {polled} nodes with a polling time ==="
+    );
+    assert!(
+        failures.is_empty(),
+        "{} NoCache value(s) served from a cache:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}

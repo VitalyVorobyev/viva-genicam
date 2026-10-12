@@ -171,3 +171,32 @@ def test_a_load_reports_what_it_could_not_write(camera, tmp_path):
     assert len(report["failures"]) == 1
     assert "NoSuchFeature" in report["failures"][0]
     assert "Other" in report["warnings"][0]
+
+
+def test_invalidate_reads_a_value_the_xml_does_not_link_again(camera, fake_gige):
+    """GA-40: the fake latches `GevTimestampValue` on `TimestampLatch` with
+    nothing in its XML linking the two, so the value stays cached until
+    invalidated. The device's register is read through a second, monitoring
+    connection, whose cache is fresh."""
+    import time
+
+    info = fake_gige.device_info()
+
+    def on_device() -> int:
+        return int(vg.connect_gige(info, monitor=True).get("GevTimestampValue"))
+
+    camera.execute("TimestampLatch")
+    first = int(camera.get("GevTimestampValue"))
+    time.sleep(0.01)
+    camera.execute("TimestampLatch")
+    latched = on_device()
+    assert latched > first
+    assert int(camera.get("GevTimestampValue")) == first, "cached until invalidated"
+    camera.invalidate("GevTimestampValue")
+    assert int(camera.get("GevTimestampValue")) == latched
+
+    time.sleep(0.01)
+    camera.execute("TimestampLatch")
+    latched = on_device()
+    camera.invalidate_all()
+    assert int(camera.get("GevTimestampValue")) == latched

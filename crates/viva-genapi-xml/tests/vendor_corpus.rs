@@ -22,6 +22,7 @@
 //! When the directory is absent the test passes with a note, so CI and a fresh
 //! clone stay green.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Default corpus location relative to the workspace root.
@@ -107,6 +108,141 @@ fn count_streamable_in_skipped(xml: &str, skipped: &[viva_genapi_xml::SkippedNod
         .sum()
 }
 
+/// The text of every `<tag>…</tag>` element in `text`, in order.
+fn element_texts<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        rest = &rest[start + open.len()..];
+        let Some(end) = rest.find(&close) else {
+            break;
+        };
+        found.push(rest[..end].trim());
+        rest = &rest[end..];
+    }
+    found
+}
+
+/// The `<tag Name=…>…</tag>` blocks of `text`, and what lies between them.
+fn split_blocks<'a>(text: &'a str, tag: &str) -> (Vec<&'a str>, String) {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut blocks = Vec::new();
+    let mut outside = String::new();
+    let mut rest = text;
+    loop {
+        // `<StructReg` must not match `<StructRegs…`, nor `<StructEntry`
+        // match anything longer.
+        let Some(start) = rest.match_indices(&open).map(|(i, _)| i).find(|&i| {
+            matches!(
+                rest[i + open.len()..].chars().next(),
+                Some(' ' | '>' | '\n' | '\t' | '\r')
+            )
+        }) else {
+            outside.push_str(rest);
+            break;
+        };
+        outside.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find(&close) else {
+            outside.push_str(&rest[start..]);
+            break;
+        };
+        let end = start + end + close.len();
+        blocks.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    (blocks, outside)
+}
+
+/// Nodes that declare `<tag>`, keyed by the element's text, counted from the
+/// raw text rather than through the parser under test (GA-05). A
+/// `<StructReg>`'s own declaration counts once for each of its entries that
+/// declares none, as each entry is a node viewing the struct's register.
+fn count_declared(xml: &str, tags: &[&str]) -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut add = |text: &str| *counts.entry(text.to_string()).or_default() += 1;
+    let texts = |text: &str| -> Vec<String> {
+        tags.iter()
+            .flat_map(|tag| element_texts(text, tag))
+            .map(str::to_string)
+            .collect()
+    };
+    let (structs, outside) = split_blocks(xml, "StructReg");
+    for value in texts(&outside) {
+        add(&value);
+    }
+    for block in structs {
+        let (entries, register) = split_blocks(block, "StructEntry");
+        let inherited = texts(&register).into_iter().next();
+        for entry in entries {
+            if let Some(value) = texts(entry)
+                .into_iter()
+                .next()
+                .or_else(|| inherited.clone())
+            {
+                add(&value);
+            }
+        }
+    }
+    counts
+}
+
+/// [`count_declared`] inside the elements of nodes the parser skipped.
+fn count_declared_in_skipped(
+    xml: &str,
+    tags: &[&str],
+    skipped: &[viva_genapi_xml::SkippedNode],
+) -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for node in skipped {
+        let Some(name) = node.name.as_deref() else {
+            continue;
+        };
+        let open = format!("<{} Name=\"{name}\"", node.tag);
+        let Some(start) = xml.find(&open) else {
+            continue;
+        };
+        let close = format!("</{}>", node.tag);
+        let Some(end) = xml[start..].find(&close).map(|end| end + start) else {
+            continue;
+        };
+        for (value, n) in count_declared(&xml[start..end], tags) {
+            *counts.entry(value).or_default() += n;
+        }
+    }
+    counts
+}
+
+/// What the parser recorded: nodes with a `<Cachable>` by mode, and nodes
+/// with a `<PollingTime>`.
+fn count_parsed(model: &viva_genapi_xml::XmlModel) -> (BTreeMap<String, usize>, usize) {
+    let mut cachable: BTreeMap<String, usize> = BTreeMap::new();
+    let mut polling = 0;
+    for node in &model.nodes {
+        if let Some(mode) = node.meta().cachable {
+            *cachable.entry(format!("{mode:?}")).or_default() += 1;
+        }
+        polling += usize::from(node.meta().polling_time_ms.is_some());
+    }
+    (cachable, polling)
+}
+
+/// `declared` less `skipped`, dropping what reaches zero.
+fn subtract(
+    mut declared: BTreeMap<String, usize>,
+    skipped: BTreeMap<String, usize>,
+) -> BTreeMap<String, usize> {
+    for (value, n) in skipped {
+        if let Some(count) = declared.get_mut(&value) {
+            *count = count.saturating_sub(n);
+        }
+    }
+    declared.retain(|_, n| *n > 0);
+    declared
+}
+
 fn corpus_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VIVA_GENICAM_XML_CORPUS") {
         return PathBuf::from(dir);
@@ -156,6 +292,13 @@ fn vendor_xml_corpus_parses() {
     let mut bitfields = 0usize;
     let mut streamable = 0usize;
     let mut streamable_documents = 0usize;
+    // GA-05: elements in the text, and the nodes that carry them.
+    let mut cachable_elements = 0usize;
+    let mut cachable_documents = 0usize;
+    let mut cachable_nodes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut polling_elements = 0usize;
+    let mut polling_documents = 0usize;
+    let mut polling_nodes = 0usize;
 
     for path in &documents {
         let document = path
@@ -210,6 +353,47 @@ fn vendor_xml_corpus_parses() {
                         "{document}: declares {declared} streamable features, parsed {parsed}"
                     ));
                 }
+                // GA-05: every `<Cachable>` and `<PollingTime>` in the text is
+                // on a node in the model, with the mode the text names.
+                const CACHABLE: &[&str] = &["Cachable", "Cacheable"];
+                const POLLING: &[&str] = &["PollingTime"];
+                let elements = element_texts(&xml, "Cachable").len();
+                cachable_elements += elements;
+                cachable_documents += usize::from(elements > 0);
+                let elements = element_texts(&xml, "PollingTime").len();
+                polling_elements += elements;
+                polling_documents += usize::from(elements > 0);
+                let (parsed_cachable, parsed_polling) = count_parsed(&model);
+                let declared_cachable = subtract(
+                    count_declared(&xml, CACHABLE),
+                    count_declared_in_skipped(&xml, CACHABLE, &model.skipped),
+                );
+                let declared_polling: usize = subtract(
+                    count_declared(&xml, POLLING),
+                    count_declared_in_skipped(&xml, POLLING, &model.skipped),
+                )
+                .values()
+                .sum();
+                for (mode, n) in &parsed_cachable {
+                    *cachable_nodes.entry(mode.clone()).or_default() += n;
+                }
+                polling_nodes += parsed_polling;
+                if parsed_cachable != declared_cachable {
+                    println!(
+                        "FAIL  {document}: <Cachable> on {declared_cachable:?}, parsed {parsed_cachable:?}"
+                    );
+                    failures.push(format!(
+                        "{document}: declares <Cachable> on {declared_cachable:?} nodes, parsed {parsed_cachable:?}"
+                    ));
+                }
+                if parsed_polling != declared_polling {
+                    println!(
+                        "FAIL  {document}: <PollingTime> on {declared_polling} nodes, parsed {parsed_polling}"
+                    );
+                    failures.push(format!(
+                        "{document}: declares <PollingTime> on {declared_polling} nodes, parsed {parsed_polling}"
+                    ));
+                }
                 let unexpected: Vec<_> = model
                     .skipped
                     .iter()
@@ -254,6 +438,11 @@ fn vendor_xml_corpus_parses() {
          {streamable} streamable in {streamable_documents} documents, {} failures ===",
         documents.len(),
         failures.len()
+    );
+    println!(
+        "=== <Cachable>: {cachable_elements} elements in {cachable_documents} documents, \
+         on nodes {cachable_nodes:?}; <PollingTime>: {polling_elements} elements in \
+         {polling_documents} documents, on {polling_nodes} nodes ==="
     );
 
     assert!(

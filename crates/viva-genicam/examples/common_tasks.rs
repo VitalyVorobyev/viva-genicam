@@ -1,6 +1,7 @@
-//! The everyday tasks — typed features, exposure and gain, triggers, region
-//! of interest, binning, frame rate, user sets, saving and restoring a
-//! configuration — against the fake GigE Vision camera, no hardware required.
+//! The everyday tasks — typed features, values the camera changes on its own,
+//! exposure and gain, triggers, region of interest, binning, frame rate, user
+//! sets, saving and restoring a configuration — against the fake GigE Vision
+//! camera, no hardware required.
 //!
 //! ```bash
 //! cargo run -p viva-genicam --example common_tasks
@@ -40,6 +41,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         camera.get_integer("Width")?
     );
     // ANCHOR_END: typed
+
+    // ANCHOR: refresh
+    // DeviceTemperature is `NoCache` in the camera's XML: every read asks the
+    // camera. Its `<PollingTime>` says how often a display should.
+    let every = camera
+        .nodemap()
+        .polling_time("DeviceTemperature")
+        .unwrap_or(std::time::Duration::from_secs(1));
+    println!("{} °C", camera.get_float("DeviceTemperature")?);
+    // A viewer keeps the generation it drew, and reads again what changed
+    // since: what a write touched, and what `poll` found due.
+    let mut drawn = camera.generation();
+    for _ in 0..3 {
+        tokio::time::sleep(every).await;
+        camera.poll();
+        let (changed, now) = camera.changed_since(drawn);
+        if changed.iter().any(|name| name == "DeviceTemperature") {
+            println!("{} °C", camera.get_float("DeviceTemperature")?);
+        }
+        drawn = now;
+    }
+    // A value the camera changed in a way its XML does not describe:
+    camera.execute_command("TimestampLatch")?;
+    camera.invalidate("GevTimestampValue");
+    println!("latched at {}", camera.get_integer("GevTimestampValue")?);
+    // ANCHOR_END: refresh
 
     // ANCHOR: exposure_gain
     // ExposureTime, else ExposureTimeAbs, else ExposureTimeRaw: the helper

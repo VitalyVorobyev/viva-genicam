@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { FeatureStore, type FeatureFetcher } from "./featureStore";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  FeatureStore,
+  MIN_REFRESH_MS,
+  NO_CACHE_REFRESH_MS,
+  refreshInterval,
+  type FeatureFetcher,
+} from "./featureStore";
 import type { FeatureState } from "./types";
 
 function state(value: number): FeatureState {
@@ -145,5 +151,85 @@ describe("FeatureStore", () => {
     store.subscribe("Width", () => {});
     await settle();
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** A fetcher that answers with whole states, so a test can give one a
+ * polling time or a caching mode. */
+function stateFetcher(states: Record<string, FeatureState>) {
+  const calls: string[][] = [];
+  const fetch: FeatureFetcher = async (names) => {
+    calls.push([...names].sort());
+    return Object.fromEntries(names.filter((n) => n in states).map((n) => [n, states[n]]));
+  };
+  return { fetch, calls };
+}
+
+describe("FeatureStore polling (GA-05)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reads a feature on screen again at its polling time, and stops when it leaves", async () => {
+    vi.useFakeTimers();
+    const { fetch, calls } = stateFetcher({
+      DeviceTemperature: { ...state(40), kind: "Float", polling_ms: 500, caching: "NoCache" },
+      Width: { ...state(640), caching: "WriteThrough" },
+    });
+    const store = new FeatureStore(fetch);
+    store.setEnabled(true);
+    const stop = store.subscribe("DeviceTemperature", () => {});
+    store.subscribe("Width", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual([["DeviceTemperature", "Width"]]);
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toEqual([["DeviceTemperature", "Width"], ["DeviceTemperature"]]);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toHaveLength(3);
+
+    stop();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("reads a NoCache feature without a polling time once a second", async () => {
+    vi.useFakeTimers();
+    const { fetch, calls } = stateFetcher({
+      LineStatus: { ...state(1), kind: "Boolean", caching: "NoCache" },
+    });
+    const store = new FeatureStore(fetch);
+    store.setEnabled(true);
+    store.subscribe("LineStatus", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(NO_CACHE_REFRESH_MS - 1);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("stops polling when the camera goes away", async () => {
+    vi.useFakeTimers();
+    const { fetch, calls } = stateFetcher({
+      DeviceTemperature: { ...state(40), polling_ms: 500 },
+    });
+    const store = new FeatureStore(fetch);
+    store.setEnabled(true);
+    store.subscribe("DeviceTemperature", () => {});
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toHaveLength(2);
+    store.setEnabled(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("knows how often to refresh a state", () => {
+    expect(refreshInterval({ ...state(1), polling_ms: 500 })).toBe(500);
+    expect(refreshInterval({ ...state(1), polling_ms: 5 })).toBe(MIN_REFRESH_MS);
+    expect(refreshInterval({ ...state(1), caching: "NoCache" })).toBe(NO_CACHE_REFRESH_MS);
+    expect(refreshInterval({ ...state(1), caching: "WriteAround" })).toBeUndefined();
+    expect(refreshInterval(state(1))).toBeUndefined();
   });
 });

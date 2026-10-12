@@ -1,5 +1,37 @@
 import type { FeatureState } from "./types";
 
+/**
+ * How often a `NoCache` feature that declares no polling time is read again
+ * while it is shown, in milliseconds.
+ *
+ * `NoCache` says the camera changes the value with nothing to announce it; 546
+ * of the 883 `NoCache` registers in the vendor corpus declare no
+ * `<PollingTime>` to say how fast. Where vendors do say, 500 and 1000 ms are
+ * by far the commonest values; the slower of the two keeps a screenful of
+ * such features to one read each per second.
+ */
+export const NO_CACHE_REFRESH_MS = 1000;
+
+/**
+ * The shortest interval a feature is polled at, in milliseconds. The shortest
+ * `<PollingTime>` in a vendor document of the corpus is 50 ms; faster than
+ * that is more than a screen shows, and only floods the control channel.
+ */
+export const MIN_REFRESH_MS = 50;
+
+/**
+ * How often to read a feature again while it is shown: its polling time —
+ * the XML's `<PollingTime>`, on the feature or on a register it is read
+ * through — or, for a `NoCache` feature without one, {@link NO_CACHE_REFRESH_MS}.
+ * `undefined`: it changes only when written, and is read again then.
+ */
+export function refreshInterval(state: FeatureState): number | undefined {
+  const polling = state.polling_ms;
+  if (polling != null && polling > 0) return Math.max(MIN_REFRESH_MS, polling);
+  if (state.caching === "NoCache") return NO_CACHE_REFRESH_MS;
+  return undefined;
+}
+
 /** Reads the live state of many features in one round-trip. */
 export type FeatureFetcher = (names: string[]) => Promise<Record<string, FeatureState>>;
 
@@ -16,6 +48,11 @@ export type FeatureFetcher = (names: string[]) => Promise<Record<string, Feature
  * arrives after {@link FeatureStore.clear} belongs to the previous
  * connection and is dropped, and so is a read of a feature that a newer read
  * or a newer state has already superseded: reads can answer out of order.
+ *
+ * A feature on screen whose value the camera changes by itself is read again
+ * at its {@link refreshInterval} (backlog GA-05); features due together go
+ * out as one bulk read. A read that fails stops that feature's polling until
+ * it is read again some other way.
  */
 export class FeatureStore {
   private readonly states = new Map<string, FeatureState>();
@@ -24,6 +61,9 @@ export class FeatureStore {
   /** Per feature: bumped by each read sent and each state stored. */
   private readonly versions = new Map<string, number>();
   private flushScheduled = false;
+  /** Per polled feature on screen: when to read it again (`Date.now()`). */
+  private readonly due = new Map<string, number>();
+  private pollTimer: ReturnType<typeof setTimeout> | undefined;
   private generation = 0;
   private enabled = false;
   private onError: (error: unknown) => void = () => {};
@@ -53,7 +93,10 @@ export class FeatureStore {
     if (!this.states.has(name)) this.request([name]);
     return () => {
       set.delete(listener);
-      if (set.size === 0) this.listeners.delete(name);
+      if (set.size === 0) {
+        this.listeners.delete(name);
+        if (this.due.delete(name)) this.armPollTimer();
+      }
     };
   }
 
@@ -122,6 +165,8 @@ export class FeatureStore {
   clear(): void {
     this.generation += 1;
     this.queued.clear();
+    this.due.clear();
+    this.armPollTimer();
     const names = [...this.states.keys()];
     this.states.clear();
     for (const name of names) this.notify(name);
@@ -164,7 +209,42 @@ export class FeatureStore {
 
   private install(name: string, state: FeatureState): void {
     this.states.set(name, state);
+    this.schedule(name, state);
     this.notify(name);
+  }
+
+  /** Poll `name` at its refresh interval while it is on screen. */
+  private schedule(name: string, state: FeatureState): void {
+    const interval = refreshInterval(state);
+    if (interval === undefined || !this.isWatched(name)) {
+      if (!this.due.delete(name)) return;
+    } else {
+      this.due.set(name, Date.now() + interval);
+    }
+    this.armPollTimer();
+  }
+
+  /** One timer, for the feature due first. */
+  private armPollTimer(): void {
+    if (this.pollTimer !== undefined) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = undefined;
+    }
+    if (!this.enabled || this.due.size === 0) return;
+    const next = Math.min(...this.due.values());
+    this.pollTimer = setTimeout(() => this.pollDue(), Math.max(0, next - Date.now()));
+  }
+
+  private pollDue(): void {
+    this.pollTimer = undefined;
+    const now = Date.now();
+    const names: string[] = [];
+    for (const [name, at] of this.due) {
+      if (at <= now) names.push(name);
+    }
+    for (const name of names) this.due.delete(name);
+    this.request(names.filter((name) => this.isWatched(name)));
+    this.armPollTimer();
   }
 
   private notify(name: string): void {

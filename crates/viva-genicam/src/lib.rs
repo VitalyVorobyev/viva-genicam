@@ -178,11 +178,12 @@ impl GenicamError {
 }
 
 /// How often [`Camera::execute_and_wait`] asks a command whether it has
-/// finished.
+/// finished, when the command declares no `<PollingTime>`.
 ///
-/// GenICam leaves the interval to the application; a `<PollingTime>` in the
-/// XML is not read yet (backlog GA-05). Ten milliseconds keeps a self-clearing
-/// command's latency low at a cost of one register read per poll.
+/// A command's `<PollingTime>` is the camera's own answer (GenICam Standard
+/// v2.1.1 §2.8.8) and is used when present. Without one, ten milliseconds
+/// keeps a self-clearing command's latency low at a cost of one register read
+/// per poll.
 pub const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// How long the helpers that wait for a command — the user-set helpers,
@@ -233,6 +234,44 @@ impl<T: RegisterIo> Camera<T> {
     /// Mutable access to the nodemap.
     pub fn nodemap_mut(&mut self) -> &mut NodeMap {
         &mut self.nodemap
+    }
+
+    /// Forget `name`'s cached value, and those of the registers it is read
+    /// through and of everything that depends on it, so the next read asks
+    /// the camera: for a value the camera changed in a way its XML does not
+    /// describe. See [`NodeMap::invalidate`].
+    ///
+    /// A value the XML declares `NoCache` needs none of this, and one with a
+    /// `<PollingTime>` is read again once that has passed (ADR-0029).
+    pub fn invalidate(&self, name: &str) {
+        self.nodemap.invalidate(name);
+    }
+
+    /// Forget every cached value, after something that may have changed the
+    /// camera wholesale. [`Camera::load_user_set`] does this itself.
+    pub fn invalidate_all(&self) {
+        self.nodemap.invalidate_all();
+    }
+
+    /// The nodemap's current generation, advanced by every write and every
+    /// invalidation: where a viewer starts [`Camera::changed_since`] from.
+    pub fn generation(&self) -> u64 {
+        self.nodemap.generation()
+    }
+
+    /// The features — and the nodes behind them — that changed after
+    /// generation `since`, in document order, and the generation now. A
+    /// viewer re-reads the ones it shows. See [`NodeMap::changed_since`].
+    pub fn changed_since(&self, since: u64) -> (Vec<String>, u64) {
+        self.nodemap.changed_since(since)
+    }
+
+    /// Invalidate the values whose `<PollingTime>` has passed since they were
+    /// read, and return their names with those of everything read through
+    /// them: what a viewer should read again. Call it as often as the shortest
+    /// polling time a viewer shows. See [`NodeMap::poll`].
+    pub fn poll(&self) -> Vec<String> {
+        self.nodemap.poll()
     }
 
     /// List available entries for an enumeration feature.
@@ -545,8 +584,9 @@ impl<T: RegisterIo> Camera<T> {
     /// GenICam Standard v2.1.1 §2.8.8: "the state of other nodes can depend on
     /// the completion of the Command therefore applications ... should always
     /// wait for the command completion by calling IsDone immediately after the
-    /// Execute". This polls [`NodeMap::is_done`] every
-    /// [`COMMAND_POLL_INTERVAL`] until it answers `true` or `timeout` passes.
+    /// Execute". This polls [`NodeMap::is_done`] at the command's
+    /// `<PollingTime>` — every [`COMMAND_POLL_INTERVAL`] when it declares
+    /// none — until it answers `true` or `timeout` passes.
     ///
     /// A command whose register path is write-only — most of them — is done
     /// as soon as the write is acknowledged, so this returns as quickly as
@@ -603,7 +643,11 @@ impl<T: RegisterIo> Camera<T> {
                 waited,
             });
         }
-        Ok(Some(COMMAND_POLL_INTERVAL.min(timeout - waited)))
+        let interval = self
+            .nodemap
+            .polling_time(name)
+            .unwrap_or(COMMAND_POLL_INTERVAL);
+        Ok(Some(interval.min(timeout - waited)))
     }
 
     /// Whether the command `name` has finished: GenICam's `IsDone`.
@@ -2283,6 +2327,44 @@ mod tests {
             .await
             .expect("done at once");
         assert_eq!(camera.transport().counts(), (1, 0));
+    }
+
+    /// GA-05: a command that declares a `<PollingTime>` is asked whether it
+    /// has finished at that interval, not every `COMMAND_POLL_INTERVAL`
+    /// (GenICam Standard v2.1.1 §2.8.8). Over 500 ms at 200 ms that is at
+    /// most four reads; at 10 ms it would be fifty.
+    #[tokio::test]
+    async fn execute_and_wait_polls_at_the_commands_polling_time() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Command Name="UserSetLoad">
+                    <pValue>UserSetLoadReg</pValue>
+                    <CommandValue>1</CommandValue>
+                    <PollingTime>200</PollingTime>
+                </Command>
+                <IntReg Name="UserSetLoadReg">
+                    <Address>0x4000</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                    <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let mut camera = Camera::new(SelfClearingIo::new(0x4000, usize::MAX), nodemap);
+        let err = camera
+            .execute_and_wait("UserSetLoad", Duration::from_millis(500))
+            .await
+            .expect_err("never clears");
+        assert!(
+            matches!(err, GenicamError::CommandNotDone { .. }),
+            "{err:?}"
+        );
+        let (_, reads) = camera.transport().counts();
+        assert!(
+            reads <= 5,
+            "{reads} reads in 500 ms at a 200 ms polling time"
+        );
+        assert!(reads >= 3, "{reads} reads: it did poll");
     }
 
     #[test]

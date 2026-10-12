@@ -387,6 +387,37 @@ impl PyCamera {
         })
     }
 
+    /// Forget `name`'s cached value, and those of the registers it is read
+    /// through and of what depends on it (`Camera::invalidate`).
+    fn invalidate(&self, name: &str) -> PyResult<()> {
+        match &self.inner {
+            CameraInner::Gige { camera, .. } => camera
+                .lock()
+                .map_err(|_| parse_error("camera mutex poisoned"))?
+                .invalidate(name),
+            CameraInner::U3v { camera, .. } => camera
+                .lock()
+                .map_err(|_| parse_error("camera mutex poisoned"))?
+                .invalidate(name),
+        }
+        Ok(())
+    }
+
+    /// Forget every cached value (`Camera::invalidate_all`).
+    fn invalidate_all(&self) -> PyResult<()> {
+        match &self.inner {
+            CameraInner::Gige { camera, .. } => camera
+                .lock()
+                .map_err(|_| parse_error("camera mutex poisoned"))?
+                .invalidate_all(),
+            CameraInner::U3v { camera, .. } => camera
+                .lock()
+                .map_err(|_| parse_error("camera mutex poisoned"))?
+                .invalidate_all(),
+        }
+        Ok(())
+    }
+
     fn enum_entries(&self, name: &str) -> PyResult<Vec<String>> {
         match &self.inner {
             CameraInner::Gige { camera, .. } => {

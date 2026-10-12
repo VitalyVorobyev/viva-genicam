@@ -40,7 +40,7 @@ These go **before** the command name:
 | `list` | Discover GigE Vision cameras; `--ip` asks one address directly |
 | `list-usb` | Discover USB3 Vision cameras |
 | `features` | The category tree: every feature with its type, access and value; `--filter` keeps the names that contain a word, `--all` shows invisible features too |
-| `describe` | One feature in full: tooltip, description, unit, range and increment, enumeration entries, the selectors it has or is, and the nodes it depends on |
+| `describe` | One feature in full: tooltip, description, unit, range and increment, enumeration entries, the selectors it has or is, and the nodes it depends on; a state it could not read is printed as such, and the command fails |
 | `dump` | Every value the camera has to read now, in XML order |
 | `get` / `set` | Read a feature, or write it from text |
 | `execute` | Run a command feature (`UserSetLoad`) and wait until the camera reports it done |

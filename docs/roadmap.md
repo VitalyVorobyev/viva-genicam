@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## K — Caching, polling and refresh
-
-**Goal**: values the camera changes on its own read fresh, and `Camera`, Python and Studio can ask what changed.
-**Rows**: GA-05, GA-40.
-
 ## Y — Python parity and threads
 
 **Goal**: the Python package offers what the Rust facade does, from any thread, with NumPy arrays of the right shape and type; the Windows wheel is tested.
@@ -52,6 +47,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
 - **API-19**: whether a camera declares an exposure name it does not implement, and what SVS's binning `On` does; a report from either camera settles it.
 - **GA-46**: whether vendor tools' configuration files are the layout ADR-0028 writes; a user's saved file settles it.
+- **GA-47**: whether a camera reads back a `WriteAround` register's new value at once, or the old one until it applies the write; a `set` then `get` with `-vv` settles it.
 
 ## Studio
 

@@ -187,7 +187,12 @@ opaque string without `/`).
     "unit": "px"
   }
   ```
-  Enumeration nodes also carry `"enum_available": ["Off", "Once"]`.
+  Enumeration nodes also carry `"enum_available": ["Off", "Once"]`. Every
+  state carries `"caching"` — `"NoCache"`, `"WriteThrough"` or `"WriteAround"`,
+  the feature's `<Cachable>` combined with that of the registers it is read
+  through — and, when the feature or such a register declares a
+  `<PollingTime>`, `"polling_ms"`: how long a client may show the value before
+  reading it again ([ADR-0029](../adrs/adr0029-caching-polling-and-refresh.md)).
   A feature with nothing to read — a Category, a Command, a node declared
   `WO`, or the register a command writes through — carries `"value": null`
   and is never read from the device. It is still reported, with its access

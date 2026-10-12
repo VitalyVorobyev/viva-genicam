@@ -116,6 +116,11 @@ pub struct EnumEntryDecl {
     /// Predicate refs controlling whether this entry is implemented / available.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
     pub predicates: PredicateRefs,
+    /// `<IsSelfClearing>Yes</IsSelfClearing>`: the device leaves this entry by
+    /// itself. GenICam Standard v2.1.1 §2.8.10: an enumeration's
+    /// `<PollingTime>` polls only while its value is such an entry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self_clearing: bool,
 }
 
 #[derive(Debug, Error)]
@@ -216,6 +221,71 @@ pub struct NodeMeta {
     /// file via the GenApi node tree"; absent means `No` (§3.2).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub streamable: bool,
+    /// `<Cachable>` as the XML declares it; `None` when it declares none.
+    ///
+    /// GenICam Standard v2.1.1 §2.8.3 puts it on a register. Absent, the
+    /// standard's default depends on the element — `WriteAround` for a
+    /// `<FloatReg>`, `WriteThrough` for the other registers (§3.2) — so it is
+    /// resolved where the node's kind is known, in `viva-genapi`. A
+    /// `<StructEntry>` without its own takes its `<StructReg>`'s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cachable: Option<CachingMode>,
+    /// `<PollingTime>`, in milliseconds: "a recommended time interval [in ms]
+    /// after which a node should be invalidated" (§2.8.3), a hint. A register
+    /// declares it, and so may a `<Command>` (§2.8.8) or an `<Enumeration>`
+    /// (§2.8.10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling_time_ms: Option<u64>,
+}
+
+/// `<Cachable>`: whether a register's value may be answered from a cache.
+///
+/// GenICam Standard v2.1.1 §2.8.3: "WriteThrough means that a value written to
+/// the camera is written to the cache as well. WriteAround means that only read
+/// values are written to the cache" — for a value the camera may change on
+/// writing, such as a gain it rounds. With `NoCache`, every read goes to the
+/// device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CachingMode {
+    /// Never answered from a cache.
+    NoCache,
+    /// A write caches the written value.
+    WriteThrough,
+    /// A write leaves nothing cached; the next read asks the device.
+    WriteAround,
+}
+
+impl CachingMode {
+    /// The more restrictive of two modes: `NoCache` over `WriteAround` over
+    /// `WriteThrough`. A value read through several registers may be cached
+    /// only as far as each of them allows; the GenApi reference
+    /// implementation's `Combine` computes the same.
+    pub fn combine(self, other: CachingMode) -> CachingMode {
+        use CachingMode::{NoCache, WriteAround, WriteThrough};
+        match (self, other) {
+            (NoCache, _) | (_, NoCache) => NoCache,
+            (WriteAround, _) | (_, WriteAround) => WriteAround,
+            (WriteThrough, WriteThrough) => WriteThrough,
+        }
+    }
+
+    /// Parse a `<Cachable>` value. The standard's own example writes `No`;
+    /// it, and any value the standard does not define, read as `NoCache`: the
+    /// reading that never answers with a stale value.
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim() {
+            "WriteThrough" => CachingMode::WriteThrough,
+            "WriteAround" => CachingMode::WriteAround,
+            "NoCache" | "No" => CachingMode::NoCache,
+            other => {
+                tracing::warn!(
+                    cachable = other,
+                    "unknown <Cachable> value, assuming NoCache"
+                );
+                CachingMode::NoCache
+            }
+        }
+    }
 }
 
 /// Access privileges for a GenICam node as described in the XML.
@@ -2408,6 +2478,133 @@ mod tests {
                 "I", "IR", "M", "F", "FR", "E", "B", "S", "R", "C", "IC", "ISK", "SK", "SE"
             ]
         );
+    }
+
+    /// GA-05: `<Cachable>` and `<PollingTime>` on every element the corpus or
+    /// the standard puts them on — the register kinds (§2.8.3), a command
+    /// (§2.8.8) and an enumeration (§2.8.10) — as declared, with no default
+    /// filled in: the default depends on the element and is `viva-genapi`'s.
+    #[test]
+    fn cachable_and_polling_time_are_read_where_they_are_declared() {
+        let model = parse_fragment(
+            r#"<IntReg Name="IR"><Address>0x0</Address><Length>4</Length><AccessMode>RO</AccessMode><Cachable>NoCache</Cachable><PollingTime>500</PollingTime></IntReg>
+            <MaskedIntReg Name="M"><Address>0x4</Address><Length>4</Length><AccessMode>RW</AccessMode><Bit>0</Bit><Cachable>WriteAround</Cachable></MaskedIntReg>
+            <FloatReg Name="FR"><Address>0x8</Address><Length>4</Length><AccessMode>RW</AccessMode><PollingTime>1000</PollingTime></FloatReg>
+            <StringReg Name="S"><Address>0x10</Address><Length>8</Length><AccessMode>RO</AccessMode><Cachable>WriteThrough</Cachable></StringReg>
+            <Register Name="R"><Address>0x20</Address><Length>8</Length><AccessMode>RO</AccessMode><Cachable>NoCache</Cachable><PollingTime>10000</PollingTime></Register>
+            <Command Name="C"><pValue>IR</pValue><CommandValue>1</CommandValue><PollingTime>5</PollingTime></Command>
+            <Enumeration Name="E"><EnumEntry Name="Idle"><Value>0</Value></EnumEntry><EnumEntry Name="Active"><Value>1</Value><IsSelfClearing>Yes</IsSelfClearing></EnumEntry><pValue>IR</pValue><PollingTime>10</PollingTime></Enumeration>
+            <Integer Name="Plain"><pValue>IR</pValue></Integer>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        let declared: Vec<(&str, Option<CachingMode>, Option<u64>)> = model
+            .nodes
+            .iter()
+            .map(|node| {
+                let meta = node.meta();
+                (node.name(), meta.cachable, meta.polling_time_ms)
+            })
+            .collect();
+        use CachingMode::{NoCache, WriteAround, WriteThrough};
+        assert_eq!(
+            declared,
+            [
+                ("IR", Some(NoCache), Some(500)),
+                ("M", Some(WriteAround), None),
+                ("FR", None, Some(1000)),
+                ("S", Some(WriteThrough), None),
+                ("R", Some(NoCache), Some(10000)),
+                ("C", None, Some(5)),
+                ("E", None, Some(10)),
+                ("Plain", None, None),
+            ]
+        );
+        let NodeDecl::Enum { entries, .. } = &model.nodes[6] else {
+            panic!("an enumeration");
+        };
+        let clearing: Vec<(&str, bool)> = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.is_self_clearing))
+            .collect();
+        assert_eq!(clearing, [("Idle", false), ("Active", true)]);
+    }
+
+    /// GA-05: a `<StructEntry>` is a view of its `<StructReg>`'s register and
+    /// takes the struct's `<Cachable>` and `<PollingTime>` unless it declares
+    /// its own — FLIR's `Power Supply Control Register` declares `NoCache` once
+    /// for seven entries, Point Grey's GPIO registers per entry.
+    #[test]
+    fn struct_entries_take_their_registers_cachable_unless_they_declare_one() {
+        let model = parse_fragment(
+            r#"<StructReg Comment="power"><Address>0x30</Address><Length>4</Length><AccessMode>RW</AccessMode><Cachable>NoCache</Cachable><PollingTime>250</PollingTime>
+              <StructEntry Name="Inherits"><Bit>0</Bit></StructEntry>
+              <StructEntry Name="Overrides"><Bit>1</Bit><Cachable>WriteAround</Cachable><PollingTime>1000</PollingTime></StructEntry>
+            </StructReg>
+            <StructReg Comment="gpio"><Address>0x34</Address><Length>4</Length><AccessMode>RW</AccessMode>
+              <StructEntry Name="Own"><Bit>0</Bit><Cachable>NoCache</Cachable></StructEntry>
+              <StructEntry Name="Undeclared"><Bit>1</Bit></StructEntry>
+            </StructReg>"#,
+        );
+        let declared: Vec<(&str, Option<CachingMode>, Option<u64>)> = model
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.name(),
+                    node.meta().cachable,
+                    node.meta().polling_time_ms,
+                )
+            })
+            .collect();
+        use CachingMode::{NoCache, WriteAround};
+        assert_eq!(
+            declared,
+            [
+                ("Inherits", Some(NoCache), Some(250)),
+                ("Overrides", Some(WriteAround), Some(1000)),
+                ("Own", Some(NoCache), None),
+                ("Undeclared", None, None),
+            ]
+        );
+    }
+
+    /// GA-05: the standard's own example writes `<Cachable>No</Cachable>`
+    /// and its prose spells the element `<Cacheable>`; a value it does not
+    /// define is read as `NoCache`, which never answers with a stale value. A
+    /// `<PollingTime>` that is not a number is dropped rather than the node.
+    #[test]
+    fn cachable_spellings_and_odd_values_read_as_no_cache() {
+        let model = parse_fragment(
+            r#"<IntReg Name="No"><Address>0x0</Address><Length>4</Length><Cachable>No</Cachable></IntReg>
+            <IntReg Name="Prose"><Address>0x4</Address><Length>4</Length><Cacheable>WriteAround</Cacheable></IntReg>
+            <IntReg Name="Odd"><Address>0x8</Address><Length>4</Length><Cachable>Sometimes</Cachable><PollingTime>soon</PollingTime></IntReg>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        let declared: Vec<(Option<CachingMode>, Option<u64>)> = model
+            .nodes
+            .iter()
+            .map(|node| (node.meta().cachable, node.meta().polling_time_ms))
+            .collect();
+        use CachingMode::{NoCache, WriteAround};
+        assert_eq!(
+            declared,
+            [
+                (Some(NoCache), None),
+                (Some(WriteAround), None),
+                (Some(NoCache), None)
+            ]
+        );
+    }
+
+    /// `combine` is the most restrictive of two modes.
+    #[test]
+    fn caching_modes_combine_to_the_most_restrictive() {
+        use CachingMode::{NoCache, WriteAround, WriteThrough};
+        assert_eq!(WriteThrough.combine(WriteThrough), WriteThrough);
+        assert_eq!(WriteThrough.combine(WriteAround), WriteAround);
+        assert_eq!(WriteAround.combine(WriteThrough), WriteAround);
+        assert_eq!(WriteAround.combine(NoCache), NoCache);
+        assert_eq!(NoCache.combine(WriteThrough), NoCache);
     }
 
     /// GA-14: a saved configuration names the camera it came from, so a load

@@ -12,8 +12,21 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **Values are cached only as the camera's XML allows** (`<Cachable>`): a
+  `NoCache` value — a temperature, an exposure under auto exposure — is read
+  from the camera every time, through the `<Converter>` or `<Float>` in front
+  of it too, and after a write to a `WriteAround` register, every
+  `<FloatReg>` that declares no mode among them, the next read shows what the
+  camera stored. Reads a cache used to answer now reach the camera. ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
+- **XML model**: `NodeMeta` gains `cachable` and `polling_time_ms`,
+  `EnumEntryDecl` gains `is_self_clearing`; `FeatureState` gains
+  `polling_time` and `caching`. ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
+- **`viva-camctl describe` fails when it cannot read the feature's state**,
+  after printing what the XML says; `--json` reports `implemented` and
+  `available` as `null` and the reason in `state_error`. ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
+
 - **`viva-camctl get-usb` and `set-usb` are gone**: `get` and `set` take
-  `--usb <N>`, as `execute`, `bench` and the new commands do. ([#PR-V](https://github.com/VitalyVorobyev/viva-genicam/pull/PR-V))
+  `--usb <N>`, as `execute`, `bench` and the new commands do. ([#200](https://github.com/VitalyVorobyev/viva-genicam/pull/200))
 - **`Camera::get` on a category and `Camera::set` on a command are errors.**
   `set` used to execute a command and discard the value; run one with
   `execute_command` or `execute_and_wait`. Python's `set` raises too. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
@@ -119,6 +132,18 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Polling and refresh** (ADR-0029): a value with a `<PollingTime>` is read
+  again once that has passed, measured against a clock the application can
+  replace (`NodeMap::set_clock`; `wasm32` has none). `Camera::changed_since`
+  names the features that changed after a generation a viewer drew, and
+  `Camera::poll` invalidates the polled values that are due, in place of
+  callbacks; `Camera::invalidate` and `invalidate_all` are on the facade, and
+  in Python. `NodeMap::polling_time` and `caching_mode` say how to refresh a
+  feature, and the Zenoh feature state carries both. ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
+- **Viva Studio re-reads the features on screen at their polling time**, and
+  a `NoCache` feature without one every second, in embedded and remote
+  mode. ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
+
 - **Save a camera's configuration to a file and restore it**:
   `Camera::save_features` and `load_features`, Python's `save_features` and
   `load_features`, `viva-camctl save` and `load`. The features the XML marks
@@ -126,12 +151,12 @@ release opens with what to read before upgrading.
   its selector; a load writes them in the order the camera's dependencies
   need, tries a failed write once more, and reports every value it could not
   write, with the reason. The file is text in GenApi's feature-file layout and
-  names the camera model, so a load onto another model warns (ADR-0028). ([#PR-V](https://github.com/VitalyVorobyev/viva-genicam/pull/PR-V))
+  names the camera model, so a load onto another model warns (ADR-0028). ([#200](https://github.com/VitalyVorobyev/viva-genicam/pull/200))
 - **`viva-camctl` for field work**: `features` (the category tree with
   values), `describe` (one feature in full), `dump` (every readable value),
   `read-reg`/`write-reg` (registers past the XML), `action` (action commands);
   `--usb` on the commands the USB3 Vision stack supports, `execute` and
-  `bench` included. ([#PR-V](https://github.com/VitalyVorobyev/viva-genicam/pull/PR-V))
+  `bench` included. ([#200](https://github.com/VitalyVorobyev/viva-genicam/pull/200))
 - `Camera` reads and writes features by type — `get_integer`/`set_integer`,
   `get_float`, `get_bool`, `get_enum`, `get_string`, `get_register` and their
   setters — as `NodeMap` does. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
@@ -208,6 +233,11 @@ release opens with what to read before upgrading.
 
 ### Changed
 
+- `Camera::execute_and_wait` asks a command whether it has finished at the
+  command's `<PollingTime>`, where it declares one, instead of every 10 ms;
+  a running command and a self-clearing enumeration are polled while they
+  run (GenICam Standard v2.1.1 §2.8.8, §2.8.10). ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
+
 - **One GVSP receive engine on every OS** (ADR-0025): a thread per stream reads
   the socket whether or not the application is asking for a frame, so time
   spent on a frame no longer becomes packets the kernel drops; frames reach the
@@ -246,6 +276,11 @@ release opens with what to read before upgrading.
   ([#192](https://github.com/VitalyVorobyev/viva-genicam/pull/192))
 
 ### Fixed
+
+- Saving a configuration walks the selectors of a feature's selectors too:
+  a feature whose selector is itself selected was saved under the outer
+  selector's current entry only (Hikrobot MV-CS050's line features under
+  `StrobeSourceSelector`). ([#201](https://github.com/VitalyVorobyev/viva-genicam/pull/201))
 
 - A GigE camera opened from a current-thread Tokio runtime panicked on its
   first register access; it now gets a runtime of its own. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))

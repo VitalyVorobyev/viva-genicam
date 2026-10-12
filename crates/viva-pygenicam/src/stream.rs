@@ -5,16 +5,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use tokio::time::timeout as tokio_timeout;
 
 use viva_genicam::gige::nic::Iface;
 use viva_genicam::{
-    FrameStream, GenicamError, ResendPolicy, StreamOptions, U3vFrameStream as U3vStream,
-    U3vStreamBuilder,
+    FrameStream, GenicamError, ResendPolicy, StreamOptions, StreamStats,
+    U3vFrameStream as U3vStream, U3vStreamBuilder,
 };
 
-use crate::camera::{GigeCamera, U3vCamera};
-use crate::errors::{parse_error, transport_error, IntoPyErr};
+use crate::camera::{lock_open, GigeCamera, U3vCamera};
+use crate::errors::{gige_only, parse_error, transport_error, IntoPyErr};
 use crate::frame::PyFrame;
 use crate::runtime::runtime;
 
@@ -27,7 +28,7 @@ enum StreamInner {
 
 /// Both streams are `Send + Sync` — the GigE receive engine runs on a thread
 /// of its own — so a frame stream may be handed to a worker thread.
-#[pyclass(module = "viva_genicam._native")]
+#[pyclass(name = "FrameStream", module = "viva_genicam._native")]
 pub(crate) struct PyFrameStream {
     inner: Option<StreamInner>,
     /// Default per-frame timeout when `__next__` is called with no argument.
@@ -48,6 +49,53 @@ impl PyFrameStream {
             default_timeout: Duration::from_secs(5),
         }
     }
+}
+
+/// `StreamStats` as a dict of its fields; durations in seconds.
+fn stats_dict<'py>(py: Python<'py>, stats: &StreamStats) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    let counters: [(&str, u64); 21] = [
+        ("frames_complete", stats.frames_complete),
+        ("frames_incomplete", stats.frames_incomplete),
+        ("frames_missed", stats.frames_missed),
+        ("frames_backpressure", stats.frames_backpressure),
+        ("frames_unsupported", stats.frames_unsupported),
+        ("packets_received", stats.packets_received),
+        ("packets_duplicate", stats.packets_duplicate),
+        ("packets_missing", stats.packets_missing),
+        ("packets_ignored_malformed", stats.packets_ignored_malformed),
+        (
+            "packets_ignored_unsupported",
+            stats.packets_ignored_unsupported,
+        ),
+        (
+            "packets_ignored_out_of_range",
+            stats.packets_ignored_out_of_range,
+        ),
+        ("packets_ignored_late", stats.packets_ignored_late),
+        (
+            "packets_ignored_error_status",
+            stats.packets_ignored_error_status,
+        ),
+        ("packets_ignored_foreign", stats.packets_ignored_foreign),
+        ("packets_size_mismatch", stats.packets_size_mismatch),
+        ("resend_requested", stats.resend_requested),
+        ("resend_recovered", stats.resend_recovered),
+        ("resend_unavailable", stats.resend_unavailable),
+        ("bytes", stats.bytes),
+        ("frames_lost", stats.frames_lost()),
+        ("packets_ignored", stats.packets_ignored()),
+    ];
+    for (name, value) in counters {
+        dict.set_item(name, value)?;
+    }
+    dict.set_item("last_frame_dt", stats.last_frame_dt.as_secs_f64())?;
+    dict.set_item("avg_fps", stats.avg_fps)?;
+    dict.set_item("avg_mbps", stats.avg_mbps)?;
+    dict.set_item("avg_latency_ms", stats.avg_latency_ms)?;
+    dict.set_item("elapsed", stats.elapsed.as_secs_f64())?;
+    dict.set_item("packets_per_second", stats.packets_per_second)?;
+    Ok(dict)
 }
 
 #[pymethods]
@@ -76,9 +124,22 @@ impl PyFrameStream {
         .map(|opt| opt.map(PyFrame::new))
     }
 
+    /// The stream's counters (GigE Vision): every block's fate, every
+    /// packet's, and the resends asked for.
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        match self.inner.as_ref() {
+            Some(StreamInner::Gige(s)) => stats_dict(py, &s.stats()),
+            Some(StreamInner::U3v(_)) => Err(gige_only("stream statistics")),
+            None => Err(parse_error("frame stream is closed")),
+        }
+    }
+
     /// Close the stream (Python context manager / explicit shutdown).
-    fn close(&mut self) {
-        self.inner.take();
+    fn close(&mut self, py: Python<'_>) {
+        if let Some(inner) = self.inner.take() {
+            // Dropping joins the receive thread: not with the GIL held.
+            py.detach(move || drop(inner));
+        }
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -101,11 +162,13 @@ pub(crate) struct GigeStreamRequest {
     pub destination_port: Option<u16>,
     pub packet_delay_ns: Option<u64>,
     pub resend: bool,
+    pub deliver_incomplete: bool,
+    pub monitor: bool,
 }
 
 pub(crate) fn build_gige_stream(
     py: Python<'_>,
-    camera: Arc<Mutex<GigeCamera>>,
+    camera: Arc<Mutex<Option<GigeCamera>>>,
     iface: Option<Iface>,
     request: GigeStreamRequest,
 ) -> PyResult<PyFrameStream> {
@@ -116,18 +179,37 @@ pub(crate) fn build_gige_stream(
         destination_port,
         packet_delay_ns,
         resend,
+        deliver_incomplete,
+        monitor,
     } = request;
     if auto_packet_size && packet_size.is_some() {
         return Err(parse_error(
             "pass at most one of auto_packet_size=True and packet_size=...",
         ));
     }
+    if monitor
+        && (packet_size.is_some()
+            || auto_packet_size
+            || multicast.is_some()
+            || destination_port.is_some()
+            || packet_delay_ns.is_some())
+    {
+        return Err(parse_error(
+            "a monitor watches the stream another application configured: \
+             pass no packet size, multicast group, port or packet delay with monitor=True",
+        ));
+    }
 
     let frame_stream = py.detach(|| {
-        let mut cam = camera
-            .lock()
-            .map_err(|_| parse_error("camera mutex poisoned"))?;
-        let mut options = StreamOptions::new();
+        let mut guard = lock_open(&camera)?;
+        let cam = guard
+            .as_mut()
+            .expect("lock_open checked the camera is open");
+        let mut options = if monitor {
+            StreamOptions::monitor()
+        } else {
+            StreamOptions::new()
+        };
         if let Some(iface) = iface {
             options = options.iface(iface);
         }
@@ -148,20 +230,23 @@ pub(crate) fn build_gige_stream(
         if !resend {
             options = options.resend(ResendPolicy::Off);
         }
-        cam.open_stream(options).into_py_err()
+        let mut stream = cam.open_stream(options).into_py_err()?;
+        stream.set_deliver_incomplete(deliver_incomplete);
+        Ok::<_, PyErr>(stream)
     })?;
     Ok(PyFrameStream::gige(frame_stream))
 }
 
 pub(crate) fn build_u3v_stream(
     py: Python<'_>,
-    camera: Arc<Mutex<U3vCamera>>,
+    camera: Arc<Mutex<Option<U3vCamera>>>,
 ) -> PyResult<PyFrameStream> {
     let stream = py.detach(|| {
-        let mut cam = camera
-            .lock()
-            .map_err(|_| parse_error("camera mutex poisoned"))?;
-        U3vStreamBuilder::new(&mut cam).build().into_py_err()
+        let mut guard = lock_open(&camera)?;
+        let cam = guard
+            .as_mut()
+            .expect("lock_open checked the camera is open");
+        U3vStreamBuilder::new(cam).build().into_py_err()
     })?;
     Ok(PyFrameStream::u3v(stream))
 }

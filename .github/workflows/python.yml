@@ -128,10 +128,17 @@ jobs:
     name: test ${{ matrix.os }} py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     needs: [build]
+    # One shell on every runner: on Windows the default, PowerShell, reports
+    # only the last command's exit code of a multi-line step.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        # Windows too: the wheel is built and published for it (CI-04), and
+        # #57 was a Windows report.
+        os: [ubuntu-latest, macos-15, windows-latest]
         python: ['3.10', '3.14']
     steps:
       - uses: actions/checkout@v7
@@ -163,6 +170,17 @@ jobs:
 
       - name: Run pytest against installed wheel
         run: python -m pytest crates/viva-pygenicam/tests -v
+
+      # The stubs are hand-written, so check them against the module the wheel
+      # built (PY-04): a method added, renamed or re-typed in Rust without its
+      # stub fails here. The whole package, so a facade calling something the
+      # stub lacks fails too. Run from the repository root, where
+      # `viva_genicam` resolves to the installed wheel.
+      - name: Check the type stubs (stubtest)
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pip install "mypy>=2.4"
+          python -m mypy.stubtest viva_genicam --allowlist crates/viva-pygenicam/stubtest-allowlist.txt
 
   publish:
     name: publish to PyPI

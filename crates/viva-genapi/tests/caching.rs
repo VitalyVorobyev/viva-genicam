@@ -478,3 +478,31 @@ fn the_feature_state_says_how_to_refresh_it() {
     assert_eq!(state.polling_time, None);
     assert_eq!(state.caching, CachingMode::WriteThrough);
 }
+
+/// Codex on #201: changing the clock keeps what is active active. A
+/// self-clearing entry that is active is still read past the cache, and a
+/// command still running is still polled, under the new clock.
+#[test]
+fn a_new_clock_keeps_active_pollers_active() {
+    let clock = Arc::new(ManualClock::new());
+    let mut map = map(&clock);
+    let device = Device::new();
+    map.set_enum("Action", "Active", &device).unwrap();
+    map.exec_command("UserSetLoad", &device).unwrap();
+
+    let later = Arc::new(ManualClock::new());
+    later.advance(ms(1_000_000));
+    map.set_clock(later.clone());
+
+    device.set_u32(ACTION, 0); // the action finished on the device
+    assert_eq!(
+        map.get_enum("Action", &device).unwrap(),
+        "Idle",
+        "an active self-clearing entry is read from the device"
+    );
+    later.advance(ms(5));
+    assert!(
+        map.poll().contains(&"UserSetLoad".to_string()),
+        "the running command is still polled"
+    );
+}

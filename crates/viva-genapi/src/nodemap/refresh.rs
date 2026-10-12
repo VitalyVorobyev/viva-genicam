@@ -264,13 +264,20 @@ impl NodeMap {
     /// Measure polling times against `clock` rather than the system clock —
     /// a [`ManualClock`](crate::ManualClock) in a test, or the host's clock
     /// where there is no `std::time::Instant` (`wasm32-unknown-unknown`).
-    /// What was read before is treated as read at an unknown time, so it is
-    /// read again.
+    ///
+    /// A polled value read before is treated as read at an unknown time, so
+    /// it is read again. A command still running, and an enumeration whose
+    /// entry is self-clearing, stay active: their polling starts again now,
+    /// on the new clock.
     pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
-        self.refresh.clock = clock;
+        let now = clock.now();
         for polled in self.refresh.polled.values() {
-            polled.since.set(None);
+            polled.since.set(match polled.kind {
+                PollKind::Value => None,
+                PollKind::Command | PollKind::SelfClearing => polled.since.get().map(|_| now),
+            });
         }
+        self.refresh.clock = clock;
     }
 
     /// The current generation: advanced by every write and every

@@ -49,4 +49,11 @@ def _free_cameras() -> Iterator[None]:
 
 @pytest.fixture()
 def loopback_iface() -> str:
-    return "lo0" if sys.platform == "darwin" else "lo"
+    """The loopback interface, by its OS name where it has a fixed one. On
+    Windows it has none to rely on, so it is named by its address, which
+    `iface=` accepts as well."""
+    if sys.platform == "darwin":
+        return "lo0"
+    if sys.platform == "win32":
+        return "127.0.0.1"
+    return "lo"

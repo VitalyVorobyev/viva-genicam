@@ -249,6 +249,8 @@ pub(crate) struct ServerOptions {
     pub delayed_acks: Arc<HashMap<u64, Duration>>,
     /// How often the heartbeat rule has revoked control privilege.
     pub expiries: Arc<AtomicU64>,
+    /// Action commands addressed to this device and acted on.
+    pub actions: Arc<AtomicU64>,
 }
 
 /// Run the GVCP control server loop.
@@ -360,7 +362,9 @@ pub async fn run(
                 handle_writemem(peer, request_id, payload, bind_ip, &regs, acquisition).await
             }
             ACTION_CMD => {
-                handle_action(&socket, peer, request_id, flags, payload).await;
+                if handle_action(&socket, peer, request_id, flags, payload).await {
+                    options.actions.fetch_add(1, Ordering::Relaxed);
+                }
                 continue;
             }
             // No acknowledgement: the command asks for none, and the answer
@@ -827,13 +831,15 @@ async fn fire_test_packet(
 /// 64-bit action time when flags bit 7 is set. A 24-byte payload, or one
 /// carrying a scheduled time without the flag, is malformed and gets no reply:
 /// the client used to send exactly that, under opcode 0x0080 (`READREG`).
+///
+/// Returns whether the device acts on it: its keys are this device's.
 async fn handle_action(
     socket: &UdpSocket,
     peer: SocketAddr,
     request_id: u16,
     flags: u8,
     payload: &[u8],
-) {
+) -> bool {
     const SCHEDULED: u8 = 0x80;
     const ACK_REQUIRED: u8 = 0x01;
 
@@ -844,7 +850,7 @@ async fn handle_action(
             len = payload.len(),
             expected, scheduled, "malformed action command payload"
         );
-        return;
+        return false;
     }
 
     let device_key = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
@@ -859,7 +865,7 @@ async fn handle_action(
             device_key,
             group_key, group_mask, "action command not addressed to this device"
         );
-        return;
+        return false;
     }
 
     debug!(%peer, scheduled, "action command accepted");
@@ -871,6 +877,7 @@ async fn handle_action(
         buf.put_u16(request_id);
         let _ = socket.send_to(&buf, peer).await;
     }
+    true
 }
 
 async fn handle_forceip(

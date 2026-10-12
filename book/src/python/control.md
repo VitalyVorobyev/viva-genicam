@@ -1,5 +1,8 @@
 # Control & introspection
 
+The examples use `info`, a `GigeDeviceInfo` from `vg.discover()`, and `cam`,
+the camera `vg.connect_gige(info)` opened.
+
 ## Reading and writing features
 
 `Camera.get(name)` returns the value as a string, formatted per the node's type. `Camera.set(name, value)` parses the string according to the node type and writes it.
@@ -14,20 +17,89 @@ cam.set("PixelFormat", "Mono8")
 cam.set("ExposureTime", "7500.0")
 ```
 
-### Typed helpers
+### Reading and writing by type
 
-The exposure and the gain have setters that take a number and find the
-feature the camera has for it:
+Each node type has its own pair, which skips the round trip through text and
+returns a Python value of the feature's type:
 
+<!-- pytest: camera -->
 ```python
-cam.set_exposure_time(10_000.0)   # returns the feature written, e.g. "ExposureTimeAbs"
+cam.set_integer("Width", 320)
+assert cam.get_integer("Width") == 320
+cam.set_float("ExposureTime", 7500.0)
+cam.set_bool("AcquisitionFrameRateEnable", False)
+cam.set_enum("AcquisitionMode", "Continuous")
+print(cam.get_string("DeviceModelName"))
+```
+
+`get_register`/`set_register` read and write a `<Register>` feature's bytes;
+`set_register` takes exactly its length. A type that does not match the
+feature — `get_integer` on a `Float` — raises `GenApiError`.
+
+### Standard features
+
+Exposure, gain, triggers, the region of interest, binning, frame rate and user
+sets have helpers that find the feature the camera has for them — SFNC's name,
+or an older one such as `ExposureTimeAbs` or `GainRaw` — and raise
+`GenicamError`, naming every name tried, when it has none:
+
+<!-- pytest: camera -->
+```python
+cam.set_exposure_time(10_000.0)   # returns the feature written: "ExposureTime"
 cam.set_gain(6.0)                 # "Gain", or "GainRaw" on an older camera
+cam.set_roi(vg.Roi(x=0, y=0, width=320, height=240))
+cam.set_binning(1, 1)
+
+cam.enable_trigger("FrameStart", "Software")
+cam.trigger_software()            # one frame
+cam.disable_trigger("FrameStart")
+
+cam.save_user_set("UserSet1")
+cam.load_user_set("UserSet1")
+cam.set_roi(vg.Roi(0, 0, 640, 480))
 ```
 
 The exposure goes to `ExposureTime`, else `ExposureTimeAbs` (both in
 microseconds), else `ExposureTimeRaw` (the camera's own units, rounded to an
 integer); the gain to `Gain` (decibels), else `GainRaw` (the camera's own
-units). A camera with none of them raises `GenicamError`, naming them.
+units). Each setter has a getter — `exposure_time()`, `gain()`, `roi()`,
+`binning()`, `frame_rate()`, `acquisition_mode()`, `user_sets()` — and
+`set_frame_rate(hz)` switches the camera's frame-rate enable on first, where
+it has one.
+
+### One feature's whole state
+
+`feature_state(name)` reads what a viewer shows, at once: the typed value,
+what the camera permits now, whether the feature is implemented and
+available, its range, the entries an enumeration accepts now, its unit, and
+how often to read it again:
+
+<!-- pytest: camera -->
+```python
+state = cam.feature_state("DeviceTemperature")
+print(state.value, state.unit)   # e.g. 40.25 C
+print(state.polling_time)        # 0.5: read it again every half second
+print(state.caching)             # "NoCache": the camera changes it on its own
+```
+
+`available_enum_entries(name)` is the list an enumeration accepts now, after
+each entry's own `pIsImplemented`/`pIsAvailable`; `enum_entries(name)` lists
+every entry the XML declares.
+
+### Values that change
+
+A value the camera changes by itself — a temperature, an exposure under auto
+exposure — is read from the camera again when the XML says so: a feature
+declared `NoCache` every time, one with a `PollingTime` once that has passed.
+Two calls tell a viewer what to read again:
+
+<!-- pytest: camera -->
+```python
+seen = cam.generation()
+# ... writes, here or from another thread ...
+changed, seen = cam.changed_since(seen)   # features written or invalidated since
+due = cam.poll()                          # features whose PollingTime has passed
+```
 
 ### Error model
 
@@ -49,20 +121,52 @@ except vg.TransportError as e:
 | `GenApiError` | Nodemap evaluation: unknown feature, value out of range, predicate failed |
 | `TransportError` | GVCP/USB register read or write failed |
 | `ParseError` | User-supplied value couldn't be parsed per the node's type |
-| `MissingChunkFeatureError` | Chunk selector not present in the camera's XML. Chunk configuration is not exposed to Python yet, so the bindings do not raise this today |
+| `MissingChunkFeatureError` | `configure_chunks()` on a camera whose XML has no chunk mode, selector or enable |
 | `UnsupportedPixelFormatError` | No RGB conversion path for the reported pixel format |
 
 All five inherit from `GenicamError`, so `except vg.GenicamError:` catches every
-error the bindings *raise deliberately*. Two failures escape it:
+error the bindings raise deliberately; a closed camera, and a GigE Vision call
+on a USB3 Vision camera, raise `GenicamError` itself. A panic in the Rust layer
+would surface as `pyo3_runtime.PanicException`, a `BaseException` that
+`except Exception:` misses: a service that must not die catches `BaseException`
+at the top of its worker as well.
 
-- Using a `Camera` or `Frame` **from a thread other than the one that created
-  it** raises `pyo3_runtime.PanicException`, which subclasses `BaseException` —
-  so even `except Exception:` misses it. These objects are `unsendable`; keep
-  each one on its own thread. A `FrameStream` may move between threads.
-- A panic anywhere in the Rust layer surfaces the same way.
+## Threads
 
-If you are wrapping this in a service that must not die, catch `BaseException`
-at the top of the worker as well.
+A `Camera`, a `Frame` and a stream can be used from any thread. Calls to one
+camera from several threads take turns; every call that waits on the camera —
+a register read, a frame, an event — releases the GIL, so other Python threads
+run meanwhile.
+
+## Closing a camera
+
+A GigE camera holds the camera's control privilege until it is closed, and
+another application — or a second run of this one — cannot take control
+meanwhile. Close it with `close()`, or use the camera as a context manager:
+
+<!-- pytest: device -->
+```python
+with vg.connect_gige(info) as cam:
+    print(cam.get("Width"))
+# control is given back here; `cam` raises GenicamError from now on
+```
+
+Without either, control is given back when the camera is garbage-collected.
+
+## Control privilege
+
+`control_state` says where a GigE session stands: `HELD`, `MONITOR` (opened
+with `monitor=True`), `LOST` (the camera timed the heartbeat out, or gave
+control to another application) or `RELEASED`. Only `HELD` writes; in every
+other state a write raises before anything is sent.
+
+<!-- pytest: camera -->
+```python
+cam.release_control()          # let another application take the camera
+assert cam.control_state is vg.ControlState.RELEASED
+cam.reclaim_control()          # raises while someone else holds it
+assert cam.control_state is vg.ControlState.HELD
+```
 
 ## Introspection
 
@@ -215,6 +319,41 @@ cam.acquisition_stop()
 ```
 
 When you use `with cam.stream() as frames:` the stream context manager calls these for you on entry/exit. Don't call them manually if you are using `stream()`.
+
+## Raw registers
+
+`read_register(address, length=4)` and `write_register(address, data)` reach
+the camera's register space past GenApi — a bootstrap register, or one the XML
+does not name. A raw write forgets every cached value, since it may have
+changed any of them.
+
+<!-- pytest: camera -->
+```python
+ccp = cam.read_register(0x0A00)   # GigE Vision's control channel privilege
+print(ccp.hex())                  # "00000002": this application has control
+```
+
+## Action commands and IP configuration
+
+An action command triggers every camera whose keys match at once —
+`ActionDeviceKey`, `ActionGroupKey`, `ActionGroupMask` — and each that acts
+acknowledges:
+
+<!-- pytest: device -->
+```python
+summary = vg.send_action(device_key=0x42, group_key=1, group_mask=1, destination=info.ip)
+print(summary.acks, "camera(s) acted")   # 1 when the keys are the camera's
+```
+
+Without `destination=` the command goes to the broadcast address, so every
+camera on the subnet hears it; `scheduled_time=` (in the cameras' timestamp
+ticks) asks them to act then.
+
+A camera configured for another network still answers discovery, at an address
+the host cannot reach. `vg.force_ip(mac, ip, subnet)` gives it a temporary
+address, until it restarts; `cam.set_persistent_ip(ip, subnet, gateway)` stores
+one in a camera you have opened, for its next power-up. `viva-camctl set-ip`
+does the same from the command line.
 
 ## Raw XML
 

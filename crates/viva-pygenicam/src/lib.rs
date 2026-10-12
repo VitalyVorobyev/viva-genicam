@@ -10,7 +10,9 @@ mod camctl;
 mod camera;
 mod discovery;
 mod errors;
+mod events;
 mod frame;
+mod gige;
 mod nodemap;
 mod runtime;
 mod stream;
@@ -23,8 +25,9 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     camera::register(m)?;
     frame::register(m)?;
     stream::register(m)?;
-    nodemap::register(m)?;
-    testing::register(py, m)?;
+    events::register(m)?;
+    gige::register(m)?;
+    testing::register(m)?;
     camctl::register(m)?;
     Ok(())
 }

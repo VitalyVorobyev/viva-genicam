@@ -13,19 +13,23 @@ The install also provides the `viva-camctl` CLI — see
 import viva_genicam as vg
 
 cams = vg.discover(timeout_ms=500)
-cam = vg.connect_gige(cams[0])
-print(cam.get("DeviceModelName"))
+with vg.connect_gige(cams[0]) as cam:    # control is given back at the end
+    print(cam.get("DeviceModelName"))
 
-with cam.stream() as frames:
-    for frame in frames:
-        arr = frame.to_numpy()           # shape and dtype follow the pixel format
-        break
+    with cam.stream() as frames:
+        for frame in frames:
+            arr = frame.to_numpy()       # shape and dtype follow the pixel format
+            break
 ```
 
-`to_numpy()` returns `(H, W)` `uint8` for `Mono8`, `(H, W)` `uint16` for
-`Mono16`, `(H, W, 3)` `uint8` for RGB, BGR and Bayer formats, and the raw bytes
-as a flat `uint8` array for anything else — see
-[Streaming → to_numpy()](python/streaming.md#to_numpy--natural-shape).
+`to_numpy()` returns the camera's values: `(H, W)` `uint8` for 8-bit
+monochrome, `(H, W)` `uint16` for 10- to 16-bit monochrome, packed or not, a
+Bayer mosaic as sent unless asked to demosaic it, and `(H, W, 3)` `uint8` for
+RGB and BGR — see
+[Streaming → to_numpy()](python/streaming.md#to_numpy--the-cameras-values).
+
+A camera, a frame and a stream may be used from any thread, and every call
+that waits on the camera lets other Python threads run.
 
 ## Tutorials
 

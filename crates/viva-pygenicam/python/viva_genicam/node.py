@@ -99,4 +99,56 @@ class SkippedNode:
         return cls(tag=d["tag"], name=d.get("name"), error=d["error"])
 
 
-__all__ = ["NodeKind", "NodeInfo"]
+@dataclass(frozen=True)
+class ValueRange:
+    """A numeric feature's bounds now, and its increment if it declares one."""
+
+    min: float
+    max: float
+    inc: Optional[float]
+
+
+@dataclass(frozen=True)
+class FeatureState:
+    """Everything about a feature at one moment, read at once
+    (``viva_genicam::genapi::FeatureState``)."""
+
+    #: The node type, such as ``"Integer"``.
+    kind: str
+    #: The value — ``int``, ``float``, ``bool`` or ``str`` by type — or
+    #: ``None`` for a feature with nothing to read: a command, a category, a
+    #: write-only, unimplemented or unavailable feature, or a ``Register``
+    #: (read its bytes with :meth:`Camera.get_register`).
+    value: "int | float | bool | str | None"
+    #: What the camera permits now: ``"RO"``, ``"RW"``, ``"WO"`` or ``None``.
+    access: Access
+    is_implemented: bool
+    is_available: bool
+    range: Optional[ValueRange]
+    #: The entries an enumeration accepts now.
+    enum_entries: Optional[list[str]]
+    unit: Optional[str]
+    #: Seconds a viewer may show the value before reading it again, when
+    #: the XML says.
+    polling_time: Optional[float]
+    #: ``"NoCache"``, ``"WriteThrough"`` or ``"WriteAround"``.
+    caching: str
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FeatureState":
+        rng = d.get("range")
+        return cls(
+            kind=d["kind"],
+            value=d.get("value"),
+            access=d.get("access"),
+            is_implemented=d["is_implemented"],
+            is_available=d["is_available"],
+            range=ValueRange(*rng) if rng is not None else None,
+            enum_entries=d.get("enum_entries"),
+            unit=d.get("unit"),
+            polling_time=d.get("polling_time"),
+            caching=d["caching"],
+        )
+
+
+__all__ = ["NodeKind", "NodeInfo", "SkippedNode", "FeatureState", "ValueRange"]

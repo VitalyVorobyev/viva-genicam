@@ -14,14 +14,79 @@ use tokio::sync::Mutex;
 use viva_genapi_xml::{self, XmlError};
 use viva_genicam::image_io::{self, ImageFormat};
 use viva_genicam::pfnc::{self, PixelFormat};
-use viva_genicam::{Access, Camera, GigeRegisterIo, connect_gige_as};
+use viva_genicam::{Access, Camera, GigeRegisterIo, U3vRegisterIo, connect_gige_as};
 use viva_gige::DeviceInfo;
 use viva_gige::discover_on_interface;
 use viva_gige::gvcp::GigeDevice;
 use viva_gige::nic::{Iface, IfaceSelector};
 use viva_gige::{GVCP_PORT, discover};
+use viva_u3v::usb::RusbTransfer;
 
 pub const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 500;
+
+/// The camera a command acts on: a GigE Vision camera by address or by its
+/// place in discovery order, or a USB3 Vision camera by its place in
+/// `list-usb` order.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct Target {
+    /// A GigE Vision camera, by IP address
+    #[arg(long, conflicts_with = "usb")]
+    pub ip: Option<Ipv4Addr>,
+    /// A GigE Vision camera, by its place in discovery order
+    #[arg(long, conflicts_with = "usb")]
+    pub index: Option<usize>,
+    /// A USB3 Vision camera, by its place in `list-usb` order
+    #[arg(long)]
+    pub usb: Option<usize>,
+}
+
+/// A camera opened through either transport. Commands that need only what
+/// [`Camera`] offers on any transport take one and dispatch with
+/// [`with_camera!`](crate::with_camera).
+pub enum AnyCamera {
+    /// GigE Vision.
+    Gige(Camera<GigeRegisterIo>),
+    /// USB3 Vision.
+    Usb(Camera<U3vRegisterIo<RusbTransfer>>),
+}
+
+/// Run `$body` with `$camera` bound to the camera inside an
+/// [`AnyCamera`](crate::common::AnyCamera), whichever transport it is on.
+#[macro_export]
+macro_rules! with_camera {
+    ($any:expr, $camera:ident => $body:expr) => {
+        match $any {
+            $crate::common::AnyCamera::Gige($camera) => $body,
+            $crate::common::AnyCamera::Usb($camera) => $body,
+        }
+    };
+}
+
+/// Open the camera `target` names, with its nodemap. `access` applies to a
+/// GigE Vision camera; USB3 Vision has no control privilege.
+pub async fn open_target(
+    target: &Target,
+    iface: Option<&IfaceSelector>,
+    access: Access,
+) -> Result<AnyCamera> {
+    if let Some(usb) = target.usb {
+        return Ok(AnyCamera::Usb(crate::cmd_usb::open_usb_camera(Some(usb))?));
+    }
+    let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
+    let device = select_device(target.ip, target.index, iface, timeout).await?;
+    Ok(AnyCamera::Gige(open_camera(&device, access).await?))
+}
+
+/// A number as decimal or `0x` hexadecimal, for addresses and register
+/// values.
+pub fn parse_number(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(&hex.replace('_', ""), 16),
+        None => text.replace('_', "").parse(),
+    }
+    .map_err(|err| format!("{text:?} is not a decimal or 0x-hexadecimal number: {err}"))
+}
 
 pub fn format_mac(mac: &[u8; 6]) -> String {
     mac.iter()

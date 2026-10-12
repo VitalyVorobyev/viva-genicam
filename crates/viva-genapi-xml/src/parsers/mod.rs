@@ -42,6 +42,8 @@ pub const TAG_DISPLAY_NAME: &str = "DisplayName";
 /// XML element for node visibility level.
 pub const TAG_VISIBILITY: &str = "Visibility";
 pub const TAG_IMPOSED_ACCESS_MODE: &str = "ImposedAccessMode";
+/// XML element marking a feature that belongs in a saved configuration.
+pub const TAG_STREAMABLE: &str = "Streamable";
 /// XML element for the long-form description.
 pub const TAG_DESCRIPTION: &str = "Description";
 /// XML element for short tooltip text.
@@ -236,6 +238,7 @@ pub struct NodeMetaBuilder {
     pub display_name: Option<String>,
     pub representation: Option<Representation>,
     pub imposed_access: Option<crate::AccessMode>,
+    pub streamable: bool,
 }
 
 impl NodeMetaBuilder {
@@ -287,6 +290,14 @@ impl NodeMetaBuilder {
                 self.imposed_access = Some(crate::AccessMode::parse(&text)?);
                 Ok(true)
             }
+            // The schema's values are `Yes` and `No`. Anything else — the
+            // empty `<Streamable/>` arrives as an empty element and never
+            // reaches here — keeps the standard's default, `No`.
+            TAG_STREAMABLE => {
+                let text = read_text_start(reader, event)?;
+                self.streamable = text.trim() == "Yes";
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -300,6 +311,7 @@ impl NodeMetaBuilder {
             display_name: self.display_name,
             representation: self.representation,
             imposed_access: self.imposed_access,
+            streamable: self.streamable,
         }
     }
 }

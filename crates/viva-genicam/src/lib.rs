@@ -98,7 +98,7 @@ use crate::events::{
     bind_socket as bind_event_socket_internal,
     configure_message_channel_raw as configure_message_channel_fallback,
 };
-use crate::genapi::{GenApiError, Node, NodeMap, PortKind, RegisterIo, SkOutput};
+use crate::genapi::{GenApiError, Node, NodeMap, PortKind, RegisterIo};
 use gige::GigeDevice;
 use gige::gvcp::consts as gvcp_consts;
 use thiserror::Error;
@@ -154,6 +154,9 @@ pub enum GenicamError {
     /// Nothing arrived within the time a blocking call was given.
     #[error("timed out after {0:?}")]
     Timeout(Duration),
+    /// Reading or writing a file or stream failed.
+    #[error("i/o: {0}")]
+    Io(#[from] std::io::Error),
     /// The camera declares none of the names a standard feature goes by.
     #[error("the camera has no {what}: it declares none of {}", tried.join(", "))]
     MissingFeature {
@@ -316,129 +319,82 @@ impl<T: RegisterIo> Camera<T> {
     /// Read a feature as text, formatted by its type: for a program that
     /// does not know the type in advance, such as a command line. The typed
     /// accessors ([`Camera::get_integer`] and the like) read without the
-    /// round trip.
+    /// round trip. See [`NodeMap::get_text`](genapi::NodeMap::get_text).
     ///
     /// A category has no value and a command none to read: both are errors.
     pub fn get(&self, name: &str) -> Result<String, GenicamError> {
-        match self.nodemap.node(name) {
-            Some(Node::Integer(_)) => {
-                Ok(self.nodemap.get_integer(name, &self.transport)?.to_string())
-            }
-            Some(Node::Float(_)) => Ok(self.nodemap.get_float(name, &self.transport)?.to_string()),
-            Some(Node::Enum(_)) => self
-                .nodemap
-                .get_enum(name, &self.transport)
-                .map_err(Into::into),
-            Some(Node::Boolean(_)) => Ok(self.nodemap.get_bool(name, &self.transport)?.to_string()),
-            Some(Node::SwissKnife(sk)) => match sk.output {
-                SkOutput::Float => Ok(self.nodemap.get_float(name, &self.transport)?.to_string()),
-                SkOutput::Integer => {
-                    Ok(self.nodemap.get_integer(name, &self.transport)?.to_string())
-                }
-            },
-            Some(Node::Converter(conv)) => match conv.output {
-                SkOutput::Float => Ok(self
-                    .nodemap
-                    .get_converter(name, &self.transport)?
-                    .to_string()),
-                SkOutput::Integer => {
-                    Ok((self.nodemap.get_converter(name, &self.transport)? as i64).to_string())
-                }
-            },
-            Some(Node::IntConverter(_)) => Ok(self
-                .nodemap
-                .get_int_converter(name, &self.transport)?
-                .to_string()),
-            Some(Node::String(_)) => self
-                .nodemap
-                .get_string(name, &self.transport)
-                .map_err(Into::into),
-            Some(Node::Command(_)) => Err(GenicamError::GenApi(GenApiError::Type(format!(
+        if let Some(Node::Command(_)) = self.nodemap.node(name) {
+            return Err(GenApiError::Type(format!(
                 "{name} is a command, which has no value; run it with \
                  Camera::execute_command or execute_and_wait"
-            )))),
-            // A `<Register>` is a byte array with no declared interpretation.
-            // Rendering it into this `String`-typed API would mean inventing an
-            // encoding — hex? base64? — that nothing asked for and no caller
-            // could rely on. Raw access goes through
-            // `Camera::get_register`.
-            Some(Node::Register(_)) => {
-                Err(GenicamError::GenApi(GenApiError::Type(name.to_string())))
-            }
-            Some(Node::Category(_)) => Err(GenicamError::GenApi(GenApiError::Type(format!(
-                "{name} is a category, which has no value"
-            )))),
-            // `Node` is `#[non_exhaustive]`, so a node type added in
-            // `viva-genapi` no longer breaks this crate's build. Name the kind
-            // rather than returning a bare type error, so the gap is legible
-            // from a log line instead of needing a debugger.
-            Some(other) => Err(GenicamError::GenApi(GenApiError::Type(format!(
-                "{name} is a {} node, which Camera::get cannot render as a string",
-                other.kind_name()
-            )))),
-            None => Err(GenApiError::NodeNotFound(name.to_string()).into()),
+            ))
+            .into());
         }
+        Ok(self.nodemap.get_text(name, &self.transport)?)
     }
 
     /// Write a feature from text, parsed by its type: the counterpart of
-    /// [`Camera::get`].
+    /// [`Camera::get`]. Text that does not parse as the feature's type is
+    /// [`GenicamError::Parse`], and nothing is written.
     ///
     /// A command is not set but executed, with [`Camera::execute_command`] or
     /// [`Camera::execute_and_wait`]: setting one is an error, and nothing is
     /// written. So is setting a category.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), GenicamError> {
-        match self.nodemap.node(name) {
-            // A converter writes through its `<FormulaTo>`: `set_integer` and
-            // `set_float` dispatch to it.
-            Some(Node::Integer(_) | Node::IntConverter(_)) => {
-                let parsed: i64 = value
-                    .parse()
-                    .map_err(|_| GenicamError::parse(format!("invalid integer for {name}")))?;
-                self.nodemap
-                    .set_integer(name, parsed, &self.transport)
-                    .map_err(Into::into)
-            }
-            Some(Node::Float(_) | Node::Converter(_)) => {
-                let parsed: f64 = value
-                    .parse()
-                    .map_err(|_| GenicamError::parse(format!("invalid float for {name}")))?;
-                self.nodemap
-                    .set_float(name, parsed, &self.transport)
-                    .map_err(Into::into)
-            }
-            Some(Node::Enum(_)) => self
-                .nodemap
-                .set_enum(name, value, &self.transport)
-                .map_err(Into::into),
-            Some(Node::Boolean(_)) => {
-                let parsed = parse_bool(value).ok_or_else(|| {
-                    GenicamError::parse(format!("invalid boolean for {name}: {value}"))
-                })?;
-                self.nodemap
-                    .set_bool(name, parsed, &self.transport)
-                    .map_err(Into::into)
-            }
-            Some(Node::SwissKnife(_)) => Err(GenApiError::Type(name.to_string()).into()),
-            Some(Node::String(_)) => self
-                .nodemap
-                .set_string(name, value, &self.transport)
-                .map_err(Into::into),
-            Some(Node::Command(_)) => Err(GenApiError::Type(format!(
+        if let Some(Node::Command(_)) = self.nodemap.node(name) {
+            return Err(GenApiError::Type(format!(
                 "{name} is a command, which is executed, not set; run it with \
                  Camera::execute_command or execute_and_wait"
             ))
-            .into()),
-            // See the matching arm in `get`: a byte array has no string form
-            // this API could parse back. Use `Camera::set_register`.
-            Some(Node::Register(_)) => Err(GenApiError::Type(name.to_string()).into()),
-            Some(Node::Category(_)) => Err(GenApiError::Type(name.to_string()).into()),
-            // See the matching arm in `get`.
-            Some(other) => Err(GenicamError::GenApi(GenApiError::Type(format!(
-                "{name} is a {} node, which Camera::set cannot write from a string",
-                other.kind_name()
-            )))),
-            None => Err(GenApiError::NodeNotFound(name.to_string()).into()),
+            .into());
         }
+        match self.nodemap.set_text(name, value, &self.transport) {
+            Err(err @ GenApiError::InvalidText { .. }) => Err(GenicamError::parse(err.to_string())),
+            other => Ok(other?),
+        }
+    }
+
+    /// Save the camera's configuration — every feature its XML marks
+    /// `<Streamable>` — to `out`, in the GenApi feature-file layout
+    /// (ADR-0028). A feature behind a selector is saved under each of the
+    /// selector's entries, and the selector is put back.
+    ///
+    /// Returns what was saved, and in [`Configuration::omitted`] what was
+    /// left out and why; the file carries the same as comments. Save while
+    /// the camera is not acquiring: what `TLParamsLocked` locks is left out
+    /// otherwise.
+    ///
+    /// [`Configuration::omitted`]: genapi::persistence::Configuration::omitted
+    pub fn save_features(
+        &mut self,
+        out: &mut impl std::io::Write,
+    ) -> Result<genapi::Configuration, GenicamError> {
+        let configuration = self.nodemap.save_configuration(&self.transport);
+        out.write_all(configuration.to_text().as_bytes())?;
+        out.flush()?;
+        Ok(configuration)
+    }
+
+    /// Restore a configuration [`Camera::save_features`] wrote, or another
+    /// GenApi-based tool did in the same layout.
+    ///
+    /// Values are written in the order the camera's dependencies require, a
+    /// write that fails is tried once more after the others, and the report
+    /// lists every value that still could not be written, with the reason.
+    /// A file saved from another camera model, or another major version of
+    /// its XML, is loaded too, with a warning in the report. Only a file that
+    /// cannot be read at all is an error.
+    pub fn load_features(
+        &mut self,
+        input: &mut impl std::io::Read,
+    ) -> Result<genapi::LoadReport, GenicamError> {
+        let mut text = String::new();
+        input.read_to_string(&mut text)?;
+        let configuration = genapi::Configuration::parse(&text)
+            .map_err(|err| GenicamError::parse(format!("configuration file: {err}")))?;
+        Ok(self
+            .nodemap
+            .load_configuration(&configuration, &self.transport))
     }
 
     /// Capture device/host timestamp pairs and fit a mapping model.
@@ -1800,24 +1756,46 @@ pub async fn connect_gige_as(
     if tokio::runtime::Handle::current().runtime_flavor() != CurrentThread {
         return connect_here(device, access).await;
     }
-    let runtime = camera_runtime()?;
+    let runtime = BackgroundShutdown(Some(camera_runtime()?));
     let device = device.clone();
     let opened = match runtime
+        .handle()
         .spawn(async move { connect_here(&device, access).await })
         .await
     {
         Ok(opened) => opened,
         Err(err) => Err(GenicamError::transport(format!("connect task: {err}"))),
     };
-    match opened {
-        Ok((mut camera, xml)) => {
-            camera.transport.adopt_runtime(runtime);
-            Ok((camera, xml))
-        }
-        Err(err) => {
-            // Dropping a runtime would block this async context.
+    let (mut camera, xml) = opened?;
+    camera.transport.adopt_runtime(runtime.into_inner());
+    Ok((camera, xml))
+}
+
+/// A runtime that, dropped, shuts down in the background: dropping a runtime
+/// blocks, which an async context forbids. The connect future that holds one
+/// can be dropped anywhere it awaits — by a timeout, a `select!` — and a
+/// plain `Runtime` dropped there panics (Codex on #199).
+struct BackgroundShutdown(Option<tokio::runtime::Runtime>);
+
+impl BackgroundShutdown {
+    fn handle(&self) -> &tokio::runtime::Handle {
+        self.0
+            .as_ref()
+            .expect("the runtime is present until into_inner")
+            .handle()
+    }
+
+    fn into_inner(mut self) -> tokio::runtime::Runtime {
+        self.0
+            .take()
+            .expect("the runtime is present until into_inner")
+    }
+}
+
+impl Drop for BackgroundShutdown {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
             runtime.shutdown_background();
-            Err(err)
         }
     }
 }
@@ -2095,14 +2073,6 @@ fn build_nodemap(xml: &str) -> Result<NodeMap, GenicamError> {
         );
     }
     Ok(nodemap)
-}
-
-fn parse_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

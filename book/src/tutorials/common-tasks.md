@@ -67,6 +67,46 @@ before anything is written, with the nearest values that would be accepted.
 
 `set_default_user_set` chooses the set the camera loads at power-up.
 
+## Saving and restoring a configuration
+
+A user set lives in the camera. To keep a configuration on the host — to
+version it, or to copy it onto another camera of the same model — save it to a
+file:
+
+```rust,ignore
+{{#include ../../../crates/viva-genicam/examples/common_tasks.rs:save_load}}
+```
+
+What is saved is what the camera's XML marks `<Streamable>`. A feature behind
+a selector — `TriggerMode` behind `TriggerSelector`, `Gain` behind
+`GainSelector` — is saved once for each of the selector's entries, and the
+selector is put back as it was. A feature that is not available, or locked,
+is left out with a comment saying why; save while the camera is not acquiring,
+or what acquisition locks (`Width`, `PixelFormat`) is left out.
+
+A load writes in the order the camera needs, whatever the order of the file:
+a selector before what it selects, `ExposureAuto` before the `ExposureTime` it
+locks, `BinningHorizontal` before the `Width` it rescales. A write that fails
+is tried once more after the others, because some features bound each other
+(`Width` and `OffsetX`). Whatever still fails is in the report, with its
+reason, and the rest is written. A file saved from another camera model loads
+too, with a warning.
+
+The file is text, one feature per line, in the layout GenApi's reference
+implementation writes:
+
+```text
+# {05D8C294-F295-4dfb-9D01-096BD04049F4}
+# ModelName = VivaCam Fake
+Width	320
+TriggerMode	{TriggerSelector=FrameStart}	Off
+```
+
+From the command line: `viva-camctl save --ip <CAMERA-IP> --out camera.txt`
+and `viva-camctl load --ip <CAMERA-IP> --file camera.txt`
+([the command line](../camctl.md)); from Python, `cam.save_features(path)` and
+`cam.load_features(path)`.
+
 ## Triggers
 
 ```rust,ignore

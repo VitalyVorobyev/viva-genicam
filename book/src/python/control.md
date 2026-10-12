@@ -172,6 +172,18 @@ From the command line, which waits the same way (`--wait-ms` bounds it,
 viva-camctl execute --name UserSetLoad --ip <CAMERA-IP>
 ```
 
+### Saving and restoring a configuration
+
+```python
+saved = cam.save_features("camera.txt")      # {"values": 42, "left_out": [...]}
+report = cam.load_features("camera.txt")
+for failure in report["failures"]:
+    print("not written:", failure)
+```
+
+What is saved, the order of the writes, and the file are described in
+[Common tasks](../tutorials/common-tasks.md#saving-and-restoring-a-configuration).
+
 ### Categories
 
 ```python

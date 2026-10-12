@@ -72,6 +72,41 @@ fn count_bitfields(model: &viva_genapi_xml::XmlModel) -> (usize, usize) {
     (single, ranged)
 }
 
+/// `<Streamable>` elements whose text is `Yes`, counted from the raw text
+/// rather than through the parser under test (GA-14).
+fn count_streamable_in_text(xml: &str) -> usize {
+    let mut count = 0;
+    let mut rest = xml;
+    while let Some(start) = rest.find("<Streamable>") {
+        rest = &rest[start + "<Streamable>".len()..];
+        let Some(end) = rest.find("</Streamable>") else {
+            break;
+        };
+        if rest[..end].trim() == "Yes" {
+            count += 1;
+        }
+        rest = &rest[end..];
+    }
+    count
+}
+
+/// Streamable declarations inside the elements of nodes the parser skipped,
+/// found by tag and name in the raw text: a `<Register>` with `<pLength>`
+/// (GA-09) is a known gap, and its `<Streamable>` goes with it.
+fn count_streamable_in_skipped(xml: &str, skipped: &[viva_genapi_xml::SkippedNode]) -> usize {
+    skipped
+        .iter()
+        .filter_map(|node| {
+            let name = node.name.as_deref()?;
+            let open = format!("<{} Name=\"{name}\"", node.tag);
+            let start = xml.find(&open)?;
+            let close = format!("</{}>", node.tag);
+            let end = xml[start..].find(&close)? + start;
+            Some(count_streamable_in_text(&xml[start..end]))
+        })
+        .sum()
+}
+
 fn corpus_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VIVA_GENICAM_XML_CORPUS") {
         return PathBuf::from(dir);
@@ -119,6 +154,8 @@ fn vendor_xml_corpus_parses() {
     let mut failures = Vec::new();
     let mut total_nodes = 0usize;
     let mut bitfields = 0usize;
+    let mut streamable = 0usize;
+    let mut streamable_documents = 0usize;
 
     for path in &documents {
         let document = path
@@ -154,6 +191,23 @@ fn vendor_xml_corpus_parses() {
                     failures.push(format!(
                         "{document}: declares <LSB>/<Lsb> but no multi-bit bitfield survived \
                          parsing — a bit-range spelling stopped being recognised"
+                    ));
+                }
+                // GA-14: every `<Streamable>Yes</Streamable>` in the text is a
+                // streamable node in the model, on whatever kind carries it.
+                let parsed = model
+                    .nodes
+                    .iter()
+                    .filter(|node| node.meta().streamable)
+                    .count();
+                let declared = count_streamable_in_text(&xml)
+                    - count_streamable_in_skipped(&xml, &model.skipped);
+                streamable += parsed;
+                streamable_documents += usize::from(parsed > 0);
+                if parsed != declared {
+                    println!("FAIL  {document}: {declared} <Streamable>Yes, {parsed} parsed");
+                    failures.push(format!(
+                        "{document}: declares {declared} streamable features, parsed {parsed}"
                     ));
                 }
                 let unexpected: Vec<_> = model
@@ -196,7 +250,8 @@ fn vendor_xml_corpus_parses() {
     }
 
     println!(
-        "=== {} documents, {total_nodes} nodes, {bitfields} bitfields, {} failures ===",
+        "=== {} documents, {total_nodes} nodes, {bitfields} bitfields, \
+         {streamable} streamable in {streamable_documents} documents, {} failures ===",
         documents.len(),
         failures.len()
     );

@@ -53,6 +53,8 @@ def test_camera_has_expected_methods():
         "categories",
         "enum_entries",
         "execute",
+        "save_features",
+        "load_features",
         "acquisition_start",
         "acquisition_stop",
         "stream",

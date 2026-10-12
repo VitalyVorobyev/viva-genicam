@@ -7,8 +7,10 @@ mod error;
 mod io;
 mod nodemap;
 mod nodes;
+pub mod persistence;
 mod state;
 pub mod swissknife;
+mod text;
 
 pub use error::GenApiError;
 pub use io::{NullIo, RegisterIo};
@@ -17,9 +19,10 @@ pub use nodes::{
     BooleanNode, CategoryNode, CommandNode, EnumNode, FloatNode, FormulaVar, IntegerNode, Node,
     NodeMeta, RegisterNode, Representation, SkNode, Visibility,
 };
+pub use persistence::{Configuration, LoadReport, PersistencePlan};
 pub use state::{FeatureState, FeatureValue, ValueRange};
 pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
-pub use viva_genapi_xml::{AccessMode, PortKind, SkOutput, SkippedNode};
+pub use viva_genapi_xml::{AccessMode, DocumentIdentity, PortKind, SkOutput, SkippedNode};
 
 #[cfg(test)]
 mod tests {

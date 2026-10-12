@@ -4,6 +4,7 @@
 //! sees a single `Camera` class regardless of transport.
 
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -270,6 +271,66 @@ impl PyCamera {
                 }
             }
         })
+    }
+
+    /// Save the streamable features to `path` (ADR-0028): a dict with
+    /// `values`, the number saved, and `left_out`, `(feature, reason)` pairs.
+    fn save_features<'py>(&self, py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
+        let saved = py.detach(|| -> PyResult<_> {
+            let file = std::fs::File::create(&path)
+                .map_err(|e| parse_error(format!("create {}: {e}", path.display())))?;
+            let mut out = std::io::BufWriter::new(file);
+            match &self.inner {
+                CameraInner::Gige { camera, .. } => camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?
+                    .save_features(&mut out)
+                    .into_py_err(),
+                CameraInner::U3v { camera, .. } => camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?
+                    .save_features(&mut out)
+                    .into_py_err(),
+            }
+        })?;
+        let dict = PyDict::new(py);
+        dict.set_item("values", saved.values.len())?;
+        let left_out: Vec<(String, String)> = saved
+            .omitted
+            .iter()
+            .map(|o| (o.feature.clone(), o.reason.clone()))
+            .collect();
+        dict.set_item("left_out", left_out)?;
+        Ok(dict)
+    }
+
+    /// Restore a configuration file: a dict with `written`,
+    /// `written_on_retry`, `failures` and `warnings` (lists of strings).
+    fn load_features<'py>(&self, py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
+        let report = py.detach(|| -> PyResult<_> {
+            let file = std::fs::File::open(&path)
+                .map_err(|e| parse_error(format!("open {}: {e}", path.display())))?;
+            let mut input = std::io::BufReader::new(file);
+            match &self.inner {
+                CameraInner::Gige { camera, .. } => camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?
+                    .load_features(&mut input)
+                    .into_py_err(),
+                CameraInner::U3v { camera, .. } => camera
+                    .lock()
+                    .map_err(|_| parse_error("camera mutex poisoned"))?
+                    .load_features(&mut input)
+                    .into_py_err(),
+            }
+        })?;
+        let dict = PyDict::new(py);
+        dict.set_item("written", report.written)?;
+        dict.set_item("written_on_retry", report.written_on_retry)?;
+        let failures: Vec<String> = report.failures.iter().map(ToString::to_string).collect();
+        dict.set_item("failures", failures)?;
+        dict.set_item("warnings", report.warnings.clone())?;
+        Ok(dict)
     }
 
     fn acquisition_start(&self, py: Python<'_>) -> PyResult<()> {

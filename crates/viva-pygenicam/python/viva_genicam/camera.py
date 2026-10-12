@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import warnings
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from . import _native
 from .discovery import DeviceInfo, GigeDeviceInfo, U3vDeviceInfo
@@ -138,6 +139,29 @@ class Camera:
                 stacklevel=2,
             )
         return done
+
+    def save_features(self, path: Union[str, os.PathLike]) -> dict:
+        """Save the camera's configuration — every feature its XML marks
+        streamable — to ``path``.
+
+        A feature behind a selector is saved under each of the selector's
+        entries. Returns ``{"values": int, "left_out": [(feature, reason)]}``;
+        the file says the same in comments. Save while the camera is not
+        acquiring: what acquisition locks is left out otherwise.
+        """
+        return self._native.save_features(os.fspath(path))
+
+    def load_features(self, path: Union[str, os.PathLike]) -> dict:
+        """Restore a configuration saved with :meth:`save_features`.
+
+        Values are written in the order the camera's dependencies need, a
+        failed write is tried once more after the others, and nothing stops
+        the load early. Returns ``{"written": int, "written_on_retry": int,
+        "failures": [str], "warnings": [str]}`` — a warning when the file was
+        saved from another camera model. Raises only for a file that cannot
+        be read.
+        """
+        return self._native.load_features(os.fspath(path))
 
     def acquisition_start(self) -> None:
         self._native.acquisition_start()

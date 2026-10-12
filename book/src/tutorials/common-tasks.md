@@ -124,7 +124,7 @@ implementation writes:
 
 ```text
 # {05D8C294-F295-4dfb-9D01-096BD04049F4}
-# ModelName = VivaCam Fake
+# ModelName = VivaCam_Fake
 Width	320
 TriggerMode	{TriggerSelector=FrameStart}	Off
 ```

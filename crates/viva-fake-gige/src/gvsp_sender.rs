@@ -11,8 +11,8 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, trace, warn};
 
 use crate::gvsp::{
-    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketKind,
-    PacketScript, block_datagrams, chunk_payload, image_size, interleave,
+    BlockSpec, CHUNK_TAG_LEN, Datagram, PAYLOAD_TYPE_IMAGE, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK,
+    PacketKind, PacketScript, block_datagrams, chunk_payload, image_size, interleave,
 };
 use crate::registers::{
     CHUNK_ID_EXPOSURE_TIME, CHUNK_ID_FRAME_ID, CHUNK_ID_IMAGE, CHUNK_ID_IMAGE_INFO,
@@ -532,33 +532,65 @@ fn build_event(request_id: u16, event_id: u16, block_id: u16, timestamp: u64) ->
 /// info, whose last four bytes are the length `ChunkImageLength` reads at
 /// address `-4`.
 fn chunk_block(config: &FrameConfig, spec: &BlockSpec, image: &[u8]) -> Vec<u8> {
+    let values = chunk_values(
+        &config.chunks_enabled,
+        spec.timestamp,
+        config.exposure_time,
+        spec.block_id,
+        (spec.width, spec.height),
+        image.len(),
+    );
+    let mut chunks: Vec<(u32, &[u8])> = vec![(CHUNK_ID_IMAGE, image)];
+    chunks.extend(values.iter().map(|(id, data)| (*id, data.as_slice())));
+    chunk_payload(&chunks)
+}
+
+/// The chunks after the image, for each enabled `ChunkSelector` value: its
+/// chunk ID and its data.
+pub(crate) fn chunk_values(
+    selectors: &[u32],
+    timestamp: u64,
+    exposure_time: f64,
+    block_id: u64,
+    (width, height): (u32, u32),
+    image_len: usize,
+) -> Vec<(u32, Vec<u8>)> {
     let mut values: Vec<(u32, Vec<u8>)> = Vec::new();
-    for selector in &config.chunks_enabled {
+    for selector in selectors {
         match *selector {
             CHUNK_SELECTOR_TIMESTAMP => {
-                values.push((CHUNK_ID_TIMESTAMP, spec.timestamp.to_le_bytes().to_vec()));
+                values.push((CHUNK_ID_TIMESTAMP, timestamp.to_le_bytes().to_vec()));
             }
-            CHUNK_SELECTOR_EXPOSURE_TIME => values.push((
-                CHUNK_ID_EXPOSURE_TIME,
-                config.exposure_time.to_le_bytes().to_vec(),
-            )),
+            CHUNK_SELECTOR_EXPOSURE_TIME => {
+                values.push((CHUNK_ID_EXPOSURE_TIME, exposure_time.to_le_bytes().to_vec()))
+            }
             CHUNK_SELECTOR_FRAME_ID => {
-                values.push((CHUNK_ID_FRAME_ID, spec.block_id.to_le_bytes().to_vec()));
+                values.push((CHUNK_ID_FRAME_ID, block_id.to_le_bytes().to_vec()));
             }
             CHUNK_SELECTOR_IMAGE_INFO => {
                 let mut info = Vec::with_capacity(16);
-                info.extend_from_slice(&spec.width.to_be_bytes());
-                info.extend_from_slice(&spec.height.to_be_bytes());
+                info.extend_from_slice(&width.to_be_bytes());
+                info.extend_from_slice(&height.to_be_bytes());
                 info.extend_from_slice(&0u32.to_be_bytes()); // reserved
-                info.extend_from_slice(&(image.len() as u32).to_be_bytes());
+                info.extend_from_slice(&(image_len as u32).to_be_bytes());
                 values.push((CHUNK_ID_IMAGE_INFO, info));
             }
             _ => {}
         }
     }
-    let mut chunks: Vec<(u32, &[u8])> = vec![(CHUNK_ID_IMAGE, image)];
-    chunks.extend(values.iter().map(|(id, data)| (*id, data.as_slice())));
-    chunk_payload(&chunks)
+    values
+}
+
+/// Bytes of a chunk-mode block: the image chunk and each enabled chunk,
+/// every one followed by its tag — what [`chunk_block`] builds.
+pub(crate) fn chunk_block_len(selectors: &[u32], image_len: usize) -> usize {
+    let values = chunk_values(selectors, 0, 0.0, 0, (0, 0), image_len);
+    image_len
+        + CHUNK_TAG_LEN
+        + values
+            .iter()
+            .map(|(_, data)| data.len() + CHUNK_TAG_LEN)
+            .sum::<usize>()
 }
 
 /// The timestamp a leader datagram carries: 8 bytes after the reserved word

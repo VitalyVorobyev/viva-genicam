@@ -33,6 +33,8 @@ Around the stack: `viva-pfnc` names pixel formats and converts their pixels,
 `viva-sfnc` names standard features; `viva-service` and `viva-service-u3v` serve cameras over
 [Zenoh](https://zenoh.io) for [Viva Studio](studio.md) and other clients, with
 the messages defined in `viva-zenoh-api`;
+`viva-gentl` is the GenTL producer, `viva_gentl.cti`, through which other
+software uses the stack ([Use viva from other tools](gentl.md));
 `viva-fake-gige` and `viva-fake-u3v` are cameras that run in your process
 ([Testing without hardware](tutorials/fake-camera.md)). The
 [Crates](crates/README.md) page says which of them you are likely to need.

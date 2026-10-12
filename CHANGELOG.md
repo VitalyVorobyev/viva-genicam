@@ -197,6 +197,15 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **A GenTL producer, `viva_gentl.cti`** (ADR-0031): GenTL consumers such as
+  Harvesters list, open, configure and stream GigE Vision cameras through
+  viva, with no vendor SDK; releases attach one for Linux x86_64, macOS (Apple
+  Silicon) and Windows x86_64 ([Use viva from other tools](https://vitalyvorobyev.github.io/viva-genicam/gentl.html)).
+  For it the facade gains `Frame::raw_payload`, exclusive access
+  (`GigeDevice::set_exclusive_access`), and `GigeRegisterIo::open_stream`
+  with `StreamOptions::payload_size` for a caller without a node map; and
+  `viva-fake-gige` now serves schema-valid GenApi XML with a `PayloadSize`.
+  ([#204](https://github.com/VitalyVorobyev/viva-genicam/pull/204))
 - **`viva-service-u3v` follows cameras as `viva-service` does**: it rescans
   USB, serves every USB3 Vision camera it finds, and publishes one that
   disappears as disconnected; it took the first camera once and never let go.

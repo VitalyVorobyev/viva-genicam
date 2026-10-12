@@ -105,7 +105,7 @@ async fn a_saved_configuration_restores_the_camera_it_came_from() {
         text.contains("TriggerMode\t{TriggerSelector=AcquisitionStart}\tOn\n"),
         "{text}"
     );
-    assert!(text.contains("# ModelName = VivaCam Fake\n"), "{text}");
+    assert!(text.contains("# ModelName = VivaCam_Fake\n"), "{text}");
     assert!(!saved.values.is_empty());
 
     camera.set("BinningHorizontal", "1").expect("binning");

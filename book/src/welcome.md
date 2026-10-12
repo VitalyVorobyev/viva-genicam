@@ -15,6 +15,7 @@ itself? The developer documentation lives in the repository — see
 - **Camera API**: features read and written by type; helpers for exposure, gain, triggers, region of interest, binning, frame rate and user sets that accept the older names cameras still use (`ExposureTimeAbs`, `GainRaw`, ...); acquisition locks the transport parameters; a camera's configuration saved to a file and restored, selectors and dependencies included; a blocking API for programs without an async runtime.
 - **GenApi**: NodeMap with the standard node types (Integer, Float, Enumeration, Boolean, Command, Category, String, Register, SwissKnife, Converter, IntConverter), pValue delegation, selectors, device, chunk and event ports, runtime access predicates (`pIsLocked`, `pIsAvailable`, `pIsImplemented`), node metadata and visibility filtering; values cached only as the XML's `<Cachable>` allows and read again after their `<PollingTime>`, with a query for what changed since a viewer last looked.
 - **CLI** (`viva-camctl`): discovery; the feature tree, a feature's full description and every value; get/set, command execution, configuration save and load; raw register access and action commands; streaming (including raw event-vision capture), events, chunks, benchmarks, IP configuration, XML dump, and a diagnostic report bundle — see [the command line](camctl.md).
+- **GenTL producer**: `viva_gentl.cti` lets GenTL consumers such as Harvesters use GigE Vision cameras through viva — see [Use viva from other tools](gentl.md).
 - **Service bridge**: expose cameras over Zenoh for Viva Studio, the desktop app in `studio/`.
 
 ## Status
@@ -30,6 +31,9 @@ viva-genicam is pre-1.0: the API still changes between releases.
   send ([Reporting a camera we can't open](reporting.md)).
 - **Viva Studio is experimental**: it works, and it has been driven against
   very little hardware.
+- **The GenTL producer is new**: Harvesters drives it on every change, against
+  the fake camera; no real camera and no other GenTL consumer has been tried
+  with it yet ([Use viva from other tools](gentl.md)).
 - **There is no camera in CI.** The tests run against built-in fake cameras
   and a corpus of real vendor GenApi XML; hardware confirmations come from
   users with their own devices.

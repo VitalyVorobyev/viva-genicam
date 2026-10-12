@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## T — GenTL producer
-
-**Goal**: a `.cti` through which GenTL consumers use viva-genicam, tested in CI by a consumer we did not write.
-**Rows**: GT-01.
-
 ## U — USB3 Vision robustness
 
 **Goal**: several transfers in flight, recovery from transfer errors, hot-unplug, and parity with GigE. Last, because no USB3 Vision camera has run any of it.
@@ -24,6 +19,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **TC-27**: USB3 Vision has never met a camera; needs `viva-camctl report --usb 0` from one.
 - **UV-04**: whether a USB rescan still reads the strings of a camera the U3V service holds; a minute of `viva-service-u3v -v` against one settles it.
 - **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.
+- **GT-07**: whether a camera grants exclusive access as the GenTL producer asks for it (CCP `0x1`).
 - **TC-37**: the chunk and event layouts (ADR-0026) have met no camera; one capture with chunk mode on settles them.
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.
 - **DC-03**: `Scan3d*` scale, offset and invalid value; one capture ([#93](https://github.com/VitalyVorobyev/viva-genicam/pull/93)) is the only evidence of what a 3D device sends.
@@ -52,6 +48,7 @@ Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-referen
 ## Not planned for 0.9.0
 
 - CoaXPress and Camera Link: reachable only through a vendor's GenTL producer, which we do not consume ([ADR-0011](adrs/adr0011-pure-rust-genicam-stack.md)).
+- The GenTL producer's optional functions, USB3 Vision cameras, events beyond new-buffer, and writing frames in place (GT-02 to GT-05).
 - PTP (IEEE 1588) configuration helpers (TC-35).
 - FileAccess helpers and firmware update (TC-34).
 - GenApi XML from `http:`/`file:` URLs, the manifest table and a host-side cache (TC-33).

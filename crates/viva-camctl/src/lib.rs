@@ -8,12 +8,16 @@
 //! be a second thing to keep in step.
 
 pub mod cli;
+pub mod cmd_action;
 pub mod cmd_bench;
 pub mod cmd_chunks;
+pub mod cmd_config;
 pub mod cmd_events;
 pub mod cmd_execute;
 pub mod cmd_get;
+pub mod cmd_inspect;
 pub mod cmd_list;
+pub mod cmd_registers;
 pub mod cmd_report;
 pub mod cmd_set;
 pub mod cmd_set_ip;

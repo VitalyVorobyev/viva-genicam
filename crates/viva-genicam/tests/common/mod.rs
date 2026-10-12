@@ -74,3 +74,32 @@ impl Drop for TestCamera {
         self.camera.take();
     }
 }
+
+/// A camera that never answers: a socket bound to the GVCP port on loopback
+/// that reads nothing and sends nothing, held under the same lock as
+/// [`TestCamera`].
+#[allow(dead_code)]
+pub struct SilentCamera {
+    _socket: std::net::UdpSocket,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl SilentCamera {
+    #[allow(dead_code)]
+    pub async fn bind() -> Self {
+        let guard = camera_lock().lock_owned().await;
+        let socket = loop {
+            match std::net::UdpSocket::bind(("127.0.0.1", 3956)) {
+                Ok(socket) => break socket,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("bind the silent camera: {e}"),
+            }
+        };
+        SilentCamera {
+            _socket: socket,
+            _guard: guard,
+        }
+    }
+}

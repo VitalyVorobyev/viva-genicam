@@ -72,6 +72,8 @@ cargo test -p viva-genicam --test report             # the diagnostic report eve
 cargo test -p viva-genicam --test gige_session       # control release, monitors, PENDING_ACK, discovery, multicast monitors
 cargo test -p viva-genicam --test facade             # standard-feature helpers, both fake XML profiles (SFNC 2 and older names)
 cargo test -p viva-genicam --test blocking           # the blocking API, and a camera opened from a current-thread runtime
+cargo test -p viva-genicam --test persistence        # saving and restoring a configuration (ADR-0028)
+cargo test -p viva-camctl  --test field_engineer     # features, describe, dump, save/load, registers, action, USB3 Vision
 # Control-channel keepalive, against fixtures that withhold or delay ACKs
 cargo test -p viva-genicam --test heartbeat          # idle keepalive, with a negative control
 cargo test -p viva-genicam --test inflight_keepalive # probes continue while register I/O holds the mutex (against the fake)
@@ -82,6 +84,7 @@ cargo test -p viva-genicam --test gvsp_engine        # reordering, loss, resend,
 # Chunk and event features through GenApi ports, from the fake's encoder (no sockets)
 cargo test -p viva-genicam --test chunk_features     # ADR-0026
 cargo test -p viva-genapi  --test ports              # port routing, attach/detach, invalidation
+cargo test -p viva-genapi  --test persistence        # the save plan, the restore order, the file layout
 cargo test -p viva-gige    --test chunk_layout       # the chunk layout, from hand-written bytes
 # USB3 Vision
 cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva-fake-u3v
@@ -116,7 +119,7 @@ the tests do nothing when the directory is absent:
 ```bash
 scripts/fetch-xml-corpus.sh
 cargo test -p viva-genapi-xml --test vendor_corpus -- --nocapture   # parses
-cargo test -p viva-genapi     --test vendor_corpus -- --nocapture   # + evaluates
+cargo test -p viva-genapi     --test vendor_corpus -- --nocapture   # + evaluates, plans each save
 cargo test -p viva-genicam    --test sfnc_corpus   -- --nocapture   # + the Camera helpers' features
 ```
 

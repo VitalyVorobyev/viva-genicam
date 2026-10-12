@@ -592,8 +592,13 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <!-- The ROI shape every corpus document shares: a size's maximum shrinks
        as its offset grows, and an offset's as the size grows, so the order
        of writes decides whether a new ROI can be reached at all. The size and
-       format are locked while TLParamsLocked is set (FLIR, Basler, Hikrobot). -->
+       format are locked while TLParamsLocked is set (FLIR, Basler, Hikrobot).
+       Binning rescales the region (SFNC: WidthMax is counted after binning),
+       which each node below says with a pInvalidator, as Basler's acA1600
+       does on its WidthMax register. -->
   <Integer Name="Width" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
+    <pInvalidator>BinningHorizontal</pInvalidator>
     <ToolTip>Width of the image in pixels</ToolTip>
     <Address>0x20000</Address>
     <Length>4</Length>
@@ -610,9 +615,11 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Formula>WMAX - OX</Formula>
   </IntSwissKnife>
   <IntReg Name="WidthMin"><Address>0x20100</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
-  <IntReg Name="WidthMax"><Address>0x20104</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="WidthMax"><Address>0x20104</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess><pInvalidator>BinningHorizontal</pInvalidator></IntReg>
 
   <Integer Name="Height" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
+    <pInvalidator>BinningVertical</pInvalidator>
     <ToolTip>Height of the image in pixels</ToolTip>
     <Address>0x20004</Address>
     <Length>4</Length>
@@ -629,9 +636,11 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Formula>HMAX - OY</Formula>
   </IntSwissKnife>
   <IntReg Name="HeightMin"><Address>0x20108</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
-  <IntReg Name="HeightMax"><Address>0x2010c</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="HeightMax"><Address>0x2010c</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess><pInvalidator>BinningVertical</pInvalidator></IntReg>
 
   <Integer Name="OffsetX" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
+    <pInvalidator>BinningHorizontal</pInvalidator>
     <ToolTip>Horizontal offset from the sensor origin</ToolTip>
     <Address>0x2000c</Address>
     <Length>4</Length>
@@ -643,6 +652,8 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Integer>
 
   <Integer Name="OffsetY" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
+    <pInvalidator>BinningVertical</pInvalidator>
     <ToolTip>Vertical offset from the sensor origin</ToolTip>
     <Address>0x20010</Address>
     <Length>4</Length>
@@ -665,6 +676,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </IntSwissKnife>
 
   <Integer Name="BinningHorizontal" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Pixels combined horizontally</ToolTip>
     <Address>0x200e4</Address>
     <Length>4</Length>
@@ -675,6 +687,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Endianess>BigEndian</Endianess>
   </Integer>
   <Integer Name="BinningVertical" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Pixels combined vertically</ToolTip>
     <Address>0x200e8</Address>
     <Length>4</Length>
@@ -695,6 +708,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <IntReg Name="SensorTypeReg"><Address>0x20058</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Enumeration Name="PixelFormat" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Format of the pixel data — entries are gated by SensorType</ToolTip>
     <pIsLocked>TLParamsLocked</pIsLocked>
     <EnumEntry Name="Mono8" NameSpace="Standard">
@@ -795,6 +809,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        ════════════════════════════════════════════════════════════════════ -->
 
   <Enumeration Name="AcquisitionMode" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Camera acquisition mode</ToolTip>
     <EnumEntry Name="Continuous"><Value>0</Value></EnumEntry>
     <EnumEntry Name="SingleFrame"><Value>1</Value></EnumEntry>
@@ -871,6 +886,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <!-- Triggers, as the Basler acA1600 and Hikrobot documents shape them: the
        selector's value indexes the mode and source registers. -->
   <Enumeration Name="TriggerSelector" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Trigger that TriggerMode, TriggerSource and TriggerSoftware act on</ToolTip>
     <EnumEntry Name="FrameStart"><Value>0</Value></EnumEntry>
     <EnumEntry Name="AcquisitionStart"><Value>1</Value></EnumEntry>
@@ -881,6 +897,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Enumeration>
   <IntReg Name="TriggerSelectorReg"><Address>0x200c0</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <Enumeration Name="TriggerMode" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Whether the selected trigger is active</ToolTip>
     <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
     <EnumEntry Name="On"><Value>1</Value></EnumEntry>
@@ -892,6 +909,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </IntReg>
   <Enumeration Name="TriggerSource" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Signal the selected trigger waits for</ToolTip>
     <EnumEntry Name="Line1"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Software"><Value>1</Value></EnumEntry>
@@ -929,6 +947,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <IntReg Name="AcquisitionStopReg"><Address>0x20028</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Boolean Name="AcquisitionFrameRateEnable" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Enable manual control of AcquisitionFrameRate. When false, the frame rate is unavailable for read/write.</ToolTip>
     <pValue>AcquisitionFrameRateEnableReg</pValue>
   </Boolean>
@@ -938,6 +957,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <!-- profile:frame-rate -->
   <Float Name="AcquisitionFrameRate" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Target frame rate in Hz</ToolTip>
     <Address>0x2002c</Address>
     <Length>4</Length>
@@ -952,6 +972,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <!-- profile:exposure -->
   <Float Name="ExposureTime" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Exposure time in microseconds — locked to RO when ExposureAuto is not Off</ToolTip>
     <pValue>ExposureTimeReg</pValue>
     <Unit>us</Unit>
@@ -989,6 +1010,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </MaskedIntReg>
 
   <Enumeration Name="ExposureAuto" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Automatic exposure control</ToolTip>
     <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Once"><Value>1</Value></EnumEntry>
@@ -1008,6 +1030,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <!-- profile:gain -->
   <Float Name="Gain" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <!-- CDATA-wrapped tooltip, as shipped by several vendors: the literal `&`
          and `<` inside are legal here and must survive parsing (issue #45). -->
     <ToolTip><![CDATA[Gain applied to the image in dB — locked to RO when GainAuto is not Off (0 < gain & gain < 48)]]></ToolTip>
@@ -1022,6 +1045,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <!-- /profile:gain -->
 
   <Enumeration Name="GainAuto" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Automatic gain control</ToolTip>
     <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Once"><Value>1</Value></EnumEntry>
@@ -1036,6 +1060,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </IntSwissKnife>
 
   <Integer Name="BlackLevel" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Analog black level offset</ToolTip>
     <Address>0x20050</Address>
     <Length>4</Length>
@@ -1131,6 +1156,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        here made Camera::configure_chunks, which correctly calls set_bool,
        fail against the only camera we can test with. -->
   <Boolean Name="ChunkModeActive" NameSpace="Standard">
+    <Streamable>Yes</Streamable>
     <ToolTip>Enable chunk data in image frames</ToolTip>
     <pValue>ChunkModeActiveReg</pValue>
   </Boolean>
@@ -1441,6 +1467,10 @@ pub struct RegisterMap {
     pending_frame_triggers: u32,
     /// Every `TriggerSoftware` execution.
     software_triggers: u64,
+    /// The binning the region of interest is counted in, horizontal and
+    /// vertical: the factor the last binning write left in place, which the
+    /// next one rescales from.
+    binning: (u32, u32),
 }
 
 /// Registers a user set holds: the analog-control settings.
@@ -1684,6 +1714,7 @@ impl RegisterMap {
             user_sets: HashMap::new(),
             pending_frame_triggers: 0,
             software_triggers: 0,
+            binning: (1, 1),
         }
     }
 
@@ -2055,6 +2086,22 @@ impl RegisterMap {
 
     /// Handle side effects of register writes.
     pub fn handle_special_write(&mut self, addr: u64) {
+        if addr == REG_BINNING_HORIZONTAL {
+            let old = self.binning.0;
+            self.binning.0 = self.rebin(
+                old,
+                REG_BINNING_HORIZONTAL,
+                [REG_SENSOR_WIDTH, REG_WIDTH_MAX, REG_WIDTH, REG_OFFSET_X],
+            );
+        }
+        if addr == REG_BINNING_VERTICAL {
+            let old = self.binning.1;
+            self.binning.1 = self.rebin(
+                old,
+                REG_BINNING_VERTICAL,
+                [REG_SENSOR_HEIGHT, REG_HEIGHT_MAX, REG_HEIGHT, REG_OFFSET_Y],
+            );
+        }
         if addr == REG_TIMESTAMP_LATCH {
             let ts = self.device_timestamp();
             self.regs
@@ -2074,6 +2121,31 @@ impl RegisterMap {
                 self.pending_frame_triggers += 1;
             }
         }
+    }
+
+    /// Apply a new binning factor along one axis and return it.
+    ///
+    /// SFNC counts `WidthMax` "after horizontal binning", so the maximum is
+    /// the sensor size divided by the factor. The region of interest keeps its
+    /// place on the sensor, counted in binned pixels: size and offset scale by
+    /// the old factor over the new. That is one way a camera keeps a region
+    /// valid when the maximum moves; a camera that resets the region instead
+    /// makes the order of writes matter just as much — a size written before
+    /// the binning does not survive it.
+    fn rebin(&mut self, old: u32, factor_reg: u64, [sensor, max, size, offset]: [u64; 4]) -> u32 {
+        let new = self.read_u32_be(factor_reg);
+        if new == 0 || new == old {
+            return old.max(1);
+        }
+        let scale = |value: u32| (u64::from(value) * u64::from(old) / u64::from(new)) as u32;
+        let maximum = self.read_u32_be(sensor) / new;
+        let size_now = scale(self.read_u32_be(size)).max(1);
+        let offset_now = scale(self.read_u32_be(offset)).min(maximum.saturating_sub(size_now));
+        self.regs.insert(max, maximum.to_be_bytes().to_vec());
+        self.regs
+            .insert(size, size_now.min(maximum).to_be_bytes().to_vec());
+        self.regs.insert(offset, offset_now.to_be_bytes().to_vec());
+        new
     }
 
     /// Whether the next frame may start now. Always, while the `FrameStart`

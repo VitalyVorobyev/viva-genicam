@@ -12,6 +12,8 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **`viva-camctl get-usb` and `set-usb` are gone**: `get` and `set` take
+  `--usb <N>`, as `execute`, `bench` and the new commands do. ([#PR-V](https://github.com/VitalyVorobyev/viva-genicam/pull/PR-V))
 - **`Camera::get` on a category and `Camera::set` on a command are errors.**
   `set` used to execute a command and discard the value; run one with
   `execute_command` or `execute_and_wait`. Python's `set` raises too. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))
@@ -117,6 +119,19 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Save a camera's configuration to a file and restore it**:
+  `Camera::save_features` and `load_features`, Python's `save_features` and
+  `load_features`, `viva-camctl save` and `load`. The features the XML marks
+  `<Streamable>` are saved, each one behind a selector under every entry of
+  its selector; a load writes them in the order the camera's dependencies
+  need, tries a failed write once more, and reports every value it could not
+  write, with the reason. The file is text in GenApi's feature-file layout and
+  names the camera model, so a load onto another model warns (ADR-0028). ([#PR-V](https://github.com/VitalyVorobyev/viva-genicam/pull/PR-V))
+- **`viva-camctl` for field work**: `features` (the category tree with
+  values), `describe` (one feature in full), `dump` (every readable value),
+  `read-reg`/`write-reg` (registers past the XML), `action` (action commands);
+  `--usb` on the commands the USB3 Vision stack supports, `execute` and
+  `bench` included. ([#PR-V](https://github.com/VitalyVorobyev/viva-genicam/pull/PR-V))
 - `Camera` reads and writes features by type — `get_integer`/`set_integer`,
   `get_float`, `get_bool`, `get_enum`, `get_string`, `get_register` and their
   setters — as `NodeMap` does. ([#199](https://github.com/VitalyVorobyev/viva-genicam/pull/199))

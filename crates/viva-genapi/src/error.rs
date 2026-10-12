@@ -29,6 +29,17 @@ pub enum GenApiError {
         /// The feature named by this node's `pIsLocked`.
         locked_by: String,
     },
+    /// Text given for a feature does not parse as the feature's type: see
+    /// [`crate::NodeMap::set_text`]. Nothing was written.
+    #[error("invalid value for {name}: expected {expected}, got {text:?}")]
+    InvalidText {
+        /// The feature.
+        name: String,
+        /// What the feature takes, such as `"an integer"`.
+        expected: &'static str,
+        /// The text as given.
+        text: String,
+    },
     /// The provided value violates the limits declared by the node.
     #[error("range error for node: {0}")]
     Range(String),

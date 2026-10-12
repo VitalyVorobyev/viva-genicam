@@ -1,4 +1,3 @@
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,7 +8,8 @@ use viva_genicam::GenicamError;
 
 use viva_gige::nic::IfaceSelector;
 
-use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS};
+use crate::common::{self, Target};
+use crate::with_camera;
 
 #[derive(Serialize)]
 struct ExecuteResponse<'a> {
@@ -40,19 +40,41 @@ struct ExecuteResponse<'a> {
 /// warning, not a failure: the command was executed, and no camera has yet
 /// shown us whether its command registers clear as the standard expects.
 pub async fn run(
-    ip: Option<Ipv4Addr>,
-    index: Option<usize>,
+    target: Target,
     name: String,
     wait: Option<Duration>,
     iface: Option<IfaceSelector>,
     json: bool,
 ) -> Result<()> {
-    let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
-    let device = common::select_device(ip, index, iface.as_ref(), timeout).await?;
-    info!(ip = %device.ip, "opening camera for execute");
-    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
+    info!(?target, "opening camera for execute");
+    let mut camera = common::open_target(&target, iface.as_ref(), viva_genicam::Access::Control)
         .await
         .context("open camera for execute")?;
+    let done = with_camera!(&mut camera, camera => execute(camera, &name, wait).await)?;
+
+    if json {
+        common::print_json(&ExecuteResponse {
+            name: &name,
+            executed: true,
+            done,
+        })?;
+    } else if done {
+        println!("{name} executed and done");
+    } else {
+        println!("{name} executed");
+    }
+
+    Ok(())
+}
+
+/// Execute `name`, and with `wait` wait for it to report done. Whether it
+/// did: `false` with no wait, or when it did not finish within the wait.
+pub async fn execute<T: viva_genicam::genapi::RegisterIo>(
+    camera: &mut viva_genicam::Camera<T>,
+    name: &str,
+    wait: Option<Duration>,
+) -> Result<bool> {
+    let name = name.to_string();
     let done = match wait {
         Some(wait) => match camera.execute_and_wait(&name, wait).await {
             Ok(()) => true,
@@ -73,17 +95,5 @@ pub async fn run(
         }
     };
 
-    if json {
-        common::print_json(&ExecuteResponse {
-            name: &name,
-            executed: true,
-            done,
-        })?;
-    } else if done {
-        println!("{name} executed and done");
-    } else {
-        println!("{name} executed");
-    }
-
-    Ok(())
+    Ok(done)
 }

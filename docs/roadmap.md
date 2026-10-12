@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## V — Configuration: persistence and the field-engineer CLI
-
-**Goal**: save a camera's configuration to a file and restore it, and do from `viva-camctl` what a field engineer does with a vendor tool.
-**Rows**: GA-14, CL-01.
-
 ## K — Caching, polling and refresh
 
 **Goal**: values the camera changes on its own read fresh, and `Camera`, Python and Studio can ask what changed.
@@ -56,6 +51,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **TC-38**: whether a CCP read tells an application another took control, and whether devices accept writes while nobody holds it; a capture of two applications on one camera.
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
 - **API-19**: whether a camera declares an exposure name it does not implement, and what SVS's binning `On` does; a report from either camera settles it.
+- **GA-46**: whether vendor tools' configuration files are the layout ADR-0028 writes; a user's saved file settles it.
 
 ## Studio
 
@@ -64,7 +60,7 @@ Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-referen
 - **Foundations**: ST-45, ST-46, ST-47.
 - **Viewer parity**: ST-39.
 - **Distribution**: ST-07.
-- **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-49.
+- **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-49, ST-50.
 
 ## Not planned for 0.9.0
 

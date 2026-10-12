@@ -1224,3 +1224,212 @@ fn corpus_port_registers_never_read_device_memory() {
         failures.join("\n  ")
     );
 }
+
+// ---------------------------------------------------------------------------
+// GA-14: the save plan of every document
+// ---------------------------------------------------------------------------
+
+/// Byte-addressed memory that keeps what is written, so a selector set during
+/// a save reads back as set, and one put back reads back as put back.
+#[derive(Default)]
+struct ByteMemory {
+    bytes: RefCell<HashMap<u64, u8>>,
+}
+
+impl RegisterIo for ByteMemory {
+    fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+        let bytes = self.bytes.borrow();
+        Ok((0..len as u64)
+            .map(|i| bytes.get(&(addr + i)).copied().unwrap_or(0))
+            .collect())
+    }
+
+    fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
+        let mut bytes = self.bytes.borrow_mut();
+        for (i, byte) in data.iter().enumerate() {
+            bytes.insert(addr + i as u64, *byte);
+        }
+        Ok(())
+    }
+}
+
+/// Whether `to` is reachable from `from` along the plan's own edges (each
+/// feature to the features listed `after` it): an edge whose target reaches
+/// back to its source is part of a cycle, which the plan orders by document.
+fn reaches(successors: &HashMap<&str, Vec<&str>>, from: &str, to: &str) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![from];
+    while let Some(current) = pending.pop() {
+        if current == to {
+            return true;
+        }
+        if seen.insert(current) {
+            pending.extend(successors.get(current).into_iter().flatten().copied());
+        }
+    }
+    false
+}
+
+/// GA-14: for every document, the save plan built from its XML, and a save
+/// against a memory stub.
+///
+/// - The restore order respects every dependency except within a cycle. The
+///   dependencies are found here from the public API — a selector's
+///   `<pSelected>`, a `pIsImplemented`/`pIsAvailable`/`pIsLocked` provider, a
+///   direct `dependents` link — independently of how the plan finds them, and
+///   each must also be among the plan's own (`after`).
+/// - The save terminates, and every selector it iterated reads back as it
+///   was before. Each selector is first put somewhere a walk does not end —
+///   an enumeration on its second-to-last entry, an integer on its minimum —
+///   and in range: memory starts at zero, which is outside many selectors'
+///   bounds, and a value out of range cannot be written back.
+#[test]
+fn corpus_save_plans_respect_dependencies_and_put_selectors_back() {
+    let dir = corpus_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        println!("corpus not present at {}", dir.display());
+        return;
+    };
+    let mut documents: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "xml"))
+        .collect();
+    documents.sort();
+
+    let mut failures = Vec::new();
+    let (mut planned, mut selected, mut edges, mut cyclic) = (0usize, 0, 0, 0);
+    let (mut values, mut omitted, mut selectors_checked) = (0usize, 0, 0);
+    let mut with_plan = 0usize;
+    for path in &documents {
+        let document = path.file_name().unwrap().to_string_lossy().into_owned();
+        let xml = String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned();
+        let Ok(model) = viva_genapi_xml::parse(&xml) else {
+            continue;
+        };
+        let Ok(mut map) = NodeMap::try_from_xml(model) else {
+            continue;
+        };
+        let plan = map.persistence_plan();
+        if plan.features().is_empty() {
+            continue;
+        }
+        with_plan += 1;
+        planned += plan.features().len();
+        selected += plan
+            .features()
+            .iter()
+            .filter(|f| !f.selectors.is_empty())
+            .count();
+
+        // The plan's own graph, for telling a cycle from a misordering.
+        let mut successors: HashMap<&str, Vec<&str>> = HashMap::new();
+        for feature in plan.features() {
+            for provider in &feature.after {
+                successors
+                    .entry(provider.as_str())
+                    .or_default()
+                    .push(feature.name.as_str());
+            }
+        }
+        for feature in plan.features() {
+            let name = feature.name.as_str();
+            let node = map.node(name).expect("planned node exists");
+            let mut providers: Vec<String> = map
+                .selectors_of(name)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            providers.extend(node.predicates().references().map(str::to_string));
+            providers.extend(
+                plan.features()
+                    .iter()
+                    .filter(|p| map.dependents(&p.name).iter().any(|d| d == name))
+                    .map(|p| p.name.clone()),
+            );
+            providers.sort();
+            providers.dedup();
+            for provider in providers {
+                let (Some(p), Some(f)) = (plan.position(&provider), plan.position(name)) else {
+                    continue;
+                };
+                if p == f {
+                    continue;
+                }
+                edges += 1;
+                if !feature.after.contains(&provider) {
+                    failures.push(format!(
+                        "{document}: {name} depends on {provider}, which the plan misses"
+                    ));
+                }
+                if reaches(&successors, name, &provider) {
+                    cyclic += 1;
+                } else if p > f {
+                    failures.push(format!(
+                        "{document}: {provider} must be written before {name}"
+                    ));
+                }
+            }
+        }
+
+        // Save against memory, each selector first moved off its first entry.
+        let io = ByteMemory::default();
+        let mut iterated: Vec<String> = plan
+            .features()
+            .iter()
+            .flat_map(|f| f.selectors.iter().cloned())
+            .collect();
+        iterated.sort();
+        iterated.dedup();
+        for selector in &iterated {
+            if let Ok(entries) = map.available_enum_entries(selector, &io) {
+                if entries.len() >= 2 {
+                    let _ = map.set_enum(selector, &entries[entries.len() - 2], &io);
+                }
+            } else if let Ok(state) = map.feature_state(selector, &io)
+                && let Some(range) = state.range
+            {
+                let _ = map.set_integer(selector, range.min as i64, &io);
+            }
+        }
+        map.invalidate_all();
+        let before: Vec<(String, String)> = iterated
+            .iter()
+            .filter_map(|s| Some((s.clone(), map.get_text(s, &io).ok()?)))
+            .collect();
+        let saved = map.save_configuration(&io);
+        map.invalidate_all();
+        for (selector, value) in &before {
+            selectors_checked += 1;
+            match map.get_text(selector, &io) {
+                Ok(after) if &after == value => {}
+                other => failures.push(format!(
+                    "{document}: {selector} was {value} before the save, {other:?} after"
+                )),
+            }
+        }
+        values += saved.values.len();
+        omitted += saved.omitted.len();
+        // What was saved parses back as it was written.
+        let reparsed = viva_genapi::Configuration::parse(&saved.to_text());
+        match reparsed {
+            Ok(back) if back.values == saved.values => {}
+            other => failures.push(format!(
+                "{document}: the saved file does not read back: {:?}",
+                other.map(|c| c.values.len())
+            )),
+        }
+        println!(
+            "ok    {document}: {} planned, {} values, {} left out",
+            plan.features().len(),
+            saved.values.len(),
+            saved.omitted.len()
+        );
+    }
+    println!(
+        "=== save plans: {with_plan} documents, {planned} streamable features ({selected} under \
+         selectors), {edges} dependencies ({cyclic} within cycles), {selectors_checked} selectors \
+         put back; against memory {values} values saved, {omitted} left out; {} failures ===",
+        failures.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -82,3 +82,17 @@ async fn a_camera_opened_on_a_current_thread_runtime_reads_and_writes() {
     assert_eq!(controller, None, "dropping the camera released control");
     fake_runtime.shutdown_background();
 }
+
+/// Codex on #199: a connect made from a current-thread runtime runs on a
+/// runtime of the camera's own, and cancelling it — a timeout around it —
+/// dropped that runtime inside the async context, where Tokio panics.
+#[tokio::test]
+async fn a_connect_cancelled_on_a_current_thread_runtime_does_not_panic() {
+    let _silent = common::SilentCamera::bind().await;
+    let attempt =
+        tokio::time::timeout(Duration::from_millis(100), connect_gige(&fake_info())).await;
+    assert!(
+        attempt.is_err(),
+        "a camera that never answers cannot be opened"
+    );
+}

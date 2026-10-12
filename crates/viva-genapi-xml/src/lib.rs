@@ -210,6 +210,12 @@ pub struct NodeMeta {
     /// `<AccessMode>` or `<pValue>` allows. `RW` imposes nothing.
     #[serde(default)]
     pub imposed_access: Option<AccessMode>,
+    /// `<Streamable>Yes</Streamable>`: the feature belongs in a saved
+    /// configuration. GenICam Standard v2.1.1 §2.8.1: Streamable "denotes that
+    /// the corresponding feature is prepared to be stored to and loaded from a
+    /// file via the GenApi node tree"; absent means `No` (§3.2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub streamable: bool,
 }
 
 /// Access privileges for a GenICam node as described in the XML.
@@ -895,6 +901,23 @@ impl NodeDecl {
         }
     }
 
+    /// The metadata every node kind carries.
+    pub fn meta(&self) -> &NodeMeta {
+        match self {
+            NodeDecl::Integer { meta, .. }
+            | NodeDecl::Float { meta, .. }
+            | NodeDecl::Enum { meta, .. }
+            | NodeDecl::Boolean { meta, .. }
+            | NodeDecl::Command { meta, .. }
+            | NodeDecl::Category { meta, .. } => meta,
+            NodeDecl::SwissKnife(decl) => &decl.meta,
+            NodeDecl::Converter(decl) => &decl.meta,
+            NodeDecl::IntConverter(decl) => &decl.meta,
+            NodeDecl::String(decl) => &decl.meta,
+            NodeDecl::Register(decl) => &decl.meta,
+        }
+    }
+
     /// Node kind, matching the variant name.
     ///
     /// This is the declaration kind rather than the originating XML tag: an
@@ -969,11 +992,32 @@ pub struct PortDecl {
     pub kind: PortKind,
 }
 
+/// Which camera a document describes, and which revision of the document it
+/// is: the `<RegisterDescription>` attributes of GenICam Standard v2.1.1 §2.7.
+///
+/// "The camera described is identified by the VendorName / ModelName pair";
+/// `MajorVersion.MinorVersion.SubMinorVersion` is the version of the XML file
+/// itself, distinct from the schema version in [`XmlModel::version`]. Empty
+/// strings where the document leaves an attribute out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentIdentity {
+    /// `VendorName`.
+    pub vendor_name: String,
+    /// `ModelName`.
+    pub model_name: String,
+    /// `MajorVersion.MinorVersion.SubMinorVersion`, or empty when the
+    /// document declares none of the three.
+    pub version: String,
+}
+
 /// Full XML model describing the GenICam schema version and all declared nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XmlModel {
     /// Combined schema version extracted from the RegisterDescription attributes.
     pub version: String,
+    /// The camera the document describes, and the document's own version.
+    #[serde(default)]
+    pub identity: DocumentIdentity,
     /// Flat list of node declarations present in the document.
     pub nodes: Vec<NodeDecl>,
     /// The `<Port>` declarations, in document order.
@@ -1191,6 +1235,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
     reader.config_mut().allow_dangling_amp = true;
     let mut buf = Vec::new();
     let mut version = String::from("0.0.0");
+    let mut identity = DocumentIdentity::default();
     let mut nodes = Vec::new();
     let mut ports = Vec::new();
     let mut skipped = Vec::new();
@@ -1203,6 +1248,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
                 "RegisterDescription" => {
                     version = schema_version_from(e)?;
+                    identity = identity_from(e)?;
                 }
                 "Group" => {
                     // Group is a transparent container wrapping feature nodes;
@@ -1337,6 +1383,7 @@ pub fn parse(xml: &str) -> Result<XmlModel, XmlError> {
 
     Ok(XmlModel {
         version,
+        identity,
         nodes,
         ports,
         skipped,
@@ -1351,6 +1398,38 @@ fn schema_version_from(event: &BytesStart<'_>) -> Result<String, XmlError> {
     let minor = minor.unwrap_or_else(|| "0".to_string());
     let sub = sub.unwrap_or_else(|| "0".to_string());
     Ok(format!("{major}.{minor}.{sub}"))
+}
+
+/// The camera and document version `<RegisterDescription>` names (§2.7).
+fn identity_from(event: &BytesStart<'_>) -> Result<DocumentIdentity, XmlError> {
+    let text = |name: &str| -> Result<String, XmlError> {
+        Ok(attribute_value(event, name)?
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default())
+    };
+    let parts = [
+        text("MajorVersion")?,
+        text("MinorVersion")?,
+        text("SubMinorVersion")?,
+    ];
+    let version = if parts.iter().all(String::is_empty) {
+        String::new()
+    } else {
+        parts
+            .map(|part| {
+                if part.is_empty() {
+                    "0".to_string()
+                } else {
+                    part
+                }
+            })
+            .join(".")
+    };
+    Ok(DocumentIdentity {
+        vendor_name: text("VendorName")?,
+        model_name: text("ModelName")?,
+        version,
+    })
 }
 
 fn handle_start(
@@ -2284,6 +2363,75 @@ mod tests {
             r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">{node}</RegisterDescription>"#
         );
         parse(&xml).expect("parse fragment")
+    }
+
+    /// GA-14: `<Streamable>` on every node kind that GenICam Standard v2.1.1
+    /// §3.2 gives a Streamable default — the numeric, symbolic and string
+    /// features, the register types and the struct entries. `No`, an absent
+    /// element and the empty `<Streamable/>` Basler's acA1600 declares on
+    /// `GlobalResetReleaseModeEnable` are all not streamable: the schema's
+    /// values are `Yes` and `No`, and the default is `No`.
+    #[test]
+    fn streamable_is_read_on_every_node_kind_that_carries_it() {
+        let model = parse_fragment(
+            r#"<Integer Name="I"><Streamable>Yes</Streamable><Value>1</Value></Integer>
+            <IntReg Name="IR"><Streamable>Yes</Streamable><Address>0x0</Address><Length>4</Length><AccessMode>RW</AccessMode></IntReg>
+            <MaskedIntReg Name="M"><Streamable>Yes</Streamable><Address>0x4</Address><Length>4</Length><AccessMode>RW</AccessMode><Bit>0</Bit></MaskedIntReg>
+            <Float Name="F"><Streamable>Yes</Streamable><Value>1.0</Value></Float>
+            <FloatReg Name="FR"><Streamable>Yes</Streamable><Address>0x8</Address><Length>4</Length><AccessMode>RW</AccessMode></FloatReg>
+            <Enumeration Name="E"><Streamable>Yes</Streamable><EnumEntry Name="A"><Value>0</Value></EnumEntry><pValue>IR</pValue></Enumeration>
+            <Boolean Name="B"><Streamable> Yes </Streamable><pValue>IR</pValue></Boolean>
+            <StringReg Name="S"><Streamable>Yes</Streamable><Address>0x10</Address><Length>8</Length><AccessMode>RW</AccessMode></StringReg>
+            <Register Name="R"><Streamable>Yes</Streamable><Address>0x20</Address><Length>8</Length><AccessMode>RW</AccessMode></Register>
+            <Converter Name="C"><Streamable>Yes</Streamable><FormulaTo>FROM</FormulaTo><FormulaFrom>TO</FormulaFrom><pValue>IR</pValue></Converter>
+            <IntConverter Name="IC"><Streamable>Yes</Streamable><FormulaTo>FROM</FormulaTo><FormulaFrom>TO</FormulaFrom><pValue>IR</pValue></IntConverter>
+            <IntSwissKnife Name="ISK"><Streamable>Yes</Streamable><pVariable Name="X">IR</pVariable><Formula>X</Formula></IntSwissKnife>
+            <SwissKnife Name="SK"><Streamable>Yes</Streamable><pVariable Name="X">IR</pVariable><Formula>X</Formula></SwissKnife>
+            <StructReg Comment="pair"><Address>0x30</Address><Length>4</Length><AccessMode>RW</AccessMode>
+              <StructEntry Name="SE"><Streamable>Yes</Streamable><Bit>0</Bit></StructEntry>
+              <StructEntry Name="SE2"><Bit>1</Bit></StructEntry>
+            </StructReg>
+            <Integer Name="No"><Streamable>No</Streamable><Value>1</Value></Integer>
+            <Integer Name="Empty"><Streamable/><Value>1</Value></Integer>
+            <Integer Name="Absent"><Value>1</Value></Integer>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        let streamable: Vec<&str> = model
+            .nodes
+            .iter()
+            .filter(|node| node.meta().streamable)
+            .map(NodeDecl::name)
+            .collect();
+        assert_eq!(
+            streamable,
+            [
+                "I", "IR", "M", "F", "FR", "E", "B", "S", "R", "C", "IC", "ISK", "SK", "SE"
+            ]
+        );
+    }
+
+    /// GA-14: a saved configuration names the camera it came from, so a load
+    /// onto another model can warn. GenICam Standard v2.1.1 §2.7: "The camera
+    /// described is identified by the VendorName / ModelName pair", and
+    /// `MajorVersion`/`MinorVersion`/`SubMinorVersion` version the file itself,
+    /// apart from the schema.
+    #[test]
+    fn the_document_names_its_camera_and_its_own_version() {
+        let model = parse(
+            r#"<RegisterDescription ModelName="acA1600-20gm" VendorName="Basler" SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0" MajorVersion="3" MinorVersion="2" SubMinorVersion="1"><Integer Name="I"><Value>1</Value></Integer></RegisterDescription>"#,
+        )
+        .expect("parse");
+        assert_eq!(
+            model.identity,
+            DocumentIdentity {
+                vendor_name: "Basler".into(),
+                model_name: "acA1600-20gm".into(),
+                version: "3.2.1".into(),
+            }
+        );
+        assert_eq!(model.version, "1.1.0", "the schema version is separate");
+        let bare = parse_fragment(r#"<Integer Name="I"><Value>1</Value></Integer>"#);
+        assert_eq!(bare.identity, DocumentIdentity::default());
     }
 
     /// Extract the metadata of the single node in a parsed fragment.

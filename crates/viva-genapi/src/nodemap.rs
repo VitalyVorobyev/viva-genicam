@@ -9,9 +9,9 @@ use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
-    AccessMode, AddressTerm, Addressing, ByteOrder, CommandValueSrc, EnumEntryDecl, EnumValueSrc,
-    FloatEncoding, FormulaBindings, IndexOffset, NodeDecl, PortKind, PredicateRefs, Sign,
-    SkippedNode, Slope, Visibility, XmlModel,
+    AccessMode, AddressTerm, Addressing, ByteOrder, CommandValueSrc, DocumentIdentity,
+    EnumEntryDecl, EnumValueSrc, FloatEncoding, FormulaBindings, IndexOffset, NodeDecl, PortKind,
+    PredicateRefs, Sign, SkippedNode, Slope, Visibility, XmlModel,
 };
 
 use crate::bitops::{extract, insert};
@@ -35,7 +35,12 @@ use crate::{GenApiError, RegisterIo, SkOutput};
 #[derive(Debug)]
 pub struct NodeMap {
     version: String,
+    /// The camera the document describes, and the document's version.
+    identity: DocumentIdentity,
     nodes: HashMap<String, Node>,
+    /// Node names in document order: listings and the restore order of a
+    /// saved configuration follow the XML rather than a hash.
+    order: Vec<String>,
     dependents: HashMap<String, Vec<String>>,
     /// See [`NodeMap::command_targets`]; fixed once the map is built.
     command_targets: HashSet<String>,
@@ -176,9 +181,28 @@ impl NodeMap {
         self.nodes.get(name)
     }
 
-    /// Return an iterator over all node names in the map.
+    /// The camera the XML describes — `VendorName`, `ModelName` — and the
+    /// version of the XML file itself (GenICam Standard v2.1.1 §2.7).
+    pub fn identity(&self) -> &DocumentIdentity {
+        &self.identity
+    }
+
+    /// Return an iterator over all node names in the map, in the order the
+    /// XML declares them.
     pub fn node_names(&self) -> impl Iterator<Item = &str> {
-        self.nodes.keys().map(|s| s.as_str())
+        self.order.iter().map(String::as_str)
+    }
+
+    /// The selectors that select `name` — every node whose `<pSelected>`
+    /// names it — in document order. Empty for a feature no selector selects.
+    pub fn selectors_of(&self, name: &str) -> Vec<&str> {
+        self.node_names()
+            .filter(|candidate| {
+                self.nodes
+                    .get(*candidate)
+                    .is_some_and(|node| node.selected().iter().any(|s| s == name))
+            })
+            .collect()
     }
 
     /// Return the list of nodes that should be invalidated when `name` changes.
@@ -285,7 +309,7 @@ impl NodeMap {
     /// `start` followed by each node it takes its value from through
     /// `<pValue>`, until a node that delegates no further. A `<pValue>` cycle
     /// ends the chain rather than looping.
-    fn value_chain<'a>(&'a self, start: &'a str) -> Vec<&'a str> {
+    pub(crate) fn value_chain<'a>(&'a self, start: &'a str) -> Vec<&'a str> {
         let mut chain = vec![start];
         let mut current = start;
         while let Some(next) = self.nodes.get(current).and_then(value_provider) {
@@ -330,6 +354,7 @@ impl NodeMap {
             .into_iter()
             .map(|port| (port.name, port.kind))
             .collect();
+        let mut order = Vec::with_capacity(model.nodes.len());
         for decl in model.nodes {
             let tag = decl.kind().to_string();
             let name = Some(decl.name().to_string());
@@ -341,6 +366,9 @@ impl NodeMap {
                 Ok((node_name, node)) => {
                     for (provider, mut names) in local {
                         dependents.entry(provider).or_default().append(&mut names);
+                    }
+                    if !nodes.contains_key(&node_name) {
+                        order.push(node_name.clone());
                     }
                     nodes.insert(node_name, node);
                 }
@@ -362,7 +390,9 @@ impl NodeMap {
 
         let mut map = NodeMap {
             version: model.version,
+            identity: model.identity,
             nodes,
+            order,
             dependents,
             command_targets: HashSet::new(),
             skipped,
@@ -1030,6 +1060,22 @@ impl NodeMap {
             out.push(entry.name.as_str());
         }
         Ok(unique_in_order(out))
+    }
+
+    /// The provider of `name`'s `<pIsLocked>`, when it reports the feature
+    /// locked now; `None` when it is not locked or declares no lock.
+    pub(crate) fn locked_by(
+        &self,
+        name: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<Option<String>, GenApiError> {
+        let prefs = self.predicate_refs(name)?;
+        match &prefs.p_is_locked {
+            Some(provider) if self.eval_predicate_ref(name, provider, io)? => {
+                Ok(Some(provider.clone()))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn predicate_refs(&self, name: &str) -> Result<&PredicateRefs, GenApiError> {

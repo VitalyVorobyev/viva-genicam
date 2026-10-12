@@ -113,6 +113,16 @@ impl Node {
         }
     }
 
+    /// `<pSelected>`: the features this node selects, when it is a selector
+    /// (GenICam Standard v2.1.1 §2.8.4). Empty otherwise.
+    pub fn selected(&self) -> &[String] {
+        match self {
+            Node::Integer(n) => &n.selected,
+            Node::Enum(n) => &n.selected,
+            _ => &[],
+        }
+    }
+
     /// Return the visibility level of this node.
     pub fn visibility(&self) -> Visibility {
         self.meta().visibility

@@ -1,6 +1,3 @@
-use std::net::Ipv4Addr;
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use serde::Serialize;
 use tracing::info;
@@ -8,7 +5,8 @@ use tracing::info;
 use viva_genapi_xml::AccessMode;
 use viva_gige::nic::IfaceSelector;
 
-use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS};
+use crate::common::{self, Target};
+use crate::with_camera;
 
 #[derive(Serialize)]
 struct SetResponse<'a> {
@@ -28,33 +26,18 @@ fn can_read_back(access: Option<AccessMode>) -> bool {
 }
 
 pub async fn run(
-    ip: Option<Ipv4Addr>,
-    index: Option<usize>,
+    target: Target,
     name: String,
     value: String,
     iface: Option<IfaceSelector>,
     json: bool,
 ) -> Result<()> {
-    let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
-    let device = common::select_device(ip, index, iface.as_ref(), timeout).await?;
-    info!(ip = %device.ip, "opening camera for set");
-    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
+    info!(?target, "opening camera for set");
+    let mut camera = common::open_target(&target, iface.as_ref(), viva_genicam::Access::Control)
         .await
         .context("open camera for set")?;
-    camera
-        .set(&name, &value)
-        .with_context(|| format!("write feature {name}"))?;
-
-    let access = camera.nodemap().node(&name).and_then(|n| n.access_mode());
-    let read_back = if can_read_back(access) {
-        Some(
-            camera
-                .get(&name)
-                .with_context(|| format!("read feature {name}"))?,
-        )
-    } else {
-        None
-    };
+    let read_back =
+        with_camera!(&mut camera, camera => write_and_read_back(camera, &name, &value))?;
 
     if json {
         let payload = SetResponse {
@@ -71,6 +54,25 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Write `name`, then read it back unless it is write-only.
+fn write_and_read_back<T: viva_genicam::genapi::RegisterIo>(
+    camera: &mut viva_genicam::Camera<T>,
+    name: &str,
+    value: &str,
+) -> Result<Option<String>> {
+    camera
+        .set(name, value)
+        .with_context(|| format!("write feature {name}"))?;
+    let access = camera.nodemap().node(name).and_then(|n| n.access_mode());
+    if !can_read_back(access) {
+        return Ok(None);
+    }
+    camera
+        .get(name)
+        .map(Some)
+        .with_context(|| format!("read feature {name}"))
 }
 
 #[cfg(test)]

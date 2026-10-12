@@ -145,3 +145,29 @@ def test_execute_rejects_a_non_command_node(camera):
     """A non-Command node must be refused, not silently written."""
     with pytest.raises(Exception):
         camera.execute("ExposureTime")
+
+
+def test_a_saved_configuration_restores_the_camera(camera, tmp_path):
+    """GA-14: the streamable features to a file and back."""
+    original = camera.get("Width")
+    camera.set("Width", "320")
+    path = tmp_path / "camera.txt"
+    saved = camera.save_features(path)
+    assert saved["values"] > 0
+    assert "\nWidth\t320\n" in path.read_text()
+    camera.set("Width", "640")
+    report = camera.load_features(path)
+    assert report["failures"] == []
+    assert report["warnings"] == []
+    assert report["written"] == saved["values"]
+    assert camera.get("Width") == "320"
+    camera.set("Width", original)
+
+
+def test_a_load_reports_what_it_could_not_write(camera, tmp_path):
+    path = tmp_path / "other.txt"
+    path.write_text("# ModelName = Other\nNoSuchFeature\t1\n")
+    report = camera.load_features(path)
+    assert len(report["failures"]) == 1
+    assert "NoSuchFeature" in report["failures"][0]
+    assert "Other" in report["warnings"][0]

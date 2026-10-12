@@ -108,7 +108,11 @@ executed, never set. The standard-feature helpers (`set_exposure_time`,
 `load_user_set`, ...) resolve each feature through a table of the names
 cameras declare it under (`StandardFeature`, names in `viva-sfnc`), in the
 vendor corpus's order of prevalence, and report which they used.
-`acquisition_start`/`stop` set and clear `TLParamsLocked`. What only GigE
+`acquisition_start`/`stop` set and clear `TLParamsLocked`.
+`save_features`/`load_features` save the features the XML marks
+`<Streamable>` to a file and restore them; what is saved, the walk over
+selectors and the restore order are `viva-genapi`'s `persistence`, which does
+no I/O ([ADR-0028](adrs/adr0028-configuration-persistence.md)). What only GigE
 Vision has — events, multicast, streams, control privilege — is in
 `impl Camera<GigeRegisterIo>`, so it does not compile against a USB3 Vision
 camera.
@@ -118,8 +122,9 @@ tracks the dependency graph for cache invalidation. Supports `pValue`
 delegation: Integer/Float/Enum/Boolean/Command nodes can delegate to `IntReg`
 or other backing nodes. The `Node` enum covers Integer, Float, Enum, Boolean,
 Command, Category, SwissKnife, Converter, IntConverter, String, Register.
-Introspection API (`node_names()`, `dependents()`, `categories()`,
-`kind_name()`, `access_mode()`, `ports()`, `port_features()`) serves external
+Introspection API (`node_names()` in document order, `dependents()`,
+`selectors_of()`, `categories()`, `identity()`, `kind_name()`,
+`access_mode()`, `ports()`, `port_features()`) serves external
 consumers such as the studio.
 
 **Ports** (`viva-genapi`) — every register reaches its bytes through the

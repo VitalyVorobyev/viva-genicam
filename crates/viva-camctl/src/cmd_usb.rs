@@ -1,15 +1,17 @@
 //! USB3 Vision CLI commands.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use viva_genicam::{Camera, U3vRegisterIo, connect_u3v};
 use viva_pfnc::PixelFormat;
 use viva_u3v::discovery::{U3vDeviceInfo, discover};
-use viva_u3v::usb::RusbTransfer;
+use viva_u3v::stream::U3vStream;
+use viva_u3v::usb::{RusbTransfer, UsbTransfer};
 
 use crate::common;
 
@@ -76,7 +78,7 @@ pub fn run_list(json: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// get-usb / set-usb helpers
+// Opening a camera
 // ---------------------------------------------------------------------------
 
 fn select_usb_device(index: Option<usize>) -> Result<U3vDeviceInfo> {
@@ -89,7 +91,7 @@ fn select_usb_device(index: Option<usize>) -> Result<U3vDeviceInfo> {
         .ok_or_else(|| anyhow!("no USB3 Vision device at index {idx}"))
 }
 
-fn open_usb_camera(index: Option<usize>) -> Result<Camera<U3vRegisterIo<RusbTransfer>>> {
+pub(crate) fn open_usb_camera(index: Option<usize>) -> Result<Camera<U3vRegisterIo<RusbTransfer>>> {
     let dev = select_usb_device(index)?;
     info!(
         vid = format!("{:04x}", dev.vendor_id),
@@ -100,57 +102,34 @@ fn open_usb_camera(index: Option<usize>) -> Result<Camera<U3vRegisterIo<RusbTran
 }
 
 // ---------------------------------------------------------------------------
-// get-usb
-// ---------------------------------------------------------------------------
-
-pub fn run_get(index: Option<usize>, name: String, json: bool) -> Result<()> {
-    let camera = open_usb_camera(index)?;
-    let value = camera.get(&name)?;
-
-    if json {
-        #[derive(Serialize)]
-        struct GetResult {
-            name: String,
-            value: String,
-        }
-        common::print_json(&GetResult { name, value })?;
-    } else {
-        println!("{value}");
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// set-usb
-// ---------------------------------------------------------------------------
-
-pub fn run_set(index: Option<usize>, name: String, value: String, json: bool) -> Result<()> {
-    let mut camera = open_usb_camera(index)?;
-    camera.set(&name, &value)?;
-
-    if json {
-        #[derive(Serialize)]
-        struct SetResult {
-            name: String,
-            value: String,
-            ok: bool,
-        }
-        common::print_json(&SetResult {
-            name,
-            value,
-            ok: true,
-        })?;
-    } else {
-        println!("OK");
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // stream-usb
 // ---------------------------------------------------------------------------
+
+/// Size the payload from the camera's image format and open its stream.
+fn open_raw_stream<T: UsbTransfer + 'static>(
+    camera: &mut Camera<U3vRegisterIo<T>>,
+) -> Result<U3vStream<T>> {
+    let width: u32 = camera.get("Width")?.parse().unwrap_or(640);
+    let height: u32 = camera.get("Height")?.parse().unwrap_or(480);
+    let pf_str = camera
+        .get("PixelFormat")
+        .unwrap_or_else(|_| "Mono8".to_string());
+    // Sized from the PFNC code, so a packed format is not undersized.
+    let payload_size = PixelFormat::from_name(&pf_str)
+        .image_bytes(width, height)
+        .unwrap_or(width as usize * height as usize);
+    info!(
+        width,
+        height,
+        pixel_format = pf_str,
+        payload_size,
+        "opening U3V stream"
+    );
+    let mut device = camera.transport().lock_device()?;
+    device
+        .open_stream(payload_size as u64)
+        .map_err(|e| anyhow!("open stream failed: {e}"))
+}
 
 pub fn run_stream(
     index: Option<usize>,
@@ -161,33 +140,8 @@ pub fn run_stream(
 ) -> Result<()> {
     let mut camera = open_usb_camera(index)?;
 
-    // Read image dimensions from camera features.
-    let width: u32 = camera.get("Width")?.parse().unwrap_or(640);
-    let height: u32 = camera.get("Height")?.parse().unwrap_or(480);
-    let pf_str = camera
-        .get("PixelFormat")
-        .unwrap_or_else(|_| "Mono8".to_string());
-    // Sized from the PFNC code, so a packed format is not undersized.
-    let payload_size = PixelFormat::from_name(&pf_str)
-        .image_bytes(width, height)
-        .unwrap_or(width as usize * height as usize);
+    let mut stream = open_raw_stream(&mut camera)?;
 
-    info!(
-        width,
-        height,
-        pixel_format = pf_str,
-        payload_size,
-        "opening U3V stream"
-    );
-
-    // Open stream through the transport.
-    let mut device = camera.transport().lock_device()?;
-    let mut stream = device
-        .open_stream(payload_size as u64)
-        .map_err(|e| anyhow!("open stream failed: {e}"))?;
-
-    // Start acquisition.
-    drop(device); // Release lock before camera feature access.
     // Sets TLParamsLocked too.
     camera.acquisition_start()?;
 
@@ -257,5 +211,101 @@ pub fn run_stream(
         frame_count as f64 / t0.elapsed().as_secs_f64().max(0.001),
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bench --usb
+// ---------------------------------------------------------------------------
+
+/// A USB3 Vision streaming benchmark's result. Fewer counters than GigE
+/// Vision's: the USB3 Vision stream has no receive engine counting packets
+/// and resends (backlog API-11), so this counts blocks as they arrive.
+#[derive(Debug, Serialize)]
+pub struct UsbBenchReport {
+    /// How long the benchmark streamed.
+    pub duration_s: f64,
+    /// Blocks received.
+    pub frames: u64,
+    /// Of those, blocks whose trailer reported a status other than success.
+    pub frames_failed: u64,
+    /// Payload bytes received.
+    pub bytes: u64,
+    /// Read errors from the stream endpoint.
+    pub stream_errors: u64,
+    pub avg_fps: f64,
+    pub avg_mbps: f64,
+}
+
+/// Stream from `camera` for `duration`, counting what arrives. Acquisition
+/// is started and stopped, and the stream closed, here.
+pub fn bench<T: UsbTransfer + 'static>(
+    camera: &mut Camera<U3vRegisterIo<T>>,
+    duration: Duration,
+) -> Result<UsbBenchReport> {
+    let mut stream = open_raw_stream(camera)?;
+    camera.acquisition_start()?;
+    let started = Instant::now();
+    let (mut frames, mut failed, mut bytes, mut errors) = (0u64, 0u64, 0u64, 0u64);
+    let mut last_print = started;
+    while started.elapsed() < duration {
+        match stream.next_frame_within(Duration::from_millis(200)) {
+            Ok(Some(frame)) => {
+                frames += 1;
+                bytes += frame.payload.len() as u64;
+                failed += u64::from(frame.trailer.status != 0);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                errors += 1;
+                warn!(error = %err, "stream read failed");
+                // A device that is gone fails every read at once.
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if last_print.elapsed() >= Duration::from_secs(1) {
+            last_print = Instant::now();
+            println!("[bench] {frames} frames, {failed} failed, {errors} read errors");
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
+    if let Err(err) = camera.acquisition_stop() {
+        eprintln!("AcquisitionStop failed: {err}");
+    }
+    drop(stream);
+    if let Err(err) = camera.transport().lock_device()?.stop_stream() {
+        eprintln!("stopping the stream failed: {err}");
+    }
+    Ok(UsbBenchReport {
+        duration_s: elapsed,
+        frames,
+        frames_failed: failed,
+        bytes,
+        stream_errors: errors,
+        avg_fps: frames as f64 / elapsed,
+        avg_mbps: bytes as f64 * 8.0 / 1e6 / elapsed,
+    })
+}
+
+pub fn run_bench(
+    index: usize,
+    duration_s: u64,
+    json: bool,
+    json_out: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut camera = open_usb_camera(Some(index))?;
+    let report = bench(&mut camera, Duration::from_secs(duration_s.max(1)))?;
+    println!(
+        "Summary: {} frames ({} failed), {:.1} fps, {:.1} Mbit/s, {} read errors",
+        report.frames, report.frames_failed, report.avg_fps, report.avg_mbps, report.stream_errors
+    );
+    if let Some(path) = json_out {
+        let file =
+            std::fs::File::create(path).map_err(|e| anyhow!("create {}: {e}", path.display()))?;
+        serde_json::to_writer_pretty(file, &report)
+            .map_err(|e| anyhow!("write {}: {e}", path.display()))?;
+    } else if json {
+        common::print_json(&report)?;
+    }
     Ok(())
 }

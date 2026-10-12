@@ -3410,6 +3410,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "viva-fake-gige",
+ "viva-fake-u3v",
  "viva-genapi-xml",
  "viva-genicam",
  "viva-gige",

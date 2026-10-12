@@ -1,6 +1,6 @@
 //! The everyday tasks — typed features, exposure and gain, triggers, region
-//! of interest, binning, frame rate, user sets — against the fake GigE Vision
-//! camera, no hardware required.
+//! of interest, binning, frame rate, user sets, saving and restoring a
+//! configuration — against the fake GigE Vision camera, no hardware required.
 //!
 //! ```bash
 //! cargo run -p viva-genicam --example common_tasks
@@ -84,6 +84,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     camera.load_user_set("Default")?;
     camera.set_default_user_set("UserSet1")?;
     // ANCHOR_END: user_sets
+
+    let path = std::env::temp_dir().join("viva-camera.txt");
+    // ANCHOR: save_load
+    // Every feature the camera's XML marks streamable, each selected one
+    // under every entry of its selector; the file's comments say what was
+    // left out and why.
+    let saved = camera.save_features(&mut std::fs::File::create(&path)?)?;
+    println!("saved {} values to {}", saved.values.len(), path.display());
+
+    // Later — on this camera or another of the same model:
+    let report = camera.load_features(&mut std::fs::File::open(&path)?)?;
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}"); // saved from another model, say
+    }
+    for failure in &report.failures {
+        eprintln!("not written: {failure}"); // `Feature[Selector=Entry] = value: why`
+    }
+    // ANCHOR_END: save_load
 
     // ANCHOR: software_trigger
     let mut frames = camera.open_stream(StreamOptions::new())?;

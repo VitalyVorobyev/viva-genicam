@@ -19,7 +19,15 @@ use crate::cmd_set_ip;
 use crate::cmd_stream::{self, StreamArgs};
 use crate::cmd_usb;
 use crate::cmd_xml::{self, XmlArgs};
-use crate::common::SaveFormat;
+use crate::common::{self, SaveFormat, Target};
+use crate::{cmd_action, cmd_config, cmd_inspect, cmd_registers};
+use viva_gige::action::ActionParams;
+
+/// A 32-bit value, decimal or `0x` hexadecimal.
+fn parse_word(text: &str) -> Result<u32, String> {
+    let value = common::parse_number(text)?;
+    u32::try_from(value).map_err(|_| format!("{text} does not fit in 32 bits"))
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "viva-camctl", version, about = "GenICam CLI")]
@@ -56,14 +64,95 @@ pub enum Cmd {
         #[arg(long)]
         allow_broadcast_ack: bool,
     },
-    /// Read a feature via GenApi NodeMap
+    /// Read a feature, formatted by its type
     Get {
-        #[arg(long)]
-        ip: Option<Ipv4Addr>,
-        #[arg(long)]
-        index: Option<usize>,
+        #[command(flatten)]
+        target: Target,
         #[arg(long)]
         name: String,
+    },
+    /// The category tree: every feature with its type, access and value
+    Features {
+        #[command(flatten)]
+        target: Target,
+        /// Only features whose name contains this, ignoring case
+        #[arg(long)]
+        filter: Option<String>,
+        /// Include the features the camera marks invisible
+        #[arg(long)]
+        all: bool,
+    },
+    /// Everything about one feature: documentation, access, value, range,
+    /// entries, selectors, and what it depends on
+    Describe {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        name: String,
+    },
+    /// Every value the camera has to read now, in XML order
+    Dump {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Save the camera's configuration (its streamable features) to a file
+    Save {
+        #[command(flatten)]
+        target: Target,
+        /// The file to write
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Restore a configuration saved with `save` (or another GenApi tool)
+    Load {
+        #[command(flatten)]
+        target: Target,
+        /// The file to read
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Read device registers directly, past the GenApi XML
+    ReadReg {
+        #[command(flatten)]
+        target: Target,
+        /// Register address, decimal or 0x-hexadecimal
+        #[arg(long, value_parser = common::parse_number)]
+        addr: u64,
+        /// Bytes to read; a multiple of 4 on GigE Vision
+        #[arg(long, default_value_t = 4)]
+        len: usize,
+    },
+    /// Write one 32-bit device register directly, past the GenApi XML
+    WriteReg {
+        #[command(flatten)]
+        target: Target,
+        /// Register address, decimal or 0x-hexadecimal
+        #[arg(long, value_parser = common::parse_number)]
+        addr: u64,
+        /// The 32-bit value, decimal or 0x-hexadecimal, in the device's byte order
+        #[arg(long, value_parser = parse_word)]
+        value: u32,
+    },
+    /// Send a GigE Vision action command and count the acknowledgements
+    Action {
+        /// Where to send it [default: broadcast, 255.255.255.255]
+        #[arg(long, default_value_t = Ipv4Addr::BROADCAST)]
+        destination: Ipv4Addr,
+        /// ActionDeviceKey
+        #[arg(long, value_parser = parse_word)]
+        device_key: u32,
+        /// ActionGroupKey
+        #[arg(long, value_parser = parse_word)]
+        group_key: u32,
+        /// ActionGroupMask
+        #[arg(long, value_parser = parse_word)]
+        group_mask: u32,
+        /// Act at this time, in the cameras' timestamp ticks (scheduled action)
+        #[arg(long, value_parser = common::parse_number)]
+        scheduled_time: Option<u64>,
+        /// How long to collect acknowledgements
+        #[arg(long, default_value_t = 200)]
+        timeout_ms: u64,
     },
     /// Dump the camera's GenApi XML (no parsing, so a document we cannot
     /// read still comes out)
@@ -104,12 +193,10 @@ pub enum Cmd {
         #[arg(long)]
         no_xml: bool,
     },
-    /// Write a feature via GenApi NodeMap
+    /// Write a feature from text, parsed by its type
     Set {
-        #[arg(long)]
-        ip: Option<Ipv4Addr>,
-        #[arg(long)]
-        index: Option<usize>,
+        #[command(flatten)]
+        target: Target,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -118,10 +205,8 @@ pub enum Cmd {
     /// Execute a GenApi Command feature (e.g. `UserSetLoad`) and wait until
     /// the camera reports it finished
     Execute {
-        #[arg(long)]
-        ip: Option<Ipv4Addr>,
-        #[arg(long)]
-        index: Option<usize>,
+        #[command(flatten)]
+        target: Target,
         #[arg(long)]
         name: String,
         /// How long to wait for the camera to report the command finished
@@ -213,10 +298,13 @@ pub enum Cmd {
     },
     /// Sustained stream soak/benchmark
     Bench {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         ip: Option<Ipv4Addr>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         index: Option<usize>,
+        /// Benchmark the Nth USB3 Vision camera (`list-usb` order) instead
+        #[arg(long)]
+        usb: Option<usize>,
         /// Host interface, by IPv4 address or by OS name
         #[arg(long)]
         iface: Option<IfaceSelector>,
@@ -262,22 +350,6 @@ pub enum Cmd {
     },
     /// Discover USB3 Vision cameras
     ListUsb,
-    /// Read a feature from a USB3 Vision camera
-    GetUsb {
-        #[arg(long)]
-        index: Option<usize>,
-        #[arg(long)]
-        name: String,
-    },
-    /// Write a feature to a USB3 Vision camera
-    SetUsb {
-        #[arg(long)]
-        index: Option<usize>,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        value: String,
-    },
     /// Stream frames from a USB3 Vision camera
     StreamUsb {
         #[arg(long)]
@@ -345,7 +417,42 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             };
             cmd_list::run(args, json).await?
         }
-        Cmd::Get { ip, index, name } => cmd_get::run(ip, index, name, iface, json).await?,
+        Cmd::Get { target, name } => cmd_get::run(target, name, iface, json).await?,
+        Cmd::Features {
+            target,
+            filter,
+            all,
+        } => cmd_inspect::run_features(target, iface, filter, all, json).await?,
+        Cmd::Describe { target, name } => {
+            cmd_inspect::run_describe(target, iface, name, json).await?
+        }
+        Cmd::Dump { target } => cmd_inspect::run_dump(target, iface, json).await?,
+        Cmd::Save { target, out } => cmd_config::run_save(target, iface, &out, json).await?,
+        Cmd::Load { target, file } => cmd_config::run_load(target, iface, &file, json).await?,
+        Cmd::ReadReg { target, addr, len } => {
+            cmd_registers::run_read(target, iface, addr, len, json).await?
+        }
+        Cmd::WriteReg {
+            target,
+            addr,
+            value,
+        } => cmd_registers::run_write(target, iface, addr, value).await?,
+        Cmd::Action {
+            destination,
+            device_key,
+            group_key,
+            group_mask,
+            scheduled_time,
+            timeout_ms,
+        } => {
+            let params = ActionParams {
+                device_key,
+                group_key,
+                group_mask,
+                scheduled_time,
+            };
+            cmd_action::run(destination, params, timeout_ms, json).await?
+        }
         Cmd::Xml {
             ip,
             index,
@@ -382,20 +489,18 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             cmd_report::run(args).await?
         }
         Cmd::Set {
-            ip,
-            index,
+            target,
             name,
             value,
-        } => cmd_set::run(ip, index, name, value, iface, json).await?,
+        } => cmd_set::run(target, name, value, iface, json).await?,
         Cmd::Execute {
-            ip,
-            index,
+            target,
             name,
             wait_ms,
             no_wait,
         } => {
             let wait = (!no_wait).then(|| Duration::from_millis(wait_ms));
-            cmd_execute::run(ip, index, name, wait, iface, json).await?
+            cmd_execute::run(target, name, wait, iface, json).await?
         }
         Cmd::Stream {
             ip,
@@ -448,8 +553,15 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             selectors,
         } => cmd_chunks::run(ip, index, enable, selectors, iface, json).await?,
         Cmd::Bench {
+            usb: Some(usb),
+            duration_s,
+            json_out,
+            ..
+        } => cmd_usb::run_bench(usb, duration_s, json, json_out.as_deref())?,
+        Cmd::Bench {
             ip,
             index,
+            usb: None,
             iface: cmd_iface,
             mode,
             group,
@@ -481,8 +593,6 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             force,
         } => cmd_set_ip::run(&mac, ip, subnet, gateway, force, iface).await?,
         Cmd::ListUsb => cmd_usb::run_list(json)?,
-        Cmd::GetUsb { index, name } => cmd_usb::run_get(index, name, json)?,
-        Cmd::SetUsb { index, name, value } => cmd_usb::run_set(index, name, value, json)?,
         Cmd::StreamUsb {
             index,
             save,

@@ -9,7 +9,7 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{TAG_P_ADDRESS, TAG_P_INDEX, handle_invalidator_start, index_offset};
+use super::{NodeMetaBuilder, TAG_P_ADDRESS, TAG_P_INDEX, handle_invalidator_start, index_offset};
 use crate::util::{
     attribute_value, attribute_value_required, parse_address, parse_u64, read_text_start,
     skip_element,
@@ -156,7 +156,7 @@ pub fn parse_struct_reg(
             let (min, max) = bitfield_range(entry.bitfield.bit_length, entry_sign);
             NodeDecl::Integer {
                 name: entry.name,
-                meta: NodeMeta::default(),
+                meta: entry.meta,
                 addressing: Some(addressing.clone()),
                 len: length,
                 access: entry.access.unwrap_or(access),
@@ -212,6 +212,9 @@ struct StructEntryData {
     access: Option<AccessMode>,
     /// `<Sign>` declared on the entry, overriding the `<StructReg>` one.
     sign: Option<Sign>,
+    /// The entry's own metadata: a `<StructEntry>` is a node of its own, with
+    /// a tooltip, a visibility and `<Streamable>` (GenICam Standard v2.1.1 §3.2).
+    meta: NodeMeta,
 }
 
 fn parse_struct_entry(
@@ -226,6 +229,7 @@ fn parse_struct_entry(
     let mut access: Option<AccessMode> = None;
     let mut sign: Option<Sign> = None;
     let mut byte_order = default_byte_order;
+    let mut meta = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
 
@@ -258,7 +262,11 @@ fn parse_struct_entry(
                         byte_order = order;
                     }
                 }
-                _ => skip_element(reader, e.name().as_ref())?,
+                _ => {
+                    if !meta.handle_start(reader, e)? {
+                        skip_element(reader, e.name().as_ref())?;
+                    }
+                }
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -296,5 +304,6 @@ fn parse_struct_entry(
         bitfield,
         access,
         sign,
+        meta: meta.build(),
     })
 }

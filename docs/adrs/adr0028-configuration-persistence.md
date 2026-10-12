@@ -78,8 +78,11 @@ nothing.
 categories and commands, in restore order. A feature behind selectors is read
 under every combination of their entries — an enumeration's available entries,
 an integer's values from minimum to maximum by increment — and each selector
-is put back. More than 65 536 combinations leaves the feature out, so a save
-always ends. A feature is left out, with the reason, when it cannot be both
+is put back. Its selectors are those that select it and, in turn, theirs,
+outermost first: `LUTValue` behind `LUTIndex` behind `LUTSelector` is read
+under every `LUTSelector` entry, though `LUTSelector` does not name it (added
+in milestone K, after a Codex review of #200). More than 65 536 combinations
+leaves the feature out, so a save always ends. A feature is left out, with the reason, when it cannot be both
 read and written (declared `RO` or `WO`), or is not implemented, not
 available, or locked now. The empty `<Streamable/>` Basler's acA1600 declares
 once is `No`: the schema's values are `Yes` and `No`.

@@ -40,6 +40,7 @@ of the record.
 | [0026](adr0026-genapi-ports-chunks-events.md) | Chunk and event data through GenApi ports | Accepted |
 | [0027](adr0027-blocking-api-and-transport-runtimes.md) | The blocking API, and a GigE transport that can own its runtime | Accepted |
 | [0028](adr0028-configuration-persistence.md) | Saving and restoring a configuration in GenApi's feature-file layout | Accepted |
+| [0029](adr0029-caching-polling-and-refresh.md) | Caching modes, polling and a changed-since query | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

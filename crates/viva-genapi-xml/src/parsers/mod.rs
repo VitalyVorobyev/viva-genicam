@@ -44,6 +44,14 @@ pub const TAG_VISIBILITY: &str = "Visibility";
 pub const TAG_IMPOSED_ACCESS_MODE: &str = "ImposedAccessMode";
 /// XML element marking a feature that belongs in a saved configuration.
 pub const TAG_STREAMABLE: &str = "Streamable";
+/// `<Cachable>`: how a register's value may be cached (GA-05).
+pub const TAG_CACHABLE: &str = "Cachable";
+/// The spelling GenICam Standard v2.1.1 §2.8.3's prose uses for
+/// [`TAG_CACHABLE`]; its example and the schema write `Cachable`. Both are
+/// accepted, as `LSB` and `Lsb` are.
+pub const TAG_CACHEABLE: &str = "Cacheable";
+/// `<PollingTime>`: milliseconds after which a value should be read again.
+pub const TAG_POLLING_TIME: &str = "PollingTime";
 /// XML element for the long-form description.
 pub const TAG_DESCRIPTION: &str = "Description";
 /// XML element for short tooltip text.
@@ -239,6 +247,8 @@ pub struct NodeMetaBuilder {
     pub representation: Option<Representation>,
     pub imposed_access: Option<crate::AccessMode>,
     pub streamable: bool,
+    pub cachable: Option<crate::CachingMode>,
+    pub polling_time_ms: Option<u64>,
 }
 
 impl NodeMetaBuilder {
@@ -298,6 +308,16 @@ impl NodeMetaBuilder {
                 self.streamable = text.trim() == "Yes";
                 Ok(true)
             }
+            TAG_CACHABLE | TAG_CACHEABLE => {
+                let text = read_text_start(reader, event)?;
+                self.cachable = Some(crate::CachingMode::parse(&text));
+                Ok(true)
+            }
+            TAG_POLLING_TIME => {
+                let text = read_text_start(reader, event)?;
+                self.polling_time_ms = parse_polling_time(&text);
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -312,6 +332,20 @@ impl NodeMetaBuilder {
             representation: self.representation,
             imposed_access: self.imposed_access,
             streamable: self.streamable,
+            cachable: self.cachable,
+            polling_time_ms: self.polling_time_ms,
+        }
+    }
+}
+
+/// Read a `<PollingTime>`. One that is not a number is a hint lost, logged
+/// and dropped: it costs no more than the node's polling, not the node.
+pub fn parse_polling_time(text: &str) -> Option<u64> {
+    match parse_u64(text) {
+        Ok(ms) => Some(ms),
+        Err(err) => {
+            tracing::warn!(value = text.trim(), error = %err, "ignoring an unreadable <PollingTime>");
+            None
         }
     }
 }

@@ -158,12 +158,13 @@ Two more things worth knowing:
   features built on them — `ExposureTime` and `Gain` among them — go stale
   with them, so a `cam.get("ExposureTime")` after `cam.execute("UserSetLoad")`
   reads the camera again. A feature with no such link, direct or indirect,
-  keeps its cached value; reconnect if you need one of those read back.
+  keeps its cached value; `cam.invalidate(name)` (or `cam.invalidate_all()`)
+  makes the next read ask the camera.
 
-  Values the camera changes *on its own* — `ExposureTime` under auto exposure,
-  say — are a different matter. GenICam governs those with `<Cachable>` and
-  `<PollingTime>`, which are not honoured yet, so such a read can still be
-  stale.
+  Values the camera changes *on its own* — a temperature, `ExposureTime`
+  under auto exposure — need none of this when the XML says so: a feature
+  declared `<Cachable>NoCache</Cachable>` is read from the camera every time,
+  and one with a `<PollingTime>` once that has passed.
 
 From the command line, which waits the same way (`--wait-ms` bounds it,
 `--no-wait` skips it):

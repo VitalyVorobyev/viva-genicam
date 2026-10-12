@@ -26,7 +26,33 @@ remain for text — a command line, a configuration file:
 
 A category has no value and a command is not set: `get` on one, or `set` on
 the other, is an error. Run a command with `execute_command`, or with
-`execute_and_wait`, which also waits for the camera to report it finished.
+`execute_and_wait`, which also waits for the camera to report it finished —
+asking it as often as the command's `<PollingTime>` says, where it has one.
+
+## Values the camera changes on its own
+
+A value read once is kept until something the camera's XML links to it is
+written — unless the XML says otherwise. A temperature, an exposure under
+auto exposure, a status bit change on the camera with nothing to announce
+it, and the XML says so with `<Cachable>NoCache</Cachable>`: such a feature
+is read from the camera every time. A `<PollingTime>` says how long a value
+may be shown before it is read again; after that, the next read asks the
+camera. After a write to a `WriteAround` feature — a float register's default
+— the next read shows what the camera stored, a gain it rounded, say.
+
+A display that shows many features asks what to read again rather than
+reading everything:
+
+```rust,ignore
+{{#include ../../../crates/viva-genicam/examples/common_tasks.rs:refresh}}
+```
+
+`changed_since` names every feature whose value may have changed since a
+generation: written, or invalidated because something it depends on was.
+`poll` adds those whose polling time has passed. `invalidate` and
+`invalidate_all` are for a change the XML does not describe; Python has
+those two as `cam.invalidate(name)` and `cam.invalidate_all()`. Viva Studio
+re-reads the features on screen this way.
 
 ## Exposure and gain
 
@@ -79,8 +105,9 @@ file:
 
 What is saved is what the camera's XML marks `<Streamable>`. A feature behind
 a selector — `TriggerMode` behind `TriggerSelector`, `Gain` behind
-`GainSelector` — is saved once for each of the selector's entries, and the
-selector is put back as it was. A feature that is not available, or locked,
+`GainSelector` — is saved once for each of the selector's entries, and under
+each entry of a selector that selects that selector in turn; the selectors
+are put back as they were. A feature that is not available, or locked,
 is left out with a comment saying why; save while the camera is not acquiring,
 or what acquisition locks (`Width`, `PixelFormat`) is left out.
 

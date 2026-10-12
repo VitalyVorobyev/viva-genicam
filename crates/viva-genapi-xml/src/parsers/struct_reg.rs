@@ -9,14 +9,17 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::{NodeMetaBuilder, TAG_P_ADDRESS, TAG_P_INDEX, handle_invalidator_start, index_offset};
+use super::{
+    NodeMetaBuilder, TAG_CACHABLE, TAG_CACHEABLE, TAG_P_ADDRESS, TAG_P_INDEX, TAG_POLLING_TIME,
+    handle_invalidator_start, index_offset, parse_polling_time,
+};
 use crate::util::{
     attribute_value, attribute_value_required, parse_address, parse_u64, read_text_start,
     skip_element,
 };
 use crate::{
-    AccessMode, AddressTerm, Addressing, BitField, ByteOrder, NodeDecl, NodeMeta, PredicateRefs,
-    Sign, XmlError,
+    AccessMode, AddressTerm, Addressing, BitField, ByteOrder, CachingMode, NodeDecl, NodeMeta,
+    PredicateRefs, Sign, XmlError,
 };
 
 /// Parse a `<StructReg>` element, producing one `NodeDecl::Integer` per `<StructEntry>`.
@@ -35,6 +38,10 @@ pub fn parse_struct_reg(
     let mut byte_order = ByteOrder::Little;
     let mut sign = Sign::default();
     let mut invalidators = Vec::new();
+    // Declared once for the register every entry views; an entry may declare
+    // its own (Point Grey's GPIO registers do).
+    let mut cachable: Option<CachingMode> = None;
+    let mut polling_time_ms: Option<u64> = None;
     let mut entries = Vec::new();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -92,6 +99,14 @@ pub fn parse_struct_reg(
                     if let Some(order) = ByteOrder::parse(&text) {
                         byte_order = order;
                     }
+                }
+                TAG_CACHABLE | TAG_CACHEABLE => {
+                    let text = read_text_start(reader, e)?;
+                    cachable = Some(CachingMode::parse(&text));
+                }
+                TAG_POLLING_TIME => {
+                    let text = read_text_start(reader, e)?;
+                    polling_time_ms = parse_polling_time(&text);
                 }
                 "StructEntry" => {
                     let entry = parse_struct_entry(reader, e.clone(), byte_order)?;
@@ -154,9 +169,12 @@ pub fn parse_struct_reg(
         .map(|entry| {
             let entry_sign = entry.sign.unwrap_or(sign);
             let (min, max) = bitfield_range(entry.bitfield.bit_length, entry_sign);
+            let mut meta = entry.meta;
+            meta.cachable = meta.cachable.or(cachable);
+            meta.polling_time_ms = meta.polling_time_ms.or(polling_time_ms);
             NodeDecl::Integer {
                 name: entry.name,
-                meta: entry.meta,
+                meta,
                 addressing: Some(addressing.clone()),
                 len: length,
                 access: entry.access.unwrap_or(access),

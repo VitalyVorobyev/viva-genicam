@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 
 use tracing::{debug, warn};
-use viva_genapi_xml::AccessMode;
+use viva_genapi_xml::{AccessMode, CachingMode};
 
 use crate::nodemap::Limit;
 use crate::nodes::Node;
@@ -51,6 +51,14 @@ pub struct FeatureState {
     pub enum_entries: Option<Vec<String>>,
     /// Engineering unit, such as `"us"`.
     pub unit: Option<String>,
+    /// How long a viewer may show this value before reading it again: the
+    /// `<PollingTime>` of the feature or of a register its value is read
+    /// through ([`NodeMap::polling_time`]). `None` when nothing polls it.
+    pub polling_time: Option<std::time::Duration>,
+    /// Whether, and how, its value may be answered from a cache
+    /// ([`NodeMap::caching_mode`]). A `NoCache` feature without a polling
+    /// time changes on the device with nothing to say when.
+    pub caching: CachingMode,
 }
 
 /// A feature's current value, typed by the node that holds it.
@@ -259,6 +267,8 @@ impl NodeMap {
             range,
             enum_entries,
             unit,
+            polling_time: self.polling_time(name),
+            caching: self.caching_mode(name).unwrap_or(CachingMode::WriteThrough),
         })
     }
 

@@ -2,6 +2,7 @@
 //! GenApi node system: typed feature access backed by register IO.
 
 mod bitops;
+mod clock;
 mod conversions;
 mod error;
 mod io;
@@ -12,6 +13,7 @@ mod state;
 pub mod swissknife;
 mod text;
 
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::GenApiError;
 pub use io::{NullIo, RegisterIo};
 pub use nodemap::{ChunkData, NodeMap};
@@ -22,7 +24,9 @@ pub use nodes::{
 pub use persistence::{Configuration, LoadReport, PersistencePlan};
 pub use state::{FeatureState, FeatureValue, ValueRange};
 pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
-pub use viva_genapi_xml::{AccessMode, DocumentIdentity, PortKind, SkOutput, SkippedNode};
+pub use viva_genapi_xml::{
+    AccessMode, CachingMode, DocumentIdentity, PortKind, SkOutput, SkippedNode,
+};
 
 #[cfg(test)]
 mod tests {

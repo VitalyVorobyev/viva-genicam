@@ -41,7 +41,21 @@ enum_available?: Array<string>,
 /**
  * Engineering unit copied from node metadata (e.g. `"us"`).
  */
-unit?: string, };
+unit?: string,
+/**
+ * How long, in milliseconds, the value may be shown before it is read
+ * again: the `<PollingTime>` of the feature or of a register its value
+ * is read through. Absent when nothing polls it.
+ */
+polling_ms?: number,
+/**
+ * The feature's caching mode in GenICam spelling — `"NoCache"`,
+ * `"WriteThrough"`, `"WriteAround"` — its own combined with that of the
+ * registers it is read through. A `NoCache` feature changes on the
+ * device with nothing to announce it. Absent from services that predate
+ * it.
+ */
+caching?: string, };
 
 export type NumericRange = { min: number, max: number,
 /**

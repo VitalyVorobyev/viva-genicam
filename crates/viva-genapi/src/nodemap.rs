@@ -1,6 +1,7 @@
 //! NodeMap implementation for runtime feature access.
 
 mod ports;
+mod refresh;
 
 pub use ports::ChunkData;
 
@@ -51,6 +52,9 @@ pub struct NodeMap {
     ports: HashMap<String, PortKind>,
     /// Chunk and event data attached to those ports.
     attached: ports::Attached,
+    /// `<Cachable>` and `<PollingTime>` resolved per node, the clock polling
+    /// is measured against, and what changed when (ADR-0029).
+    refresh: refresh::Refresh,
 }
 
 fn register_addressing_dependency(
@@ -399,10 +403,12 @@ impl NodeMap {
             generation: Cell::new(0),
             ports,
             attached: ports::Attached::default(),
+            refresh: refresh::Refresh::default(),
         };
         map.command_targets = map.find_command_targets();
         map.link_selected_values();
         map.link_port_dependents();
+        map.build_refresh();
         Ok(map)
     }
 
@@ -499,7 +505,9 @@ impl NodeMap {
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
         let location = self.locate(name, addressing, io)?;
-        if let Some(value) = *node.cache.borrow() {
+        if self.may_serve(name)
+            && let Some(value) = *node.cache.borrow()
+        {
             return Ok(value);
         }
         let raw = self.read_location(name, &location, io)?;
@@ -515,8 +523,14 @@ impl NodeMap {
             bytes_to_i64(name, &raw, integer_sign(node), node.byte_order)?
         };
         debug!(node = %name, raw = value, "read integer feature");
-        node.cache.replace(Some(value));
-        node.raw_cache.replace(Some(raw));
+        self.note_read(name);
+        if self.may_cache(name) {
+            node.cache.replace(Some(value));
+            node.raw_cache.replace(Some(raw));
+        } else {
+            node.cache.replace(None);
+            node.raw_cache.replace(None);
+        }
         Ok(value)
     }
 
@@ -564,6 +578,11 @@ impl NodeMap {
                 integer_sign(node).is_signed(),
             )?;
             let readable = !matches!(node.access, AccessMode::WO);
+            // The other bits are the device's now: a cached reading it may
+            // since have changed must not be written back over them.
+            if readable && !self.may_serve(name) {
+                node.raw_cache.replace(None);
+            }
             let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
             insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
             debug!(node = %name, raw = value, "write integer feature");
@@ -571,8 +590,7 @@ impl NodeMap {
                 GenApiError::Io(_) => err,
                 other => other,
             })?;
-            node.cache.replace(Some(value));
-            node.raw_cache.replace(Some(raw));
+            self.after_register_write(name, &node.cache, value, &node.raw_cache, raw, readable);
         } else {
             let bytes = i64_to_bytes(name, value, len, integer_sign(node), node.byte_order)?;
             debug!(node = %name, raw = value, "write integer feature");
@@ -580,8 +598,8 @@ impl NodeMap {
                 GenApiError::Io(_) => err,
                 other => other,
             })?;
-            node.cache.replace(Some(value));
-            node.raw_cache.replace(Some(bytes));
+            let readable = !matches!(node.access, AccessMode::WO);
+            self.after_register_write(name, &node.cache, value, &node.raw_cache, bytes, readable);
         }
         self.invalidate_dependents(name);
         Ok(())
@@ -625,7 +643,9 @@ impl NodeMap {
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing or pValue")))?;
         let location = self.locate(name, addressing, io)?;
-        if let Some(value) = *node.cache.borrow() {
+        if self.may_serve(name)
+            && let Some(value) = *node.cache.borrow()
+        {
             return Ok(value);
         }
         let raw = self.read_location(name, &location, io)?;
@@ -644,7 +664,8 @@ impl NodeMap {
                 v
             }
         };
-        node.cache.replace(Some(value));
+        self.note_read(name);
+        node.cache.replace(self.may_cache(name).then_some(value));
         Ok(value)
     }
 
@@ -695,7 +716,14 @@ impl NodeMap {
             GenApiError::Io(_) => err,
             other => other,
         })?;
-        node.cache.replace(Some(value));
+        // `WriteAround` — a `<FloatReg>`'s default — keeps nothing: the camera
+        // may store something else, a gain it rounded.
+        if self.keeps_written(name) {
+            node.cache.replace(Some(value));
+            self.note_read(name);
+        } else {
+            node.cache.replace(None);
+        }
         self.invalidate_dependents(name);
         Ok(())
     }
@@ -705,14 +733,31 @@ impl NodeMap {
         let node = self.get_enum_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
         // When pValue is set, read the integer from the delegate node.
+        // GenICam Standard v2.1.1 §2.8.10: while a polled enumeration holds a
+        // self-clearing entry, "the reading will be performed ignoring the
+        // cache" — the register's behind it too.
+        let active = self.self_clearing_active(name);
+        if active {
+            for link in self.value_chain(name) {
+                if let Some(node) = self.nodes.get(link) {
+                    node.invalidate_cache();
+                }
+            }
+        }
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
-            if let Some(value) = node.value_cache.borrow().clone() {
+            if !active
+                && self.may_serve(name)
+                && let Some(value) = node.value_cache.borrow().clone()
+            {
                 return Ok(value);
             }
             let raw_value = self.get_integer(&pv, io)?;
             let entry = self.lookup_enum_entry(node, raw_value, io)?;
-            node.value_cache.replace(Some(entry.clone()));
+            self.note_entry(name, entry_is_self_clearing(node, &entry));
+            if self.may_cache(name) {
+                node.value_cache.replace(Some(entry.clone()));
+            }
             return Ok(entry);
         }
         // A floating enumeration: the entry written, else its start value.
@@ -727,7 +772,10 @@ impl NodeMap {
             .as_ref()
             .ok_or_else(|| GenApiError::NodeNotFound(format!("{name}: no addressing")))?;
         let location = self.locate(name, addressing, io)?;
-        if let Some(value) = node.value_cache.borrow().clone() {
+        if !active
+            && self.may_serve(name)
+            && let Some(value) = node.value_cache.borrow().clone()
+        {
             return Ok(value);
         }
         let raw = self.read_location(name, &location, io)?;
@@ -737,7 +785,11 @@ impl NodeMap {
         let raw_value = bytes_to_i64(name, &raw, Sign::Signed, ByteOrder::Big)?;
         let entry = self.lookup_enum_entry(node, raw_value, io)?;
         debug!(node = %name, raw = raw_value, entry = %entry, "read enum feature");
-        node.value_cache.replace(Some(entry.clone()));
+        self.note_read(name);
+        self.note_entry(name, entry_is_self_clearing(node, &entry));
+        if self.may_cache(name) {
+            node.value_cache.replace(Some(entry.clone()));
+        }
         Ok(entry)
     }
 
@@ -761,12 +813,12 @@ impl NodeMap {
                     entry: entry.to_string(),
                 })?;
             let raw_value = self.resolve_enum_entry_value(node, entry_decl, io)?;
-            let entry_str = entry.to_string();
-            // Re-borrow node after mutable self call.
+            let self_clearing = entry_decl.is_self_clearing;
             self.set_integer(&pv, raw_value, io)?;
+            // Re-borrow node after mutable self call.
             let node = self.get_enum_node(name)?;
-            node.value_cache.replace(Some(entry_str));
             node.invalidate();
+            self.note_entry(name, self_clearing);
             self.invalidate_dependents(name);
             return Ok(());
         }
@@ -802,6 +854,7 @@ impl NodeMap {
                 entry: entry.to_string(),
             })?;
         let raw = self.resolve_enum_entry_value(node, entry_decl, io)?;
+        let self_clearing = entry_decl.is_self_clearing;
         let bytes = i64_to_bytes(name, raw, len, Sign::Signed, ByteOrder::Big)?;
         debug!(node = %name, raw, entry, "write enum feature");
         io.write(address, &bytes).map_err(|err| match err {
@@ -809,6 +862,7 @@ impl NodeMap {
             other => other,
         })?;
         node.value_cache.replace(None);
+        self.note_entry(name, self_clearing);
         self.invalidate_dependents(name);
         Ok(())
     }
@@ -1137,15 +1191,23 @@ impl NodeMap {
             .bitfield
             .ok_or_else(|| GenApiError::Parse(format!("{name}: boolean without bitfield")))?;
         let location = self.locate(name, addressing, io)?;
-        if let Some(value) = *node.cache.borrow() {
+        if self.may_serve(name)
+            && let Some(value) = *node.cache.borrow()
+        {
             return Ok(value);
         }
         let raw = self.read_location(name, &location, io)?;
         let raw_value = extract(&raw, bitfield).map_err(|err| map_bitops_error(name, err))?;
         let value = raw_value != 0;
         debug!(node = %name, raw = raw_value, value, "read boolean feature");
-        node.cache.replace(Some(value));
-        node.raw_cache.replace(Some(raw));
+        self.note_read(name);
+        if self.may_cache(name) {
+            node.cache.replace(Some(value));
+            node.raw_cache.replace(Some(raw));
+        } else {
+            node.cache.replace(None);
+            node.raw_cache.replace(None);
+        }
         Ok(value)
     }
 
@@ -1188,6 +1250,9 @@ impl NodeMap {
         let (address, len) = self.locate_for_write(name, addressing, io)?;
         let encoded = if value { 1 } else { 0 };
         let readable = !matches!(node.access, AccessMode::WO);
+        if readable && !self.may_serve(name) {
+            node.raw_cache.replace(None);
+        }
         let mut raw = get_raw_or_read(name, readable, &node.raw_cache, io, address, len)?;
         insert(&mut raw, bitfield, encoded).map_err(|err| map_bitops_error(name, err))?;
         debug!(node = %name, raw = encoded, value, "write boolean feature");
@@ -1195,8 +1260,7 @@ impl NodeMap {
             GenApiError::Io(_) => err,
             other => other,
         })?;
-        node.cache.replace(Some(value));
-        node.raw_cache.replace(Some(raw));
+        self.after_register_write(name, &node.cache, value, &node.raw_cache, raw, readable);
         self.invalidate_dependents(name);
         Ok(())
     }
@@ -1222,6 +1286,10 @@ impl NodeMap {
         if let Some(pv) = node.pvalue.clone() {
             debug!(node = %name, value, "execute command via pValue");
             self.set_integer(&pv, value, io)?;
+            // "If the command is write only no polling takes place" (§2.8.8).
+            let polls =
+                self.imposed_access(name) != Some(AccessMode::WO) && !self.is_write_only(&pv);
+            self.note_command(name, polls);
             self.invalidate_dependents(name);
             return Ok(());
         }
@@ -1283,6 +1351,7 @@ impl NodeMap {
         let done = current != expected;
         trace!(node = %name, current, expected, done, "command IsDone");
         if done {
+            self.note_command(name, false);
             self.invalidate_dependents(name);
             for link in chain {
                 self.invalidate_dependents(link);
@@ -1576,7 +1645,8 @@ impl NodeMap {
         io: &dyn RegisterIo,
         stack: &mut HashSet<String>,
     ) -> Result<SkValue, GenApiError> {
-        if let Some((value, generation)) = *node.cache.borrow()
+        if self.may_serve(&node.name)
+            && let Some((value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value);
@@ -1601,7 +1671,9 @@ impl NodeMap {
         stack.remove(&node.name);
         let value = result?;
         debug!(node = %node.name, value = %value, "evaluate SwissKnife");
-        node.cache.replace(Some((value, current_gen)));
+        if self.may_cache(&node.name) {
+            node.cache.replace(Some((value, current_gen)));
+        }
         Ok(value)
     }
 
@@ -2029,15 +2101,19 @@ impl NodeMap {
     /// held — and those of the nodes that depend on it, so the next read asks
     /// the device.
     ///
-    /// For a value the device changes on its own whose XML does not say so:
-    /// `Cachable` and `PollingTime` are not honoured yet (backlog GA-05), so
-    /// a latched timestamp read twice came back the same. Every timestamp in
-    /// the vendor corpus is an `Integer` over an `IntReg`, so clearing the
-    /// front node alone changed nothing (Codex review of #187).
+    /// For a value the device changes in a way its XML does not describe — a
+    /// timestamp a latch command fills, with nothing linking the two. A value
+    /// the XML declares `NoCache` needs none of this, and one with a
+    /// `<PollingTime>` is read again once that has passed (ADR-0029). Every
+    /// timestamp in the vendor corpus is an `Integer` over an `IntReg`, so
+    /// clearing the front node alone would change nothing (Codex review of
+    /// #187). The invalidation is a change for [`NodeMap::changed_since`].
     pub fn invalidate(&self, name: &str) {
+        self.bump_generation();
         for link in self.value_chain(name) {
             if let Some(node) = self.nodes.get(link) {
                 node.invalidate_cache();
+                self.note_changed(link);
             }
         }
         self.invalidate_dependents(name);
@@ -2052,10 +2128,14 @@ impl NodeMap {
             node.invalidate_cache();
         }
         self.bump_generation();
+        self.note_all_changed();
     }
 
+    /// `name` changed: a new generation, recorded against it and against
+    /// everything that depends on it, whose caches are dropped.
     fn invalidate_dependents(&self, name: &str) {
         self.bump_generation();
+        self.note_changed(name);
         if let Some(children) = self.dependents.get(name) {
             let mut visited = HashSet::new();
             for child in children {
@@ -2071,10 +2151,35 @@ impl NodeMap {
         if let Some(node) = self.nodes.get(name) {
             node.invalidate_cache();
         }
+        self.note_changed(name);
         if let Some(children) = self.dependents.get(name) {
             for child in children {
                 self.invalidate_recursive(child, visited);
             }
+        }
+    }
+
+    /// Leave a register's cache as its caching mode says after a write:
+    /// `WriteThrough` keeps the value written; `WriteAround` and `NoCache`
+    /// keep nothing, so the next read asks the device — except the bytes a
+    /// write-only register was written, the only way to keep its other bits
+    /// on the next masked write (GA-31).
+    fn after_register_write<T>(
+        &self,
+        name: &str,
+        cache: &std::cell::RefCell<Option<T>>,
+        value: T,
+        raw_cache: &std::cell::RefCell<Option<Vec<u8>>>,
+        raw: Vec<u8>,
+        readable: bool,
+    ) {
+        if self.keeps_written(name) {
+            cache.replace(Some(value));
+            raw_cache.replace(Some(raw));
+            self.note_read(name);
+        } else {
+            cache.replace(None);
+            raw_cache.replace((!readable).then_some(raw));
         }
     }
 
@@ -2123,14 +2228,17 @@ impl NodeMap {
     pub fn get_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<f64, GenApiError> {
         let node = self.get_converter_node(name)?;
         self.ensure_not_imposed(name, AccessMode::WO)?;
-        if let Some((value, generation)) = *node.cache.borrow()
+        if self.may_serve(name)
+            && let Some((value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value.as_f64());
         }
         let mut stack = HashSet::new();
         let value = self.evaluate_converter(node, io, &mut stack)?;
-        node.cache.replace(Some((value, self.generation.get())));
+        if self.may_cache(name) {
+            node.cache.replace(Some((value, self.generation.get())));
+        }
         Ok(value.as_f64())
     }
 
@@ -2138,14 +2246,17 @@ impl NodeMap {
     pub fn get_int_converter(&self, name: &str, io: &dyn RegisterIo) -> Result<i64, GenApiError> {
         let node = self.get_int_converter_node(name)?;
         self.ensure_not_imposed(name, AccessMode::WO)?;
-        if let Some((value, generation)) = *node.cache.borrow()
+        if self.may_serve(name)
+            && let Some((value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value);
         }
         let mut stack = HashSet::new();
         let value = self.evaluate_int_converter(node, io, &mut stack)?;
-        node.cache.replace(Some((value, self.generation.get())));
+        if self.may_cache(name) {
+            node.cache.replace(Some((value, self.generation.get())));
+        }
         Ok(value)
     }
 
@@ -2244,7 +2355,8 @@ impl NodeMap {
     pub fn get_string(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_string_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        if let Some((ref value, generation)) = *node.cache.borrow()
+        if self.may_serve(name)
+            && let Some((ref value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value.clone());
@@ -2254,8 +2366,11 @@ impl NodeMap {
         // Convert bytes to string, stopping at first null byte
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
         let value = String::from_utf8_lossy(&raw[..end]).to_string();
-        node.cache
-            .replace(Some((value.clone(), self.generation.get())));
+        self.note_read(name);
+        node.cache.replace(
+            self.may_cache(name)
+                .then(|| (value.clone(), self.generation.get())),
+        );
         debug!(node = %name, value = %value, "get_string");
         Ok(value)
     }
@@ -2276,9 +2391,14 @@ impl NodeMap {
         let copy_len = bytes.len().min(len as usize);
         buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
         io.write(address, &buf)?;
-        node.cache
-            .replace(Some((value.to_string(), self.generation.get())));
         self.invalidate_dependents(name);
+        if self.keeps_written(name) {
+            node.cache
+                .replace(Some((value.to_string(), self.generation.get())));
+            self.note_read(name);
+        } else {
+            node.cache.replace(None);
+        }
         debug!(node = %name, value = %value, "set_string");
         Ok(())
     }
@@ -2292,15 +2412,19 @@ impl NodeMap {
     pub fn get_register(&self, name: &str, io: &dyn RegisterIo) -> Result<Vec<u8>, GenApiError> {
         let node = self.get_register_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
-        if let Some((ref value, generation)) = *node.cache.borrow()
+        if self.may_serve(name)
+            && let Some((ref value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value.clone());
         }
         let location = self.locate(name, &node.addressing, io)?;
         let raw = self.read_location(name, &location, io)?;
-        node.cache
-            .replace(Some((raw.clone(), self.generation.get())));
+        self.note_read(name);
+        node.cache.replace(
+            self.may_cache(name)
+                .then(|| (raw.clone(), self.generation.get())),
+        );
         debug!(node = %name, len = raw.len(), "get_register");
         Ok(raw)
     }
@@ -2327,9 +2451,14 @@ impl NodeMap {
             )));
         }
         io.write(address, data)?;
-        node.cache
-            .replace(Some((data.to_vec(), self.generation.get())));
         self.invalidate_dependents(name);
+        if self.keeps_written(name) {
+            node.cache
+                .replace(Some((data.to_vec(), self.generation.get())));
+            self.note_read(name);
+        } else {
+            node.cache.replace(None);
+        }
         debug!(node = %name, len = data.len(), "set_register");
         Ok(())
     }
@@ -2391,6 +2520,13 @@ impl NodeMap {
         debug!(node = %node.name, int_value, "evaluate IntConverter");
         Ok(int_value)
     }
+}
+
+/// Whether `entry` of `node` is declared `<IsSelfClearing>Yes`.
+fn entry_is_self_clearing(node: &EnumNode, entry: &str) -> bool {
+    node.entries
+        .iter()
+        .any(|candidate| candidate.name == entry && candidate.is_self_clearing)
 }
 
 /// Build one runtime node from its declaration, recording the nodes it depends

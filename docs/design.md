@@ -127,6 +127,17 @@ Introspection API (`node_names()` in document order, `dependents()`,
 `access_mode()`, `ports()`, `port_features()`) serves external
 consumers such as the studio.
 
+Values are cached as the XML's `<Cachable>` allows
+([ADR-0029](adrs/adr0029-caching-polling-and-refresh.md)): `NoCache` never,
+`WriteAround` (a `<FloatReg>`'s default) only what was read, `WriteThrough`
+(every other register's) what was written too; a node is cached only as far
+as every register its value is read through allows. A `<PollingTime>`
+expires a cached value, measured against an injected `Clock` so the crate
+still runs on `wasm32-unknown-unknown`. Every write and invalidation
+advances a generation: `changed_since(generation)` names what changed, and
+`poll()` invalidates the values whose polling time has passed — a query in
+place of callbacks, because the node map is not `Sync`.
+
 **Ports** (`viva-genapi`) — every register reaches its bytes through the
 `<Port>` its `<pPort>` names ([ADR-0026](adrs/adr0026-genapi-ports-chunks-events.md)).
 The device port is the `RegisterIo`. A chunk port (`<ChunkID>`) reads one chunk

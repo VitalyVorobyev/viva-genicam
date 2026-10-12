@@ -366,6 +366,7 @@ fn parse_enum_entry(
     let mut provider = attribute_value(&start, TAG_P_VALUE)?;
     let mut display_name = attribute_value(&start, TAG_DISPLAY_NAME)?;
     let mut predicates = PredicateRefs::default();
+    let mut is_self_clearing = false;
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
 
@@ -400,6 +401,10 @@ fn parse_enum_entry(
                         name = trimmed.to_string();
                     }
                 }
+                "IsSelfClearing" => {
+                    let text = read_text_start(reader, e)?;
+                    is_self_clearing = text.trim() == "Yes";
+                }
                 _ => {
                     if !handle_predicate_start(reader, e, &mut predicates)? {
                         skip_element(reader, e.name().as_ref())?;
@@ -416,7 +421,9 @@ fn parse_enum_entry(
         buf.clear();
     }
 
-    build_enum_entry(name, literal, provider, display_name, predicates)
+    let mut entry = build_enum_entry(name, literal, provider, display_name, predicates)?;
+    entry.is_self_clearing = is_self_clearing;
+    Ok(entry)
 }
 
 /// Parse an empty `<EnumEntry />` element.
@@ -481,5 +488,6 @@ fn build_enum_entry(
         value,
         display_name,
         predicates,
+        is_self_clearing: false,
     })
 }

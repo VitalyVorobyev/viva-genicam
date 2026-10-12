@@ -355,6 +355,18 @@ pub struct FeatureState {
     /// Engineering unit copied from node metadata (e.g. `"us"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// How long, in milliseconds, the value may be shown before it is read
+    /// again: the `<PollingTime>` of the feature or of a register its value
+    /// is read through. Absent when nothing polls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling_ms: Option<u64>,
+    /// The feature's caching mode in GenICam spelling — `"NoCache"`,
+    /// `"WriteThrough"`, `"WriteAround"` — its own combined with that of the
+    /// registers it is read through. A `NoCache` feature changes on the
+    /// device with nothing to announce it. Absent from services that predate
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caching: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -378,6 +390,8 @@ impl FeatureState {
             numeric: None,
             enum_available: None,
             unit: None,
+            polling_ms: None,
+            caching: None,
         }
     }
 
@@ -445,7 +459,21 @@ impl From<viva_genapi::FeatureState> for FeatureState {
             }),
             enum_available: state.enum_entries,
             unit: state.unit,
+            polling_ms: state
+                .polling_time
+                .map(|t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX)),
+            caching: Some(caching_text(state.caching).to_string()),
         }
+    }
+}
+
+/// GenICam's spelling of a caching mode.
+#[cfg(feature = "genapi")]
+fn caching_text(mode: viva_genapi::CachingMode) -> &'static str {
+    match mode {
+        viva_genapi::CachingMode::NoCache => "NoCache",
+        viva_genapi::CachingMode::WriteThrough => "WriteThrough",
+        viva_genapi::CachingMode::WriteAround => "WriteAround",
     }
 }
 
@@ -1186,6 +1214,30 @@ mod tests {
 
     // ── FeatureState ────────────────────────────────────────────────────────
 
+    /// GA-05: the wire state says how to refresh a feature — its polling time
+    /// and its caching mode, both resolved along its value path — so a remote
+    /// viewer polls what a local one does.
+    #[cfg(feature = "genapi")]
+    #[test]
+    fn a_genapi_state_carries_its_polling_time_and_caching_mode() {
+        let xml = r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Float Name="DeviceTemperature"><pValue>DeviceTemperatureReg</pValue></Float>
+            <FloatReg Name="DeviceTemperatureReg"><Address>0x0</Address><Length>4</Length><AccessMode>RO</AccessMode><Cachable>NoCache</Cachable><PollingTime>500</PollingTime></FloatReg>
+            <Integer Name="Width"><Address>0x4</Address><Length>4</Length><AccessMode>RW</AccessMode></Integer>
+        </RegisterDescription>"#;
+        let model = viva_genapi_xml::parse(xml).expect("parse");
+        let map = viva_genapi::NodeMap::try_from_xml(model).expect("build");
+        let io = viva_genapi::NullIo;
+        let wire = FeatureState::from(map.feature_state("DeviceTemperature", &io).unwrap());
+        assert_eq!(wire.polling_ms, Some(500));
+        assert_eq!(wire.caching.as_deref(), Some("NoCache"));
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains(r#""polling_ms":500"#), "{json}");
+        let wire = FeatureState::from(map.feature_state("Width", &io).unwrap());
+        assert_eq!(wire.polling_ms, None);
+        assert_eq!(wire.caching.as_deref(), Some("WriteThrough"));
+    }
+
     #[test]
     fn test_feature_state_minimal_roundtrip() {
         let s = FeatureState {
@@ -1197,6 +1249,8 @@ mod tests {
             numeric: None,
             enum_available: None,
             unit: None,
+            polling_ms: None,
+            caching: None,
         };
         let j = serde_json::to_string(&s).expect("serialize");
         // Optional fields should be skipped.
@@ -1235,6 +1289,8 @@ mod tests {
             }),
             enum_available: None,
             unit: Some("px".to_string()),
+            polling_ms: None,
+            caching: None,
         };
         let j = serde_json::to_string(&s).expect("serialize");
         let d: FeatureState = serde_json::from_str(&j).expect("deserialize");
@@ -1256,6 +1312,8 @@ mod tests {
             }),
             enum_available: None,
             unit: None,
+            polling_ms: None,
+            caching: None,
         };
         let u: NodeValueUpdate = (&s).into();
         assert_eq!(u.value, serde_json::json!(512));
@@ -1276,6 +1334,8 @@ mod tests {
             numeric: None,
             enum_available: Some(vec!["Off".to_string(), "Once".to_string()]),
             unit: None,
+            polling_ms: None,
+            caching: None,
         };
         let j = serde_json::to_string(&s).expect("serialize");
         assert!(j.contains("\"enum_available\""));
@@ -1318,6 +1378,8 @@ mod tests {
                 numeric: None,
                 enum_available: None,
                 unit: None,
+                polling_ms: None,
+                caching: None,
             },
         );
         let r = CommandResult {

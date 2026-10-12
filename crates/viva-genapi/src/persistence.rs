@@ -391,10 +391,31 @@ impl NodeMap {
         PersistencePlan { features }
     }
 
-    /// The selectors of `name`, a selector that selects another (directly or
-    /// through others) before it, document order otherwise.
+    /// The selectors of `name` — those that select it, and the selectors of
+    /// those in turn — a selector that selects another (directly or through
+    /// others) before it, document order otherwise.
+    ///
+    /// A selector of a selector matters as much as a direct one: when
+    /// `LUTSelector` selects `LUTIndex` and `LUTIndex` selects `LUTValue`,
+    /// `LUTValue` read under each `LUTIndex` differs for each `LUTSelector`
+    /// entry too, though `LUTSelector` does not name it (Codex review of
+    /// #200).
     fn selectors_outermost_first(&self, name: &str) -> Vec<String> {
-        let selectors = self.selectors_of(name);
+        let mut selectors: Vec<&str> = Vec::new();
+        let mut pending: Vec<&str> = self.selectors_of(name);
+        while let Some(selector) = pending.pop() {
+            if selector == name || selectors.contains(&selector) {
+                continue;
+            }
+            selectors.push(selector);
+            pending.extend(self.selectors_of(selector));
+        }
+        let position: HashMap<&str, usize> = self
+            .node_names()
+            .enumerate()
+            .map(|(i, node)| (node, i))
+            .collect();
+        selectors.sort_by_key(|selector| position.get(selector).copied());
         let selects = |outer: &str, inner: &str| -> bool {
             let mut seen: HashSet<&str> = HashSet::new();
             let mut pending: Vec<&str> = vec![outer];

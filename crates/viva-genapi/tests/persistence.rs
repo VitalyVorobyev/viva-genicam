@@ -566,3 +566,82 @@ fn a_load_onto_another_model_or_xml_version_warns() {
     let same = configuration(vec![]);
     assert!(map.load_configuration(&same, &device).warnings.is_empty());
 }
+
+/// Selectors of selectors: `LUTSelector` selects `LUTIndex`, which selects
+/// `LUTValue`; `LUTSelector` does not name `LUTValue` itself, yet the value
+/// read depends on both (the register is indexed by both). The save must walk
+/// every entry of the outer selector, and under each the inner one — the
+/// shape of the corpus's LUT and sequencer selectors (Codex review of #200).
+const CHAINED: &str = r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+  <Enumeration Name="LUTSelector">
+    <EnumEntry Name="Luminance"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="Red"><Value>1</Value></EnumEntry>
+    <pValue>LUTSelectorReg</pValue>
+    <pSelected>LUTIndex</pSelected>
+  </Enumeration>
+  <IntReg Name="LUTSelectorReg"><Address>0x0</Address><Length>4</Length><AccessMode>RW</AccessMode></IntReg>
+  <Integer Name="LUTIndex">
+    <pValue>LUTIndexReg</pValue><Min>0</Min><Max>1</Max>
+    <pSelected>LUTValue</pSelected>
+  </Integer>
+  <IntReg Name="LUTIndexReg"><Address>0x4</Address><Length>4</Length><AccessMode>RW</AccessMode></IntReg>
+  <Integer Name="LUTValue">
+    <Streamable>Yes</Streamable>
+    <pValue>LUTValueReg</pValue><Min>0</Min><Max>4095</Max>
+  </Integer>
+  <IntReg Name="LUTValueReg">
+    <Address>0x100</Address>
+    <pIndex Offset="16">LUTSelectorReg</pIndex>
+    <pIndex Offset="4">LUTIndexReg</pIndex>
+    <Length>4</Length><AccessMode>RW</AccessMode>
+  </IntReg>
+</RegisterDescription>"#;
+
+#[test]
+fn a_save_walks_the_selectors_of_selectors_outermost_first() {
+    let device = Device::default();
+    for selector in 0..2u32 {
+        for index in 0..2u32 {
+            let addr = 0x100 + 16 * u64::from(selector) + 4 * u64::from(index);
+            device.put(addr, 1000 + 10 * selector + index);
+        }
+    }
+    device.put(0x0, 1); // Red selected
+    device.put(0x4, 0);
+    let mut map = NodeMap::try_from_xml(viva_genapi_xml::parse(CHAINED).unwrap()).unwrap();
+    let saved = map.save_configuration(&device);
+    let mut values: Vec<&SavedValue> = saved
+        .values
+        .iter()
+        .filter(|v| v.feature == "LUTValue")
+        .collect();
+    values.sort_by(|a, b| a.selectors.cmp(&b.selectors));
+    let expected: Vec<SavedValue> = [("Luminance", 0u32), ("Red", 1)]
+        .into_iter()
+        .flat_map(|(entry, selector)| {
+            (0..2u32).map(move |index| {
+                let addr = 0x100 + 16 * u64::from(selector) + 4 * u64::from(index);
+                (entry, index, addr)
+            })
+        })
+        .map(|(entry, index, addr)| {
+            value(
+                "LUTValue",
+                &[("LUTSelector", entry), ("LUTIndex", &index.to_string())],
+                &device.word(addr).to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(values, expected.iter().collect::<Vec<_>>());
+    assert_eq!(device.word(0x0), 1, "LUTSelector put back");
+    assert_eq!(device.word(0x4), 0, "LUTIndex put back");
+
+    // And a restore writes each value under both selectors.
+    let other = Device::default();
+    let mut map = NodeMap::try_from_xml(viva_genapi_xml::parse(CHAINED).unwrap()).unwrap();
+    let report = map.load_configuration(&saved, &other);
+    assert!(report.is_complete(), "{:?}", report.failures);
+    for addr in [0x100, 0x104, 0x110, 0x114] {
+        assert_eq!(other.word(addr), device.word(addr), "register {addr:#x}");
+    }
+}

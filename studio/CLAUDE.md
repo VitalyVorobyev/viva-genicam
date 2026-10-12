@@ -59,7 +59,8 @@ never appears (#132).
   (`ui/.../device/featureStore.ts`). Read a feature with `useFeature(name)`,
   write with `useFeatureWriter`, and draw one with `<FeatureControl>`; never
   keep a second copy. The store reads only what is subscribed — what is on
-  screen — and re-reads it when a write invalidates it.
+  screen — and re-reads it when a write invalidates it, and at its polling
+  time (`refreshInterval`, ADR-0029) while it stays on screen.
 - A command registered in `main.rs` needs a permission in
   `src-tauri/permissions/` that `capabilities/main.json` grants: Tauri refuses
   it otherwise, and only in the running app. `src/permissions.rs` checks the

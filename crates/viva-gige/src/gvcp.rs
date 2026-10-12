@@ -15,234 +15,14 @@ use tokio::time;
 use tracing::{debug, info, trace, warn};
 use viva_gencp::{AckHeader, CommandFlags, GenCpAck, OpCode, StatusCode, decode_ack};
 
+use crate::consts::{
+    self, GVCP_CMD_KEY, SCPS_DO_NOT_FRAGMENT, SCPS_FIRE_TEST_PACKET, STREAM_PACKET_SIZE_MASK,
+};
 use crate::nic::Iface;
-
-/// GVCP protocol constants grouped by semantic area.
-pub mod consts {
-    use std::time::Duration;
-
-    /// GVCP control port as defined by the GigE Vision specification (section 7.3).
-    pub const PORT: u16 = 3956;
-    /// Opcode of the discovery command.
-    pub const DISCOVERY_COMMAND: u16 = 0x0002;
-    /// Opcode of the discovery acknowledgement.
-    pub const DISCOVERY_ACK: u16 = 0x0003;
-    /// Opcode of the FORCEIP command.
-    pub const FORCEIP_COMMAND: u16 = 0x0004;
-    /// Opcode of the FORCEIP acknowledgement.
-    pub const FORCEIP_ACK: u16 = 0x0005;
-    /// Opcode of `PACKETRESEND_CMD`, which asks for no acknowledgement: the
-    /// answer is the packets themselves, on the stream channel. See
-    /// [`encode_packet_resend`](super::encode_packet_resend).
-    pub const PACKET_RESEND_COMMAND: u16 = 0x0040;
-    /// Flag-byte bit 4 on `PACKETRESEND_CMD`: the payload carries a 64-bit
-    /// block id and 32-bit packet ids (GigE Vision 2.0 extended ids). The same
-    /// bit means "allow broadcast acknowledge" on `DISCOVERY_CMD`.
-    pub const PACKET_RESEND_EXTENDED_IDS: u8 = 0x10;
-    /// Opcode of the PENDING_ACK acknowledgement (GigE Vision 1.2, section 18.5).
-    ///
-    /// A device that cannot complete a command within the controller's timeout
-    /// answers with this instead of the real acknowledgement, asking for more
-    /// time. It is not a GenCP opcode — the U3V side of GenCP signals the same
-    /// condition with status `0x8006` — so it is handled in the GVCP layer.
-    pub const PENDING_ACK: u16 = 0x0089;
-
-    // ── Event channel and action commands ───────────────────────────────
-    //
-    // These four opcodes are the ones a device sends *to* us on the message
-    // channel, plus the two we broadcast for actions. They live here rather
-    // than in `action`/`message` because keeping every GVCP opcode in one
-    // table is what makes a collision visible: `ACTION_COMMAND` was 0x0080 —
-    // `READ_REGISTER` — for as long as it had its own private constant.
-    // GigE Vision 2.0 section 18; corroborated by Wireshark's `packet-gvcp.c`
-    // (`GVCP_ACTION_CMD`, `GVCP_EVENT_CMD`, `GVCP_EVENTDATA_CMD`) and, for the
-    // register commands it shadowed, `../aravis/src/arvgvcpprivate.h`.
-
-    /// Opcode of the event command sent by a device on the message channel.
-    pub const EVENT_COMMAND: u16 = 0x00C0;
-    /// Opcode of the acknowledgement a controller returns for an `EVENT_CMD`.
-    pub const EVENT_ACK: u16 = 0x00C1;
-    /// Opcode of the event command that carries device-specific event data.
-    pub const EVENTDATA_COMMAND: u16 = 0x00C2;
-    /// Opcode of the acknowledgement returned for an `EVENTDATA_CMD`.
-    pub const EVENTDATA_ACK: u16 = 0x00C3;
-    /// Opcode of the action command.
-    pub const ACTION_COMMAND: u16 = 0x0100;
-    /// Opcode of the action acknowledgement.
-    pub const ACTION_ACK: u16 = 0x0101;
-
-    /// Size of one event entry in an `EVENT_CMD` with 16-bit block IDs.
-    pub const EVENT_ENTRY: usize = 16;
-    /// Size of one event entry in an `EVENT_CMD` with 64-bit block IDs.
-    ///
-    /// GigE Vision 2.0 extended block IDs, signalled by bit 4 of the GVCP
-    /// flags byte.
-    pub const EVENT_ENTRY_EXTENDED: usize = 24;
-
-    /// Current IP configuration flags register.
-    ///
-    /// Bit 2 = DHCP, bit 1 = persistent IP, bit 0 = LLA.
-    pub const CURRENT_IP_CONFIG: u64 = 0x0014;
-
-    /// Persistent IP address register (4 bytes at the end of a 16-byte block).
-    pub const PERSISTENT_IP_ADDRESS: u64 = 0x064C;
-    /// Persistent subnet mask register.
-    pub const PERSISTENT_SUBNET_MASK: u64 = 0x065C;
-    /// Persistent default gateway register.
-    pub const PERSISTENT_DEFAULT_GATEWAY: u64 = 0x066C;
-
-    /// Address of the Control Channel Privilege (CCP) register.
-    ///
-    /// A controller must write `CONTROL_PRIVILEGE` to this register before the
-    /// device accepts stream configuration or acquisition commands.
-    pub const CONTROL_CHANNEL_PRIVILEGE: u64 = 0x0a00;
-    /// CCP value claiming exclusive control.
-    pub const CCP_CONTROL: u32 = 1 << 1;
-    /// CCP value indicating an exclusive owner.
-    pub const CCP_EXCLUSIVE: u32 = 1 << 0;
-    /// Bits of the CCP register that mean "this application is the controller".
-    pub const CCP_CONTROLLER_BITS: u32 = CCP_CONTROL | CCP_EXCLUSIVE;
-    /// Primary Application Port: the UDP port of the application holding
-    /// control, in the low half, where GVCP Capability bit `0x0800_0000` says
-    /// the device has it. Wireshark: `GVCP_PRIMARY_APPLICATION_PORT`.
-    pub const PRIMARY_APPLICATION_PORT: u64 = 0x0a04;
-    /// Primary Application IP address. Wireshark:
-    /// `GVCP_PRIMARY_APPLICATION_IP_ADDRESS`.
-    pub const PRIMARY_APPLICATION_IP: u64 = 0x0a14;
-
-    /// Heartbeat timeout register (`GevHeartbeatTimeout`), in milliseconds.
-    ///
-    /// A device that has granted control privilege releases it again if it
-    /// receives no GVCP command from the controlling application within this
-    /// window. GVSP image traffic does not count — a stream can be running at
-    /// full rate while the control channel times out underneath it.
-    pub const HEARTBEAT_TIMEOUT: u64 = 0x0938;
-
-    /// Number of stream channels the device implements
-    /// (`GevNumberOfStreamChannels`). Wireshark: `GVCP_NUMBER_OF_STREAM_CHANNELS`.
-    pub const NUMBER_OF_STREAM_CHANNELS: u64 = 0x0904;
-    /// GVCP Capability: one bit per optional command or feature. Wireshark:
-    /// `GVCP_CAPABILITY`.
-    pub const GVCP_CAPABILITY: u64 = 0x0934;
-    /// Capability bit 29 — counting from the most significant bit as bit 0,
-    /// as the specification does — `PACKETRESEND_CMD` supported. Wireshark's
-    /// `hf_gvcp_capability_packetresend` masks `0x00000004`; aravis reads the
-    /// same bit (`ARV_GVBS_GVCP_CAPABILITY_PACKET_RESEND`, `1 << 2`).
-    pub const CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004;
-    /// Capability bit 26 — `PENDING_ACK` supported. Wireshark:
-    /// `hf_gvcp_capability_pending`, mask `0x00000020`.
-    pub const CAPABILITY_PENDING_ACK: u32 = 0x0000_0020;
-    /// GVCP Configuration (`GevGVCPConfiguration`): optional behaviour the
-    /// controller switches on. Wireshark: `GVCP_CONFIGURATION`.
-    pub const GVCP_CONFIGURATION: u64 = 0x0954;
-    /// Configuration bit 30 — `PENDING_ACK` enabled; a device sends one only
-    /// once this is set. Wireshark: `hf_gvcp_configuration_pending_ack_enable`,
-    /// mask `0x00000002`.
-    pub const CONFIGURATION_PENDING_ACK_ENABLE: u32 = 0x0000_0002;
-    /// Timestamp tick frequency, high 32 bits (`GevTimestampTickFrequencyHigh`).
-    pub const TIMESTAMP_TICK_FREQUENCY_HIGH: u64 = 0x093C;
-    /// Timestamp tick frequency, low 32 bits (`GevTimestampTickFrequencyLow`).
-    /// `GevSCPD` counts in these ticks.
-    pub const TIMESTAMP_TICK_FREQUENCY_LOW: u64 = 0x0940;
-
-    // ── Message channel bootstrap registers ─────────────────────────────
-    //
-    // These sit in the 0x0B00 block, next to CCP at 0x0A00 and the stream
-    // channels at 0x0D00. They previously read 0x0900_0200 / 0x0900_0204,
-    // which is not a bootstrap address at all: 0x0900 is
-    // `GevNumberOfMessageChannels`, and the low half was being used as if it
-    // were a base. Every event-channel write therefore landed ~150 MB into
-    // the device's register space. Wireshark's `packet-gvcp.c`
-    // (`GVCP_MC_DESTINATION_PORT`, `GVCP_MC_DESTINATION_ADDRESS`) gives the
-    // real values, and the CCP and stream-channel addresses we already had
-    // right corroborate the scheme.
-
-    /// Number of message channels the device implements (`GevNumberOfMessageChannels`).
-    pub const NUMBER_OF_MESSAGE_CHANNELS: u64 = 0x0000_0900;
-    /// Message channel destination port register (`GevMCP`).
-    ///
-    /// A 32-bit register; the UDP port occupies the low 16 bits.
-    pub const MESSAGE_DESTINATION_PORT: u64 = 0x0000_0B00;
-    /// Message channel destination address register (`GevMCDA`).
-    pub const MESSAGE_DESTINATION_ADDRESS: u64 = 0x0000_0B10;
-    /// Message channel transmission timeout in milliseconds (`GevMCTT`).
-    pub const MESSAGE_CHANNEL_TIMEOUT: u64 = 0x0000_0B14;
-    /// Message channel retry count (`GevMCRC`).
-    pub const MESSAGE_CHANNEL_RETRY_COUNT: u64 = 0x0000_0B18;
-
-    /// Maximum number of bytes we read per GenCP `ReadMem` operation.
-    pub const GENCP_MAX_BLOCK: usize = 512;
-    /// Additional bytes that accompany a GenCP `WriteMem` block.
-    pub const GENCP_WRITE_OVERHEAD: usize = 8;
-
-    /// Default timeout for control transactions.
-    pub const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
-    /// Maximum number of automatic retries for a control transaction.
-    pub const MAX_RETRIES: usize = 4;
-    /// Maximum number of consecutive PENDING_ACKs honoured for one command.
-    ///
-    /// A device is free to keep asking for more time; this bounds a
-    /// misbehaving one that never finishes.
-    pub const MAX_PENDING_ACKS: usize = 100;
-    /// Ceiling on the extension a single PENDING_ACK may request.
-    ///
-    /// The field is 16-bit milliseconds, so the wire maximum is ~65 s. Cap it
-    /// well below that: an honest device asks for tens or hundreds of
-    /// milliseconds, and this keeps a garbage value from hanging the caller.
-    pub const MAX_PENDING_ACK_WAIT: Duration = Duration::from_secs(10);
-    /// Base delay used for retry backoff.
-    pub const RETRY_BASE_DELAY: Duration = Duration::from_millis(20);
-    /// Upper bound for the random jitter added to the retry delay (inclusive).
-    pub const RETRY_JITTER: Duration = Duration::from_millis(10);
-
-    /// Maximum number of bytes captured while listening for discovery responses.
-    pub const DISCOVERY_BUFFER: usize = 2048;
-
-    /// Base register for stream channel 0 (GigE Vision bootstrap register map).
-    ///
-    /// The GigE Vision specification defines stream channel bootstrap registers
-    /// starting at 0x0d00. Note: some cameras may use different offsets declared
-    /// in their GenICam XML (e.g. SFNC `GevSCDA` nodes). The bootstrap offsets
-    /// here match the aravis implementation and the GigE Vision 2.x standard.
-    pub const STREAM_CHANNEL_BASE: u64 = 0x0d00;
-    /// Stride in bytes between successive stream channel blocks.
-    pub const STREAM_CHANNEL_STRIDE: u64 = 0x40;
-    /// Offset for `GevSCPHostPort` within a stream channel block.
-    pub const STREAM_DESTINATION_PORT: u64 = 0x00;
-    /// Offset for `GevSCPSPacketSize` within a stream channel block.
-    pub const STREAM_PACKET_SIZE: u64 = 0x04;
-    /// Offset for `GevSCPD` (packet delay) within a stream channel block.
-    pub const STREAM_PACKET_DELAY: u64 = 0x08;
-    /// Offset for `GevSCDA` (stream destination IP address) within a stream channel block.
-    pub const STREAM_DESTINATION_ADDRESS: u64 = 0x18;
-}
+use crate::status::GigeStatus;
 
 /// Public alias for the GVCP well-known port.
 pub use consts::PORT as GVCP_PORT;
-
-/// The bits of `GevSCPSPacketSize` that hold the packet size.
-///
-/// Bit 31 fires a test packet and bit 30 sets do-not-fragment; bits 29-16 are
-/// reserved. Masking matters on the read side as much as the write side — a
-/// device that leaves the do-not-fragment bit set would otherwise read back as
-/// a packet size of over a billion.
-pub const STREAM_PACKET_SIZE_MASK: u32 = 0xFFFF;
-
-/// `GevSCPSPacketSize` bit 31: emit one test packet of the requested size.
-///
-/// The only way to discover that a size *both endpoints accept* cannot cross
-/// the link between them — a register read reports what the device stored, not
-/// what the network will carry
-/// ([#112](https://github.com/VitalyVorobyev/viva-genicam/issues/112)).
-pub const SCPS_FIRE_TEST_PACKET: u32 = 0x8000_0000;
-
-/// `GevSCPSPacketSize` bit 30: set do-not-fragment on transmitted packets.
-///
-/// Paired with the test packet so a path that would *fragment* the datagram
-/// drops it instead. Without it a probe can succeed on a link that then
-/// delivers reassembled fragments, which is slower than the smaller size it
-/// talked us out of.
-pub const SCPS_DO_NOT_FRAGMENT: u32 = 0x4000_0000;
 
 /// Encode a `PACKETRESEND_CMD` asking the device to send packets
 /// `first_packet..=last_packet` of block `block_id` on stream channel
@@ -302,7 +82,7 @@ pub fn encode_packet_resend(
 
 /// GVCP request header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GvcpRequestHeader {
+pub(crate) struct GvcpRequestHeader {
     /// Request flags (acknowledgement, broadcast).
     pub flags: CommandFlags,
     /// Raw command/opcode value.
@@ -313,15 +93,12 @@ pub struct GvcpRequestHeader {
     pub request_id: u16,
 }
 
-/// GVCP command message key value (first byte of every GVCP command packet).
-const GVCP_CMD_KEY: u8 = 0x42;
-
 impl GvcpRequestHeader {
     /// Encode the header into a `Bytes` buffer ready to be transmitted.
     ///
     /// Uses proper GVCP wire format: byte 0 = `0x42` (command key),
     /// byte 1 = flags byte (bit 0 = ACK_REQUIRED, bit 4 = BROADCAST).
-    pub fn encode(self, payload: &[u8]) -> Bytes {
+    pub(crate) fn encode(self, payload: &[u8]) -> Bytes {
         let mut buf = BytesMut::with_capacity(viva_gencp::HEADER_SIZE + payload.len());
         // GVCP command header: key byte + flags byte (not a u16 flags field).
         buf.put_u8(GVCP_CMD_KEY);
@@ -356,9 +133,9 @@ impl GvcpRequestHeader {
 
 /// GVCP acknowledgement header wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GvcpAckHeader {
+pub(crate) struct GvcpAckHeader {
     /// Status reported by the device.
-    pub status: StatusCode,
+    pub status: GigeStatus,
     /// Raw command/opcode value.
     pub command: u16,
     /// Payload length in bytes.
@@ -370,7 +147,7 @@ pub struct GvcpAckHeader {
 impl From<AckHeader> for GvcpAckHeader {
     fn from(value: AckHeader) -> Self {
         Self {
-            status: value.status,
+            status: GigeStatus::from_raw(value.status),
             command: value.opcode.ack_code(),
             length: value.length,
             request_id: value.request_id,
@@ -380,17 +157,48 @@ impl From<AckHeader> for GvcpAckHeader {
 
 /// Errors that can occur when operating the GVCP control path.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GigeError {
+    /// A socket operation failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("protocol: {0}")]
-    Protocol(String),
+    /// No acknowledgement arrived within the control timeout, retries
+    /// included.
     #[error("timeout waiting for acknowledgement")]
     Timeout,
+    /// An acknowledgement's header could not be decoded.
     #[error("GenCP: {0}")]
     GenCp(#[from] viva_gencp::GenCpError),
+    /// The device answered with an error status, decoded with GigE Vision's
+    /// table (ADR-0020).
     #[error("device reported status {0}")]
-    Status(StatusCode),
+    Status(GigeStatus),
+    /// An acknowledgement does not have the shape GVCP gives it.
+    #[error("malformed {command} acknowledgement: {problem}")]
+    MalformedAck {
+        /// The command it answers, such as `"READREG"`.
+        command: &'static str,
+        /// What is wrong, such as `"answers another command"`.
+        problem: &'static str,
+    },
+    /// An acknowledgement carries another payload length than its command
+    /// asked for.
+    #[error("{command} acknowledgement carries {got} bytes; expected {expected}")]
+    AckLength {
+        /// The command it answers.
+        command: &'static str,
+        /// The bytes asked for.
+        expected: usize,
+        /// The bytes it carries.
+        got: usize,
+    },
+    /// GigE Vision control runs over IPv4, and the address or interface
+    /// given has none.
+    #[error("GigE Vision control runs over IPv4, and the {0} has no IPv4 address")]
+    NotIpv4(&'static str),
+    /// A GVSP packet size wider than `GevSCPSPacketSize`'s 16-bit field.
+    #[error("GVSP packet size {0} does not fit GevSCPSPacketSize's 16 bits")]
+    PacketSize(u32),
 }
 
 /// Information returned by GVCP discovery packets.
@@ -399,9 +207,13 @@ pub enum GigeError {
 /// (`DeviceInfo { model, ..DeviceInfo::from_ip(ip) }`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
+    /// The camera's current IPv4 address.
     pub ip: Ipv4Addr,
+    /// The camera's MAC address.
     pub mac: [u8; 6],
+    /// Model name (Discovery ACK offset 104).
     pub model: Option<String>,
+    /// Manufacturer name (Discovery ACK offset 72).
     pub manufacturer: Option<String>,
     /// Device version string (Discovery ACK offset 136).
     pub version: Option<String>,
@@ -630,9 +442,7 @@ pub async fn force_ip(
     let payload = encode_forceip_payload(mac, ip, subnet, gateway);
 
     let local_ip = match iface {
-        Some(iface) => iface
-            .ipv4()
-            .ok_or_else(|| GigeError::Protocol("interface lacks IPv4 address".into()))?,
+        Some(iface) => iface.ipv4().ok_or(GigeError::NotIpv4("interface"))?,
         None => Ipv4Addr::UNSPECIFIED,
     };
 
@@ -655,20 +465,27 @@ pub async fn force_ip(
     match time::timeout(consts::CONTROL_TIMEOUT, socket.recv_from(&mut buf)).await {
         Ok(Ok((len, _src))) => {
             if len < viva_gencp::HEADER_SIZE {
-                return Err(GigeError::Protocol("FORCEIP ack too short".into()));
+                return Err(GigeError::MalformedAck {
+                    command: "FORCEIP",
+                    problem: "is shorter than a GVCP header",
+                });
             }
             let mut cursor = &buf[..];
             let status = cursor.get_u16();
             let command = cursor.get_u16();
             if command != consts::FORCEIP_ACK {
-                return Err(GigeError::Protocol(format!(
-                    "unexpected FORCEIP ack opcode {command:#06x}"
-                )));
+                debug!(
+                    command = format_args!("{command:#06x}"),
+                    "FORCEIP answered by another acknowledgement"
+                );
+                return Err(GigeError::MalformedAck {
+                    command: "FORCEIP",
+                    problem: "answers another command",
+                });
             }
-            if status != 0 {
-                return Err(GigeError::Protocol(format!(
-                    "FORCEIP returned status {status:#06x}"
-                )));
+            let status = GigeStatus::from_raw(status);
+            if !status.is_success() {
+                return Err(GigeError::Status(status));
             }
             info!(%ip, "FORCEIP accepted");
             Ok(())
@@ -991,7 +808,11 @@ fn parse_discovery_payload(payload: &[u8]) -> Result<DeviceInfo, GigeError> {
     // read leniently: a short-but-valid ACK should still yield a usable device
     // rather than failing discovery on that interface.
     if payload.len() < 40 {
-        return Err(GigeError::Protocol("discovery payload too small".into()));
+        return Err(GigeError::AckLength {
+            command: "DISCOVERY",
+            expected: 40,
+            got: payload.len(),
+        });
     }
     let mut cursor = Cursor::new(payload);
     let _spec_major = cursor.get_u16(); // 0
@@ -1130,6 +951,16 @@ fn force_readmem_requested(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// The GVCP name of a register or memory command, for errors.
+fn command_name(opcode: OpCode) -> &'static str {
+    match opcode {
+        OpCode::ReadRegister => "READREG",
+        OpCode::WriteRegister => "WRITEREG",
+        OpCode::ReadMem => "READMEM",
+        OpCode::WriteMem => "WRITEMEM",
+    }
+}
+
 /// The READREG/WRITEREG address for an access that is exactly one register.
 ///
 /// A GVCP register is a 32-bit word on a 32-bit boundary in the low 4 GiB, so
@@ -1266,7 +1097,7 @@ impl GigeDevice {
         let local_ip = match addr.ip() {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             IpAddr::V6(_) => {
-                return Err(GigeError::Protocol("IPv6 GVCP is not supported".into()));
+                return Err(GigeError::NotIpv4("device"));
             }
         };
         let socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
@@ -1509,12 +1340,13 @@ impl GigeDevice {
                     trace!(request_id, bytes = len, attempt, "received GenCP ack");
                     let ack = decode_ack(&buf[..len])?;
                     if ack.header.opcode != opcode {
-                        return Err(GigeError::Protocol(
-                            "unexpected opcode in acknowledgement".into(),
-                        ));
+                        return Err(GigeError::MalformedAck {
+                            command: command_name(opcode),
+                            problem: "answers another command",
+                        });
                     }
-                    match ack.header.status {
-                        StatusCode::Success => return Ok(ack),
+                    match GigeStatus::from_raw(ack.header.status) {
+                        status if status.is_success() => return Ok(ack),
                         // Only `BUSY` (0x8007) is congestion. This used to
                         // match `DeviceBusy`, which was mapped to 0x8004 —
                         // `WRITE_PROTECT` — so the retry loop burned its
@@ -1728,7 +1560,7 @@ impl GigeDevice {
         };
         match self.read_register(register).await {
             Ok(value) => Ok(value.to_be_bytes().to_vec()),
-            Err(GigeError::Status(StatusCode::NotImplemented)) => {
+            Err(GigeError::Status(GigeStatus::Common(StatusCode::NotImplemented))) => {
                 self.latch_memory_access("READREG", addr, "NOT_IMPLEMENTED");
                 self.read_mem(addr, len).await
             }
@@ -1761,7 +1593,7 @@ impl GigeDevice {
         };
         match self.write_register(register, value).await {
             Ok(()) => Ok(()),
-            Err(GigeError::Status(StatusCode::NotImplemented)) => {
+            Err(GigeError::Status(GigeStatus::Common(StatusCode::NotImplemented))) => {
                 self.latch_memory_access("WRITEREG", addr, "NOT_IMPLEMENTED");
                 self.write_mem(addr, data).await
             }
@@ -1791,9 +1623,14 @@ impl GigeDevice {
     /// Read one 32-bit register through [`Self::read_register_or_mem`].
     async fn read_u32(&mut self, addr: u64) -> Result<u32, GigeError> {
         let data = self.read_register_or_mem(addr, 4).await?;
-        let word: [u8; 4] = data.as_slice().try_into().map_err(|_| {
-            GigeError::Protocol(format!("expected 4 register bytes, got {}", data.len()))
-        })?;
+        let word: [u8; 4] = data
+            .as_slice()
+            .try_into()
+            .map_err(|_| GigeError::AckLength {
+                command: "READREG",
+                expected: 4,
+                got: data.len(),
+            })?;
         Ok(u32::from_be_bytes(word))
     }
 
@@ -1816,10 +1653,11 @@ impl GigeDevice {
             .transact_with_retry(OpCode::ReadRegister, payload)
             .await?;
         if ack.payload.len() != 4 {
-            return Err(GigeError::Protocol(format!(
-                "expected 4-byte register ack but device returned {} bytes",
-                ack.payload.len()
-            )));
+            return Err(GigeError::AckLength {
+                command: "READREG",
+                expected: 4,
+                got: ack.payload.len(),
+            });
         }
         let mut cursor = &ack.payload[..];
         Ok(cursor.get_u32())
@@ -1839,10 +1677,11 @@ impl GigeDevice {
             .transact_with_retry(OpCode::WriteRegister, payload)
             .await?;
         if ack.payload.len() != 4 {
-            return Err(GigeError::Protocol(format!(
-                "expected 4-byte register write ack but device returned {} bytes",
-                ack.payload.len()
-            )));
+            return Err(GigeError::AckLength {
+                command: "WRITEREG",
+                expected: 4,
+                got: ack.payload.len(),
+            });
         }
         Ok(())
     }
@@ -1875,11 +1714,11 @@ impl GigeDevice {
                 // Some devices omit the address echo.
                 &ack.payload[..request]
             } else {
-                return Err(GigeError::Protocol(format!(
-                    "expected {} bytes but device returned {}",
-                    request,
-                    ack.payload.len()
-                )));
+                return Err(GigeError::AckLength {
+                    command: "READMEM",
+                    expected: request,
+                    got: ack.payload.len(),
+                });
             };
             data.extend_from_slice(&ack_data[..chunk]);
             remaining -= chunk;
@@ -1931,19 +1770,21 @@ impl GigeDevice {
 
         let mut offset = 0usize;
         while offset < data.len() {
+            // Never zero: the loop runs while bytes remain, and a block holds
+            // more than the address prefix.
+            const _: () = assert!(consts::GENCP_MAX_BLOCK > GVCP_WRITE_OVERHEAD);
             let chunk = (data.len() - offset).min(consts::GENCP_MAX_BLOCK - GVCP_WRITE_OVERHEAD);
-            if chunk == 0 {
-                return Err(GigeError::Protocol("write chunk size is zero".into()));
-            }
             let mut payload = BytesMut::with_capacity(GVCP_WRITE_OVERHEAD + chunk);
             payload.put_u32((addr + offset as u64) as u32);
             payload.extend_from_slice(&data[offset..offset + chunk]);
             let ack = self.transact_with_retry(OpCode::WriteMem, payload).await?;
             // GVCP WRITEMEM_ACK: 4-byte reserved payload.
             if ack.payload.len() > 4 {
-                return Err(GigeError::Protocol(
-                    "write acknowledgement carried unexpected payload".into(),
-                ));
+                return Err(GigeError::AckLength {
+                    command: "WRITEMEM",
+                    expected: 4,
+                    got: ack.payload.len(),
+                });
             }
             offset += chunk;
         }
@@ -2009,11 +1850,7 @@ impl GigeDevice {
         packet_size: u32,
     ) -> Result<(), GigeError> {
         if packet_size > STREAM_PACKET_SIZE_MASK {
-            return Err(GigeError::Protocol(format!(
-                "GVSP packet size {packet_size} does not fit GevSCPSPacketSize: the size field is \
-                 bits 0-15, so the device would receive {}",
-                packet_size & STREAM_PACKET_SIZE_MASK
-            )));
+            return Err(GigeError::PacketSize(packet_size));
         }
         info!(channel, packet_size, "configuring stream packet size");
         let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
@@ -2035,9 +1872,7 @@ impl GigeDevice {
         packet_size: u32,
     ) -> Result<(), GigeError> {
         if packet_size > STREAM_PACKET_SIZE_MASK {
-            return Err(GigeError::Protocol(format!(
-                "GVSP packet size {packet_size} does not fit GevSCPSPacketSize"
-            )));
+            return Err(GigeError::PacketSize(packet_size));
         }
         let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
         let word = packet_size | SCPS_FIRE_TEST_PACKET | SCPS_DO_NOT_FRAGMENT;
@@ -2645,7 +2480,10 @@ mod tests {
             .await
             .expect_err("write protect must surface");
         assert!(
-            matches!(err, GigeError::Status(StatusCode::WriteProtect)),
+            matches!(
+                err,
+                GigeError::Status(GigeStatus::Common(StatusCode::WriteProtect))
+            ),
             "expected WRITE_PROTECT, got {err:?}"
         );
         assert_eq!(
@@ -2744,13 +2582,13 @@ mod tests {
     #[test]
     fn ack_header_conversion() {
         let ack = AckHeader {
-            status: StatusCode::Busy,
+            status: 0x8007,
             opcode: OpCode::ReadMem,
             length: 12,
             request_id: 0x44,
         };
         let converted = GvcpAckHeader::from(ack);
-        assert_eq!(converted.status, StatusCode::Busy);
+        assert_eq!(converted.status, GigeStatus::Common(StatusCode::Busy));
         assert_eq!(converted.command, OpCode::ReadMem.ack_code());
         assert_eq!(converted.length, 12);
         assert_eq!(converted.request_id, 0x44);

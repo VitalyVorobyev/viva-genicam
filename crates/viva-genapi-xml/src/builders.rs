@@ -8,7 +8,7 @@ use crate::{AddressTerm, Addressing, BitField, ByteOrder, IndexOffset, XmlError}
 /// `<pIndex>` may each appear several times and every one of them contributes.
 /// This builder therefore *appends* terms; it never replaces one with another.
 #[derive(Debug, Default)]
-pub struct AddressingBuilder {
+pub(crate) struct AddressingBuilder {
     pub(crate) terms: Vec<AddressTerm>,
     pub(crate) length: Option<u32>,
     pub(crate) port: Option<String>,
@@ -19,7 +19,7 @@ impl AddressingBuilder {
     ///
     /// This is useful for StringReg nodes where the length is optional and can
     /// default to the full register.
-    pub fn build(self) -> Addressing {
+    pub(crate) fn build(self) -> Addressing {
         let len = self.length.unwrap_or(0);
         let terms = if self.terms.is_empty() {
             vec![AddressTerm::Fixed(0)]
@@ -34,27 +34,27 @@ impl AddressingBuilder {
     }
 
     /// Add a literal `<Address>` term.
-    pub fn push_fixed_address(&mut self, address: i64) {
+    pub(crate) fn push_fixed_address(&mut self, address: i64) {
         self.terms.push(AddressTerm::Fixed(address));
     }
 
     /// Record the `<pPort>` the address is relative to.
-    pub fn set_port(&mut self, port: &str) {
+    pub(crate) fn set_port(&mut self, port: &str) {
         self.port = Some(port.to_string());
     }
 
     /// Set the register length in bytes.
-    pub fn set_length(&mut self, len: u32) {
+    pub(crate) fn set_length(&mut self, len: u32) {
         self.length = Some(len);
     }
 
     /// Add a `<pAddress>` term naming a node that supplies an offset.
-    pub fn push_p_address(&mut self, node: &str) {
+    pub(crate) fn push_p_address(&mut self, node: &str) {
         self.terms.push(AddressTerm::Node(node.to_string()));
     }
 
     /// Add a `<pIndex>` term: an index node scaled by a stride.
-    pub fn push_index(&mut self, node: &str, offset: IndexOffset) {
+    pub(crate) fn push_index(&mut self, node: &str, offset: IndexOffset) {
         self.terms.push(AddressTerm::Index {
             node: node.to_string(),
             offset,
@@ -62,15 +62,17 @@ impl AddressingBuilder {
     }
 
     /// Finalize the builder into an [`Addressing`].
-    pub fn finalize(self, node: &str, default_len: Option<u32>) -> Result<Addressing, XmlError> {
+    pub(crate) fn finalize(
+        self,
+        node: &str,
+        default_len: Option<u32>,
+    ) -> Result<Addressing, XmlError> {
         let len = self
             .length
             .or(default_len)
-            .ok_or_else(|| XmlError::Invalid(format!("node {node} is missing <Length>")))?;
+            .ok_or_else(|| XmlError::missing(node, "<Length>"))?;
         if self.terms.is_empty() {
-            return Err(XmlError::Invalid(format!(
-                "node {node} is missing <Address>"
-            )));
+            return Err(XmlError::missing(node, "<Address>"));
         }
         Ok(Addressing::Sum {
             terms: self.terms,
@@ -82,7 +84,7 @@ impl AddressingBuilder {
 
 /// Source of bitfield specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BitfieldSource {
+pub(crate) enum BitfieldSource {
     /// LSB/MSB pair defining the range.
     LsbMsb,
     /// Bit index and optional length.
@@ -93,7 +95,7 @@ pub enum BitfieldSource {
 
 /// Builder for collecting bitfield-related elements during parsing.
 #[derive(Debug, Default)]
-pub struct BitfieldBuilder {
+pub(crate) struct BitfieldBuilder {
     lsb: Option<u32>,
     msb: Option<u32>,
     bit: Option<u32>,
@@ -105,7 +107,7 @@ pub struct BitfieldBuilder {
 
 impl BitfieldBuilder {
     /// Record an LSB value.
-    pub fn note_lsb(&mut self, value: u32) {
+    pub(crate) fn note_lsb(&mut self, value: u32) {
         if self
             .source
             .map(|source| source != BitfieldSource::LsbMsb)
@@ -118,7 +120,7 @@ impl BitfieldBuilder {
     }
 
     /// Record an MSB value.
-    pub fn note_msb(&mut self, value: u32) {
+    pub(crate) fn note_msb(&mut self, value: u32) {
         if self
             .source
             .map(|source| source != BitfieldSource::LsbMsb)
@@ -131,7 +133,7 @@ impl BitfieldBuilder {
     }
 
     /// Record a bit index.
-    pub fn note_bit(&mut self, value: u32) {
+    pub(crate) fn note_bit(&mut self, value: u32) {
         if self
             .source
             .map(|source| source != BitfieldSource::BitLength)
@@ -144,7 +146,7 @@ impl BitfieldBuilder {
     }
 
     /// Record a bit length.
-    pub fn note_bit_length(&mut self, value: u32) {
+    pub(crate) fn note_bit_length(&mut self, value: u32) {
         if self
             .source
             .map(|source| source != BitfieldSource::BitLength)
@@ -157,7 +159,7 @@ impl BitfieldBuilder {
     }
 
     /// Record a bitmask.
-    pub fn note_mask(&mut self, mask: u64) {
+    pub(crate) fn note_mask(&mut self, mask: u64) {
         if self.source.is_some() {
             return;
         }
@@ -166,25 +168,23 @@ impl BitfieldBuilder {
     }
 
     /// Record a byte order.
-    pub fn note_byte_order(&mut self, order: ByteOrder) {
+    pub(crate) fn note_byte_order(&mut self, order: ByteOrder) {
         self.byte_order = Some(order);
     }
 
     /// Finalize the builder into a [`BitField`] if sufficient data was provided.
-    pub fn finish(self, node: &str, len_bytes: u32) -> Result<Option<BitField>, XmlError> {
+    pub(crate) fn finish(self, node: &str, len_bytes: u32) -> Result<Option<BitField>, XmlError> {
         let source = match self.source {
             Some(source) => source,
             None => return Ok(None),
         };
         let byte_order = self.byte_order.unwrap_or(ByteOrder::Little);
         if len_bytes == 0 {
-            return Err(XmlError::Invalid(format!(
-                "node {node} declares zero-length register"
-            )));
+            return Err(XmlError::invalid(node, "declares a zero-length register"));
         }
         let total_bits = len_bytes
             .checked_mul(8)
-            .ok_or_else(|| XmlError::Invalid(format!("node {node} register length overflow")))?;
+            .ok_or_else(|| XmlError::invalid(node, "declares a register too long to address"))?;
 
         // Whether the index produced below is already counted the way
         // `bitops` counts for this byte order — see the `offset` match at the
@@ -194,12 +194,8 @@ impl BitfieldBuilder {
 
         let (first_index, bit_length) = match source {
             BitfieldSource::LsbMsb => {
-                let lsb = self
-                    .lsb
-                    .ok_or_else(|| XmlError::Invalid(format!("node {node} is missing <Lsb>")))?;
-                let msb = self
-                    .msb
-                    .ok_or_else(|| XmlError::Invalid(format!("node {node} is missing <Msb>")))?;
+                let lsb = self.lsb.ok_or_else(|| XmlError::missing(node, "<LSB>"))?;
+                let msb = self.msb.ok_or_else(|| XmlError::missing(node, "<MSB>"))?;
                 // GenICam orients the pair by endianness: on `Big` the
                 // indices count down from the MSB, so a conformant document
                 // has `<LSB>` >= `<MSB>`; on `Little` they count up, so
@@ -232,28 +228,18 @@ impl BitfieldBuilder {
                 let length = upper
                     .checked_sub(lower)
                     .and_then(|value| value.checked_add(1))
-                    .ok_or_else(|| {
-                        XmlError::Invalid(format!(
-                            "node {node} has invalid bit range <Lsb>={lsb}, <Msb>={msb}"
-                        ))
-                    })?;
+                    .ok_or_else(|| XmlError::invalid(node, "has an invalid bit range"))?;
                 (lower, length)
             }
             BitfieldSource::BitLength => {
-                let bit = self
-                    .bit
-                    .ok_or_else(|| XmlError::Invalid(format!("node {node} is missing <Bit>")))?;
+                let bit = self.bit.ok_or_else(|| XmlError::missing(node, "<Bit>"))?;
                 let length = self.bit_length.unwrap_or(1);
                 (bit, length)
             }
             BitfieldSource::Mask => {
-                let mask = self.mask.ok_or_else(|| {
-                    XmlError::Invalid(format!("node {node} is missing <Mask> value"))
-                })?;
+                let mask = self.mask.ok_or_else(|| XmlError::missing(node, "<Mask>"))?;
                 if mask == 0 {
-                    return Err(XmlError::Invalid(format!(
-                        "node {node} mask must be non-zero"
-                    )));
+                    return Err(XmlError::invalid(node, "has a zero <Mask>"));
                 }
                 let offset = mask.trailing_zeros();
                 let length = mask.count_ones();
@@ -262,32 +248,34 @@ impl BitfieldBuilder {
         };
 
         if bit_length == 0 {
-            return Err(XmlError::Invalid(format!(
-                "node {node} bitfield must have positive length"
-            )));
+            return Err(XmlError::invalid(node, "declares an empty bit field"));
         }
         if bit_length > 64 {
-            return Err(XmlError::Invalid(format!(
-                "node {node} bitfield length {bit_length} exceeds 64 bits"
-            )));
+            return Err(XmlError::invalid(
+                node,
+                "declares a bit field wider than 64 bits",
+            ));
         }
 
         if first_index > u16::MAX as u32 {
-            return Err(XmlError::Invalid(format!(
-                "node {node} bit offset {first_index} exceeds u16 range"
-            )));
+            return Err(XmlError::invalid(
+                node,
+                "declares a bit offset past bit 65535",
+            ));
         }
 
         if bit_length > u16::MAX as u32 {
-            return Err(XmlError::Invalid(format!(
-                "node {node} bit length {bit_length} exceeds u16 range"
-            )));
+            return Err(XmlError::invalid(
+                node,
+                "declares a bit field wider than 65535 bits",
+            ));
         }
 
         if first_index + bit_length > total_bits {
-            return Err(XmlError::Invalid(format!(
-                "node {node} bitfield exceeds register width"
-            )));
+            return Err(XmlError::invalid(
+                node,
+                "declares a bit field wider than its register",
+            ));
         }
 
         // [`BitField::bit_offset`] is relative to the *most* significant bit for
@@ -314,13 +302,10 @@ impl BitfieldBuilder {
         };
 
         Ok(Some(BitField {
-            bit_offset: u16::try_from(offset).map_err(|_| {
-                XmlError::Invalid(format!("node {node} bit offset {offset} exceeds u16 range"))
-            })?,
+            bit_offset: u16::try_from(offset)
+                .map_err(|_| XmlError::invalid(node, "declares a bit offset past bit 65535"))?,
             bit_length: u16::try_from(bit_length).map_err(|_| {
-                XmlError::Invalid(format!(
-                    "node {node} bit length {bit_length} exceeds u16 range"
-                ))
+                XmlError::invalid(node, "declares a bit field wider than 65535 bits")
             })?,
             byte_order,
         }))

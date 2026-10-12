@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use tracing::info;
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, Target};
 use crate::with_camera;

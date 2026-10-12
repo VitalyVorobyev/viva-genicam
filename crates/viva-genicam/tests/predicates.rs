@@ -296,8 +296,7 @@ async fn execute_command_through_pvalue_changes_device_state() {
         let cam = camera.clone();
         tokio::task::spawn_blocking(move || {
             let cam = cam.lock().unwrap();
-            cam.transport()
-                .read(viva_fake_gige::registers::REG_EXPOSURE_TIME, 8)
+            cam.transport().read(viva_fake_gige::REG_EXPOSURE_TIME, 8)
         })
         .await
         .unwrap()
@@ -306,7 +305,7 @@ async fn execute_command_through_pvalue_changes_device_state() {
     let restored = f64::from_be_bytes(raw.try_into().expect("8 bytes"));
     assert_eq!(
         restored,
-        viva_fake_gige::registers::DEFAULT_EXPOSURE_US,
+        viva_fake_gige::DEFAULT_EXPOSURE_US,
         "UserSetLoad should have restored the default exposure on the device"
     );
 
@@ -316,7 +315,7 @@ async fn execute_command_through_pvalue_changes_device_state() {
         .unwrap_or_else(|_| panic!("ExposureTime should be a float, got {reported}"));
     assert_eq!(
         reported,
-        viva_fake_gige::registers::DEFAULT_EXPOSURE_US,
+        viva_fake_gige::DEFAULT_EXPOSURE_US,
         "Camera::get should re-read ExposureTime after UserSetLoad, not answer from a stale cache"
     );
 }
@@ -402,7 +401,7 @@ async fn user_set_save_is_refused_while_default_is_selected() {
     assert_eq!(
         cam.fake().commands().at(
             viva_fake_gige::GvcpCommand::WriteReg,
-            viva_fake_gige::registers::REG_USER_SET_SAVE
+            viva_fake_gige::REG_USER_SET_SAVE
         ),
         0,
         "the refused command must not be written"

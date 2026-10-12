@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use tracing::{info, warn};
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS};
 
@@ -14,7 +14,8 @@ struct EventRecord {
     index: usize,
     id: u16,
     ts_dev: u64,
-    ts_host: String,
+    /// `None` without a fitted clock: the camera's ticks map to no host time.
+    ts_host: Option<String>,
     payload_len: usize,
 }
 
@@ -69,8 +70,9 @@ pub async fn run(
     for idx in 0..usize::try_from(count).unwrap_or(0) {
         match stream.next().await {
             Ok(event) => {
-                let ts_host = common::format_system_time(event.ts_host)
-                    .unwrap_or_else(|_| "unknown".to_string());
+                let ts_host = event
+                    .ts_host
+                    .and_then(|ts| common::format_system_time(ts).ok());
                 if json {
                     records.push(EventRecord {
                         index: idx + 1,
@@ -83,7 +85,7 @@ pub async fn run(
                     println!(
                         "#{:02} host={} id=0x{:04X} ticks={} payload={} bytes",
                         idx + 1,
-                        ts_host,
+                        ts_host.as_deref().unwrap_or("-"),
                         event.id,
                         event.ts_dev,
                         event.data.len()

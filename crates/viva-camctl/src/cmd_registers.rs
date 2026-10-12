@@ -16,10 +16,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
-use viva_gige::gvcp::GigeDevice;
-use viva_gige::nic::IfaceSelector;
-use viva_u3v::device::U3vDevice;
-use viva_u3v::usb::UsbTransfer;
+use viva_gige::GigeDevice;
+use viva_gige::IfaceSelector;
+use viva_u3v::U3vDevice;
+use viva_u3v::UsbTransfer;
 
 use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS, Target};
 
@@ -154,8 +154,8 @@ async fn open_gige(target: &Target, iface: Option<&IfaceSelector>) -> Result<Gig
     common::open_control(&device).await
 }
 
-fn open_usb(index: usize) -> Result<U3vDevice<viva_u3v::usb::RusbTransfer>> {
-    let info = viva_u3v::discovery::discover()
+fn open_usb(index: usize) -> Result<U3vDevice<viva_u3v::RusbTransfer>> {
+    let info = viva_u3v::discover()
         .map_err(|err| anyhow!("USB discovery failed: {err}"))?
         .into_iter()
         .nth(index)

@@ -1,12 +1,12 @@
-//! Acquisition control queryable and frame streaming over Zenoh.
+//! Acquisition control queryable and frame streaming over Zenoh, for every
+//! [`StreamSource`]: GigE Vision and USB3 Vision publish the same way.
 
 use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
-use viva_genicam::gige::nic::Iface;
 use viva_genicam::pfnc;
-use viva_genicam::{EvsBlock, EvsFormat, Frame, FrameStream, GenericStreamBlock, StreamBlock};
+use viva_genicam::{EvsBlock, EvsFormat, Frame, StreamBlock};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
     AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, EvsFormat as ZenohEvsFormat,
@@ -14,13 +14,14 @@ use viva_zenoh_api::{
 };
 use zenoh::Session;
 
-use crate::device::{DeviceHandle, DeviceOps};
+use crate::device::DeviceOps;
 use crate::pixel_format::expected_payload_len;
+use crate::source::{BlockStream, StreamSource};
 
 /// Run the acquisition control queryable and frame streaming loop.
-pub async fn run(
+pub(crate) async fn run<D: StreamSource>(
     session: Arc<Session>,
-    device: Arc<DeviceHandle>,
+    device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let device_id = device.device_id().to_string();
@@ -52,8 +53,7 @@ pub async fn run(
                                         AcquisitionCommand::Start if frame_task.is_none() => {
                                             handle_start(
                                                 &session,
-                                                &device,
-                                                &device_id,
+                                                device.as_ref(),
                                                 &stop_tx,
                                                 &mut frame_task,
                                                 req.packet_size,
@@ -66,8 +66,7 @@ pub async fn run(
                                         AcquisitionCommand::Stop if frame_task.is_some() => {
                                             handle_stop(
                                                 &session,
-                                                &device,
-                                                &device_id,
+                                                device.as_ref(),
                                                 &stop_tx,
                                                 &mut frame_task,
                                             )
@@ -96,7 +95,7 @@ pub async fn run(
                 if *shutdown.borrow() {
                     // Stop acquisition on shutdown.
                     if frame_task.is_some() {
-                        handle_stop(&session, &device, &device_id, &stop_tx, &mut frame_task).await;
+                        handle_stop(&session, device.as_ref(), &stop_tx, &mut frame_task).await;
                     }
                     break;
                 }
@@ -105,104 +104,65 @@ pub async fn run(
     }
 }
 
-async fn handle_start(
+async fn handle_start<D: StreamSource>(
     session: &Arc<Session>,
-    device: &Arc<DeviceHandle>,
-    device_id: &str,
+    device: &D,
     stop_tx: &watch::Sender<bool>,
     frame_task: &mut Option<tokio::task::JoinHandle<()>>,
     packet_size: Option<u32>,
 ) -> NodeOpResponse {
-    // Best-effort refresh before stream setup. On macOS loopback the fake
-    // Aravis camera can sit discovered/idle for a while and then fail to
-    // deliver GVSP until the control channel is reopened. Immediate-start
-    // cases can still work with the existing control channel, so a refresh
-    // timeout falls back to the current connection instead of failing start.
-    if cfg!(target_os = "macos")
-        && let Err(e) = device.refresh_connection().await
-    {
-        warn!(
-            device_id,
-            error = %e,
-            "camera reconnect before acquisition failed; continuing with existing control connection"
-        );
-    }
+    let device_id = device.device_id();
 
-    // 1. Resolve the network interface for GVSP reception.
-    let iface = match resolve_iface(device) {
-        Ok(i) => i,
-        Err(e) => {
-            return NodeOpResponse::err(format!("interface resolution failed: {e}"));
-        }
+    // 1. Open the stream, configured on the camera, before AcquisitionStart:
+    //    a GigE camera must know where to send GVSP first.
+    let blocks = match device.open_stream(packet_size).await {
+        Ok(blocks) => blocks,
+        Err(e) => return NodeOpResponse::err(format!("opening the stream failed: {e}")),
     };
 
-    // 2. Configure stream registers (SCDA/SCPH/SCPS) and bind socket using
-    //    the CCP-holding device. This must happen BEFORE AcquisitionStart so
-    //    the camera knows where to send GVSP packets.
-    let mut frame_stream = match device.build_stream(iface, packet_size).await {
-        Ok(fs) => fs,
-        Err(e) => {
-            return NodeOpResponse::err(format!("stream build failed: {e}"));
-        }
-    };
-
-    // No explicit CCP refresh after the potentially long stream setup: the
-    // transport's keepalive waits on the same device mutex `build_stream` holds
-    // and pings as soon as that guard drops.
-
-    // 3. Publish metadata before starting acquisition.
-    publish_image_meta(session, device.as_ref(), device_id).await;
+    // 2. Publish metadata before starting acquisition.
+    publish_image_meta(session, device, device_id).await;
 
     let _ = stop_tx.send(false);
     let stop_rx = stop_tx.subscribe();
+    let handle = tokio::spawn(frame_loop(
+        session.clone(),
+        device_id.to_string(),
+        blocks,
+        stop_rx,
+    ));
 
-    let session_clone = session.clone();
-    let device_id_owned = device_id.to_string();
-
-    let handle = tokio::spawn(async move {
-        frame_loop(session_clone, device_id_owned, &mut frame_stream, stop_rx).await;
-    });
-
-    // Let the spawned task reach its first `next_frame()` poll before the
-    // camera starts emitting GVSP. Without this yield, `tokio::spawn` only
+    // Let the spawned task reach its first `next_block()` poll before the
+    // camera starts sending. Without this yield, `tokio::spawn` only
     // schedules the task; on macOS loopback the fake camera can otherwise
     // outrun the receiver and the stream may never recover.
     tokio::task::yield_now().await;
 
-    // 4. Start acquisition only after the frame loop is armed.
-    //
-    // On macOS loopback, the fake Aravis camera can start emitting GVSP
-    // immediately after AcquisitionStart. If the reader task is spawned only
-    // afterwards, the initial leader/payload packets can be missed and the
-    // stream may never recover in practice. Arming the reader first keeps the
-    // UDP socket draining from the first packet onward.
+    // 3. Start acquisition only after the frame loop is armed, so the
+    //    stream drains from the first packet onward.
     if let Err(e) = device.acquisition_start().await {
-        handle.abort();
+        let _ = stop_tx.send(true);
         let _ = handle.await;
         return NodeOpResponse::err(format!("AcquisitionStart failed: {e}"));
     }
 
-    // 5. Publish active status now that the device is streaming.
+    // 4. Publish active status now that the device is streaming.
     publish_status(session, device_id, true).await;
-
     info!(device_id, "acquisition started, frame loop armed");
 
     *frame_task = Some(handle);
-
     NodeOpResponse::ok()
 }
 
-async fn handle_stop(
+async fn handle_stop<D: StreamSource>(
     session: &Arc<Session>,
-    device: &Arc<DeviceHandle>,
-    device_id: &str,
+    device: &D,
     stop_tx: &watch::Sender<bool>,
     frame_task: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> NodeOpResponse {
-    // Signal the frame loop to stop.
+    let device_id = device.device_id();
+    // Signal the frame loop to stop, and wait for it to let go of the stream.
     let _ = stop_tx.send(true);
-
-    // Wait for the frame task to finish.
     if let Some(task) = frame_task.take() {
         let _ = task.await;
     }
@@ -218,13 +178,14 @@ async fn handle_stop(
     NodeOpResponse::ok()
 }
 
-/// Main frame reading loop: reads blocks from the GigE stream and publishes
-/// them to Zenoh — images on [`keys::image`], event-vision blocks on
-/// [`keys::evs`].
+/// Main frame reading loop: reads blocks from the stream and publishes them
+/// to Zenoh — images on [`keys::image`], event-vision blocks on
+/// [`keys::evs`] — with the frame rate on [`keys::acquisition_status`] each
+/// second. Closes the stream when it stops.
 async fn frame_loop(
     session: Arc<Session>,
     device_id: String,
-    frame_stream: &mut FrameStream,
+    mut blocks: Box<dyn BlockStream>,
     mut stop: watch::Receiver<bool>,
 ) {
     let status_key = keys::acquisition_status(&device_id);
@@ -236,7 +197,7 @@ async fn frame_loop(
 
     loop {
         tokio::select! {
-            result = frame_stream.next_block() => {
+            result = blocks.next_block() => {
                 match result {
                     Ok(Some(block)) => {
                         let Some((key, payload)) = publisher.frame(block) else {
@@ -251,10 +212,7 @@ async fn frame_loop(
                         let elapsed = fps_start.elapsed();
                         if elapsed >= fps_interval {
                             let fps = fps_frame_count as f32 / elapsed.as_secs_f32();
-                            let status = AcquisitionStatus::active(
-                                Some(fps),
-                                frame_stream.stats().frames_lost(),
-                            );
+                            let status = AcquisitionStatus::active(Some(fps), blocks.frames_lost());
                             if let Ok(payload) = serde_json::to_vec(&status) {
                                 let _ = session.put(&status_key, payload).await;
                             }
@@ -282,6 +240,7 @@ async fn frame_loop(
         }
     }
 
+    blocks.close().await;
     info!(device_id, frames_acquired, "frame loop exited");
 }
 
@@ -322,8 +281,8 @@ impl BlockPublisher {
     }
 
     /// The key and framed payload for one block, or `None` when it is dropped.
-    fn frame(&mut self, block: GenericStreamBlock) -> Option<(String, Vec<u8>)> {
-        match StreamBlock::from(block) {
+    fn frame(&mut self, block: StreamBlock) -> Option<(String, Vec<u8>)> {
+        match block {
             StreamBlock::Image(frame) => self.frame_image(&frame),
             StreamBlock::Evs(events) => self.frame_evs(&events),
             // `StreamBlock` is `#[non_exhaustive]`. A kind this service does
@@ -355,7 +314,6 @@ impl BlockPublisher {
             self.logged_first_gvsp_frame = true;
         }
 
-        let zenoh_pf = viva_zenoh_api::PixelFormat::from(frame.pixel_format);
         let expected = expected_payload_len(frame.pixel_format, frame.width, frame.height);
 
         if expected.is_none() && !self.logged_unsized_format {
@@ -397,7 +355,7 @@ impl BlockPublisher {
         };
 
         let header = FrameHeader {
-            pixel_format: zenoh_pf,
+            pixel_format: frame.pixel_format,
             width: frame.width,
             height: frame.height,
             seq: self.image_seq,
@@ -474,39 +432,8 @@ fn evs_format_to_zenoh(format: EvsFormat) -> ZenohEvsFormat {
     }
 }
 
-/// The host interface that will receive this device's GVSP traffic.
-///
-/// With `--iface` the operator has already chosen, and the handle carries the
-/// interface they chose, resolved once.
-///
-/// Without it, the OS is asked which local interface routes to the camera.
-/// This arm used to call `Iface::from_ipv4(device.info().ip)` — the camera's
-/// address handed to the *host*-address lookup, which can only ever fail with
-/// `no interface with IPv4 <camera-ip>`. So `viva-service` could not stream
-/// without `--iface` at all. That is the same confusion as #70 (`REL-04` in
-/// the studio backend, `DX-08` in `viva-camctl`); this was the third copy and
-/// the last one left (backlog `SVC-06`).
-fn resolve_iface(device: &DeviceHandle) -> Result<Iface, String> {
-    receive_iface(device.iface(), device.info().ip)
-}
-
-/// The decision behind [`resolve_iface`], separated so it can be tested
-/// without a camera — which matters here, because the fake camera cannot
-/// reproduce the defect this guards (see the test).
-fn receive_iface(chosen: Option<&Iface>, camera_ip: std::net::Ipv4Addr) -> Result<Iface, String> {
-    match chosen {
-        Some(iface) => Ok(iface.clone()),
-        None => Iface::from_remote_ipv4(camera_ip).map_err(|e| {
-            format!(
-                "probe which local interface routes to {camera_ip}: {e} \
-                 (pass --iface <HOST-IP|NAME> to choose one explicitly)"
-            )
-        }),
-    }
-}
-
 /// Publish acquisition status to Zenoh.
-pub async fn publish_status(session: &Session, device_id: &str, active: bool) {
+pub(crate) async fn publish_status(session: &Session, device_id: &str, active: bool) {
     let status = if active {
         AcquisitionStatus::active(None, 0)
     } else {
@@ -519,7 +446,7 @@ pub async fn publish_status(session: &Session, device_id: &str, active: bool) {
 }
 
 /// Publish image metadata (width, height, pixel format) to Zenoh.
-pub async fn publish_image_meta<D: crate::device::DeviceOps>(
+pub(crate) async fn publish_image_meta<D: DeviceOps>(
     session: &Session,
     device: &D,
     device_id: &str,
@@ -567,7 +494,7 @@ pub async fn publish_image_meta<D: crate::device::DeviceOps>(
 /// [`pfnc::PixelFormat::from_name`], which knows the older spellings cameras
 /// use (`YUV422Packed`, `RGB8Packed`); an unknown name is published as
 /// `Unknown`, sized one byte per pixel.
-pub fn image_meta(
+pub(crate) fn image_meta(
     width: u32,
     height: u32,
     pixel_format: &str,
@@ -578,35 +505,37 @@ pub fn image_meta(
         pfnc.image_bytes(width, height)
             .unwrap_or(width as usize * height as usize) as u64
     });
-    ImageMeta::new(pfnc.into(), width, height, payload_size)
+    ImageMeta::new(pfnc, width, height, payload_size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     /// The `PixelFormat` entry names cameras report (vendor corpus:
     /// `Mono12Packed` in 28 of 38 documents, `YUV422Packed` and `RGB8Packed`
     /// in 23), sized from their PFNC code.
     #[test]
     fn image_meta_names_and_sizes_the_cameras_format() {
-        use viva_zenoh_api::PixelFormat as W;
+        use pfnc::PixelFormat as P;
         for (name, format, bytes) in [
-            ("Mono8", W::Mono8, 307_200),
-            ("Mono12", W::Mono12, 614_400),
-            ("Mono12Packed", W::Mono12Packed, 460_800),
-            ("Mono10p", W::Mono10p, 384_000),
-            ("BayerRG12p", W::BayerRG12p, 460_800),
-            ("YUV422Packed", W::YUV422_8_UYVY, 614_400),
-            ("RGB8Packed", W::RGB8, 921_600),
+            ("Mono8", P::Mono8, 307_200),
+            ("Mono12", P::Mono12, 614_400),
+            ("Mono12Packed", P::Mono12Packed, 460_800),
+            ("Mono10p", P::Mono10p, 384_000),
+            ("BayerRG12p", P::BayerRG12p, 460_800),
+            ("YUV422Packed", P::YUV422_8_UYVY, 614_400),
+            ("RGB8Packed", P::RGB8Packed, 921_600),
         ] {
             let meta = image_meta(640, 480, name, None);
             assert_eq!(meta.pixel_format, format, "{name}");
             assert_eq!(meta.payload_size, bytes, "{name}");
         }
         // A name nobody knows is not passed off as Mono8.
-        assert_eq!(image_meta(2, 2, "Fancy42", None).pixel_format, W::Unknown);
+        assert_eq!(
+            image_meta(2, 2, "Fancy42", None).pixel_format,
+            P::Unknown(0)
+        );
     }
 
     /// The camera's `PayloadSize` is what a frame carries — padding and chunk
@@ -617,41 +546,5 @@ mod tests {
         assert_eq!(meta.payload_size, 307_456);
         // Zero is not a size; fall back to the computed one.
         assert_eq!(image_meta(640, 480, "Mono8", Some(0)).payload_size, 307_200);
-    }
-
-    /// Backlog `SVC-06`. Without `--iface` the receive interface must come
-    /// from a route probe, not from looking the *camera's* address up among
-    /// the host's own — a lookup that can only ever fail.
-    ///
-    /// `127.0.0.2` is the whole test: it is routable (loopback answers for the
-    /// entire `127/8`) but it is not an address any interface reports, so the
-    /// two functions give visibly different answers. The camera we test
-    /// against cannot show this, because it lives on `127.0.0.1`, which *is* a
-    /// host address — so the broken lookup succeeds there by coincidence. That
-    /// is why this is a unit test and not an e2e one.
-    #[test]
-    fn no_iface_probes_the_route_rather_than_looking_up_the_camera_address() {
-        let camera_ip = Ipv4Addr::new(127, 0, 0, 2);
-
-        // What the code used to do.
-        assert!(
-            Iface::from_ipv4(camera_ip).is_err(),
-            "a camera address is not a host address; if this ever succeeds \
-             the test has stopped proving anything"
-        );
-
-        // What it does now.
-        let iface = receive_iface(None, camera_ip).expect("route probe should resolve");
-        assert_eq!(iface.ipv4(), Some(Ipv4Addr::LOCALHOST));
-    }
-
-    /// An explicit `--iface` is honoured verbatim; the camera's address is not
-    /// consulted at all.
-    #[test]
-    fn an_explicit_iface_is_used_as_given() {
-        let chosen = Iface::from_ipv4(Ipv4Addr::LOCALHOST).expect("loopback iface");
-        let resolved = receive_iface(Some(&chosen), Ipv4Addr::new(192, 0, 2, 1))
-            .expect("an explicit interface needs no probe");
-        assert_eq!(resolved, chosen);
     }
 }

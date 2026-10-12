@@ -28,12 +28,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use viva_u3v::ControlChannel;
+use viva_u3v::U3vDevice;
 use viva_u3v::U3vError;
-use viva_u3v::bootstrap::{Abrm, Sbrm};
-use viva_u3v::control::ControlChannel;
-use viva_u3v::device::U3vDevice;
-use viva_u3v::stream::{parse_leader, parse_trailer};
-use viva_u3v::usb::UsbTransfer;
+use viva_u3v::UsbTransfer;
+use viva_u3v::{Abrm, Sbrm};
+use viva_u3v::{parse_leader, parse_trailer};
 
 const EP_OUT: u8 = 0x01;
 const EP_IN: u8 = 0x81;
@@ -432,4 +432,56 @@ fn a_trailer_is_read_at_the_u3v_offsets() {
     assert_eq!(parsed.block_id, 7);
     assert_eq!(parsed.status, 0xA101);
     assert_eq!(parsed.valid_payload_size, 9_000);
+}
+
+/// A device that answers `status` to every command.
+struct Refusing(u16, Mutex<Option<Vec<u8>>>);
+
+impl UsbTransfer for Refusing {
+    fn bulk_write(&self, _: u8, data: &[u8], _: Duration) -> Result<usize, U3vError> {
+        let request_id = u16::from_le_bytes([data[10], data[11]]);
+        let device = SpecDevice::default();
+        *self.1.lock().unwrap() = Some(device.answer(self.0, READMEM_ACK, request_id, &[]));
+        Ok(data.len())
+    }
+
+    fn bulk_read(&self, _: u8, buf: &mut [u8], _: Duration) -> Result<usize, U3vError> {
+        let ack = self.1.lock().unwrap().take().ok_or(U3vError::Timeout)?;
+        buf[..ack.len()].copy_from_slice(&ack);
+        Ok(ack.len())
+    }
+}
+
+fn read_error(status: u16) -> String {
+    let device = Arc::new(Refusing(status, Mutex::new(None)));
+    let mut control = ControlChannel::new(device, EP_IN, EP_OUT, 1024, 1024);
+    control
+        .read_mem(0x01D8, 8)
+        .expect_err("the device refused the read")
+        .to_string()
+}
+
+/// GenCP 1.2 Table 6: `0x800B` is `MSG_TIMEOUT` over GenCP, where GigE
+/// Vision calls the same number `NO_MSG` (ADR-0020, backlog TC-16).
+#[test]
+fn gencp_names_0x800b_msg_timeout() {
+    let message = read_error(0x800B);
+    assert!(message.contains("MSG_TIMEOUT (0x800B)"), "{message}");
+}
+
+/// A code only USB3 Vision defines is named, not reported as unknown.
+#[test]
+fn u3v_names_its_own_codes() {
+    let message = read_error(0xA002);
+    assert!(
+        message.contains("DSI_ENDPOINT_HALTED (0xA002)"),
+        "{message}"
+    );
+}
+
+/// The shared core reads as it does on GigE Vision.
+#[test]
+fn u3v_names_the_shared_codes() {
+    let message = read_error(GENCP_WRITE_PROTECT);
+    assert!(message.contains("WRITE_PROTECT (0x8004)"), "{message}");
 }

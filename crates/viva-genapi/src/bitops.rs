@@ -4,7 +4,7 @@ use viva_genapi_xml::{BitField, ByteOrder};
 
 /// Errors produced by bitfield extraction and insertion helpers.
 #[derive(Debug, Error)]
-pub enum BitOpsError {
+pub(crate) enum BitOpsError {
     /// Register payload wider than the supported 64-bit limit.
     #[error("unsupported register width {len} bytes for bitfield operation")]
     UnsupportedWidth { len: usize },
@@ -56,7 +56,7 @@ fn mask_for(length: u16) -> u128 {
 }
 
 /// Extract the value of a bitfield from the provided register payload.
-pub fn extract(bits: &[u8], bf: BitField) -> Result<u64, BitOpsError> {
+pub(crate) fn extract(bits: &[u8], bf: BitField) -> Result<u64, BitOpsError> {
     validate_range(bits, bf)?;
     let mask = mask_for(bf.bit_length);
     let mut value = 0u128;
@@ -89,7 +89,7 @@ pub fn extract(bits: &[u8], bf: BitField) -> Result<u64, BitOpsError> {
 }
 
 /// Insert a value into the specified bitfield within the destination payload.
-pub fn insert(dst: &mut [u8], bf: BitField, value: u64) -> Result<(), BitOpsError> {
+pub(crate) fn insert(dst: &mut [u8], bf: BitField, value: u64) -> Result<(), BitOpsError> {
     validate_range(dst, bf)?;
     let mask = mask_for(bf.bit_length);
     if (value as u128) > mask {

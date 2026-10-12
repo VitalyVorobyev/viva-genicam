@@ -1,4 +1,5 @@
-//! In-process fake GigE Vision camera — Python binding over `viva-fake-gige`.
+//! In-process fake cameras — Python bindings over `viva-fake-gige` and
+//! `viva-fake-u3v`.
 //!
 //! Lets users exercise the full bindings (discovery, control, streaming)
 //! without any hardware and without shelling out to a binary, so
@@ -15,13 +16,19 @@ use std::time::Duration;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use viva_fake_gige::registers as regs;
+use viva_fake_gige as regs;
 use viva_fake_gige::{FakeCamera, GvcpCommand, PacketScript, ScriptStep, MONO8, RGB8};
 use viva_genicam::gige;
+use viva_genicam::gige::consts as bootstrap;
 use viva_pfnc::PixelFormat;
 
+use std::sync::Arc;
+
+use viva_fake_u3v::FakeU3vTransport;
+
+use crate::camera::{open_u3v, PyCamera, UsbLink};
 use crate::discovery::PyGigeDeviceInfo;
-use crate::errors::{parse_error, transport_error};
+use crate::errors::{parse_error, transport_error, IntoPyErr};
 use crate::runtime::runtime;
 
 /// The PFNC code of `name`: any format `viva_pfnc` names, plus the lower-case
@@ -127,11 +134,14 @@ impl PyFakeGigeCamera {
             ("DeviceModelName", regs::REG_DEVICE_MODEL_NAME),
             ("DeviceUserID", regs::REG_DEVICE_USER_ID),
             ("DeviceUserBuffer", regs::REG_DEVICE_USER_BUFFER),
-            ("CCP", regs::CCP),
-            ("CurrentIPConfiguration", regs::CURRENT_IP_CONFIG),
-            ("PersistentIPAddress", regs::PERSISTENT_IP_ADDRESS),
-            ("PersistentSubnetMask", regs::PERSISTENT_SUBNET_MASK),
-            ("PersistentDefaultGateway", regs::PERSISTENT_DEFAULT_GATEWAY),
+            ("CCP", bootstrap::CONTROL_CHANNEL_PRIVILEGE),
+            ("CurrentIPConfiguration", bootstrap::CURRENT_IP_CONFIG),
+            ("PersistentIPAddress", bootstrap::PERSISTENT_IP_ADDRESS),
+            ("PersistentSubnetMask", bootstrap::PERSISTENT_SUBNET_MASK),
+            (
+                "PersistentDefaultGateway",
+                bootstrap::PERSISTENT_DEFAULT_GATEWAY,
+            ),
         ])
     }
 
@@ -370,7 +380,58 @@ impl PyFakeGigeCamera {
     }
 }
 
+/// An in-process USB3 Vision camera: the `viva-fake-u3v` device, whose
+/// registers and GenCP and stream protocol are laid out from the standard.
+/// There is no USB enumeration to find it on; `connect` opens it.
+#[pyclass(name = "FakeU3vCamera", module = "viva_genicam._native")]
+pub(crate) struct PyFakeU3vCamera {
+    transport: Arc<FakeU3vTransport>,
+}
+
+#[pymethods]
+impl PyFakeU3vCamera {
+    #[new]
+    #[pyo3(signature = (width = 640, height = 480, pixel_format = "Mono8"))]
+    fn new(width: u32, height: u32, pixel_format: &str) -> PyResult<Self> {
+        let code = pixel_format_code(pixel_format)?;
+        Ok(Self {
+            transport: Arc::new(FakeU3vTransport::new(width, height, code)),
+        })
+    }
+
+    /// Open the camera, as `connect_u3v` opens one on USB.
+    fn connect(&self, py: Python<'_>) -> PyResult<PyCamera> {
+        let link = Arc::new(UsbLink::Fake(Arc::clone(&self.transport)));
+        py.detach(|| {
+            viva_fake_u3v::open(link)
+                .map_err(|source| viva_genicam::GenicamError::U3v {
+                    during: "open the device",
+                    source,
+                })
+                .and_then(open_u3v)
+        })
+        .into_py_err()
+    }
+
+    /// Whether the camera is acquiring: `AcquisitionStart` reached it and
+    /// `AcquisitionStop` has not.
+    fn acquiring(&self) -> bool {
+        self.transport.acquiring()
+    }
+
+    /// `length` bytes of the camera's registers at `address`, as it holds
+    /// them.
+    fn peek<'py>(&self, py: Python<'py>, address: u64, length: usize) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.transport.peek(address, length))
+    }
+
+    fn __repr__(&self) -> String {
+        "FakeU3vCamera()".to_owned()
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFakeGigeCamera>()?;
+    m.add_class::<PyFakeU3vCamera>()?;
     Ok(())
 }

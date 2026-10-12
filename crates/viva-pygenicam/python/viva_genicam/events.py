@@ -39,8 +39,9 @@ class Event:
 
     @property
     def ts_host(self) -> Optional[float]:
-        """The timestamp mapped to host time, as POSIX seconds; the time it
-        was received when the camera's clock is not calibrated."""
+        """The timestamp mapped to host time, as POSIX seconds; ``None``
+        until the camera's clock is calibrated (:meth:`Camera.time_calibrate`),
+        as for a frame."""
         return self._native.ts_host
 
     @property

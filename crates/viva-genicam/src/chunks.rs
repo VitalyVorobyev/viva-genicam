@@ -2,7 +2,7 @@
 //!
 //! A camera in chunk mode sends each frame as a run of chunks — the image
 //! first, then one chunk per enabled value — each its data followed by a tag
-//! naming its chunk ID and length (TC-06, [`viva_gige::gvsp::parse_chunks`]).
+//! naming its chunk ID and length (TC-06, [`viva_gige::parse_chunks`]).
 //! What a chunk *means* is not decided here: the camera's own XML declares
 //! which registers sit on which chunk, at which offset and in which byte
 //! order, and [`Camera::with_chunks`](crate::Camera::with_chunks) reads them
@@ -10,15 +10,15 @@
 
 use bytes::Bytes;
 pub use viva_genapi::ChunkData;
-pub use viva_gige::gvsp::ChunkError;
-use viva_gige::gvsp::{PAYLOAD_TYPE_CHUNK_DATA, has_extended_chunks, is_image_payload};
+pub use viva_gige::ChunkError;
+use viva_gige::{PAYLOAD_TYPE_CHUNK_DATA, has_extended_chunks, is_image_payload};
 
 /// Split a GigE Vision chunk payload into a [`ChunkData`], by chunk ID.
 ///
 /// `payload` must end where the camera's data ends. Each chunk is a slice of
 /// `payload`; nothing is copied.
 pub fn chunk_data(payload: &Bytes) -> Result<ChunkData, ChunkError> {
-    let chunks = viva_gige::gvsp::parse_chunks(payload)?;
+    let chunks = viva_gige::parse_chunks(payload)?;
     Ok(chunks
         .into_iter()
         .map(|chunk| {

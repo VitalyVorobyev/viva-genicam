@@ -1,5 +1,5 @@
 //! Any sequence of datagrams at any packet size: the assembler neither panics
-//! nor lets a block outgrow its bound (`viva_genicam::stream::fuzz_assemble`
+//! nor lets a block outgrow its bound (`viva_genicam::fuzz_assemble`
 //! checks the invariants).
 //!
 //! Input: packet size (2 bytes), a `PayloadSize` selector (1 byte), then
@@ -25,5 +25,5 @@ fuzz_target!(|data: &[u8]| {
         datagrams.push(&rest[2..2 + len]);
         rest = &rest[2 + len..];
     }
-    viva_genicam::stream::fuzz_assemble(packet_size, payload_size, &datagrams);
+    viva_genicam::fuzz_assemble(packet_size, payload_size, &datagrams);
 });

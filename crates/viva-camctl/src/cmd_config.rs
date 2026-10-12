@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use viva_genicam::Camera;
 use viva_genicam::genapi::{Configuration, LoadReport, RegisterIo};
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common::{self, Target};
 use crate::with_camera;

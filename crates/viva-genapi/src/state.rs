@@ -331,7 +331,7 @@ mod tests {
     impl RegisterIo for MemIo {
         fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
             if self.denied.contains(&addr) {
-                return Err(GenApiError::Io(format!("read of {addr:#x} denied")));
+                return Err(GenApiError::io(format!("read of {addr:#x} denied")));
             }
             Ok(self
                 .regs

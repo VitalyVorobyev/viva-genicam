@@ -9,9 +9,9 @@ use tracing::{info, warn};
 
 use viva_genicam::{Camera, U3vRegisterIo, connect_u3v};
 use viva_pfnc::PixelFormat;
-use viva_u3v::discovery::{U3vDeviceInfo, discover};
-use viva_u3v::stream::U3vStream;
-use viva_u3v::usb::{RusbTransfer, UsbTransfer};
+use viva_u3v::U3vStream;
+use viva_u3v::{RusbTransfer, UsbTransfer};
+use viva_u3v::{U3vDeviceInfo, discover};
 
 use crate::common;
 

@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "lo"
     };
-    let iface = gige::nic::Iface::from_system(iface_name)?;
+    let iface = gige::Iface::from_system(iface_name)?;
     let mut frame_stream = camera.open_stream(
         StreamOptions::new()
             .iface(iface)

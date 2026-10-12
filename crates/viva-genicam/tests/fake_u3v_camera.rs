@@ -59,13 +59,12 @@ fn stream_frames_from_fake_camera() {
     use std::sync::Arc;
     use viva_fake_u3v::FakeU3vTransport;
     use viva_fake_u3v::registers::REG_ACQ_START;
-    use viva_u3v::device::U3vDevice;
 
     let (width, height) = (64u32, 64u32);
     let pixel_format = 0x0108_0001u32; // Mono8
 
     let transport = Arc::new(FakeU3vTransport::new(width, height, pixel_format));
-    let mut device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None).unwrap();
+    let mut device = viva_fake_u3v::open(Arc::clone(&transport)).unwrap();
     let mut stream = device.open_stream(0).expect("SIRM configured");
     device
         .write_mem(REG_ACQ_START, &1u32.to_le_bytes())
@@ -128,10 +127,9 @@ fn inspectable_camera() -> (
 ) {
     use std::sync::Arc;
     use viva_fake_u3v::FakeU3vTransport;
-    use viva_u3v::device::U3vDevice;
 
     let transport = Arc::new(FakeU3vTransport::new(64, 64, 0x0108_0001));
-    let device = U3vDevice::open(Arc::clone(&transport), 0x81, 0x01, Some(0x82), None).unwrap();
+    let device = viva_fake_u3v::open(Arc::clone(&transport)).unwrap();
     let (camera, _xml) = open_u3v_device(device).unwrap();
     (transport, camera)
 }
@@ -235,8 +233,8 @@ fn u3v_block(block_id: u64, status: u16, payload: &[u8]) -> [Vec<u8>; 3] {
 async fn a_block_the_device_marks_failed_is_dropped_and_counted() {
     use std::sync::Arc;
     use viva_genicam::U3vFrameStream;
-    use viva_u3v::stream::{StreamLayout, U3vStream};
-    use viva_u3v::usb::MockUsbTransfer;
+    use viva_u3v::MockUsbTransfer;
+    use viva_u3v::{StreamLayout, U3vStream};
 
     let mock = Arc::new(MockUsbTransfer::new());
     for (id, status) in [(1, 0xA101), (2, 0x0000), (3, 0x2001)] {

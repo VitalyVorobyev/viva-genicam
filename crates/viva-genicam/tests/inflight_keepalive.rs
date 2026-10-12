@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use viva_fake_gige::GvcpCommand;
-use viva_fake_gige::registers::{REG_BLACK_LEVEL, REG_GAIN_AUTO};
+use viva_fake_gige::{REG_BLACK_LEVEL, REG_GAIN_AUTO};
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::gige::DeviceInfo;
 use viva_genicam::{Camera, GigeRegisterIo, connect_gige};

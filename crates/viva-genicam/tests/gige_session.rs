@@ -11,7 +11,7 @@ mod common;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use viva_fake_gige::registers::REG_BLACK_LEVEL;
+use viva_fake_gige::REG_BLACK_LEVEL;
 use viva_fake_gige::{FAKE_MAC, FAKE_SERIAL, GvcpCommand};
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::gige::{self, DeviceInfo, DiscoveryOptions, GigeDevice};
@@ -324,7 +324,7 @@ async fn a_write_refused_for_lack_of_privilege_marks_control_lost() {
 async fn a_register_refusing_an_access_does_not_mark_control_lost() {
     let _cam = common::TestCamera::start().await;
     let camera = open(Access::Control).await;
-    let write_only = viva_fake_gige::registers::WRITE_ONLY_REGISTERS[0];
+    let write_only = viva_fake_gige::WRITE_ONLY_REGISTERS[0];
     camera
         .transport()
         .read(write_only, 4)
@@ -549,7 +549,7 @@ async fn a_monitor_watches_a_multicast_stream_it_did_not_configure() {
         return;
     }
     let cam = common::TestCamera::start().await;
-    let lo = gige::nic::Iface::from_ipv4(Ipv4Addr::LOCALHOST).expect("loopback");
+    let lo = gige::Iface::from_ipv4(Ipv4Addr::LOCALHOST).expect("loopback");
     let mut controller = open(Access::Control).await;
     let _own = controller
         .open_stream(
@@ -579,4 +579,57 @@ async fn a_monitor_watches_a_multicast_stream_it_did_not_configure() {
         !sent.iter().any(|&(command, _)| is_write(command)),
         "a monitor wrote: {sent:x?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Errors carry their cause (API-03)
+// ---------------------------------------------------------------------------
+
+/// Every error in `err`'s source chain, outermost first.
+fn causes(err: &dyn std::error::Error) -> Vec<&(dyn std::error::Error + 'static)> {
+    std::iter::successors(err.source(), |e| e.source()).collect()
+}
+
+/// A refusal reaches the caller with its cause as a typed source, not as
+/// text: the camera's `ACCESS_DENIED` as the GVCP error, and a monitor's
+/// local refusal as `WriteRefused`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_carries_its_cause() {
+    let _cam = common::TestCamera::start().await;
+    let _controller = open(Access::Control).await;
+
+    // The camera's refusal: a second application's claim.
+    let err = connect_gige_as(&fake_info(), Access::Control)
+        .await
+        .map(drop)
+        .expect_err("the camera refuses a second claim");
+    let chain = causes(&err);
+    assert!(!chain.is_empty(), "no cause behind: {err}");
+    let gige = chain
+        .iter()
+        .find_map(|cause| cause.downcast_ref::<gige::GigeError>())
+        .unwrap_or_else(|| panic!("no GigeError behind: {err:?}"));
+    assert!(
+        matches!(
+            gige,
+            gige::GigeError::Status(gige::GigeStatus::Common(
+                viva_genicam::gencp::StatusCode::AccessDenied
+            ))
+        ),
+        "{gige:?}"
+    );
+
+    // Ours: a monitor's write, refused before the wire.
+    let mut monitor = open(Access::Monitor).await;
+    let err = monitor
+        .set_integer("Width", 320)
+        .expect_err("a monitor does not write");
+    let chain = causes(&err);
+    assert!(!chain.is_empty(), "no cause behind: {err}");
+    let refused = chain
+        .iter()
+        .find_map(|cause| cause.downcast_ref::<viva_genicam::WriteRefused>())
+        .unwrap_or_else(|| panic!("no WriteRefused behind: {err:?}"));
+    assert_eq!(refused.state, ControlState::Monitor);
+    assert_eq!(refused.address, 0x20000);
 }

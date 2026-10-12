@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use viva_genapi::swissknife::EvalError;
 use viva_genapi::{GenApiError, NodeMap, NullIo, RegisterIo};
 
 /// Default corpus location relative to the workspace root.
@@ -98,15 +99,17 @@ impl RegisterIo for PatternIo {
     }
 }
 
-/// Which stub a pass runs against, and how strict it is about `Parse`.
+/// Which stub a pass runs against, and how strict it is about conversions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pass {
-    /// Reads return zeros. `Parse` can be an honest outcome here — a zero
-    /// enum value with no matching entry, for instance.
+    /// Reads return zeros. A refused conversion can be an honest outcome
+    /// here: a zero raw value through a formula that divides by it.
     Zeros,
     /// Reads return a descending byte pattern, which sets the top bit of
-    /// every register in either byte order. `Parse` is a defect in this pass:
-    /// every value is representable, so a conversion that refuses one is ours.
+    /// every register in either byte order. A register that does not convert
+    /// is a defect in this pass: every value is representable, so a
+    /// conversion that refuses one is ours. So is a declaration the node
+    /// map cannot evaluate.
     Pattern,
 }
 
@@ -129,7 +132,11 @@ impl Pass {
         if is_engine_defect(err) {
             return true;
         }
-        self == Pass::Pattern && matches!(err, GenApiError::Parse(_))
+        self == Pass::Pattern
+            && matches!(
+                err,
+                GenApiError::RegisterEncoding { .. } | GenApiError::Declaration { .. }
+            )
     }
 }
 
@@ -162,10 +169,36 @@ fn is_expected_skip(document: &str, tag: &str, node: Option<&str>, error: &str) 
 fn is_engine_defect(err: &GenApiError) -> bool {
     match err {
         GenApiError::ExprParse { .. } | GenApiError::UnknownVariable { .. } => true,
-        GenApiError::ExprEval { msg, .. } => {
-            msg.starts_with("unknown function") || msg.contains("expects")
-        }
+        GenApiError::ExprEval { source, .. } => matches!(
+            source,
+            EvalError::UnknownFunction(_) | EvalError::ArityMismatch { .. }
+        ),
         _ => false,
+    }
+}
+
+/// What a failed read says about the document, for the corpus summary: a
+/// register whose bytes do not convert is the device's data (or the width
+/// the node declares) meeting our codec; a declaration the node map cannot
+/// evaluate is the XML. Before backlog GA-30 both were `Parse`, so a failed
+/// device read read as bad XML and the summary could not tell them apart.
+fn failure_class(err: &GenApiError) -> &'static str {
+    match err {
+        GenApiError::RegisterEncoding { .. } => "register encoding",
+        GenApiError::Declaration { .. } => "declaration",
+        GenApiError::ExprParse { .. }
+        | GenApiError::ExprEval { .. }
+        | GenApiError::UnknownVariable { .. } => "formula",
+        GenApiError::Range { .. } => "range",
+        GenApiError::EnumValueUnknown { .. } => "enum value",
+        GenApiError::Access { .. } => "access",
+        GenApiError::Type { .. } => "kind",
+        GenApiError::NotAttached { .. } => "no chunk or event attached",
+        GenApiError::Unavailable(_) => "unavailable",
+        // Backlog GA-17: Baumer's registers whose address is an inline
+        // `<IntSwissKnife>`, which the XML layer drops.
+        GenApiError::NoValueSource { .. } => "no register, pValue or Value",
+        _ => "other",
     }
 }
 
@@ -197,6 +230,8 @@ fn vendor_xml_corpus_builds_nodemaps() {
     let mut failures = Vec::new();
     let mut total_nodes = 0usize;
     let mut total_evaluated = 0usize;
+    // Reads that failed for a reason the pass allows, by pass and class.
+    let mut allowed: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
 
     for path in &documents {
         let document = path
@@ -278,13 +313,19 @@ fn vendor_xml_corpus_builds_nodemaps() {
                     Err(err) => err,
                 };
                 if pass.is_defect(&err) {
-                    defects.insert(name.clone(), err.to_string());
+                    defects.insert(name.clone(), format!("{}: {err}", failure_class(&err)));
                     continue;
                 }
-                if let Err(err) = nodemap.get_integer(name, io.as_ref())
-                    && pass.is_defect(&err)
-                {
-                    defects.insert(name.clone(), err.to_string());
+                match nodemap.get_integer(name, io.as_ref()) {
+                    Ok(_) => {}
+                    Err(err) if pass.is_defect(&err) => {
+                        defects.insert(name.clone(), format!("{}: {err}", failure_class(&err)));
+                    }
+                    Err(err) => {
+                        *allowed
+                            .entry((pass.label(), failure_class(&err)))
+                            .or_default() += 1;
+                    }
                 }
             }
 
@@ -318,6 +359,13 @@ fn vendor_xml_corpus_builds_nodemaps() {
         "\n{} documents, {total_nodes} nodes built, {total_evaluated} evaluated",
         documents.len()
     );
+    // Reads that fail without a camera, by why: a kind with no value, a
+    // write-only node, an enum value the stub's bytes do not name. A register
+    // that does not convert and a declaration that does not evaluate are
+    // counted apart (GA-30); under the pattern pass either is a defect.
+    for ((pass, class), count) in &allowed {
+        println!("  {pass}: {count} reads refused ({class})");
+    }
 
     assert!(
         failures.is_empty(),

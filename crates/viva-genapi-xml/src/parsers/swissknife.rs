@@ -17,7 +17,7 @@ use crate::{FormulaBindings, NodeDecl, PredicateRefs, SkOutput, SwissKnifeDecl, 
 /// three thousand times — so deriving the type from `<Output>` alone silently
 /// made every integer knife a float one. `<Output>` is still honoured as an
 /// override for the tools that do emit it.
-pub fn parse_swissknife(
+pub(crate) fn parse_swissknife(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -43,9 +43,7 @@ pub fn parse_swissknife(
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
-                        return Err(XmlError::Invalid(format!(
-                            "SwissKnife node {name} has empty <Constant Name=\"{const_name}\">"
-                        )));
+                        return Err(XmlError::invalid(&name, "has an empty <Constant>"));
                     }
                     bindings.constants.push((const_name, trimmed.to_string()));
                 }
@@ -56,9 +54,7 @@ pub fn parse_swissknife(
                     let text = read_text_start(reader, e)?;
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
-                        return Err(XmlError::Invalid(format!(
-                            "SwissKnife node {name} has empty <Expression>"
-                        )));
+                        return Err(XmlError::invalid(&name, "has an empty <Expression>"));
                     }
                     match sub_name {
                         Some(sub_name) => {
@@ -72,9 +68,7 @@ pub fn parse_swissknife(
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if target.is_empty() {
-                        return Err(XmlError::Invalid(format!(
-                            "SwissKnife node {name} has empty <pVariable>"
-                        )));
+                        return Err(XmlError::invalid(&name, "has an empty <pVariable>"));
                     }
                     variables.push((var_name, target.to_string()));
                 }
@@ -97,24 +91,21 @@ pub fn parse_swissknife(
                     let var_name = attribute_value_required(e, "Name")?;
                     if let Some(target) = attribute_value(e, TAG_VALUE)? {
                         if target.is_empty() {
-                            return Err(XmlError::Invalid(format!(
-                                "SwissKnife node {name} has empty <pVariable/>"
-                            )));
+                            return Err(XmlError::invalid(&name, "has an empty <pVariable>"));
                         }
                         variables.push((var_name, target));
                     } else {
-                        return Err(XmlError::Invalid(format!(
-                            "SwissKnife node {name} missing variable target"
-                        )));
+                        return Err(XmlError::invalid(
+                            &name,
+                            "has a <pVariable> that names no node",
+                        ));
                     }
                 }
                 "Expression" | "Formula" => {
                     let text = attribute_value_required(e, TAG_VALUE)?;
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
-                        return Err(XmlError::Invalid(format!(
-                            "SwissKnife node {name} has empty <Expression/>"
-                        )));
+                        return Err(XmlError::invalid(&name, "has an empty <Expression>"));
                     }
                     expr = Some(trimmed.to_string());
                 }
@@ -129,18 +120,15 @@ pub fn parse_swissknife(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated SwissKnife node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
     }
 
-    let expr = expr
-        .ok_or_else(|| XmlError::Invalid(format!("SwissKnife node {name} is missing <Formula>")))?;
+    let expr = expr.ok_or_else(|| XmlError::missing(&name, "<Formula>"))?;
     // `<pVariable>` is optional: a constant formula such as `<Formula>0x1234</Formula>`
     // is legal GenICam and appears in the standard's own conformance documents.
 

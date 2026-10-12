@@ -1,6 +1,6 @@
 //! In-process fake USB3 Vision camera for testing.
 //!
-//! [`FakeU3vTransport`] implements [`UsbTransfer`](viva_u3v::usb::UsbTransfer)
+//! [`FakeU3vTransport`] implements [`UsbTransfer`]
 //! with an in-memory register map and GenCP command handling, both laid out
 //! from the standards rather than from `viva-u3v` ([`registers`]). It can be used
 //! with `U3vDevice::open()` to create a fully functional `Camera` without any
@@ -27,8 +27,27 @@ pub use transport::FakeU3vTransport;
 
 use std::sync::Arc;
 
-use viva_u3v::U3vError;
-use viva_u3v::device::U3vDevice;
+use viva_u3v::{U3vDevice, U3vError, UsbTransfer};
+
+/// The control interface's bulk IN endpoint: acknowledges.
+pub const CONTROL_EP_IN: u8 = 0x81;
+/// The control interface's bulk OUT endpoint: commands.
+pub const CONTROL_EP_OUT: u8 = 0x01;
+/// The streaming interface's bulk IN endpoint.
+pub const STREAM_EP_IN: u8 = 0x82;
+
+/// Open a [`U3vDevice`] on a fake's endpoints, over `transport`: a
+/// [`FakeU3vTransport`], or a caller's type that delegates to one (a binding
+/// that serves real and fake cameras through one type).
+pub fn open<T: UsbTransfer + 'static>(transport: Arc<T>) -> Result<U3vDevice<T>, U3vError> {
+    U3vDevice::open(
+        transport,
+        CONTROL_EP_IN,
+        CONTROL_EP_OUT,
+        Some(STREAM_EP_IN),
+        None,
+    )
+}
 
 /// Builder for a fake USB3 Vision camera.
 ///
@@ -62,17 +81,10 @@ impl FakeU3vCamera {
     /// and serves a GenApi XML describing Width, Height, PixelFormat,
     /// and acquisition features.
     pub fn open_device(self) -> Result<U3vDevice<FakeU3vTransport>, U3vError> {
-        let transport = Arc::new(FakeU3vTransport::new(
+        open(Arc::new(FakeU3vTransport::new(
             self.width,
             self.height,
             self.pixel_format,
-        ));
-
-        // Control endpoints matching our fake descriptor.
-        let ep_in = 0x81;
-        let ep_out = 0x01;
-        let stream_ep = Some(0x82);
-
-        U3vDevice::open(transport, ep_in, ep_out, stream_ep, None)
+        )))
     }
 }

@@ -16,11 +16,11 @@ use viva_genicam::image_io::{self, ImageFormat};
 use viva_genicam::pfnc::{self, PixelFormat};
 use viva_genicam::{Access, Camera, GigeRegisterIo, U3vRegisterIo, connect_gige_as};
 use viva_gige::DeviceInfo;
+use viva_gige::GigeDevice;
 use viva_gige::discover_on_interface;
-use viva_gige::gvcp::GigeDevice;
-use viva_gige::nic::{Iface, IfaceSelector};
 use viva_gige::{GVCP_PORT, discover};
-use viva_u3v::usb::RusbTransfer;
+use viva_gige::{Iface, IfaceSelector};
+use viva_u3v::RusbTransfer;
 
 pub const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 500;
 
@@ -52,7 +52,6 @@ pub enum AnyCamera {
 
 /// Run `$body` with `$camera` bound to the camera inside an
 /// [`AnyCamera`](crate::common::AnyCamera), whichever transport it is on.
-#[macro_export]
 macro_rules! with_camera {
     ($any:expr, $camera:ident => $body:expr) => {
         match $any {
@@ -61,6 +60,7 @@ macro_rules! with_camera {
         }
     };
 }
+pub(crate) use with_camera;
 
 /// Open the camera `target` names, with its nodemap. `access` applies to a
 /// GigE Vision camera; USB3 Vision has no control privilege.
@@ -155,7 +155,7 @@ pub async fn fetch_xml(control: Arc<Mutex<GigeDevice>>) -> Result<String> {
                 guard
                     .read_mem(address, length)
                     .await
-                    .map_err(|err| XmlError::Transport(err.to_string()))
+                    .map_err(XmlError::transport)
             }
         }
     })

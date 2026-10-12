@@ -4,7 +4,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use pyo3::prelude::*;
-use viva_genicam::gige::{self, action};
+use viva_genicam::gige;
 
 use crate::camera::iface_from_str;
 use crate::errors::{parse_error, transport_error};
@@ -50,7 +50,7 @@ fn send_action(
     timeout_ms: u64,
 ) -> PyResult<(usize, usize)> {
     let ip = parse_ip("destination", destination)?;
-    let params = action::ActionParams {
+    let params = gige::ActionParams {
         device_key,
         group_key,
         group_mask,
@@ -58,7 +58,7 @@ fn send_action(
     };
     let dest = SocketAddr::from((ip, gige::GVCP_PORT));
     let summary = py
-        .detach(|| runtime().block_on(action::send_action(dest, &params, timeout_ms)))
+        .detach(|| runtime().block_on(gige::send_action(dest, &params, timeout_ms)))
         .map_err(|err| transport_error(format!("action command to {ip}: {err}")))?;
     Ok((summary.sent, summary.acks))
 }

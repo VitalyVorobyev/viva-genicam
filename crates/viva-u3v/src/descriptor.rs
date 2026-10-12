@@ -4,33 +4,47 @@
 //! (IAD) class codes and interface class/subclass values. This module extracts
 //! endpoint addresses and interface numbers from USB descriptors.
 
+#[cfg(any(feature = "usb", test))]
 /// USB3 Vision interface class code: Miscellaneous.
-pub const U3V_INTERFACE_CLASS: u8 = 0xEF;
+pub(crate) const U3V_INTERFACE_CLASS: u8 = 0xEF;
+#[cfg(any(feature = "usb", test))]
 /// USB3 Vision interface subclass, the same on all three of its interfaces.
-pub const U3V_INTERFACE_SUBCLASS: u8 = 0x05;
+pub(crate) const U3V_INTERFACE_SUBCLASS: u8 = 0x05;
 
+#[cfg(any(feature = "usb", test))]
 /// Interface protocol of the control interface.
-pub const U3V_CONTROL_PROTOCOL: u8 = 0x00;
+pub(crate) const U3V_CONTROL_PROTOCOL: u8 = 0x00;
+#[cfg(any(feature = "usb", test))]
 /// Interface protocol of the event interface.
-pub const U3V_EVENT_PROTOCOL: u8 = 0x01;
+pub(crate) const U3V_EVENT_PROTOCOL: u8 = 0x01;
+#[cfg(any(feature = "usb", test))]
 /// Interface protocol of the streaming interface.
-pub const U3V_STREAM_PROTOCOL: u8 = 0x02;
+pub(crate) const U3V_STREAM_PROTOCOL: u8 = 0x02;
 
 /// What a USB3 Vision interface carries.
+#[cfg(any(feature = "usb", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum U3vInterfaceKind {
+pub(crate) enum U3vInterfaceKind {
+    /// The control interface: GenCP commands and acknowledges.
     Control,
+    /// The event interface.
     Event,
+    /// The streaming interface.
     Stream,
 }
 
+#[cfg(any(feature = "usb", test))]
 /// Which USB3 Vision interface, if any, an interface descriptor describes.
 ///
 /// All three are class `0xEF`, subclass `0x05`; the protocol tells them apart
 /// (aravis `ARV_UV_INTERFACE_*_PROTOCOL`, Wireshark `IF_SUBCLASS_MISC_U3V`).
 /// Until backlog TC-27 discovery matched the *subclass* against 0, 1 and 2,
 /// so it found no interface on a conformant camera.
-pub fn classify_interface(class: u8, subclass: u8, protocol: u8) -> Option<U3vInterfaceKind> {
+pub(crate) fn classify_interface(
+    class: u8,
+    subclass: u8,
+    protocol: u8,
+) -> Option<U3vInterfaceKind> {
     if class != U3V_INTERFACE_CLASS || subclass != U3V_INTERFACE_SUBCLASS {
         return None;
     }
@@ -67,7 +81,7 @@ pub struct U3vInterfaceInfo {
 ///
 /// Returns `None` if no U3V control interface is found.
 #[cfg(feature = "usb")]
-pub fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterfaceInfo> {
+pub(crate) fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterfaceInfo> {
     let mut control_iface = None;
     let mut control_ep_in = None;
     let mut control_ep_out = None;
@@ -143,7 +157,7 @@ pub fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterf
 /// This is a coarse filter; full detection requires inspecting interface
 /// descriptors via [`parse_u3v_interfaces`].
 #[cfg(feature = "usb")]
-pub fn is_likely_u3v_device(desc: &rusb::DeviceDescriptor) -> bool {
+pub(crate) fn is_likely_u3v_device(desc: &rusb::DeviceDescriptor) -> bool {
     // IAD class at device level
     if desc.class_code() == 0xEF && desc.sub_class_code() == 0x02 && desc.protocol_code() == 0x01 {
         return true;

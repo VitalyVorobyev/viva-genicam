@@ -1,4 +1,4 @@
-//! Device timestamp helpers and host mapping utilities.
+//! Mapping device timestamps to host time.
 //!
 //! The [`TimeSync`] struct maintains a sliding window of timestamp measurements
 //! and computes a linear model mapping device ticks to host time. It supports:
@@ -8,88 +8,12 @@
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
-use std::convert::TryInto;
 use std::time::{Duration, Instant, SystemTime};
 
-use async_trait::async_trait;
-use thiserror::Error;
 use tracing::trace;
 
-use crate::gvcp::GigeError;
-
-/// Address of the SFNC `TimestampControl` register.
-pub const REG_TIMESTAMP_CONTROL: u64 = 0x0900_0100;
-/// Address of the SFNC `TimestampValue` register (64-bit).
-pub const REG_TIMESTAMP_VALUE: u64 = 0x0900_0104;
-/// Address of the SFNC `TimestampTickFrequency` register (64-bit).
-pub const REG_TIMESTAMP_TICK_FREQUENCY: u64 = 0x0900_010C;
-/// Bit flag to latch the timestamp counter.
-pub const TIMESTAMP_LATCH_BIT: u32 = 0x0000_0002;
-/// Bit flag to reset the timestamp counter.
-pub const TIMESTAMP_RESET_BIT: u32 = 0x0000_0001;
 /// Default maximum number of samples kept for linear regression.
 pub const DEFAULT_TIME_WINDOW: usize = 32;
-
-/// Errors encountered while interacting with timestamp control registers.
-#[derive(Debug, Error)]
-pub enum TimeError {
-    #[error("control: {0}")]
-    Control(#[from] GigeError),
-    #[error("protocol: {0}")]
-    Protocol(&'static str),
-}
-
-/// Minimal interface required to read/write timestamp registers.
-///
-/// The [`GigeDevice`](crate::gvcp::GigeDevice) implementation used to forward
-/// both methods to READMEM/WRITEMEM whatever their names said. It now goes
-/// through [`GigeDevice::read_register_or_mem`](crate::gvcp::GigeDevice::read_register_or_mem),
-/// so the 4-byte control write is a WRITEREG and the 8-byte value reads stay
-/// READMEM — one command, never two registers that could tear.
-#[async_trait]
-pub trait ControlChannel: Send + Sync {
-    async fn read_register(&self, addr: u64, len: usize) -> Result<Vec<u8>, TimeError>;
-    async fn write_register(&self, addr: u64, data: &[u8]) -> Result<(), TimeError>;
-}
-
-fn write_u32_be(value: u32) -> [u8; 4] {
-    value.to_be_bytes()
-}
-
-fn parse_u64_be(data: &[u8]) -> Result<u64, TimeError> {
-    if data.len() != 8 {
-        return Err(TimeError::Protocol("unexpected register size"));
-    }
-    Ok(u64::from_be_bytes(
-        data.try_into().expect("slice length checked"),
-    ))
-}
-
-/// Issue a timestamp reset using the SFNC control register.
-pub async fn timestamp_reset<C: ControlChannel>(ctrl: &C) -> Result<(), TimeError> {
-    trace!("triggering timestamp reset");
-    ctrl.write_register(REG_TIMESTAMP_CONTROL, &write_u32_be(TIMESTAMP_RESET_BIT))
-        .await
-}
-
-/// Latch the current timestamp counter to make it readable without jitter.
-pub async fn timestamp_latch<C: ControlChannel>(ctrl: &C) -> Result<(), TimeError> {
-    trace!("triggering timestamp latch");
-    ctrl.write_register(REG_TIMESTAMP_CONTROL, &write_u32_be(TIMESTAMP_LATCH_BIT))
-        .await
-}
-
-/// Read the current 64-bit timestamp value from the device.
-pub async fn read_timestamp_value<C: ControlChannel>(ctrl: &C) -> Result<u64, TimeError> {
-    let bytes = ctrl.read_register(REG_TIMESTAMP_VALUE, 8).await?;
-    parse_u64_be(&bytes)
-}
-
-/// Read the device tick frequency.
-pub async fn read_tick_frequency<C: ControlChannel>(ctrl: &C) -> Result<u64, TimeError> {
-    let bytes = ctrl.read_register(REG_TIMESTAMP_TICK_FREQUENCY, 8).await?;
-    parse_u64_be(&bytes)
-}
 
 /// Maintain a linear mapping between device ticks and host time.
 ///
@@ -369,25 +293,6 @@ fn compute_fit(samples: &[(f64, f64)]) -> Option<(f64, f64)> {
     let slope = numer / denom;
     let intercept = mean_y - slope * mean_x;
     Some((slope, intercept))
-}
-
-#[async_trait]
-impl ControlChannel for tokio::sync::Mutex<crate::gvcp::GigeDevice> {
-    async fn read_register(&self, addr: u64, len: usize) -> Result<Vec<u8>, TimeError> {
-        let mut guard = self.lock().await;
-        guard
-            .read_register_or_mem(addr, len)
-            .await
-            .map_err(TimeError::from)
-    }
-
-    async fn write_register(&self, addr: u64, data: &[u8]) -> Result<(), TimeError> {
-        let mut guard = self.lock().await;
-        guard
-            .write_register_or_mem(addr, data)
-            .await
-            .map_err(TimeError::from)
-    }
 }
 
 #[cfg(test)]

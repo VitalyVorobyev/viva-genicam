@@ -26,7 +26,7 @@ opaque string without `/`).
     "name": "Left",
     "model": "SPC-3000",
     "serial": "SN12345678",
-    "api_version": 4,
+    "api_version": 5,
     "ip": "192.168.1.10",
     "mac": "00:0C:DF:06:5B:2F",
     "user_name": "Left",
@@ -38,14 +38,16 @@ opaque string without `/`).
   for more than 6 seconds is considered lost and removed from the discovered list.
 - **Identity:** for GigE Vision, `id` is `cam-` plus the MAC as lowercase hex
   (`viva_zenoh_api::gige_device_id`) — the one identifier that survives an address
-  change. `name` is the user-defined name, else the model, else the address. `serial` is
+  change. For USB3 Vision it is `cam-u3v-`, the vendor and product ids as hex, then
+  the bus and address (`viva_zenoh_api::u3v_device_id`, `cam-u3v-1e10300a-2-7`), so
+  identical cameras get different ids; a replug can change it (backlog UV-03). `name` is the user-defined name, else the model, else the address. `serial` is
   the device's own serial, empty when it reports none (services before version 3 put the
   device id there). `ip`, `mac`, `user_name` and `manufacturer` are optional and absent
   when unknown; USB3 Vision has no `ip` or `mac`. The app labels a device by its
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional (`null`/absent means the service is pre-versioning). The app
-  compares this against `viva_zenoh_api::API_VERSION` (currently `4`). On mismatch or
+  compares this against `viva_zenoh_api::API_VERSION` (currently `5`). On mismatch or
   absence, the app emits an `api-version-mismatch` Tauri event (see below) and still
   discovers the device — no hard rejection.
 
@@ -294,40 +296,72 @@ opaque string without `/`).
 
 #### Pixel format discriminant table
 
-Codes are **only appended** — never reordered. Unknown codes map to `PixelFormat::Unknown`.
+The byte says which PFNC format the pixels are in; what a format *is* —
+its layout, its size — is `viva-pfnc`'s to say, and `image/meta` names it in
+full. Codes are **only appended** — never reordered. A format without a code
+travels as `0`, which decodes as `viva_pfnc::PixelFormat::Unknown(0)`.
 
-| Code | `PixelFormat` variant | Notes               |
-|------|----------------------|---------------------|
-|    0 | `Unknown`            | fallback / unset    |
-|    1 | `Mono8`              | 1 byte/px           |
-|    2 | `Mono10`             | 2 bytes/px (LE)     |
-|    3 | `Mono12`             | 2 bytes/px (LE)     |
-|    4 | `Mono16`             | 2 bytes/px (LE)     |
-|    5 | `BayerRG8`           | 1 byte/px           |
-|    6 | `BayerGR8`           | 1 byte/px           |
-|    7 | `BayerBG8`           | 1 byte/px           |
-|    8 | `BayerGB8`           | 1 byte/px           |
-|    9 | `BayerRG10`          | 2 bytes/px (LE)     |
-|   10 | `BayerGR10`          | 2 bytes/px (LE)     |
-|   11 | `BayerBG10`          | 2 bytes/px (LE)     |
-|   12 | `BayerGB10`          | 2 bytes/px (LE)     |
-|   13 | `BayerRG12`          | 2 bytes/px (LE)     |
-|   14 | `BayerGR12`          | 2 bytes/px (LE)     |
-|   15 | `BayerBG12`          | 2 bytes/px (LE)     |
-|   16 | `BayerGB12`          | 2 bytes/px (LE)     |
-|   17 | `BayerRG16`          | 2 bytes/px (LE)     |
-|   18 | `BayerGR16`          | 2 bytes/px (LE)     |
-|   19 | `BayerBG16`          | 2 bytes/px (LE)     |
-|   20 | `BayerGB16`          | 2 bytes/px (LE)     |
-|   21 | `RGB8`               | 3 bytes/px          |
-|   22 | `BGR8`               | 3 bytes/px          |
-|   23 | `RGBa8`              | 4 bytes/px          |
-|   24 | `YCbCr422_8`         | 2 bytes/px          |
-|   25 | `YCbCr8`             | 3 bytes/px          |
-|   26 | `Coord3D_C16`        | 2 bytes/px (LE)     |
+| Code | PFNC format | PFNC code |
+|------|-------------|-----------|
+|    0 | none: a format without a code, or unset | — |
+|    1 | `Mono8` | `0x0108_0001` |
+|    2 | `Mono10` | `0x0110_0003` |
+|    3 | `Mono12` | `0x0110_0005` |
+|    4 | `Mono16` | `0x0110_0007` |
+|    5 | `BayerRG8` | `0x0108_0009` |
+|    6 | `BayerGR8` | `0x0108_0008` |
+|    7 | `BayerBG8` | `0x0108_000B` |
+|    8 | `BayerGB8` | `0x0108_000A` |
+|    9 | `BayerRG10` | `0x0110_000D` |
+|   10 | `BayerGR10` | `0x0110_000C` |
+|   11 | `BayerBG10` | `0x0110_000F` |
+|   12 | `BayerGB10` | `0x0110_000E` |
+|   13 | `BayerRG12` | `0x0110_0011` |
+|   14 | `BayerGR12` | `0x0110_0010` |
+|   15 | `BayerBG12` | `0x0110_0013` |
+|   16 | `BayerGB12` | `0x0110_0012` |
+|   17 | `BayerRG16` | `0x0110_002F` |
+|   18 | `BayerGR16` | `0x0110_002E` |
+|   19 | `BayerBG16` | `0x0110_0031` |
+|   20 | `BayerGB16` | `0x0110_0030` |
+|   21 | `RGB8Packed` | `0x0218_0014` |
+|   22 | `BGR8Packed` | `0x0218_0015` |
+|   23 | `RGBa8` | `0x0220_0016` |
+|   24 | `YCbCr422_8` | `0x0210_003B` |
+|   25 | `YCbCr8` | `0x0218_005B` |
+|   26 | `Coord3D_C16` | `0x0110_00B8` |
+|   27 | `Mono14` | `0x0110_0025` |
+|   28 | `Mono10p` | `0x010A_0046` |
+|   29 | `Mono12p` | `0x010C_0047` |
+|   30 | `Mono10Packed` | `0x010C_0004` |
+|   31 | `Mono12Packed` | `0x010C_0006` |
+|   32 | `BayerRG10p` | `0x010A_0058` |
+|   33 | `BayerGR10p` | `0x010A_0056` |
+|   34 | `BayerBG10p` | `0x010A_0052` |
+|   35 | `BayerGB10p` | `0x010A_0054` |
+|   36 | `BayerRG12p` | `0x010C_0059` |
+|   37 | `BayerGR12p` | `0x010C_0057` |
+|   38 | `BayerBG12p` | `0x010C_0053` |
+|   39 | `BayerGB12p` | `0x010C_0055` |
+|   40 | `BayerRG10Packed` | `0x010C_0027` |
+|   41 | `BayerGR10Packed` | `0x010C_0026` |
+|   42 | `BayerBG10Packed` | `0x010C_0029` |
+|   43 | `BayerGB10Packed` | `0x010C_0028` |
+|   44 | `BayerRG12Packed` | `0x010C_002B` |
+|   45 | `BayerGR12Packed` | `0x010C_002A` |
+|   46 | `BayerBG12Packed` | `0x010C_002D` |
+|   47 | `BayerGB12Packed` | `0x010C_002C` |
+|   48 | `BGRa8` | `0x0220_0017` |
+|   49 | `YUV422_8` | `0x0210_0032` |
+|   50 | `YUV422_8_UYVY` | `0x0210_001F` |
+|   51 | `YCbCr422_8_CbYCrY` | `0x0210_0043` |
+|   52 | `YUV411_8_UYYVYY` | `0x020C_001E` |
+|   53 | `YUV8_UYV` | `0x0218_0020` |
+|   54 | `YCbCr8_CbYCr` | `0x0218_003A` |
 
 - **Rust types:** `FrameHeader`, `FrameHeaderError`, `FRAME_MAGIC`, `HEADER_SIZE`,
-  `pixel_format_to_u8`, `u8_to_pixel_format` — all in `viva_zenoh_api::frame_header`.
+  `pixel_format_to_u8`, `u8_to_pixel_format` — all in `viva_zenoh_api::frame_header`;
+  a header's `pixel_format` is a `viva_pfnc::PixelFormat`.
 
 ### `genicam/devices/{device_id}/image/meta`
 
@@ -345,11 +379,15 @@ Codes are **only appended** — never reordered. Unknown codes map to `PixelForm
   ```
 - **Rust type:** `ImageMeta` in `viva-zenoh-api`
 - **Field notes:**
-  - `pixel_format` — SFNC format string (e.g. `"Mono8"`, `"Mono16"`, `"BayerRG8"`,
-    `"RGB8"`). Full variant list: `viva_zenoh_api::PixelFormat`. Unknown strings
-    deserialize as `PixelFormat::Unknown`.
-  - `payload_size` — `width × height × bytes_per_pixel` for the given format.
-    See `PixelFormat::bytes_per_pixel()` for the authoritative mapping.
+  - `pixel_format` — the format's PFNC name (`"Mono8"`, `"Mono12p"`,
+    `"BayerRG8"`, `"RGB8Packed"`, `"Coord3D_ABC32f"`): any format `viva-pfnc`
+    names, not a list of the wire's own. In Rust it is a `viva_pfnc::PixelFormat`;
+    a name `viva-pfnc` does not know deserializes as `Unknown(0)` and is
+    published as `"Unknown"`. Older names a camera may use (`"RGB8"`,
+    `"YUV422Packed"`) are read as the same format.
+  - `payload_size` — the bytes a frame's payload carries: the camera's
+    `PayloadSize`, padding and chunk data included; without one,
+    `width × height` at the format's PFNC size.
 
 ### `genicam/devices/{device_id}/evs`
 

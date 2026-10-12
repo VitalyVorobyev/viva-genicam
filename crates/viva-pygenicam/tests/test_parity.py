@@ -319,6 +319,7 @@ def test_events_and_their_features(camera, loopback_iface):
         with camera.stream(packet_size=1500):
             event = events.next_event(timeout_ms=5000)
     assert event.id == EVENT_EXPOSURE_END
+    assert event.ts_host is None, "a host time without a fitted clock (API-20)"
     values = camera.event_features(event)
     # The fake timestamps the event like the block's leader and puts the
     # block id in the data.

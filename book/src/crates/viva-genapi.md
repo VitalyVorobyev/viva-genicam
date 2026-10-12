@@ -184,18 +184,22 @@ change is a wrong answer, not a slow one.
 
 ## Errors
 
-`GenApiError` is specific on purpose; the variant usually says what to do next:
+`GenApiError` is specific on purpose; the variant usually says what to do next.
+It is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
 
 | Variant | Means |
 |---|---|
 | `NodeNotFound(name)` | No such feature in this camera's document |
-| `Type(name)` | Asked for the wrong type — `get_float` on an `Integer` |
-| `Access(name)` | The node's access mode forbids the operation |
+| `Type { name, kind, expected }` | Asked for the wrong type — `get_float` on an `Integer` |
+| `Access { name, refused }` | The node's access mode forbids the read or write `refused` names |
 | `Locked { name, locked_by }` | `pIsLocked` is engaged; `locked_by` is the feature to change |
-| `Range(name)` | Value outside `Min`/`Max`, or off `Inc` |
+| `InvalidText { name, expected, text }` | Text that is not a value of the feature's type |
+| `Range { name, value, violation }` | Value below `Min`, above `Max`, or off `Inc` |
 | `Unavailable(name)` | `pIsImplemented` or `pIsAvailable` says the feature cannot be used now |
-| `Io(msg)` | The transport failed |
-| `Parse(msg)` | Metadata or conversion failure |
+| `NoValueSource { name }` | The node declares no register, `<pValue>` or `<Value>` to read |
+| `Io(source)` | The transport failed; `source` is the transport's error (`GigeError`, `U3vError`) |
+| `RegisterEncoding { name, width, problem }` | The register's bytes do not convert — the camera's answer, not the XML |
+| `Declaration { name, problem }` | The XML declares the node in a way that cannot be evaluated |
 | `ExprParse` / `ExprEval` / `UnknownVariable` | A SwissKnife formula failed to parse, evaluate, or resolve a reference |
 | `EnumValueUnknown` / `EnumNoSuchEntry` | Raw value maps to no entry, or no entry has that name |
 | `BadIndirectAddress` | `pAddress` resolved to something impossible |

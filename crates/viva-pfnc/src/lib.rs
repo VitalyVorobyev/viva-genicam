@@ -34,7 +34,11 @@ macro_rules! pixel_formats {
         // component order after the underscore is part of the name.
         #[allow(non_camel_case_types)]
         pub enum PixelFormat {
-            $($(#[$meta])* $variant = $code,)*
+            $(
+                $(#[$meta])*
+                #[doc = concat!("PFNC `", stringify!($variant), "`, code `", stringify!($code), "`.")]
+                $variant = $code,
+            )*
             /// Unknown PFNC code reported by the device.
             Unknown(u32),
         }
@@ -69,8 +73,9 @@ macro_rules! pixel_formats {
                 }
             }
 
-            /// The name the format prints as, `None` for an unknown code.
-            const fn name(self) -> Option<&'static str> {
+            /// The format's PFNC name, as it prints (`"Mono8"`,
+            /// `"RGB8Packed"`); `None` for an unknown code.
+            pub const fn name(self) -> Option<&'static str> {
                 match self {
                     $(PixelFormat::$variant => Some($name),)*
                     PixelFormat::Unknown(_) => None,

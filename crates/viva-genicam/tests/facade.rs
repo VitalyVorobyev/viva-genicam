@@ -11,7 +11,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use viva_fake_gige::XmlProfile;
-use viva_fake_gige::registers::{
+use viva_fake_gige::{
     REG_ACQ_FRAME_RATE, REG_ACQ_FRAME_RATE_ENABLE, REG_BINNING_HORIZONTAL, REG_BINNING_VERTICAL,
     REG_EXPOSURE_TIME, REG_GAIN_RAW, REG_HEIGHT, REG_OFFSET_X, REG_OFFSET_Y, REG_USER_SET_DEFAULT,
     REG_WIDTH,

@@ -28,37 +28,38 @@ const MAX_XML_SIZE: u64 = 64 * 1024 * 1024;
 /// GenICam devices commonly serve their register-description XML as a ZIP
 /// archive (the URL then ends in `.zip`), which the standard requires
 /// consumers to handle transparently.
-pub fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, XmlError> {
+pub(crate) fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, XmlError> {
     use std::io::Read;
 
     if data.len() < 4 || &data[..4] != ZIP_MAGIC {
         return Ok(data);
     }
     let cursor = std::io::Cursor::new(&data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| XmlError::Invalid(format!("bad XML ZIP archive: {e}")))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| XmlError::Archive(Box::new(e)))?;
     if archive.is_empty() {
-        return Err(XmlError::Invalid("XML ZIP archive is empty".into()));
+        return Err(XmlError::ArchiveSize {
+            limit: MAX_XML_SIZE,
+        });
     }
     let file = archive
         .by_index(0)
-        .map_err(|e| XmlError::Invalid(format!("cannot read XML ZIP entry: {e}")))?;
+        .map_err(|e| XmlError::Archive(Box::new(e)))?;
     if file.size() > MAX_XML_SIZE {
-        return Err(XmlError::Invalid(format!(
-            "XML ZIP entry declares {} bytes, exceeding the {MAX_XML_SIZE}-byte cap",
-            file.size()
-        )));
+        tracing::debug!(declared = file.size(), "XML ZIP entry exceeds the cap");
+        return Err(XmlError::ArchiveSize {
+            limit: MAX_XML_SIZE,
+        });
     }
     let mut xml = Vec::with_capacity(file.size().min(MAX_XML_SIZE) as usize);
     // The declared size can lie and DEFLATE can expand past it, so bound the
     // read itself as well.
     file.take(MAX_XML_SIZE + 1)
         .read_to_end(&mut xml)
-        .map_err(|e| XmlError::Invalid(format!("XML ZIP decompression failed: {e}")))?;
+        .map_err(|e| XmlError::Archive(Box::new(e)))?;
     if xml.len() as u64 > MAX_XML_SIZE {
-        return Err(XmlError::Invalid(format!(
-            "XML ZIP entry decompressed past the {MAX_XML_SIZE}-byte cap"
-        )));
+        return Err(XmlError::ArchiveSize {
+            limit: MAX_XML_SIZE,
+        });
     }
     Ok(xml)
 }
@@ -104,25 +105,25 @@ where
     Fut: Future<Output = Result<Vec<u8>, XmlError>>,
 {
     let url_bytes = read_mem(url_addr, URL_MAX_LEN).await?;
-    let url = first_cstring(&url_bytes)
-        .ok_or_else(|| XmlError::Invalid("URL register is empty".into()))?;
+    let url = first_cstring(&url_bytes).ok_or_else(|| XmlError::Url {
+        url: String::new(),
+        problem: "is empty",
+    })?;
     let location = UrlLocation::parse(&url)?;
     match location {
         UrlLocation::Local { address, length } => {
             let xml_bytes = read_mem(address, length).await?;
             let xml_bytes = decompress_if_zip(xml_bytes)?;
-            String::from_utf8(xml_bytes)
-                .map_err(|err| XmlError::Xml(format!("invalid UTF-8: {err}")))
+            Ok(String::from_utf8(xml_bytes)?)
         }
-        UrlLocation::LocalNamed(name) => Err(XmlError::Unsupported(format!(
-            "named local URL '{name}' is not supported"
-        ))),
-        UrlLocation::Http(url) => Err(XmlError::Unsupported(format!(
-            "HTTP retrieval is not implemented ({url})"
-        ))),
-        UrlLocation::File(path) => Err(XmlError::Unsupported(format!(
-            "file URL '{path}' is not supported"
-        ))),
+        UrlLocation::Http => Err(XmlError::Url {
+            url,
+            problem: "is an HTTP URL, which is not supported",
+        }),
+        UrlLocation::File => Err(XmlError::Url {
+            url,
+            problem: "is a file URL, which is not supported",
+        }),
     }
 }
 
@@ -139,13 +140,10 @@ fn first_cstring(bytes: &[u8]) -> Option<String> {
 enum UrlLocation {
     /// Memory-mapped local XML at a fixed address.
     Local { address: u64, length: usize },
-    /// Named local XML resource (unsupported).
-    #[allow(dead_code)]
-    LocalNamed(String),
     /// HTTP(S) remote URL (unsupported).
-    Http(String),
+    Http,
     /// File system URL (unsupported).
-    File(String),
+    File,
 }
 
 impl UrlLocation {
@@ -156,11 +154,14 @@ impl UrlLocation {
             let rest_original = &url[url.len() - rest.len()..];
             parse_local_url(rest_original)
         } else if lower.starts_with("http://") || lower.starts_with("https://") {
-            Ok(UrlLocation::Http(url.to_string()))
+            Ok(UrlLocation::Http)
         } else if lower.starts_with("file://") {
-            Ok(UrlLocation::File(url.to_string()))
+            Ok(UrlLocation::File)
         } else {
-            Err(XmlError::Unsupported(format!("unknown URL scheme: {url}")))
+            Err(XmlError::Url {
+                url: url.to_string(),
+                problem: "has a scheme that is not local:, http: or file:",
+            })
         }
     }
 }
@@ -177,7 +178,10 @@ fn parse_local_url(rest: &str) -> Result<UrlLocation, XmlError> {
     // Strip the `///` prefix used by the standard GenICam URL format.
     let trimmed = rest.strip_prefix("///").unwrap_or(rest).trim();
     if trimmed.is_empty() {
-        return Err(XmlError::Invalid("empty local URL".into()));
+        return Err(XmlError::Url {
+            url: rest.to_string(),
+            problem: "is a local: URL with no address",
+        });
     }
 
     let parts: Vec<&str> = trimmed.split(';').collect();
@@ -214,10 +218,10 @@ fn parse_local_url(rest: &str) -> Result<UrlLocation, XmlError> {
                 }
                 "length" | "size" => {
                     let len = parse_u64(value)?;
-                    length = Some(
-                        len.try_into()
-                            .map_err(|_| XmlError::Invalid("length does not fit usize".into()))?,
-                    );
+                    length = Some(len.try_into().map_err(|_| XmlError::Url {
+                        url: rest.to_string(),
+                        problem: "declares a length this host cannot address",
+                    })?);
                 }
                 _ => {}
             }
@@ -228,7 +232,10 @@ fn parse_local_url(rest: &str) -> Result<UrlLocation, XmlError> {
     }
     match (address, length) {
         (Some(address), Some(length)) => Ok(UrlLocation::Local { address, length }),
-        _ => Err(XmlError::Invalid(format!("unsupported local URL: {rest}"))),
+        _ => Err(XmlError::Url {
+            url: rest.to_string(),
+            problem: "is a local: URL without an address and a length",
+        }),
     }
 }
 
@@ -304,7 +311,7 @@ mod tests {
         let err = fetch_and_load_xml(|_, _| async { Ok(vec![0u8; URL_MAX_LEN]) })
             .await
             .expect_err("both URLs empty");
-        assert!(matches!(err, XmlError::Invalid(_)));
+        assert!(matches!(err, XmlError::Url { .. }), "got: {err:?}");
     }
 
     #[test]
@@ -322,7 +329,7 @@ mod tests {
             zipped[pos + offset..pos + offset + 4].copy_from_slice(&huge);
         }
         let err = decompress_if_zip(zipped).expect_err("oversized declared XML");
-        assert!(matches!(err, XmlError::Invalid(_)), "got: {err:?}");
+        assert!(matches!(err, XmlError::ArchiveSize { .. }), "got: {err:?}");
     }
 
     #[test]

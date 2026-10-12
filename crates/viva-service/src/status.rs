@@ -7,7 +7,7 @@ use viva_zenoh_api::{DeviceStatus, keys};
 use zenoh::Session;
 
 /// Publish a connected status for the device.
-pub async fn publish_connected(session: &Arc<Session>, device_id: &str) {
+pub(crate) async fn publish_connected(session: &Arc<Session>, device_id: &str) {
     let status = DeviceStatus::connected();
     let key = keys::status(device_id);
     match serde_json::to_vec(&status) {
@@ -23,8 +23,7 @@ pub async fn publish_connected(session: &Arc<Session>, device_id: &str) {
 }
 
 /// Publish a disconnected status for the device.
-#[allow(dead_code)]
-pub async fn publish_disconnected(session: &Arc<Session>, device_id: &str, reason: &str) {
+pub(crate) async fn publish_disconnected(session: &Arc<Session>, device_id: &str, reason: &str) {
     let status = DeviceStatus::disconnected(Some(reason.to_string()));
     let key = keys::status(device_id);
     match serde_json::to_vec(&status) {

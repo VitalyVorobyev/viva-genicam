@@ -6,8 +6,8 @@
 //! fails here.
 
 use bytes::Bytes;
-use viva_fake_gige::gvsp::chunk_payload;
-use viva_fake_gige::registers::{
+use viva_fake_gige::chunk_payload;
+use viva_fake_gige::{
     CHUNK_ID_EXPOSURE_TIME, CHUNK_ID_FRAME_ID, CHUNK_ID_IMAGE, CHUNK_ID_IMAGE_INFO,
     CHUNK_ID_TIMESTAMP, EVENT_EXPOSURE_END, FAKE_XML,
 };
@@ -135,7 +135,7 @@ fn event_features_read_the_event_through_its_port() {
         stream_channel: 0,
         block_id: 42,
         ts_dev: 0x0000_0003_0000_0004,
-        ts_host: std::time::SystemTime::now(),
+        ts_host: None,
         data: raw.slice(16..),
         raw,
     };

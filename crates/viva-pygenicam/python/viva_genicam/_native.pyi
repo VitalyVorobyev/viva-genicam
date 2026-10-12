@@ -16,6 +16,7 @@ __all__ = [
     "Event",
     "EventStream",
     "FakeGigeCamera",
+    "FakeU3vCamera",
     "Frame",
     "FrameStream",
     "GenApiError",
@@ -273,6 +274,15 @@ class FakeGigeCamera:
     def writes(self) -> int: ...
     def __enter__(self) -> FakeGigeCamera: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+@final
+class FakeU3vCamera:
+    def __new__(
+        cls, width: int = 640, height: int = 480, pixel_format: str = "Mono8"
+    ) -> FakeU3vCamera: ...
+    def connect(self) -> Camera: ...
+    def acquiring(self) -> bool: ...
+    def peek(self, address: int, length: int) -> bytes: ...
 
 def discover_gige(
     timeout_ms: int = 500,

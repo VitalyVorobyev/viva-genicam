@@ -45,6 +45,35 @@ mod rusb_impl {
         pub fn new(handle: Arc<rusb::DeviceHandle<rusb::Context>>) -> Self {
             Self { handle }
         }
+
+        /// Open the device enumeration reported as `info` and claim its
+        /// USB3 Vision interfaces: control, and streaming and events where it
+        /// has them. [`U3vDevice::open_device`](crate::U3vDevice::open_device)
+        /// opens one this way.
+        pub fn open(info: &crate::U3vDeviceInfo) -> Result<Self, U3vError> {
+            use rusb::UsbContext;
+            let context = rusb::Context::new().map_err(U3vError::usb)?;
+            let devices = context.devices().map_err(U3vError::usb)?;
+            let device = devices
+                .iter()
+                .find(|d| d.bus_number() == info.bus && d.address() == info.address)
+                .ok_or(U3vError::NotFound {
+                    bus: info.bus,
+                    address: info.address,
+                })?;
+            let handle = device.open().map_err(U3vError::usb)?;
+            let iface = &info.interface_info;
+            handle
+                .claim_interface(iface.control_iface)
+                .map_err(U3vError::usb)?;
+            if let Some(si) = iface.stream_iface {
+                let _ = handle.claim_interface(si);
+            }
+            if let Some(ei) = iface.event_iface {
+                let _ = handle.claim_interface(ei);
+            }
+            Ok(Self::new(Arc::new(handle)))
+        }
     }
 
     impl UsbTransfer for RusbTransfer {
@@ -76,7 +105,7 @@ mod rusb_impl {
     fn usb_error(error: rusb::Error) -> U3vError {
         match error {
             rusb::Error::Timeout => U3vError::Timeout,
-            other => U3vError::Usb(other.to_string()),
+            other => U3vError::usb(other),
         }
     }
 }
@@ -162,12 +191,12 @@ impl UsbTransfer for MockUsbTransfer {
         _timeout: Duration,
     ) -> Result<usize, U3vError> {
         let mut reads = self.reads.lock().expect("mock read queue poisoned");
-        let queue = reads.get_mut(&endpoint).ok_or_else(|| {
-            U3vError::Protocol(format!("no queued read for endpoint {endpoint:#04x}"))
-        })?;
-        let data = queue.pop_front().ok_or_else(|| {
-            U3vError::Protocol(format!("read queue exhausted for endpoint {endpoint:#04x}"))
-        })?;
+        // Nothing queued is a device that does not answer: the host times
+        // out.
+        let data = reads
+            .get_mut(&endpoint)
+            .and_then(VecDeque::pop_front)
+            .ok_or(U3vError::Timeout)?;
         let n = data.len().min(buf.len());
         buf[..n].copy_from_slice(&data[..n]);
         Ok(n)
@@ -212,6 +241,6 @@ mod tests {
         let err = mock
             .bulk_read(0x81, &mut buf, Duration::from_millis(100))
             .unwrap_err();
-        assert!(matches!(err, U3vError::Protocol(_)));
+        assert!(matches!(err, U3vError::Timeout));
     }
 }

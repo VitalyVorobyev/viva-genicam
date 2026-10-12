@@ -83,8 +83,8 @@ async fn blocking_read_register(
 }
 
 /// Resolve the loopback network interface (platform-independent).
-fn loopback_iface() -> gige::nic::Iface {
-    gige::nic::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback iface")
+fn loopback_iface() -> gige::Iface {
+    gige::Iface::from_ipv4(std::net::Ipv4Addr::LOCALHOST).expect("loopback iface")
 }
 
 // ---------------------------------------------------------------------------
@@ -372,10 +372,10 @@ async fn test_claim_control_visible_via_register_read() {
     device.claim_control().await.expect("claim CCP");
 
     let privilege = device
-        .read_register(gige::gvcp::consts::CONTROL_CHANNEL_PRIVILEGE as u32)
+        .read_register(gige::consts::CONTROL_CHANNEL_PRIVILEGE as u32)
         .await
         .expect("read CCP register");
-    let controller_bits = gige::gvcp::consts::CCP_CONTROL | gige::gvcp::consts::CCP_EXCLUSIVE;
+    let controller_bits = gige::consts::CCP_CONTROL | gige::consts::CCP_EXCLUSIVE;
     assert_ne!(
         privilege & controller_bits,
         0,
@@ -597,10 +597,10 @@ async fn try_setup_stream_at(
             async move {
                 let mut dev = gige::GigeDevice::open(addr)
                     .await
-                    .map_err(|e| viva_genapi_xml::XmlError::Transport(e.to_string()))?;
+                    .map_err(viva_genapi_xml::XmlError::transport)?;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|e| viva_genapi_xml::XmlError::Transport(e.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     })
@@ -910,8 +910,7 @@ async fn test_probe_leaves_the_device_holding_the_negotiated_size() {
     // gone out as WRITEREG and the fake must serve test packets from it
     // (TC-22, TC-23). Before TC-23 the fake fired them from WRITEMEM only.
     use viva_fake_gige::GvcpCommand;
-    let scps =
-        viva_fake_gige::registers::STREAM_CHANNEL_BASE + viva_fake_gige::registers::SCP_PACKET_SIZE;
+    let scps = gige::consts::STREAM_CHANNEL_BASE + gige::consts::STREAM_PACKET_SIZE;
     let commands = cam.fake().commands();
     assert!(
         commands.at(GvcpCommand::WriteReg, scps) > 1,
@@ -1028,10 +1027,10 @@ async fn test_fake_gvsp_packets_match_spec_layout() {
         move |address, length| async move {
             let mut dev = gige::GigeDevice::open(addr)
                 .await
-                .map_err(|e| viva_genapi_xml::XmlError::Transport(e.to_string()))?;
+                .map_err(viva_genapi_xml::XmlError::transport)?;
             dev.read_mem(address, length)
                 .await
-                .map_err(|e| viva_genapi_xml::XmlError::Transport(e.to_string()))
+                .map_err(viva_genapi_xml::XmlError::transport)
         }
     })
     .await
@@ -1446,8 +1445,8 @@ async fn a_calibrated_stream_maps_device_time_to_host_time() {
 /// must continue to expose the same wire bytes for existing callers.
 #[tokio::test]
 async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
+    use viva_genicam::StreamBlock;
     use viva_genicam::pfnc::PixelFormat;
-    use viva_genicam::stream::StreamBlock;
 
     const WIDTH: u32 = 16;
     const HEIGHT: u32 = 4;
@@ -1480,7 +1479,7 @@ async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
     let StreamBlock::Evs(events) = StreamBlock::from(generic) else {
         panic!("EVT 3.0 data must be classified separately from image frames");
     };
-    assert_eq!(events.format, viva_genicam::evs::EvsFormat::Evt30);
+    assert_eq!(events.format, viva_genicam::EvsFormat::Evt30);
     assert_eq!(
         (events.leader_size_x, events.leader_size_y),
         (WIDTH, HEIGHT)
@@ -1822,14 +1821,14 @@ async fn test_persistent_ip_roundtrip() {
 async fn test_action_command_is_acknowledged() {
     let _cam = common::TestCamera::start().await;
 
-    let params = gige::action::ActionParams {
+    let params = gige::ActionParams {
         device_key: viva_fake_gige::FAKE_DEVICE_KEY,
         group_key: viva_fake_gige::FAKE_GROUP_KEY,
         group_mask: viva_fake_gige::FAKE_GROUP_MASK,
         scheduled_time: None,
     };
     let dest = std::net::SocketAddr::from(([127, 0, 0, 1], gige::GVCP_PORT));
-    let summary = gige::action::send_action(dest, &params, 1000)
+    let summary = gige::send_action(dest, &params, 1000)
         .await
         .expect("send action");
     assert_eq!(summary.sent, 1);
@@ -1839,11 +1838,11 @@ async fn test_action_command_is_acknowledged() {
     );
 
     // A device the command is not addressed to stays silent.
-    let other = gige::action::ActionParams {
+    let other = gige::ActionParams {
         group_key: viva_fake_gige::FAKE_GROUP_KEY ^ 0xFFFF,
         ..params
     };
-    let summary = gige::action::send_action(dest, &other, 300)
+    let summary = gige::send_action(dest, &other, 300)
         .await
         .expect("send action");
     assert_eq!(
@@ -2590,7 +2589,7 @@ fn foreign_ipv4() -> std::net::Ipv4Addr {
     if std::net::UdpSocket::bind((alias, 0)).is_ok() {
         return alias;
     }
-    gige::nic::Iface::list()
+    gige::Iface::list()
         .expect("interfaces")
         .iter()
         .flat_map(|iface| iface.all_ipv4().unwrap_or_default())

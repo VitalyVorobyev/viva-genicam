@@ -13,7 +13,7 @@
 
 use thiserror::Error;
 
-use crate::PixelFormat;
+use viva_pfnc::PixelFormat;
 
 /// Magic bytes identifying a GenICam frame header.
 /// Little-endian encoding of `0x4746` -> bytes `[0x46, 0x47]`.
@@ -35,7 +35,10 @@ pub enum FrameHeaderError {
 
     /// First two bytes do not match [`FRAME_MAGIC`].
     #[error("bad magic: expected 0x{:04X}, got 0x{got:04X}", FRAME_MAGIC)]
-    BadMagic { got: u16 },
+    BadMagic {
+        /// What the first two bytes hold.
+        got: u16,
+    },
 
     /// Version byte is not [`SUPPORTED_VERSION`].
     #[error("unsupported version {0}; only version {SUPPORTED_VERSION} is supported")]
@@ -47,7 +50,8 @@ pub enum FrameHeaderError {
 /// See module-level documentation for the byte layout and format discriminant table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameHeader {
-    /// Pixel format of the following pixel data.
+    /// Pixel format of the following pixel data; a format the header has no
+    /// code for decodes as `PixelFormat::Unknown(0)`.
     pub pixel_format: PixelFormat,
     /// Image width in pixels.
     pub width: u32,
@@ -63,7 +67,7 @@ impl FrameHeader {
         let mut buf = Vec::with_capacity(HEADER_SIZE);
         buf.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
         buf.push(SUPPORTED_VERSION);
-        buf.push(pixel_format_to_u8(&self.pixel_format));
+        buf.push(pixel_format_to_u8(self.pixel_format));
         buf.extend_from_slice(&self.width.to_le_bytes());
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&self.seq.to_le_bytes());
@@ -104,127 +108,86 @@ impl FrameHeader {
     }
 }
 
-/// Map a [`PixelFormat`] variant to its stable 1-byte discriminant code.
-pub fn pixel_format_to_u8(pf: &PixelFormat) -> u8 {
-    match pf {
-        PixelFormat::Unknown => 0,
-        PixelFormat::Mono8 => 1,
-        PixelFormat::Mono10 => 2,
-        PixelFormat::Mono12 => 3,
-        PixelFormat::Mono16 => 4,
-        PixelFormat::BayerRG8 => 5,
-        PixelFormat::BayerGR8 => 6,
-        PixelFormat::BayerBG8 => 7,
-        PixelFormat::BayerGB8 => 8,
-        PixelFormat::BayerRG10 => 9,
-        PixelFormat::BayerGR10 => 10,
-        PixelFormat::BayerBG10 => 11,
-        PixelFormat::BayerGB10 => 12,
-        PixelFormat::BayerRG12 => 13,
-        PixelFormat::BayerGR12 => 14,
-        PixelFormat::BayerBG12 => 15,
-        PixelFormat::BayerGB12 => 16,
-        PixelFormat::BayerRG16 => 17,
-        PixelFormat::BayerGR16 => 18,
-        PixelFormat::BayerBG16 => 19,
-        PixelFormat::BayerGB16 => 20,
-        PixelFormat::RGB8 => 21,
-        PixelFormat::BGR8 => 22,
-        PixelFormat::RGBa8 => 23,
-        PixelFormat::YCbCr422_8 => 24,
-        PixelFormat::YCbCr8 => 25,
-        PixelFormat::Coord3dC16 => 26,
-        PixelFormat::Mono14 => 27,
-        PixelFormat::Mono10p => 28,
-        PixelFormat::Mono12p => 29,
-        PixelFormat::Mono10Packed => 30,
-        PixelFormat::Mono12Packed => 31,
-        PixelFormat::BayerRG10p => 32,
-        PixelFormat::BayerGR10p => 33,
-        PixelFormat::BayerBG10p => 34,
-        PixelFormat::BayerGB10p => 35,
-        PixelFormat::BayerRG12p => 36,
-        PixelFormat::BayerGR12p => 37,
-        PixelFormat::BayerBG12p => 38,
-        PixelFormat::BayerGB12p => 39,
-        PixelFormat::BayerRG10Packed => 40,
-        PixelFormat::BayerGR10Packed => 41,
-        PixelFormat::BayerBG10Packed => 42,
-        PixelFormat::BayerGB10Packed => 43,
-        PixelFormat::BayerRG12Packed => 44,
-        PixelFormat::BayerGR12Packed => 45,
-        PixelFormat::BayerBG12Packed => 46,
-        PixelFormat::BayerGB12Packed => 47,
-        PixelFormat::BGRa8 => 48,
-        PixelFormat::YUV422_8 => 49,
-        PixelFormat::YUV422_8_UYVY => 50,
-        PixelFormat::YCbCr422_8_CbYCrY => 51,
-        PixelFormat::YUV411_8_UYYVYY => 52,
-        PixelFormat::YUV8_UYV => 53,
-        PixelFormat::YCbCr8_CbYCr => 54,
-    }
+/// The frame header's one-byte format codes.
+///
+/// The Zenoh wire's own map, and nothing more: what a format *is* is
+/// `viva-pfnc`'s to say (ADR-0030); this table says which byte carries it.
+/// Codes are only appended, never reordered. A format without a code travels
+/// as 0 and decodes as `PixelFormat::Unknown(0)`; [`ImageMeta`](crate::ImageMeta)
+/// names it in full. Giving `Coord3D_*` codes (backlog DC-02) changes the wire.
+const WIRE_CODES: &[(u8, PixelFormat)] = &[
+    (1, PixelFormat::Mono8),
+    (2, PixelFormat::Mono10),
+    (3, PixelFormat::Mono12),
+    (4, PixelFormat::Mono16),
+    (5, PixelFormat::BayerRG8),
+    (6, PixelFormat::BayerGR8),
+    (7, PixelFormat::BayerBG8),
+    (8, PixelFormat::BayerGB8),
+    (9, PixelFormat::BayerRG10),
+    (10, PixelFormat::BayerGR10),
+    (11, PixelFormat::BayerBG10),
+    (12, PixelFormat::BayerGB10),
+    (13, PixelFormat::BayerRG12),
+    (14, PixelFormat::BayerGR12),
+    (15, PixelFormat::BayerBG12),
+    (16, PixelFormat::BayerGB12),
+    (17, PixelFormat::BayerRG16),
+    (18, PixelFormat::BayerGR16),
+    (19, PixelFormat::BayerBG16),
+    (20, PixelFormat::BayerGB16),
+    (21, PixelFormat::RGB8Packed),
+    (22, PixelFormat::BGR8Packed),
+    (23, PixelFormat::RGBa8),
+    (24, PixelFormat::YCbCr422_8),
+    (25, PixelFormat::YCbCr8),
+    (26, PixelFormat::Coord3DC16),
+    (27, PixelFormat::Mono14),
+    (28, PixelFormat::Mono10p),
+    (29, PixelFormat::Mono12p),
+    (30, PixelFormat::Mono10Packed),
+    (31, PixelFormat::Mono12Packed),
+    (32, PixelFormat::BayerRG10p),
+    (33, PixelFormat::BayerGR10p),
+    (34, PixelFormat::BayerBG10p),
+    (35, PixelFormat::BayerGB10p),
+    (36, PixelFormat::BayerRG12p),
+    (37, PixelFormat::BayerGR12p),
+    (38, PixelFormat::BayerBG12p),
+    (39, PixelFormat::BayerGB12p),
+    (40, PixelFormat::BayerRG10Packed),
+    (41, PixelFormat::BayerGR10Packed),
+    (42, PixelFormat::BayerBG10Packed),
+    (43, PixelFormat::BayerGB10Packed),
+    (44, PixelFormat::BayerRG12Packed),
+    (45, PixelFormat::BayerGR12Packed),
+    (46, PixelFormat::BayerBG12Packed),
+    (47, PixelFormat::BayerGB12Packed),
+    (48, PixelFormat::BGRa8),
+    (49, PixelFormat::YUV422_8),
+    (50, PixelFormat::YUV422_8_UYVY),
+    (51, PixelFormat::YCbCr422_8_CbYCrY),
+    (52, PixelFormat::YUV411_8_UYYVYY),
+    (53, PixelFormat::YUV8_UYV),
+    (54, PixelFormat::YCbCr8_CbYCr),
+];
+
+/// The one-byte code the frame header carries `format` as; 0 for a format
+/// without one.
+pub fn pixel_format_to_u8(format: PixelFormat) -> u8 {
+    WIRE_CODES
+        .iter()
+        .find(|&&(_, named)| named == format)
+        .map_or(0, |&(code, _)| code)
 }
 
-/// Map a 1-byte discriminant code back to the corresponding [`PixelFormat`].
+/// The format a frame header's one-byte code names; `PixelFormat::Unknown(0)`
+/// for 0 and for a code this table does not know.
 pub fn u8_to_pixel_format(code: u8) -> PixelFormat {
-    match code {
-        0 => PixelFormat::Unknown,
-        1 => PixelFormat::Mono8,
-        2 => PixelFormat::Mono10,
-        3 => PixelFormat::Mono12,
-        4 => PixelFormat::Mono16,
-        5 => PixelFormat::BayerRG8,
-        6 => PixelFormat::BayerGR8,
-        7 => PixelFormat::BayerBG8,
-        8 => PixelFormat::BayerGB8,
-        9 => PixelFormat::BayerRG10,
-        10 => PixelFormat::BayerGR10,
-        11 => PixelFormat::BayerBG10,
-        12 => PixelFormat::BayerGB10,
-        13 => PixelFormat::BayerRG12,
-        14 => PixelFormat::BayerGR12,
-        15 => PixelFormat::BayerBG12,
-        16 => PixelFormat::BayerGB12,
-        17 => PixelFormat::BayerRG16,
-        18 => PixelFormat::BayerGR16,
-        19 => PixelFormat::BayerBG16,
-        20 => PixelFormat::BayerGB16,
-        21 => PixelFormat::RGB8,
-        22 => PixelFormat::BGR8,
-        23 => PixelFormat::RGBa8,
-        24 => PixelFormat::YCbCr422_8,
-        25 => PixelFormat::YCbCr8,
-        26 => PixelFormat::Coord3dC16,
-        27 => PixelFormat::Mono14,
-        28 => PixelFormat::Mono10p,
-        29 => PixelFormat::Mono12p,
-        30 => PixelFormat::Mono10Packed,
-        31 => PixelFormat::Mono12Packed,
-        32 => PixelFormat::BayerRG10p,
-        33 => PixelFormat::BayerGR10p,
-        34 => PixelFormat::BayerBG10p,
-        35 => PixelFormat::BayerGB10p,
-        36 => PixelFormat::BayerRG12p,
-        37 => PixelFormat::BayerGR12p,
-        38 => PixelFormat::BayerBG12p,
-        39 => PixelFormat::BayerGB12p,
-        40 => PixelFormat::BayerRG10Packed,
-        41 => PixelFormat::BayerGR10Packed,
-        42 => PixelFormat::BayerBG10Packed,
-        43 => PixelFormat::BayerGB10Packed,
-        44 => PixelFormat::BayerRG12Packed,
-        45 => PixelFormat::BayerGR12Packed,
-        46 => PixelFormat::BayerBG12Packed,
-        47 => PixelFormat::BayerGB12Packed,
-        48 => PixelFormat::BGRa8,
-        49 => PixelFormat::YUV422_8,
-        50 => PixelFormat::YUV422_8_UYVY,
-        51 => PixelFormat::YCbCr422_8_CbYCrY,
-        52 => PixelFormat::YUV411_8_UYYVYY,
-        53 => PixelFormat::YUV8_UYV,
-        54 => PixelFormat::YCbCr8_CbYCr,
-        _ => PixelFormat::Unknown,
-    }
+    WIRE_CODES
+        .iter()
+        .find(|&&(known, _)| known == code)
+        .map_or(PixelFormat::Unknown(0), |&(_, format)| format)
 }
 
 #[cfg(test)]
@@ -288,48 +251,59 @@ mod tests {
         assert_eq!(err, FrameHeaderError::UnsupportedVersion(2));
     }
 
+    /// The published codes keep their meaning, written out as literals
+    /// rather than from the table: a client built before the table moved
+    /// onto `viva-pfnc` reads the same bytes.
     #[test]
-    fn test_pixel_format_roundtrip_all_known() {
-        let variants = [
-            PixelFormat::Mono8,
-            PixelFormat::Mono10,
-            PixelFormat::Mono12,
-            PixelFormat::Mono16,
-            PixelFormat::BayerRG8,
-            PixelFormat::BayerGR8,
-            PixelFormat::BayerBG8,
-            PixelFormat::BayerGB8,
-            PixelFormat::BayerRG10,
-            PixelFormat::BayerGR10,
-            PixelFormat::BayerBG10,
-            PixelFormat::BayerGB10,
-            PixelFormat::BayerRG12,
-            PixelFormat::BayerGR12,
-            PixelFormat::BayerBG12,
-            PixelFormat::BayerGB12,
-            PixelFormat::BayerRG16,
-            PixelFormat::BayerGR16,
-            PixelFormat::BayerBG16,
-            PixelFormat::BayerGB16,
-            PixelFormat::RGB8,
-            PixelFormat::BGR8,
-            PixelFormat::RGBa8,
-            PixelFormat::YCbCr422_8,
-            PixelFormat::YCbCr8,
-            PixelFormat::Coord3dC16,
+    fn the_published_codes_keep_their_meaning() {
+        let published: &[(u8, &str)] = &[
+            (1, "Mono8"),
+            (2, "Mono10"),
+            (3, "Mono12"),
+            (4, "Mono16"),
+            (5, "BayerRG8"),
+            (20, "BayerGB16"),
+            (21, "RGB8Packed"),
+            (22, "BGR8Packed"),
+            (23, "RGBa8"),
+            (24, "YCbCr422_8"),
+            (25, "YCbCr8"),
+            (26, "Coord3D_C16"),
+            (27, "Mono14"),
+            (28, "Mono10p"),
+            (31, "Mono12Packed"),
+            (48, "BGRa8"),
+            (50, "YUV422_8_UYVY"),
+            (54, "YCbCr8_CbYCr"),
         ];
-        for pf in &variants {
-            let code = pixel_format_to_u8(pf);
-            let roundtripped = u8_to_pixel_format(code);
-            assert_eq!(
-                &roundtripped, pf,
-                "roundtrip failed for {pf:?}: code={code}"
-            );
+        for &(code, name) in published {
+            let format = PixelFormat::from_name(name);
+            assert_eq!(pixel_format_to_u8(format), code, "{name}");
+            assert_eq!(u8_to_pixel_format(code), format, "{code}");
         }
     }
 
+    /// Every code names one format, and every coded format round-trips.
     #[test]
-    fn test_pixel_format_unknown_code() {
-        assert_eq!(u8_to_pixel_format(0xFF), PixelFormat::Unknown);
+    fn every_code_is_its_own_format() {
+        let mut seen = std::collections::HashSet::new();
+        for &(code, format) in WIRE_CODES {
+            assert_ne!(code, 0, "{format}");
+            assert!(seen.insert(code), "{format} reuses code {code}");
+            assert!(
+                !matches!(format, PixelFormat::Unknown(_)),
+                "code {code} names no PFNC format"
+            );
+            assert_eq!(u8_to_pixel_format(pixel_format_to_u8(format)), format);
+        }
+    }
+
+    /// A format without a code travels as 0, and 0 and unknown codes decode
+    /// as unknown.
+    #[test]
+    fn a_format_without_a_code_is_unknown_on_the_wire() {
+        assert_eq!(pixel_format_to_u8(PixelFormat::Coord3DABC32f), 0);
+        assert_eq!(u8_to_pixel_format(0), PixelFormat::Unknown(0));
+        assert_eq!(u8_to_pixel_format(0xFF), PixelFormat::Unknown(0));
     }
 }

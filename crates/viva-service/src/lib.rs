@@ -1,14 +1,30 @@
-//! GenICam camera service library — bridges viva-genicam to Zenoh for Viva Studio.
+//! The camera services' library: bridges viva-genicam to Zenoh for Viva
+//! Studio.
 //!
-//! The binary entrypoint lives in `main.rs`; this module re-exports the core
-//! components so that integration tests can drive the service in-process.
+//! Both services run on it — `viva-service` for GigE Vision and
+//! `viva-service-u3v` for USB3 Vision — so they answer every query, publish
+//! every stream and follow every camera's lifecycle the same way (backlog
+//! API-04). A transport supplies a [`Discovery`], whose cameras are
+//! [`DeviceOps`] for their features and a [`StreamSource`] for their
+//! frames; [`run_discovery`] does the rest. [`serve_device`] runs one camera's
+//! task set, for tests that serve a camera in-process.
 
-pub mod acquisition;
-pub mod config;
-pub mod device;
-pub mod nodes;
-pub mod pixel_format;
-pub mod report;
-pub mod serve;
-pub mod status;
-pub mod xml;
+mod acquisition;
+mod device;
+mod discovery;
+mod gige;
+mod nodes;
+mod pixel_format;
+mod report;
+mod serve;
+mod source;
+mod status;
+mod xml;
+
+pub use device::{DeviceOps, SharedCamera};
+pub use discovery::{Discovery, init_tracing, run_discovery, run_service};
+pub use gige::{
+    DeviceHandle, GigeDiscovery, GigeFound, derive_device_id, device_announce, publish_announce,
+};
+pub use serve::serve_device;
+pub use source::{BlockStream, StreamSource};

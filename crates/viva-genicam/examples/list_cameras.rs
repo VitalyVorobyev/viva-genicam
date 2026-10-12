@@ -1,8 +1,10 @@
+//! List the GigE Vision cameras on the network.
+
 use std::env;
 use std::time::Duration;
 
 use tracing::info;
-use viva_genicam::gige::nic::IfaceSelector;
+use viva_genicam::gige::IfaceSelector;
 
 fn parse_args() -> (Duration, Option<IfaceSelector>) {
     let mut args = env::args().skip(1);

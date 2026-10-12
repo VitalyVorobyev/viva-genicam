@@ -3,9 +3,10 @@
 use tracing::debug;
 use viva_genapi_xml::{ByteOrder, Sign};
 
-use crate::GenApiError;
 use crate::bitops::BitOpsError;
 use crate::nodes::FloatNode;
+use crate::swissknife::{EvalError, Value};
+use crate::{GenApiError, RangeViolation};
 
 /// Convert a register payload (up to 8 bytes) to a 64-bit integer.
 ///
@@ -23,22 +24,25 @@ use crate::nodes::FloatNode;
 /// v2.1.1 §2.4). It is reinterpreted as two's complement rather than refused,
 /// which is lossless at the bit level and round-trips through
 /// [`i64_to_bytes`]. See ADR-0022.
-pub fn bytes_to_i64(
+pub(crate) fn bytes_to_i64(
     name: &str,
     bytes: &[u8],
     sign: Sign,
     order: ByteOrder,
 ) -> Result<i64, GenApiError> {
     if bytes.is_empty() {
-        return Err(GenApiError::Parse(format!(
-            "node {name} returned empty payload"
-        )));
+        return Err(GenApiError::encoding(
+            name,
+            0,
+            "the register returned no bytes",
+        ));
     }
     if bytes.len() > 8 {
-        return Err(GenApiError::Parse(format!(
-            "node {name} uses unsupported width {}",
-            bytes.len()
-        )));
+        return Err(GenApiError::encoding(
+            name,
+            bytes.len(),
+            "an integer register is at most 8 bytes",
+        ));
     }
     // Normalise to big-endian first so sign extension has a single form.
     let mut be = [0u8; 8];
@@ -74,7 +78,7 @@ pub fn bytes_to_i64(
 /// not survive the round trip does not fit the register. Keeping the two in
 /// step matters more than either alone — a reader that learns byte order while
 /// the writer does not turns every little-endian write into a range error.
-pub fn i64_to_bytes(
+pub(crate) fn i64_to_bytes(
     name: &str,
     value: i64,
     width: u32,
@@ -82,9 +86,11 @@ pub fn i64_to_bytes(
     order: ByteOrder,
 ) -> Result<Vec<u8>, GenApiError> {
     if width == 0 || width > 8 {
-        return Err(GenApiError::Parse(format!(
-            "node {name} has unsupported width {width}"
-        )));
+        return Err(GenApiError::encoding(
+            name,
+            width as usize,
+            "an integer register is 1 to 8 bytes",
+        ));
     }
     let width = width as usize;
     let bytes = value.to_be_bytes();
@@ -94,15 +100,17 @@ pub fn i64_to_bytes(
     }
     let roundtrip = bytes_to_i64(name, &data, sign, order)?;
     if roundtrip != value {
-        return Err(GenApiError::Range(format!(
-            "value {value} does not fit {width} bytes for {name}"
-        )));
+        return Err(GenApiError::range(
+            name,
+            Value::Int(value),
+            RangeViolation::Unrepresentable,
+        ));
     }
     Ok(data)
 }
 
 /// Interpret an extracted bitfield value, applying sign extension if needed.
-pub fn interpret_bitfield_value(
+pub(crate) fn interpret_bitfield_value(
     name: &str,
     raw: u64,
     bit_length: u16,
@@ -112,24 +120,28 @@ pub fn interpret_bitfield_value(
         Ok(sign_extend(raw, bit_length))
     } else {
         i64::try_from(raw).map_err(|_| {
-            GenApiError::Parse(format!(
-                "bitfield value {raw} exceeds i64 range for node {name}"
-            ))
+            GenApiError::encoding(
+                name,
+                usize::from(bit_length),
+                "an unsigned bit field this wide exceeds i64",
+            )
         })
     }
 }
 
 /// Encode a value into bitfield representation, validating range constraints.
-pub fn encode_bitfield_value(
+pub(crate) fn encode_bitfield_value(
     name: &str,
     value: i64,
     bit_length: u16,
     signed: bool,
 ) -> Result<u64, GenApiError> {
     if bit_length == 0 || bit_length > 64 {
-        return Err(GenApiError::Parse(format!(
-            "node {name} uses unsupported bitfield width {bit_length}"
-        )));
+        return Err(GenApiError::encoding(
+            name,
+            usize::from(bit_length),
+            "a bit field is 1 to 64 bits",
+        ));
     }
     if signed {
         let width = bit_length as u32;
@@ -179,26 +191,17 @@ fn sign_extend(value: u64, bits: u16) -> i64 {
 }
 
 /// Round a floating-point value to i64 using round-to-nearest with ties toward zero.
-pub fn round_to_i64(name: &str, value: f64) -> Result<i64, GenApiError> {
+pub(crate) fn round_to_i64(name: &str, value: f64) -> Result<i64, GenApiError> {
     if !value.is_finite() {
-        return Err(GenApiError::ExprEval {
-            name: name.to_string(),
-            msg: "non-finite result".into(),
-        });
+        return Err(GenApiError::eval(name, EvalError::NotAnInteger(value)));
     }
     let rounded = round_ties_to_zero(value);
     if rounded < i64::MIN as f64 || rounded > i64::MAX as f64 {
-        return Err(GenApiError::ExprEval {
-            name: name.to_string(),
-            msg: "result out of range".into(),
-        });
+        return Err(GenApiError::eval(name, EvalError::NotAnInteger(value)));
     }
     let truncated = rounded.trunc();
     if (rounded - truncated).abs() > 1e-9 {
-        return Err(GenApiError::ExprEval {
-            name: name.to_string(),
-            msg: "unable to represent integer".into(),
-        });
+        return Err(GenApiError::eval(name, EvalError::NotAnInteger(value)));
     }
     Ok(truncated as i64)
 }
@@ -216,7 +219,7 @@ fn round_ties_to_zero(value: f64) -> f64 {
 }
 
 /// Apply scale and offset conversion to a raw float register value.
-pub fn apply_scale(node: &FloatNode, raw: f64) -> f64 {
+pub(crate) fn apply_scale(node: &FloatNode, raw: f64) -> f64 {
     let mut value = raw;
     if let Some((num, den)) = node.scale {
         value *= num as f64 / den as f64;
@@ -228,23 +231,27 @@ pub fn apply_scale(node: &FloatNode, raw: f64) -> f64 {
 }
 
 /// Encode a user-facing float value back to raw register representation.
-pub fn encode_float(node: &FloatNode, value: f64) -> Result<i64, GenApiError> {
+pub(crate) fn encode_float(node: &FloatNode, value: f64) -> Result<i64, GenApiError> {
     let mut raw = value;
     if let Some(offset) = node.offset {
         raw -= offset;
     }
     if let Some((num, den)) = node.scale {
         if num == 0 {
-            return Err(GenApiError::Parse(format!(
-                "node {} has zero scale numerator",
-                node.name
-            )));
+            return Err(GenApiError::declaration(
+                &node.name,
+                "has a zero <Scale> numerator",
+            ));
         }
         raw *= den as f64 / num as f64;
     }
     let rounded = raw.round();
     if (raw - rounded).abs() > 1e-6 {
-        return Err(GenApiError::Range(node.name.clone()));
+        return Err(GenApiError::range(
+            &node.name,
+            Value::Float(value),
+            RangeViolation::Unrepresentable,
+        ));
     }
     let raw_i64 = rounded as i64;
     Ok(raw_i64)
@@ -254,7 +261,11 @@ pub fn encode_float(node: &FloatNode, value: f64) -> Result<i64, GenApiError> {
 ///
 /// `bytes.len()` must be 4 (f32) or 8 (f64). Other widths are rejected because
 /// the GenICam Float schema has no other native encodings.
-pub fn decode_ieee754(name: &str, bytes: &[u8], order: ByteOrder) -> Result<f64, GenApiError> {
+pub(crate) fn decode_ieee754(
+    name: &str,
+    bytes: &[u8],
+    order: ByteOrder,
+) -> Result<f64, GenApiError> {
     match bytes.len() {
         4 => {
             let b: [u8; 4] = bytes.try_into().expect("len checked");
@@ -271,9 +282,11 @@ pub fn decode_ieee754(name: &str, bytes: &[u8], order: ByteOrder) -> Result<f64,
                 ByteOrder::Little => f64::from_le_bytes(b),
             })
         }
-        other => Err(GenApiError::Parse(format!(
-            "node {name} unsupported IEEE-754 width {other}"
-        ))),
+        other => Err(GenApiError::encoding(
+            name,
+            other,
+            "an IEEE 754 float is 4 or 8 bytes",
+        )),
     }
 }
 
@@ -281,7 +294,7 @@ pub fn decode_ieee754(name: &str, bytes: &[u8], order: ByteOrder) -> Result<f64,
 ///
 /// Rejects non-finite inputs and f32 overflow so the caller gets a typed
 /// `GenApiError::Range` rather than a silent inf write.
-pub fn encode_ieee754(
+pub(crate) fn encode_ieee754(
     name: &str,
     value: f64,
     len: u32,
@@ -289,11 +302,12 @@ pub fn encode_ieee754(
 ) -> Result<Vec<u8>, GenApiError> {
     match len {
         4 => {
-            if !value.is_finite() {
-                return Err(GenApiError::Range(name.to_string()));
-            }
-            if value < f32::MIN as f64 || value > f32::MAX as f64 {
-                return Err(GenApiError::Range(name.to_string()));
+            if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+                return Err(GenApiError::range(
+                    name,
+                    Value::Float(value),
+                    RangeViolation::Unrepresentable,
+                ));
             }
             let v = value as f32;
             Ok(match order {
@@ -303,28 +317,34 @@ pub fn encode_ieee754(
         }
         8 => {
             if !value.is_finite() {
-                return Err(GenApiError::Range(name.to_string()));
+                return Err(GenApiError::range(
+                    name,
+                    Value::Float(value),
+                    RangeViolation::Unrepresentable,
+                ));
             }
             Ok(match order {
                 ByteOrder::Big => value.to_be_bytes().to_vec(),
                 ByteOrder::Little => value.to_le_bytes().to_vec(),
             })
         }
-        other => Err(GenApiError::Parse(format!(
-            "node {name} unsupported IEEE-754 width {other}"
-        ))),
+        other => Err(GenApiError::encoding(
+            name,
+            other as usize,
+            "an IEEE 754 float is 4 or 8 bytes",
+        )),
     }
 }
 
 /// Map a bitops error to a GenApiError with node context.
-pub fn map_bitops_error(name: &str, err: BitOpsError) -> GenApiError {
+pub(crate) fn map_bitops_error(name: &str, err: BitOpsError) -> GenApiError {
     match err {
         BitOpsError::UnsupportedWidth { len } => {
-            GenApiError::Parse(format!("node {name} uses unsupported register width {len}"))
+            GenApiError::encoding(name, len, "a bit field's register is 1 to 8 bytes")
         }
-        BitOpsError::UnsupportedLength { bit_length } => GenApiError::Parse(format!(
-            "node {name} uses unsupported bitfield length {bit_length}"
-        )),
+        BitOpsError::UnsupportedLength { bit_length } => {
+            GenApiError::encoding(name, usize::from(bit_length), "a bit field is 1 to 64 bits")
+        }
         BitOpsError::OutOfRange {
             len,
             bit_offset,
@@ -353,7 +373,7 @@ pub fn map_bitops_error(name: &str, err: BitOpsError) -> GenApiError {
 /// this node last wrote, which is the legal GenICam way to keep the other bits
 /// — but with a cold cache the read would go to a device that refuses it, so
 /// it is refused here instead with an error that says why (GA-31).
-pub fn get_raw_or_read(
+pub(crate) fn get_raw_or_read(
     name: &str,
     readable: bool,
     cache: &std::cell::RefCell<Option<Vec<u8>>>,
@@ -373,10 +393,7 @@ pub fn get_raw_or_read(
             address,
         });
     }
-    io.read(address, len as usize).map_err(|err| match err {
-        GenApiError::Io(_) => err,
-        other => other,
-    })
+    io.read(address, len as usize)
 }
 
 #[cfg(test)]
@@ -522,11 +539,11 @@ mod tests {
         for order in [ByteOrder::Big, ByteOrder::Little] {
             assert!(matches!(
                 i64_to_bytes("R", 0x1_0000, 2, Sign::Unsigned, order),
-                Err(GenApiError::Range(_))
+                Err(GenApiError::Range { .. })
             ));
             assert!(matches!(
                 i64_to_bytes("R", -1, 2, Sign::Unsigned, order),
-                Err(GenApiError::Range(_))
+                Err(GenApiError::Range { .. })
             ));
         }
     }

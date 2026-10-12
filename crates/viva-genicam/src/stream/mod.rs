@@ -42,16 +42,18 @@ use viva_pfnc::PixelFormat;
 
 use crate::GenicamError;
 use crate::chunks::ChunkError;
+use crate::error::{gige, network};
 use crate::evs::EvsBlock;
 use crate::frame::{Frame, FrameStatus};
-use crate::time::TimeSync;
 use assembly::AssembledBlock;
 use receiver::{Popped, Shared};
-use viva_gige::gvcp::{GigeDevice, StreamParams};
-use viva_gige::gvsp::StreamConfig;
-use viva_gige::nic::{self, DEFAULT_RCVBUF_BYTES, Iface, McOptions};
+use viva_gige::GigeError;
+use viva_gige::StreamConfig;
+use viva_gige::TimeSync;
+use viva_gige::{DEFAULT_RCVBUF_BYTES, Iface, McOptions};
+use viva_gige::{GigeDevice, StreamParams};
 
-pub use viva_gige::gvsp::StreamDest;
+pub use viva_gige::StreamDest;
 
 /// The semantic payload carried by one complete GVSP block.
 #[derive(Debug, Clone)]
@@ -233,7 +235,7 @@ const MIN_PACKET_SIZE: u32 = 576;
 ///
 /// Both bounds bite at once: an IPv4 datagram cannot exceed 65 535 bytes, and
 /// `GevSCPSPacketSize` holds the size in 16 bits.
-const MAX_PACKET_SIZE: u32 = viva_gige::gvcp::STREAM_PACKET_SIZE_MASK;
+const MAX_PACKET_SIZE: u32 = viva_gige::consts::STREAM_PACKET_SIZE_MASK;
 
 /// Write `GevSCPSPacketSize`, then read it back and return what the device
 /// actually holds.
@@ -275,7 +277,7 @@ async fn configure_packet_size(
     device
         .set_stream_packet_size(channel, requested)
         .await
-        .map_err(|err| GenicamError::transport(err.to_string()))?;
+        .map_err(gige("write GevSCPSPacketSize"))?;
 
     let effective = match device.get_stream_packet_size(channel).await {
         Ok(effective) => effective,
@@ -297,10 +299,14 @@ async fn configure_packet_size(
     }
 
     if effective < MIN_PACKET_SIZE {
-        return Err(GenicamError::transport(format!(
-            "camera reduced the GVSP packet size from {requested} to {effective}, below the \
-             {MIN_PACKET_SIZE}-byte minimum; it cannot stream on this link"
-        )));
+        warn!(
+            requested,
+            effective, "the camera reduced the GVSP packet size below the minimum"
+        );
+        return Err(GenicamError::PacketTooSmall {
+            size: effective,
+            min: MIN_PACKET_SIZE,
+        });
     }
 
     warn!(
@@ -453,7 +459,7 @@ async fn test_packet_arrives(
     device
         .request_test_packet(channel, size)
         .await
-        .map_err(|err| GenicamError::transport(err.to_string()))?;
+        .map_err(gige("request a test packet"))?;
 
     let mut buf = vec![0u8; size as usize + 64];
     match timeout(PROBE_TIMEOUT, socket.recv_from(&mut buf)).await {
@@ -675,15 +681,13 @@ impl<'a> StreamBuilder<'a> {
     /// point the stream channel at it, negotiate the packet size, write
     /// `GevSCPD` if asked, and read whether the camera supports resend.
     pub async fn build(self) -> Result<Stream, GenicamError> {
-        let iface = self
-            .iface
-            .ok_or_else(|| GenicamError::transport("stream requires a network interface"))?;
+        let iface = self.iface.ok_or(GenicamError::NoInterface)?;
         let host_ip = iface
             .ipv4()
-            .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
+            .ok_or_else(|| GenicamError::InterfaceWithoutIpv4(iface.name().to_string()))?;
         let camera = self.device.remote_addr();
         let IpAddr::V4(camera_ip) = camera.ip() else {
-            return Err(GenicamError::transport("IPv6 cameras are not supported"));
+            return Err(GigeError::NotIpv4("camera").into());
         };
 
         // Refusals first, so a refused stream has written nothing.
@@ -698,7 +702,7 @@ impl<'a> StreamBuilder<'a> {
             dst_port: self.dst_port,
         });
 
-        let iface_mtu = nic::mtu(&iface).bytes();
+        let iface_mtu = viva_gige::mtu(&iface).bytes();
         let mtu = self
             .target_mtu
             .map_or(iface_mtu, |limit| limit.min(iface_mtu));
@@ -712,7 +716,7 @@ impl<'a> StreamBuilder<'a> {
                     .device
                     .get_stream_packet_size(self.channel)
                     .await
-                    .map_err(|err| GenicamError::transport(err.to_string()))?;
+                    .map_err(gige("read GevSCPSPacketSize"))?;
                 debug!(
                     channel = self.channel,
                     packet_size = current,
@@ -721,23 +725,21 @@ impl<'a> StreamBuilder<'a> {
                 );
                 (current, false)
             }
-            PacketSizeMode::Auto => (nic::best_packet_size(mtu), true),
+            PacketSizeMode::Auto => (viva_gige::best_packet_size(mtu), true),
             PacketSizeMode::Explicit(size) => (size, true),
         };
 
         if requested < MIN_PACKET_SIZE {
-            return Err(GenicamError::transport(format!(
-                "GVSP packet size {requested} is below the {MIN_PACKET_SIZE}-byte minimum; \
-                 raise the camera's GevSCPSPacketSize, or override with auto_packet_size() \
-                 or packet_size(n)"
-            )));
+            return Err(GenicamError::PacketTooSmall {
+                size: requested,
+                min: MIN_PACKET_SIZE,
+            });
         }
         if requested > MAX_PACKET_SIZE {
-            return Err(GenicamError::transport(format!(
-                "GVSP packet size {requested} exceeds the {MAX_PACKET_SIZE}-byte maximum an \
-                 IPv4 datagram can carry, which is also the widest value GevSCPSPacketSize can \
-                 hold"
-            )));
+            return Err(GenicamError::PacketTooLarge {
+                size: requested,
+                max: MAX_PACKET_SIZE,
+            });
         }
 
         // Bind before configuring, so the socket is already listening when the
@@ -746,7 +748,7 @@ impl<'a> StreamBuilder<'a> {
         let socket = Self::bind_socket(&dest, &iface, self.rcvbuf_bytes).await?;
         let port = socket
             .local_addr()
-            .map_err(|err| GenicamError::transport(format!("stream socket address: {err}")))?
+            .map_err(network("read the stream socket's address"))?
             .port();
         match &mut dest {
             StreamDest::Unicast { dst_port, .. } => *dst_port = port,
@@ -762,7 +764,7 @@ impl<'a> StreamBuilder<'a> {
         self.device
             .set_stream_destination(self.channel, dest.addr(), port)
             .await
-            .map_err(|err| GenicamError::transport(err.to_string()))?;
+            .map_err(gige("write GevSCDA/GevSCPHostPort"))?;
 
         let packet_size = if write_camera {
             configure_packet_size(self.device, self.channel, requested).await?
@@ -787,7 +789,7 @@ impl<'a> StreamBuilder<'a> {
             self.device
                 .set_stream_packet_delay(self.channel, ticks)
                 .await
-                .map_err(|err| GenicamError::transport(err.to_string()))?;
+                .map_err(gige("write GevSCPD"))?;
         }
 
         let resend = match self.resend {
@@ -838,14 +840,13 @@ impl<'a> StreamBuilder<'a> {
     ) -> Result<UdpSocket, GenicamError> {
         match dest {
             StreamDest::Unicast { dst_port, .. } => {
-                let bind_ip = IpAddr::V4(
-                    iface
-                        .ipv4()
-                        .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?,
-                );
-                nic::bind_udp(bind_ip, *dst_port, Some(iface.clone()), rcvbuf_bytes)
+                let bind_ip =
+                    IpAddr::V4(iface.ipv4().ok_or_else(|| {
+                        GenicamError::InterfaceWithoutIpv4(iface.name().to_string())
+                    })?);
+                viva_gige::bind_udp(bind_ip, *dst_port, Some(iface.clone()), rcvbuf_bytes)
                     .await
-                    .map_err(|err| GenicamError::transport(err.to_string()))
+                    .map_err(network("bind the stream socket"))
             }
             StreamDest::Multicast {
                 group,
@@ -859,9 +860,9 @@ impl<'a> StreamBuilder<'a> {
                     rcvbuf_bytes: rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
                     ..McOptions::default()
                 };
-                nic::bind_multicast(iface, *group, *port, &opts)
+                viva_gige::bind_multicast(iface, *group, *port, &opts)
                     .await
-                    .map_err(|err| GenicamError::transport(err.to_string()))
+                    .map_err(network("join the multicast group"))
             }
         }
     }
@@ -885,14 +886,14 @@ async fn check_stream_channel(device: &mut GigeDevice, channel: u32) -> Result<(
         }
     };
     match count {
-        Some(count) if channel >= count => Err(GenicamError::transport(format!(
-            "the camera has {count} stream channel(s) (GevNumberOfStreamChannels); stream \
-             channel {channel} does not exist"
-        ))),
-        None if channel > 0 => Err(GenicamError::transport(format!(
-            "the camera does not say how many stream channels it has; only stream channel 0 \
-             can be configured, not {channel}"
-        ))),
+        Some(count) if channel >= count => Err(GenicamError::StreamChannel {
+            channel,
+            count: Some(count),
+        }),
+        None if channel > 0 => Err(GenicamError::StreamChannel {
+            channel,
+            count: None,
+        }),
         _ => Ok(()),
     }
 }
@@ -902,12 +903,10 @@ async fn packet_delay_ticks(device: &mut GigeDevice, delay: Duration) -> Result<
     if delay.is_zero() {
         return Ok(0);
     }
-    let hz = device.timestamp_tick_frequency().await.map_err(|err| {
-        GenicamError::transport(format!(
-            "cannot set a packet delay: reading the timestamp tick frequency (0x093C/0x0940), \
-             the unit of GevSCPD, failed: {err}"
-        ))
-    })?;
+    let hz = device
+        .timestamp_tick_frequency()
+        .await
+        .map_err(gige("read the timestamp tick frequency, GevSCPD's unit"))?;
     delay_in_ticks(delay, hz)
 }
 
@@ -915,10 +914,10 @@ async fn packet_delay_ticks(device: &mut GigeDevice, delay: Duration) -> Result<
 /// for a delay that is not.
 fn delay_in_ticks(delay: Duration, hz: u64) -> Result<u32, GenicamError> {
     if hz == 0 {
-        return Err(GenicamError::transport(
-            "cannot set a packet delay: the camera reports a timestamp tick frequency of 0, \
-             so GevSCPD has no unit to convert to",
-        ));
+        return Err(GenicamError::PacketDelay {
+            delay,
+            problem: "the camera reports a timestamp tick frequency of 0, so GevSCPD has no unit",
+        });
     }
     let ticks = (delay.as_nanos() * u128::from(hz) + 500_000_000) / 1_000_000_000;
     let ticks = if ticks == 0 && !delay.is_zero() {
@@ -926,10 +925,9 @@ fn delay_in_ticks(delay: Duration, hz: u64) -> Result<u32, GenicamError> {
     } else {
         ticks
     };
-    u32::try_from(ticks).map_err(|_| {
-        GenicamError::transport(format!(
-            "a packet delay of {delay:?} is {ticks} ticks at {hz} Hz, more than GevSCPD holds"
-        ))
+    u32::try_from(ticks).map_err(|_| GenicamError::PacketDelay {
+        delay,
+        problem: "it is more ticks of the camera's clock than GevSCPD holds",
     })
 }
 
@@ -1064,11 +1062,7 @@ impl crate::Camera<crate::GigeRegisterIo> {
             return self.watch_stream(options);
         }
         if self.transport().control_state() == crate::ControlState::Monitor {
-            return Err(GenicamError::transport(
-                "the camera was opened as a read-only monitor, which cannot configure a stream; \
-                 watch a multicast stream with StreamOptions::monitor(), or open the camera \
-                 with Access::Control",
-            ));
+            return Err(GenicamError::NotInControl(crate::ControlState::Monitor));
         }
         let payload_size = read_payload_size(self);
         let time_sync = self.time_sync().clone();
@@ -1079,7 +1073,7 @@ impl crate::Camera<crate::GigeRegisterIo> {
             device
                 .claim_control()
                 .await
-                .map_err(|err| GenicamError::transport(format!("claim control: {err}")))?;
+                .map_err(gige("claim control"))?;
             // A session that had lost or released control holds it again,
             // whatever happens to the setup below: the camera says so.
             transport.note_claimed();
@@ -1089,13 +1083,12 @@ impl crate::Camera<crate::GigeRegisterIo> {
                     let camera_ip = match device.remote_addr().ip() {
                         IpAddr::V4(ip) => ip,
                         IpAddr::V6(_) => {
-                            return Err(GenicamError::transport("IPv6 cameras are not supported"));
+                            return Err(GigeError::NotIpv4("camera").into());
                         }
                     };
-                    Iface::from_remote_ipv4(camera_ip).map_err(|err| {
-                        GenicamError::transport(format!(
-                            "no local interface routes to {camera_ip}: {err}"
-                        ))
+                    Iface::from_remote_ipv4(camera_ip).map_err(|source| GenicamError::NoRoute {
+                        camera: camera_ip,
+                        source,
                     })?
                 }
             };
@@ -1139,50 +1132,49 @@ impl crate::Camera<crate::GigeRegisterIo> {
         let (socket, packet_size, group, iface_ip, camera_ip) =
             transport.block_on(async move {
                 let IpAddr::V4(camera_ip) = device.remote_addr().ip() else {
-                    return Err(GenicamError::transport("IPv6 cameras are not supported"));
+                    return Err(GigeError::NotIpv4("camera").into());
                 };
-                let (group, port) = device.stream_destination(CHANNEL).await.map_err(|err| {
-                    GenicamError::transport(format!("read GevSCDA/GevSCPHostPort: {err}"))
-                })?;
+                let (group, port) = device
+                    .stream_destination(CHANNEL)
+                    .await
+                    .map_err(gige("read GevSCDA/GevSCPHostPort"))?;
                 if !group.is_multicast() || port == 0 {
-                    return Err(GenicamError::transport(format!(
-                        "the camera streams to {group}:{port}, not to a multicast group; a monitor \
-                     can only watch a stream the controlling application sent to one"
+                    // A monitor can only watch a stream the controlling
+                    // application sent to a multicast group.
+                    return Err(GenicamError::NotMulticast(std::net::SocketAddrV4::new(
+                        group, port,
                     )));
                 }
                 let packet_size = device
                     .get_stream_packet_size(CHANNEL)
                     .await
-                    .map_err(|err| {
-                        GenicamError::transport(format!("read GevSCPSPacketSize: {err}"))
-                    })?;
+                    .map_err(gige("read GevSCPSPacketSize"))?;
                 let iface = match options.iface {
                     Some(iface) => iface,
-                    None => Iface::from_remote_ipv4(camera_ip).map_err(|err| {
-                        GenicamError::transport(format!(
-                            "no local interface routes to {camera_ip}: {err}"
-                        ))
+                    None => Iface::from_remote_ipv4(camera_ip).map_err(|source| {
+                        GenicamError::NoRoute {
+                            camera: camera_ip,
+                            source,
+                        }
                     })?,
                 };
                 let iface_ip = iface
                     .ipv4()
-                    .ok_or_else(|| GenicamError::transport("interface lacks IPv4 address"))?;
+                    .ok_or_else(|| GenicamError::InterfaceWithoutIpv4(iface.name().to_string()))?;
                 let mc = McOptions {
                     rcvbuf_bytes: options.rcvbuf_bytes.unwrap_or(DEFAULT_RCVBUF_BYTES),
                     ..McOptions::default()
                 };
-                let socket = nic::bind_multicast(&iface, group, port, &mc)
+                let socket = viva_gige::bind_multicast(&iface, group, port, &mc)
                     .await
-                    .map_err(|err| {
-                        GenicamError::transport(format!("join {group}:{port}: {err}"))
-                    })?;
+                    .map_err(network("join the camera's multicast group"))?;
                 info!(%group, port, packet_size, "watching the camera's multicast stream");
                 Ok((socket, packet_size, group, iface_ip, camera_ip))
             })??;
         drop(guard);
         let socket = socket
             .into_std()
-            .map_err(|err| GenicamError::transport(format!("socket conversion failed: {err}")))?;
+            .map_err(network("hand the stream socket to the receive thread"))?;
         let mut frames = FrameStream::watch_multicast(socket, packet_size, group, iface_ip)?;
         frames.set_source_filter(Some(camera_ip));
         frames.set_payload_size(payload_size);
@@ -1381,7 +1373,7 @@ impl FrameStream {
             Err(err) => frames
                 .shared
                 .queue
-                .fail(format!("socket conversion failed: {err}")),
+                .fail("hand the stream socket to the receive thread", err),
         }
         frames
     }
@@ -1404,14 +1396,15 @@ impl FrameStream {
         socket: std::net::UdpSocket,
         packet_size: u32,
     ) -> Result<Self, GenicamError> {
-        if assembly::payload_stride(packet_size, viva_gige::gvsp::GVSP_EXTENDED_HEADER_SIZE) == 0 {
-            return Err(GenicamError::transport(format!(
-                "GVSP packet size {packet_size} leaves no room for data"
-            )));
+        if assembly::payload_stride(packet_size, viva_gige::GVSP_EXTENDED_HEADER_SIZE) == 0 {
+            return Err(GenicamError::PacketTooSmall {
+                size: packet_size,
+                min: MIN_PACKET_SIZE,
+            });
         }
         let local = socket
             .local_addr()
-            .map_err(|e| GenicamError::transport(format!("stream socket address: {e}")))?;
+            .map_err(network("read the stream socket's address"))?;
         let host = match local.ip() {
             IpAddr::V4(ip) => ip,
             IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
@@ -1470,10 +1463,7 @@ impl FrameStream {
             rcvbuf_bytes,
         ) {
             Ok(handle) => self.receiver = Some(handle),
-            Err(err) => self
-                .shared
-                .queue
-                .fail(format!("could not start the GVSP receive thread: {err}")),
+            Err(err) => self.shared.queue.fail("start the GVSP receive thread", err),
         }
     }
 
@@ -1664,7 +1654,7 @@ impl FrameStream {
                 }
                 Ok(Some(block))
             }
-            Popped::Failed(message) => Err(GenicamError::transport(message)),
+            Popped::Failed(during, source) => Err(GenicamError::Network { during, source }),
             Popped::Finished | Popped::Empty => Ok(None),
         }
     }
@@ -1696,7 +1686,7 @@ impl Drop for FrameStream {
 /// when it ends: [`shutdown`](Self::shutdown) once the reader has stopped, or
 /// a drop.
 ///
-/// [`U3vStream`]: crate::u3v::stream::U3vStream
+/// [`U3vStream`]: crate::u3v::U3vStream
 ///
 /// # Example
 ///
@@ -1748,15 +1738,13 @@ impl U3vFrameStream {
     /// clears the device's StreamEnable; [`U3vStreamBuilder`] starts streams
     /// that do.
     ///
-    /// [`U3vStream`]: crate::u3v::stream::U3vStream
-    pub fn start<T: crate::u3v::usb::UsbTransfer + 'static>(
-        stream: crate::u3v::stream::U3vStream<T>,
-    ) -> Self {
+    /// [`U3vStream`]: crate::u3v::U3vStream
+    pub fn start<T: crate::u3v::UsbTransfer + 'static>(stream: crate::u3v::U3vStream<T>) -> Self {
         Self::start_inner(stream, None)
     }
 
-    fn start_inner<T: crate::u3v::usb::UsbTransfer + 'static>(
-        mut stream: crate::u3v::stream::U3vStream<T>,
+    fn start_inner<T: crate::u3v::UsbTransfer + 'static>(
+        mut stream: crate::u3v::U3vStream<T>,
         disable: Option<DisableStream>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -1802,7 +1790,10 @@ impl U3vFrameStream {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.blocking_send(Err(GenicamError::transport(e.to_string())));
+                        let _ = tx.blocking_send(Err(GenicamError::U3v {
+                            during: "read a frame",
+                            source: e,
+                        }));
                         break;
                     }
                 }
@@ -1900,11 +1891,8 @@ fn computed_frame_size(pixel_format: &str, width: u32, height: u32) -> Result<u6
     PixelFormat::from_name(pixel_format)
         .image_bytes(width, height)
         .map(|bytes| bytes as u64)
-        .ok_or_else(|| {
-            GenicamError::parse(format!(
-                "cannot size a {pixel_format} frame: the camera has no PayloadSize and the \
-                 format declares no size; pass U3vStreamBuilder::payload_size"
-            ))
+        .ok_or_else(|| GenicamError::UnsizedFrame {
+            pixel_format: pixel_format.to_string(),
         })
 }
 
@@ -1918,15 +1906,18 @@ fn payload_size_is_absent(error: &GenicamError) -> bool {
     )
 }
 
+/// Builder for a USB3 Vision [`U3vFrameStream`]: the payload size, or the
+/// camera's own; [`U3vStreamBuilder::build`] configures the SIRM and enables
+/// streaming.
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
-pub struct U3vStreamBuilder<'a, T: crate::u3v::usb::UsbTransfer + 'static> {
+pub struct U3vStreamBuilder<'a, T: crate::u3v::UsbTransfer + 'static> {
     camera: &'a mut crate::Camera<crate::U3vRegisterIo<T>>,
     payload_size: Option<u64>,
 }
 
 #[cfg(feature = "u3v")]
-impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
+impl<'a, T: crate::u3v::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
     /// Create a new builder bound to a camera.
     pub fn new(camera: &'a mut crate::Camera<crate::U3vRegisterIo<T>>) -> Self {
         Self {
@@ -1964,10 +1955,15 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
             Err(error) => return Err(error),
         }
         let dimension = |name: &str| -> Result<u32, GenicamError> {
-            self.camera
-                .get(name)?
-                .parse()
-                .map_err(|e| GenicamError::parse(format!("{name}: {e}")))
+            let value = self.camera.get_integer(name)?;
+            u32::try_from(value).map_err(|_| {
+                viva_genapi::GenApiError::Range {
+                    name: name.to_string(),
+                    value: viva_genapi::swissknife::Value::Int(value),
+                    violation: viva_genapi::RangeViolation::Unrepresentable,
+                }
+                .into()
+            })
         };
         let pixel_format = self.camera.get("PixelFormat")?;
         computed_frame_size(&pixel_format, dimension("Width")?, dimension("Height")?)
@@ -1988,9 +1984,9 @@ impl<'a, T: crate::u3v::usb::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
         let device = self.camera.transport().shared_device();
         let stream = device
             .lock()
-            .map_err(|_| GenicamError::transport("u3v device mutex poisoned"))?
+            .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))?
             .open_stream(payload_hint)
-            .map_err(|e| GenicamError::transport(e.to_string()))?;
+            .map_err(crate::error::u3v("open the stream"))?;
 
         let disable: DisableStream = std::sync::Arc::new(move |wait: bool| {
             let guard = if wait {
@@ -2069,8 +2065,14 @@ mod tests {
     fn only_a_missing_payload_size_falls_back() {
         use viva_genapi::GenApiError;
         let missing = GenicamError::GenApi(GenApiError::NodeNotFound("PayloadSize".into()));
-        let refused = GenicamError::GenApi(GenApiError::Access("PayloadSize".into()));
-        let failed = GenicamError::Transport("bulk read".into());
+        let refused = GenicamError::GenApi(GenApiError::Access {
+            name: "PayloadSize".into(),
+            refused: viva_genapi::AccessDirection::Read,
+        });
+        let failed = GenicamError::U3v {
+            during: "read PayloadSize",
+            source: viva_u3v::U3vError::Timeout,
+        };
         assert!(payload_size_is_absent(&missing));
         assert!(!payload_size_is_absent(&refused));
         assert!(!payload_size_is_absent(&failed));

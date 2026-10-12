@@ -9,14 +9,16 @@ mod struct_reg;
 mod swissknife;
 mod symbolic;
 
-pub use control::{missing_command_value, parse_category, parse_category_empty, parse_command};
-pub use converter::{parse_converter, parse_int_converter, parse_string};
-pub use numeric::{parse_float, parse_integer};
-pub use port::{parse_port, parse_port_empty};
-pub use register::parse_register;
-pub use struct_reg::parse_struct_reg;
-pub use swissknife::parse_swissknife;
-pub use symbolic::{parse_boolean, parse_enum};
+pub(crate) use control::{
+    missing_command_value, parse_category, parse_category_empty, parse_command,
+};
+pub(crate) use converter::{parse_converter, parse_int_converter, parse_string};
+pub(crate) use numeric::{parse_float, parse_integer};
+pub(crate) use port::{parse_port, parse_port_empty};
+pub(crate) use register::parse_register;
+pub(crate) use struct_reg::parse_struct_reg;
+pub(crate) use swissknife::parse_swissknife;
+pub(crate) use symbolic::{parse_boolean, parse_enum};
 
 use quick_xml::Reader;
 use quick_xml::events::BytesStart;
@@ -26,38 +28,38 @@ use crate::util::{attribute_value, parse_address, parse_u64, read_text_start};
 use crate::{IndexOffset, NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
 
 /// XML element name referencing another node that provides an address.
-pub const TAG_P_ADDRESS: &str = "pAddress";
+pub(crate) const TAG_P_ADDRESS: &str = "pAddress";
 
 /// `<pPort>`: the port a register's address is relative to.
-pub const TAG_P_PORT: &str = "pPort";
+pub(crate) const TAG_P_PORT: &str = "pPort";
 
 /// `<pIndex>`: an index node whose value is scaled and added to the address.
-pub const TAG_P_INDEX: &str = "pIndex";
+pub(crate) const TAG_P_INDEX: &str = "pIndex";
 /// XML element holding an inline literal value.
-pub const TAG_VALUE: &str = "Value";
+pub(crate) const TAG_VALUE: &str = "Value";
 /// XML element referencing another node supplying the value at runtime.
-pub const TAG_P_VALUE: &str = "pValue";
+pub(crate) const TAG_P_VALUE: &str = "pValue";
 /// XML element specifying a user friendly label.
-pub const TAG_DISPLAY_NAME: &str = "DisplayName";
+pub(crate) const TAG_DISPLAY_NAME: &str = "DisplayName";
 /// XML element for node visibility level.
-pub const TAG_VISIBILITY: &str = "Visibility";
-pub const TAG_IMPOSED_ACCESS_MODE: &str = "ImposedAccessMode";
+pub(crate) const TAG_VISIBILITY: &str = "Visibility";
+pub(crate) const TAG_IMPOSED_ACCESS_MODE: &str = "ImposedAccessMode";
 /// XML element marking a feature that belongs in a saved configuration.
-pub const TAG_STREAMABLE: &str = "Streamable";
+pub(crate) const TAG_STREAMABLE: &str = "Streamable";
 /// `<Cachable>`: how a register's value may be cached (GA-05).
-pub const TAG_CACHABLE: &str = "Cachable";
+pub(crate) const TAG_CACHABLE: &str = "Cachable";
 /// The spelling GenICam Standard v2.1.1 §2.8.3's prose uses for
 /// [`TAG_CACHABLE`]; its example and the schema write `Cachable`. Both are
 /// accepted, as `LSB` and `Lsb` are.
-pub const TAG_CACHEABLE: &str = "Cacheable";
+pub(crate) const TAG_CACHEABLE: &str = "Cacheable";
 /// `<PollingTime>`: milliseconds after which a value should be read again.
-pub const TAG_POLLING_TIME: &str = "PollingTime";
+pub(crate) const TAG_POLLING_TIME: &str = "PollingTime";
 /// XML element for the long-form description.
-pub const TAG_DESCRIPTION: &str = "Description";
+pub(crate) const TAG_DESCRIPTION: &str = "Description";
 /// XML element for short tooltip text.
-pub const TAG_TOOLTIP: &str = "ToolTip";
+pub(crate) const TAG_TOOLTIP: &str = "ToolTip";
 /// XML element for the recommended numeric representation.
-pub const TAG_REPRESENTATION: &str = "Representation";
+pub(crate) const TAG_REPRESENTATION: &str = "Representation";
 /// XML element describing the least significant bit of a bitfield.
 ///
 /// The GenICam schema spells it `LSB`, and every one of the 1 419 declarations
@@ -65,33 +67,33 @@ pub const TAG_REPRESENTATION: &str = "Representation";
 /// `Lsb`. Both are accepted: matching only the mixed-case form silently dropped
 /// the bit range from every `<MaskedIntReg>` that declared one, leaving the node
 /// reading its whole register (issue #120).
-pub const TAG_LSB: &str = "LSB";
+pub(crate) const TAG_LSB: &str = "LSB";
 /// Mixed-case spelling of [`TAG_LSB`], accepted alongside it.
-pub const TAG_LSB_MIXED: &str = "Lsb";
+pub(crate) const TAG_LSB_MIXED: &str = "Lsb";
 /// XML element describing the most significant bit of a bitfield.
 ///
 /// See [`TAG_LSB`] for why both spellings are accepted.
-pub const TAG_MSB: &str = "MSB";
+pub(crate) const TAG_MSB: &str = "MSB";
 /// Mixed-case spelling of [`TAG_MSB`], accepted alongside it.
-pub const TAG_MSB_MIXED: &str = "Msb";
+pub(crate) const TAG_MSB_MIXED: &str = "Msb";
 /// XML element describing the starting bit index of a bitfield.
-pub const TAG_BIT: &str = "Bit";
+pub(crate) const TAG_BIT: &str = "Bit";
 /// XML element describing a bitmask for a bitfield.
-pub const TAG_MASK: &str = "Mask";
+pub(crate) const TAG_MASK: &str = "Mask";
 /// XML element providing the register byte order (common spelling).
-pub const TAG_ENDIANNESS: &str = "Endianness";
+pub(crate) const TAG_ENDIANNESS: &str = "Endianness";
 /// XML element providing the register byte order (alternate spelling).
-pub const TAG_ENDIANESS: &str = "Endianess";
+pub(crate) const TAG_ENDIANESS: &str = "Endianess";
 /// XML element providing the register byte order (PFNC style).
-pub const TAG_BYTE_ORDER: &str = "ByteOrder";
+pub(crate) const TAG_BYTE_ORDER: &str = "ByteOrder";
 /// XML element referencing a node whose value gates feature implementation.
-pub const TAG_P_IS_IMPLEMENTED: &str = "pIsImplemented";
+pub(crate) const TAG_P_IS_IMPLEMENTED: &str = "pIsImplemented";
 /// XML element referencing a node whose value gates feature availability.
-pub const TAG_P_IS_AVAILABLE: &str = "pIsAvailable";
+pub(crate) const TAG_P_IS_AVAILABLE: &str = "pIsAvailable";
 /// XML element referencing a node whose value locks the feature (RW→RO).
-pub const TAG_P_IS_LOCKED: &str = "pIsLocked";
+pub(crate) const TAG_P_IS_LOCKED: &str = "pIsLocked";
 /// XML element naming a node whose change makes a register's cached value stale.
-pub const TAG_P_INVALIDATOR: &str = "pInvalidator";
+pub(crate) const TAG_P_INVALIDATOR: &str = "pInvalidator";
 
 /// Handle a `<pIsImplemented>` / `<pIsAvailable>` / `<pIsLocked>` element.
 ///
@@ -102,7 +104,7 @@ pub const TAG_P_INVALIDATOR: &str = "pInvalidator";
 /// The element text is a single node reference; empty text is treated as
 /// absent so that vendor XMLs with placeholder empty tags do not fabricate
 /// references to a node named "".
-pub fn handle_predicate_start(
+pub(crate) fn handle_predicate_start(
     reader: &mut Reader<&[u8]>,
     event: &BytesStart<'_>,
     prefs: &mut PredicateRefs,
@@ -130,7 +132,7 @@ pub fn handle_predicate_start(
 /// A register may declare any number of these — the vendor corpus has nodes
 /// with nineteen — so each non-empty reference is appended in declaration
 /// order. Empty text is ignored, as in [`handle_predicate_start`].
-pub fn handle_invalidator_start(
+pub(crate) fn handle_invalidator_start(
     reader: &mut Reader<&[u8]>,
     event: &BytesStart<'_>,
     invalidators: &mut Vec<String>,
@@ -147,7 +149,7 @@ pub fn handle_invalidator_start(
 }
 
 /// XML element on a selector naming a feature it selects.
-pub const TAG_P_SELECTED: &str = "pSelected";
+pub(crate) const TAG_P_SELECTED: &str = "pSelected";
 
 /// Record a `<pSelected>` element's target in `selected`.
 ///
@@ -155,7 +157,7 @@ pub const TAG_P_SELECTED: &str = "pSelected";
 /// `<Integer>` or `<Enumeration>` — and names a feature whose value depends on
 /// it. The element text is that feature's name; empty text is ignored, as in
 /// [`handle_predicate_start`].
-pub fn handle_p_selected_start(
+pub(crate) fn handle_p_selected_start(
     reader: &mut Reader<&[u8]>,
     event: &BytesStart<'_>,
     selected: &mut Vec<String>,
@@ -172,7 +174,7 @@ pub fn handle_p_selected_start(
 ///
 /// `Offset` gives a literal stride, `pOffset` names a node supplying one, and
 /// neither means the stride is the register length.
-pub fn index_offset(event: &BytesStart<'_>) -> Result<IndexOffset, XmlError> {
+pub(crate) fn index_offset(event: &BytesStart<'_>) -> Result<IndexOffset, XmlError> {
     if let Some(offset) = attribute_value(event, "Offset")? {
         return Ok(IndexOffset::Fixed(parse_u64(&offset)?));
     }
@@ -188,7 +190,7 @@ pub fn index_offset(event: &BytesStart<'_>) -> Result<IndexOffset, XmlError> {
 /// Handle common addressing elements for start events.
 ///
 /// Returns `true` if the element was handled, `false` otherwise.
-pub fn handle_addressing_start(
+pub(crate) fn handle_addressing_start(
     reader: &mut Reader<&[u8]>,
     event: &BytesStart<'_>,
     name: &str,
@@ -229,7 +231,7 @@ pub fn handle_addressing_start(
             let text = read_text_start(reader, event)?;
             let value = parse_u64(&text)?;
             let len = u32::try_from(value)
-                .map_err(|_| XmlError::Invalid(format!("length out of range for node {name}")))?;
+                .map_err(|_| XmlError::invalid(name, "declares a <Length> out of range"))?;
             addressing.set_length(len);
             Ok(true)
         }
@@ -239,7 +241,7 @@ pub fn handle_addressing_start(
 
 /// Accumulates metadata fields during node parsing.
 #[derive(Debug, Default)]
-pub struct NodeMetaBuilder {
+pub(crate) struct NodeMetaBuilder {
     pub visibility: Option<Visibility>,
     pub description: Option<String>,
     pub tooltip: Option<String>,
@@ -255,7 +257,7 @@ impl NodeMetaBuilder {
     /// Try to handle a start element as a metadata tag.
     ///
     /// Returns `true` if the tag was consumed, `false` otherwise.
-    pub fn handle_start(
+    pub(crate) fn handle_start(
         &mut self,
         reader: &mut Reader<&[u8]>,
         event: &BytesStart<'_>,
@@ -323,7 +325,7 @@ impl NodeMetaBuilder {
     }
 
     /// Build the final [`NodeMeta`].
-    pub fn build(self) -> NodeMeta {
+    pub(crate) fn build(self) -> NodeMeta {
         NodeMeta {
             visibility: self.visibility.unwrap_or_default(),
             description: self.description,
@@ -340,7 +342,7 @@ impl NodeMetaBuilder {
 
 /// Read a `<PollingTime>`. One that is not a number is a hint lost, logged
 /// and dropped: it costs no more than the node's polling, not the node.
-pub fn parse_polling_time(text: &str) -> Option<u64> {
+pub(crate) fn parse_polling_time(text: &str) -> Option<u64> {
     match parse_u64(text) {
         Ok(ms) => Some(ms),
         Err(err) => {
@@ -353,7 +355,7 @@ pub fn parse_polling_time(text: &str) -> Option<u64> {
 /// Handle common addressing elements for empty events.
 ///
 /// Returns `true` if the element was handled, `false` otherwise.
-pub fn handle_addressing_empty(
+pub(crate) fn handle_addressing_empty(
     event: &BytesStart<'_>,
     addressing: &mut AddressingBuilder,
 ) -> Result<bool, XmlError> {

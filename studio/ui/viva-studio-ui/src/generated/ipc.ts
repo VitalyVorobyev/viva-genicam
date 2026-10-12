@@ -57,20 +57,44 @@ polling_ms?: number,
  */
 caching?: string, };
 
-export type NumericRange = { min: number, max: number,
+export type NumericRange = {
+/**
+ * Minimum.
+ */
+min: number,
+/**
+ * Maximum.
+ */
+max: number,
 /**
  * Optional increment (step). Omitted when the feature has no grid.
  */
 inc?: number, };
 
-export type CommandResult = { ok: boolean, error?: string,
+export type CommandResult = {
+/**
+ * Whether the command was executed.
+ */
+ok: boolean,
+/**
+ * Why not, when it was not.
+ */
+error?: string,
 /**
  * Map of node name -> refreshed state for nodes affected by this command.
  * Empty when the service cannot determine side effects.
  */
 affected_states?: { [key in string]: FeatureState }, };
 
-export type AcquisitionStatus = { active: boolean, fps: number | null,
+export type AcquisitionStatus = {
+/**
+ * Whether the camera is acquiring.
+ */
+active: boolean,
+/**
+ * Frames per second, when known.
+ */
+fps: number | null,
 /**
  * Frames the stream did not deliver complete since it started: closed
  * with packets missing, never seen at all (block-id gaps), or discarded
@@ -79,9 +103,25 @@ export type AcquisitionStatus = { active: boolean, fps: number | null,
  */
 dropped: number, };
 
-export type ImageMeta = { pixel_format: PixelFormat, width: number, height: number, payload_size: number, };
-
-export type PixelFormat = "Mono8" | "Mono10" | "Mono12" | "Mono16" | "BayerRG8" | "BayerGR8" | "BayerBG8" | "BayerGB8" | "BayerRG10" | "BayerGR10" | "BayerBG10" | "BayerGB10" | "BayerRG12" | "BayerGR12" | "BayerBG12" | "BayerGB12" | "BayerRG16" | "BayerGR16" | "BayerBG16" | "BayerGB16" | "RGB8" | "BGR8" | "RGBa8" | "YCbCr422_8" | "YCbCr8" | "Coord3D_C16" | "Mono14" | "Mono10p" | "Mono12p" | "Mono10Packed" | "Mono12Packed" | "BayerRG10p" | "BayerGR10p" | "BayerBG10p" | "BayerGB10p" | "BayerRG12p" | "BayerGR12p" | "BayerBG12p" | "BayerGB12p" | "BayerRG10Packed" | "BayerGR10Packed" | "BayerBG10Packed" | "BayerGB10Packed" | "BayerRG12Packed" | "BayerGR12Packed" | "BayerBG12Packed" | "BayerGB12Packed" | "BGRa8" | "YUV422_8" | "YUV422_8_UYVY" | "YCbCr422_8_CbYCrY" | "YUV411_8_UYYVYY" | "YUV8_UYV" | "YCbCr8_CbYCr" | "Unknown";
+export type ImageMeta = {
+/**
+ * The camera's pixel format; on the wire, its PFNC name. `viva-pfnc` is
+ * the one authority on formats (ADR-0030).
+ */
+pixel_format: string,
+/**
+ * Image width in pixels.
+ */
+width: number,
+/**
+ * Image height in pixels.
+ */
+height: number,
+/**
+ * Bytes a frame's payload carries: the camera's `PayloadSize`, padding
+ * and chunk data included.
+ */
+payload_size: number, };
 
 export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string,
 /**

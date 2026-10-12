@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Parse a `<StructReg>` element, producing one `NodeDecl::Integer` per `<StructEntry>`.
-pub fn parse_struct_reg(
+pub(crate) fn parse_struct_reg(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<Vec<NodeDecl>, XmlError> {
@@ -142,9 +142,12 @@ pub fn parse_struct_reg(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid("unterminated StructReg".into()));
+                return Err(XmlError::invalid(
+                    "<StructReg>",
+                    "ends before its closing tag",
+                ));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -153,8 +156,9 @@ pub fn parse_struct_reg(
     if terms.is_empty() {
         // Defaulting to address 0 here would produce a nodemap full of
         // registers that read the wrong memory and never say so.
-        return Err(XmlError::Invalid(
-            "StructReg declares no <Address>, <pAddress> or <pIndex>".into(),
+        return Err(XmlError::missing(
+            "<StructReg>",
+            "<Address>, <pAddress> or <pIndex>",
         ));
     }
     let addressing = Addressing::Sum {
@@ -288,11 +292,9 @@ fn parse_struct_entry(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated StructEntry {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -312,9 +314,7 @@ fn parse_struct_entry(
             byte_order,
         }
     } else {
-        return Err(XmlError::Invalid(format!(
-            "StructEntry {name} needs LSB+MSB or Bit"
-        )));
+        return Err(XmlError::missing(&name, "<LSB> and <MSB>, or <Bit>"));
     };
 
     Ok(StructEntryData {

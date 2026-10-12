@@ -1,3 +1,5 @@
+//! Enable GigE Vision events and print them as they arrive on the message channel.
+
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -9,7 +11,7 @@ use viva_genapi_xml::{self, XmlError};
 use viva_genicam::Camera;
 use viva_genicam::genapi;
 use viva_genicam::gige::GVCP_PORT;
-use viva_genicam::gige::nic::IfaceSelector;
+use viva_genicam::gige::IfaceSelector;
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -96,9 +98,7 @@ async fn build_camera(
             let control = Arc::clone(&control);
             async move {
                 let mut dev = control.lock().await;
-                dev.read_mem(addr, len)
-                    .await
-                    .map_err(|err| XmlError::Transport(err.to_string()))
+                dev.read_mem(addr, len).await.map_err(XmlError::transport)
             }
         }
     })

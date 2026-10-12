@@ -1,23 +1,22 @@
-//! USB3 Vision Zenoh service — bridges U3V cameras to Viva Studio.
+//! USB3 Vision Zenoh service — bridges USB3 Vision cameras to Viva Studio.
 //!
-//! This is the U3V equivalent of `viva-service` (GigE Vision).
-//! Supports a `--fake` flag for testing without USB hardware.
+//! The same service as `viva-service` (GigE Vision), on the same library:
+//! it rescans the bus, serves every camera it finds, and publishes a camera
+//! disconnected when it is gone (backlog SVC-04). `--fake` serves cameras in
+//! process, for testing without USB hardware.
 
-mod acquisition;
 mod device;
+mod discovery;
+#[cfg(test)]
+mod tests;
 
-use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
-use tokio::sync::watch;
-use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
-use viva_service::device::DeviceOps;
-use viva_service::{nodes, report, status, xml};
-use viva_u3v::usb::UsbTransfer;
-use viva_zenoh_api::{DeviceAnnounce, keys};
+use viva_genicam::pfnc::PixelFormat;
+use viva_service::{init_tracing, run_service};
 
-use crate::device::U3vDeviceHandle;
+use crate::discovery::{FakeDiscovery, FakeSpec, UsbDiscovery};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -30,9 +29,13 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Use fake in-process U3V camera (no USB hardware needed)
+    /// Serve in-process fake cameras instead of USB devices
     #[arg(long)]
     fake: bool,
+
+    /// How many fake cameras to serve
+    #[arg(long, default_value_t = 1)]
+    fake_count: usize,
 
     /// Fake camera width
     #[arg(long, default_value_t = 640)]
@@ -42,9 +45,13 @@ struct Cli {
     #[arg(long, default_value_t = 480)]
     height: u32,
 
-    /// Pixel format: mono8 or rgb8
-    #[arg(long, default_value = "mono8")]
+    /// Fake pixel format, by its PFNC name (Mono8, RGB8, Mono12Packed, ...)
+    #[arg(long, default_value = "Mono8")]
     pixel_format: String,
+
+    /// Seconds between rescans of the bus
+    #[arg(long, default_value_t = 5)]
+    discovery_interval_s: u64,
 
     /// Path to Zenoh configuration file
     #[arg(long)]
@@ -55,248 +62,34 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
-
-    info!("Starting viva-service-u3v");
-
-    let zenoh_config = match &cli.zenoh_config {
-        Some(path) => zenoh::Config::from_file(path)?,
-        None => zenoh::Config::default(),
-    };
-    let session = Arc::new(zenoh::open(zenoh_config).await?);
-    info!("Zenoh session opened");
-
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    if cli.fake {
-        let pfnc = match cli.pixel_format.to_lowercase().as_str() {
-            "rgb8" | "rgb8packed" => 0x0218_0014u32,
-            _ => 0x0108_0001u32, // Mono8
-        };
-        info!(
-            width = cli.width,
-            height = cli.height,
-            pixel_format = cli.pixel_format,
-            "starting fake U3V camera"
-        );
-        run_fake_camera(
-            session.clone(),
-            cli.width,
-            cli.height,
-            pfnc,
-            shutdown_rx.clone(),
-        )
-        .await?;
-    } else {
-        run_real_camera(session.clone(), shutdown_rx.clone()).await?;
+    let interval = Duration::from_secs(cli.discovery_interval_s);
+    let zenoh_config = cli.zenoh_config.as_deref();
+    if !cli.fake {
+        return run_service("viva-service-u3v", zenoh_config, UsbDiscovery, interval).await;
     }
-
-    // Wait for CTRL+C.
-    tokio::signal::ctrl_c().await?;
-    info!("Shutdown requested (CTRL+C)");
-    let _ = _shutdown_tx.send(true);
-
-    // Give tasks a moment to finish.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    session.close().await?;
-    info!("viva-service-u3v shut down");
-    Ok(())
-}
-
-/// Spawn Zenoh service tasks shared by both fake and real camera paths.
-///
-/// Publishes connected status and initial feature values, then spawns XML,
-/// node-set, node-execute, bulk-read, and acquisition queryables, and a
-/// periodic announce loop publishing `announce`, whose `id` is the device id.
-async fn spawn_service_tasks<T: UsbTransfer + 'static>(
-    session: Arc<zenoh::Session>,
-    handle: Arc<U3vDeviceHandle<T>>,
-    announce: DeviceAnnounce,
-    shutdown: watch::Receiver<bool>,
-) {
-    let device_id = announce.id.clone();
-    // Publish connected status and initial values.
-    status::publish_connected(&session, &device_id).await;
-    nodes::publish_initial_values(&session, handle.as_ref()).await;
-
-    info!(device_id, "U3V camera connected, spawning service tasks");
-
-    // Spawn shared Zenoh queryables.
-    tokio::spawn(xml::run(
-        session.clone(),
-        device_id.clone(),
-        handle.raw_xml().to_string(),
-        shutdown.clone(),
-    ));
-    // The report cannot open the camera this service holds — a USB device
-    // admits one owner — so it describes it from what the service read
-    // (backlog DX-06).
-    tokio::spawn(report::serve(
-        session.clone(),
-        device_id.clone(),
-        format!("viva-service-u3v {}", env!("CARGO_PKG_VERSION")),
-        viva_genicam::report::ReportTarget::Open(viva_genicam::report::OpenCamera {
-            transport: "USB3 Vision".to_string(),
-            identity: [
-                ("name".to_string(), announce.name.clone()),
-                ("model".to_string(), announce.model.clone()),
-                ("serial".to_string(), announce.serial.clone()),
-                (
-                    "manufacturer".to_string(),
-                    announce
-                        .manufacturer
-                        .clone()
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-            ]
-            .into_iter()
-            .chain(handle.bootstrap().await)
-            .collect(),
-            xml: handle.raw_xml().to_string(),
-        }),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_set_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_execute_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_bulk_read_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_introspect_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(nodes::run_bulk_state_queryable(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-    tokio::spawn(acquisition::run(
-        session.clone(),
-        handle.clone(),
-        shutdown.clone(),
-    ));
-
-    // Periodic announce so the studio discovers the device even if it
-    // starts after the service (studio subscribes to announce topic).
-    let announce_session = session.clone();
-    let mut announce_shutdown = shutdown;
-    tokio::spawn(async move {
-        let key = keys::announce(&announce.id);
-        let Ok(payload) = serde_json::to_vec(&announce) else {
-            tracing::error!("serialize announce");
-            return;
-        };
-        loop {
-            let _ = announce_session.put(&key, payload.clone()).await;
-            tokio::select! {
-                _ = tokio::time::sleep(viva_zenoh_api::ANNOUNCE_INTERVAL) => {}
-                _ = announce_shutdown.changed() => {
-                    if *announce_shutdown.borrow() { break; }
-                }
-            }
+    // Any PFNC name, and the lower-case spellings this flag took before.
+    let name = match cli.pixel_format.as_str() {
+        "mono8" => "Mono8",
+        "rgb8" | "rgb8packed" => "RGB8",
+        other => other,
+    };
+    let pixel_format = match PixelFormat::from_name(name) {
+        PixelFormat::Unknown(_) => {
+            return Err(format!("unknown pixel format {}", cli.pixel_format).into());
         }
-    });
-
-    info!(device_id, "U3V service tasks spawned");
-}
-
-async fn run_fake_camera(
-    session: Arc<zenoh::Session>,
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    shutdown: watch::Receiver<bool>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use viva_genicam::open_u3v_device;
-
-    let fake_transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(
-        width,
-        height,
-        pixel_format,
-    ));
-
-    let device = viva_u3v::device::U3vDevice::open(fake_transport, 0x81, 0x01, Some(0x82), None)?;
-
-    let (camera, xml) = open_u3v_device(device)?;
-
-    let device_id = "cam-fake-u3v".to_string();
-    let handle = Arc::new(U3vDeviceHandle::new(camera, xml, device_id.clone()));
-
-    let announce = DeviceAnnounce::new(device_id, "FakeU3V", "FakeU3V", "FAKE-001");
-    spawn_service_tasks(session, handle, announce, shutdown).await;
-
-    info!("fake U3V camera service ready (use Viva Studio to connect)");
-    Ok(())
-}
-
-async fn run_real_camera(
-    session: Arc<zenoh::Session>,
-    shutdown: watch::Receiver<bool>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use viva_genicam::connect_u3v_with_xml;
-    use viva_u3v::discovery;
-
-    let devices = discovery::discover().map_err(|e| format!("USB discovery failed: {e}"))?;
-    if devices.is_empty() {
-        error!("No USB3 Vision cameras found. Use --fake for testing.");
-        return Ok(());
-    }
-
-    let device_info = &devices[0];
-    info!(
-        vendor = format!("{:04x}", device_info.vendor_id),
-        product = format!("{:04x}", device_info.product_id),
-        model = device_info.model.as_deref().unwrap_or("unknown"),
-        "connecting to USB3 Vision camera"
-    );
-
-    let (camera, xml) = connect_u3v_with_xml(device_info)?;
-
-    let device_id = format!(
-        "cam-u3v-{:04x}{:04x}",
-        device_info.vendor_id, device_info.product_id
-    );
-
-    let handle = Arc::new(U3vDeviceHandle::new(camera, xml, device_id.clone()));
-
-    let name = device_info
-        .model
-        .clone()
-        .unwrap_or_else(|| "U3V Camera".to_string());
-    let model = device_info
-        .model
-        .clone()
-        .unwrap_or_else(|| "Unknown".to_string());
-    // USB enumeration has no IP, MAC or user-defined name to offer, so the
-    // serial is what tells two cameras of one model apart. Empty when the
-    // string descriptor is absent, as `DeviceAnnounce::serial` specifies.
-    let serial = device_info.serial.clone().unwrap_or_default();
-    let mut announce = DeviceAnnounce::new(device_id, name, model, serial);
-    announce.manufacturer = device_info.manufacturer.clone();
-
-    spawn_service_tasks(session, handle, announce, shutdown).await;
-
-    Ok(())
-}
-
-fn init_tracing(verbose: u8) {
-    let default_level = match verbose {
-        0 => "info",
-        1 => "debug",
-        _ => "trace",
+        known => known.code(),
     };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let discovery = FakeDiscovery::default();
+    for index in 0..cli.fake_count {
+        discovery.plug(FakeSpec {
+            id: match index {
+                0 => "cam-fake-u3v".to_string(),
+                _ => format!("cam-fake-u3v-{index}"),
+            },
+            width: cli.width,
+            height: cli.height,
+            pixel_format,
+        });
+    }
+    run_service("viva-service-u3v", zenoh_config, discovery, interval).await
 }

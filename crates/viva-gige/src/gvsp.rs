@@ -63,25 +63,6 @@ const FORMAT_TRAILER: u8 = 0x02;
 /// Packet format: generic data payload.
 const FORMAT_PAYLOAD: u8 = 0x03;
 
-/// GVSP packet status codes that concern packet resend. Names from
-/// Wireshark's `packet-gvcp.c` status table (`GEV_STATUS_*`); bit 15 marks an
-/// error.
-pub mod status {
-    /// Success: a packet sent again in answer to a resend request.
-    pub const PACKET_RESEND: u16 = 0x0100;
-    /// The packet asked for is no longer available.
-    pub const PACKET_UNAVAILABLE: u16 = 0x800C;
-    /// The packet asked for has not been sent yet.
-    pub const PACKET_NOT_YET_AVAILABLE: u16 = 0x8010;
-    /// The packet asked for, and every packet before it, has been removed
-    /// from the device's memory.
-    pub const PACKET_AND_PREVIOUS_REMOVED_FROM_MEMORY: u16 = 0x8011;
-    /// The packet asked for has been removed from the device's memory.
-    pub const PACKET_REMOVED_FROM_MEMORY: u16 = 0x8012;
-    /// The packet asked for cannot be sent just now (GigE Vision 2.0).
-    pub const PACKET_TEMPORARILY_UNAVAILABLE: u16 = 0x8014;
-}
-
 /// Destination for GVSP packets received by the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamDest {
@@ -149,8 +130,10 @@ pub struct StreamConfig {
 #[non_exhaustive]
 pub enum GvspError {
     #[error("unsupported packet type: {0}")]
+    /// A packet of a kind the parser does not handle.
     Unsupported(&'static str),
     #[error("invalid packet: {0}")]
+    /// A packet that does not have the shape GVSP gives it.
     Invalid(&'static str),
 }
 
@@ -259,8 +242,9 @@ pub fn parse_chunks(payload: &[u8]) -> Result<Vec<ChunkRaw<'_>>, ChunkError> {
 /// `lucid_evt30_*` tests below).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GvspHeader {
-    /// Status word. Bit 15 marks an error (aravis
-    /// `arv_gvsp_packet_status_is_error`); `0x0100` flags a resent packet.
+    /// Status word, raw: decode it with [`GigeStatus`](crate::GigeStatus).
+    /// Bit 15 marks an error (aravis `arv_gvsp_packet_status_is_error`);
+    /// `0x0100` flags a resent packet.
     pub status: u16,
     /// Block id: 16 bits widened, or the 64-bit extended id.
     pub block_id: u64,
@@ -946,7 +930,10 @@ mod tests {
     fn a_bare_header_parses_on_its_own() {
         let bare = [0x80, 0x0C, 0x00, 0x09, 0x02, 0x00, 0x00, 0x05];
         let header = parse_header(&bare).expect("header");
-        assert_eq!(header.status, status::PACKET_UNAVAILABLE);
+        assert_eq!(
+            crate::GigeStatus::from_raw(header.status),
+            crate::GigeStatus::PacketUnavailable
+        );
         assert_eq!((header.block_id, header.packet_id), (9, 5));
         assert!(parse_packet_ref(&bare).is_err());
     }

@@ -4,7 +4,6 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use viva_pfnc::PixelFormat;
-use viva_pfnc::convert::ConvertError;
 
 use crate::chunks::ChunkData;
 
@@ -24,7 +23,7 @@ pub enum FrameStatus {
         missing_packets: u32,
     },
     /// The trailer reported this error status (bit 15 set).
-    DeviceStatus(u16),
+    DeviceStatus(viva_gige::GigeStatus),
     /// No trailer arrived before the block timed out or was displaced, so how
     /// many packets the block had is unknown.
     TrailerMissing,
@@ -149,12 +148,7 @@ impl Frame {
             self.row_stride(),
             &self.payload,
         )
-        .map_err(|err| match err {
-            ConvertError::Unsupported(format) => {
-                crate::GenicamError::UnsupportedPixelFormat(format)
-            }
-            other => crate::GenicamError::Parse(other.to_string()),
-        })
+        .map_err(crate::GenicamError::from)
     }
 }
 
@@ -247,7 +241,7 @@ mod tests {
         let short = frame_with_payload(&[1, 2, 3], 2, 2, PixelFormat::Mono8);
         assert!(matches!(
             short.to_rgb8(),
-            Err(crate::GenicamError::Parse(_))
+            Err(crate::GenicamError::Convert(_))
         ));
         let depth = frame_with_payload(&[0; 4], 1, 1, PixelFormat::Coord3DC32f);
         assert!(matches!(

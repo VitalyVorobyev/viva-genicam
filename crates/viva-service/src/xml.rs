@@ -8,7 +8,7 @@ use viva_zenoh_api::{DeviceXmlResponse, keys};
 use zenoh::Session;
 
 /// Declare a queryable for the device XML endpoint.
-pub async fn run(
+pub(crate) async fn run(
     session: Arc<Session>,
     device_id: String,
     xml: String,

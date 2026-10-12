@@ -1,8 +1,9 @@
 # `viva-gencp` — GenCP message primitives
 
-`viva-gencp` is the smallest crate in the stack: one `lib.rs` that encodes and
-decodes **GenCP control messages** and nothing else. No sockets, no retries, no
-async, no device state.
+`viva-gencp` is the smallest crate in the stack: one `lib.rs` with **GenCP's
+vocabulary** — opcodes, command ids, flags and status codes — and the decoding
+of an acknowledgement, and nothing else. No sockets, no retries, no async, no
+device state.
 
 GigE Vision and USB3 Vision both control a camera with GenCP-style register
 reads and writes, but they do not put the same bytes on the wire:
@@ -29,16 +30,15 @@ understands.
 | `OpCode` | GVCP's `ReadRegister`, `WriteRegister`, `ReadMem`, `WriteMem` |
 | `command_id` | GenCP's command ids: `READMEM_CMD` `0x0800` … `EVENT_ACK` `0x0C01` |
 | `ccd_flags` | GenCP's `REQUEST_ACK` (bit 14) and `COMMAND_RESEND` (bit 15) |
-| `StatusCode` | Transport-neutral status, with `Unknown(u16)` for anything not in the table |
-| `CommandHeader` / `AckHeader` | GVCP's 8-byte headers |
-| `GenCpCmd` / `GenCpAck` | Header plus payload |
+| `StatusCode` | The status codes GVCP and GenCP share; each transport wraps it in its own type |
+| `AckHeader` | GVCP's 8-byte acknowledgement header, its status as the wire value |
+| `GenCpAck` | Header plus payload |
 | `decode_ack` | Parses a GVCP acknowledgement; `viva-gige` uses it |
-| `encode_cmd` | Encodes a command without GVCP's `0x42` key byte, so it is not what `viva-gige` sends |
 | `GenCpError` | Decode failures |
 | `HEADER_SIZE`, `PENDING_ACK_COMMAND` | `8` and `0x0805` |
 
 `OpCode::command_code()` gives GVCP's wire value (`0x0080`, `0x0082`, `0x0084`,
-`0x0086`); `StatusCode::from_raw` / `to_raw` convert the status field.
+`0x0086`); `StatusCode::from_raw` / `to_raw` convert a shared status code.
 
 ---
 
@@ -58,7 +58,9 @@ commands, and `NodeMap` sits above those, so an application reads
 ## Status codes
 
 The table matters more than it looks, because a status is often the only thing
-a user sees when something fails.
+a user sees when something fails. `StatusCode` holds the codes both protocols
+define, with the same meaning: `0x0000`, `0x8001`–`0x8007`, `0x800E`, `0x800F`
+and `0x8FFF`.
 
 | Code | Meaning | Retry? |
 |---|---|---|
@@ -70,8 +72,16 @@ a user sees when something fails.
 | `BadAlignment` | Access not aligned as the transport requires | No |
 | `AccessDenied` | Refused *this* write: a GenApi lock, or control privilege not held | Only after fixing the cause |
 | `Busy` | Device busy | **Yes** — the only one worth retrying |
+| `InvalidHeader` | The command's header is invalid | No |
+| `WrongConfig` | The device's configuration does not allow the command | No |
 | `GenericError` | Device reported an error with nothing more specific | — |
-| `Unknown(u16)` | Not in this table, or transport-specific; carries the raw value |  |
+
+Beyond that the two tables part, and at `0x800B` they disagree: GVCP's
+`NO_MSG`, GenCP's `MSG_TIMEOUT`. So each transport decodes a status with a type
+of its own that wraps this one — `viva_gige::GigeStatus` (with GVCP's
+packet-resend codes) and `viva_u3v::U3vStatus` (with USB3 Vision's `0xA0xx`
+codes) — and keeps `Unknown(u16)` for a code neither table names. Each prints
+the name and the hex value together, `ACCESS_DENIED (0x8006)`.
 
 The distinction between `WriteProtect` and `AccessDenied` is worth keeping in
 mind when debugging: the first means the register never accepts writes, the
@@ -93,15 +103,16 @@ You would only do this for diagnostics. `decode_ack` turns the bytes of a GVCP
 acknowledgement into a `GenCpAck`:
 
 ```rust,ignore
+use viva_gige::GigeStatus;
 use viva_gencp::{StatusCode, decode_ack};
 
 let ack = decode_ack(&buf)?;        // -> GenCpAck
 
-// `AckHeader::status` is already a decoded `StatusCode`; `from_raw`/`to_raw`
-// are there for transports that need the wire value.
-match ack.header.status {
-    StatusCode::Success => { /* ack.payload */ }
-    StatusCode::Busy => { /* the one status worth retrying */ }
+// `AckHeader::status` is the wire value: decode it with the transport's type,
+// which names GVCP's own codes as well as the shared ones.
+match GigeStatus::from_raw(ack.header.status) {
+    GigeStatus::Common(StatusCode::Success) => { /* ack.payload */ }
+    GigeStatus::Common(StatusCode::Busy) => { /* the one status worth retrying */ }
     other => return Err(format!("device reported {other}").into()),
 }
 ```

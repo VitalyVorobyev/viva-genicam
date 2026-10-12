@@ -52,19 +52,26 @@ const STREAM_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Largest single payload transfer the host asks for: aravis's default
 /// (`ARV_UV_STREAM_MAXIMUM_TRANSFER_SIZE_DEFAULT`, 1 MiB).
-pub const DEFAULT_MAX_TRANSFER_SIZE: u32 = 1 << 20;
+pub(crate) const DEFAULT_MAX_TRANSFER_SIZE: u32 = 1 << 20;
 
 /// How the host reads one block: the sizes it writes to the SIRM, and reads
 /// with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StreamLayout {
     /// Bytes of payload the device sends in one block.
     pub payload_size: u64,
+    /// Bytes the host reads for a leader.
     pub leader_size: u32,
+    /// Bytes the host reads for a trailer.
     pub trailer_size: u32,
+    /// Bytes in each full payload transfer.
     pub payload_transfer_size: u32,
+    /// Number of full payload transfers.
     pub payload_transfer_count: u32,
+    /// Bytes in the first final transfer, 0 when there is none.
     pub final_transfer1_size: u32,
+    /// Bytes in the second final transfer, 0 when there is none.
     pub final_transfer2_size: u32,
 }
 
@@ -88,14 +95,12 @@ impl StreamLayout {
         max_transfer: u32,
     ) -> Result<Self, U3vError> {
         if alignment == 0 || alignment > max_transfer {
-            return Err(U3vError::Protocol(format!(
-                "a {alignment}-byte transfer alignment does not fit {max_transfer}-byte transfers"
-            )));
+            return Err(U3vError::Device(
+                "requires a transfer alignment larger than its transfers",
+            ));
         }
         if payload_size == 0 {
-            return Err(U3vError::Protocol(
-                "the device requires a zero-byte payload".into(),
-            ));
+            return Err(U3vError::Device("requires a zero-byte payload"));
         }
         let aligned_max = max_transfer / alignment * alignment;
         // A device that requires no leader or trailer size gets a whole
@@ -118,7 +123,7 @@ impl StreamLayout {
         };
         let count = payload_size / u64::from(payload_transfer_size);
         let payload_transfer_count = u32::try_from(count).map_err(|_| {
-            U3vError::Protocol(format!("{payload_size} bytes need {count} transfers"))
+            U3vError::Device("requires more payload transfers than a SIRM can count")
         })?;
         let remainder = payload_size.saturating_sub(count * u64::from(payload_transfer_size));
         let final_transfer1_size = align_up(remainder as u32, alignment)?;
@@ -146,7 +151,9 @@ fn align_up(value: u32, alignment: u32) -> Result<u32, U3vError> {
     value
         .div_ceil(alignment)
         .checked_mul(alignment)
-        .ok_or_else(|| U3vError::Protocol(format!("{value} bytes aligned to {alignment} overflow")))
+        .ok_or(U3vError::Device(
+            "requires an alignment that overflows a transfer size",
+        ))
 }
 
 /// Parsed U3V stream leader.
@@ -252,10 +259,15 @@ impl<T: UsbTransfer> U3vStream<T> {
         let received = self.read_payload()?;
         let trailer = self.read_trailer()?;
         if trailer.block_id != leader.block_id {
-            return Err(U3vError::Protocol(format!(
-                "block {} closed by the trailer of block {}",
-                leader.block_id, trailer.block_id
-            )));
+            tracing::debug!(
+                leader = leader.block_id,
+                trailer = trailer.block_id,
+                "a trailer closes another block"
+            );
+            return Err(U3vError::Malformed {
+                packet: "trailer",
+                problem: "closes another block than its leader opened",
+            });
         }
         let valid = (trailer.valid_payload_size as usize).min(received);
         Ok(Some(RawFrame {
@@ -304,6 +316,7 @@ impl<T: UsbTransfer> U3vStream<T> {
 /// A raw frame as received from the U3V stream, before conversion to
 /// the transport-agnostic `Frame` type.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RawFrame {
     /// Leader containing image metadata.
     pub leader: Leader,
@@ -339,17 +352,18 @@ pub struct RawFrame {
 /// ```
 pub fn parse_leader(buf: &[u8]) -> Result<Leader, U3vError> {
     if buf.len() < GENERIC_LEADER_SIZE {
-        return Err(U3vError::Protocol(format!(
-            "leader too short: {} bytes, need at least {GENERIC_LEADER_SIZE}",
-            buf.len()
-        )));
+        return Err(U3vError::Malformed {
+            packet: "leader",
+            problem: "is shorter than a generic leader",
+        });
     }
 
     let prefix = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if prefix != LEADER_PREFIX {
-        return Err(U3vError::Protocol(format!(
-            "bad leader prefix: {prefix:#010x}, expected {LEADER_PREFIX:#010x}"
-        )));
+        return Err(U3vError::Malformed {
+            packet: "leader",
+            problem: "lacks the U3VL prefix",
+        });
     }
 
     let le32 = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
@@ -373,10 +387,10 @@ pub fn parse_leader(buf: &[u8]) -> Result<Leader, U3vError> {
         PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK
     ) {
         if buf.len() < IMAGE_LEADER_SIZE {
-            return Err(U3vError::Protocol(format!(
-                "image leader too short: {} bytes, need {IMAGE_LEADER_SIZE}",
-                buf.len()
-            )));
+            return Err(U3vError::Malformed {
+                packet: "image leader",
+                problem: "is shorter than an image leader",
+            });
         }
         leader.timestamp = le64(20);
         leader.pixel_format = le32(28);
@@ -408,17 +422,18 @@ pub fn parse_leader(buf: &[u8]) -> Result<Leader, U3vError> {
 /// ```
 pub fn parse_trailer(buf: &[u8]) -> Result<Trailer, U3vError> {
     if buf.len() < MIN_TRAILER_SIZE {
-        return Err(U3vError::Protocol(format!(
-            "trailer too short: {} bytes, need at least {MIN_TRAILER_SIZE}",
-            buf.len()
-        )));
+        return Err(U3vError::Malformed {
+            packet: "trailer",
+            problem: "is shorter than a trailer",
+        });
     }
 
     let prefix = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if prefix != TRAILER_PREFIX {
-        return Err(U3vError::Protocol(format!(
-            "bad trailer prefix: {prefix:#010x}, expected {TRAILER_PREFIX:#010x}"
-        )));
+        return Err(U3vError::Malformed {
+            packet: "trailer",
+            problem: "lacks the U3VT prefix",
+        });
     }
 
     Ok(Trailer {
@@ -633,7 +648,10 @@ mod tests {
         let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(64, 256));
         assert!(matches!(
             stream.next_frame(),
-            Err(U3vError::Protocol(ref m)) if m.contains("block 4")
+            Err(U3vError::Malformed {
+                packet: "trailer",
+                ..
+            })
         ));
     }
 }

@@ -14,32 +14,24 @@ use tracing::{debug, trace, warn};
 use crate::registers::RegisterMap;
 use crate::resend::{self, PACKETRESEND_CMD, ResendCounters, Retention};
 
-/// GVCP command key byte (first byte of every GVCP command).
-const GVCP_CMD_KEY: u8 = 0x42;
+// GVCP's opcodes and key byte are vocabulary, imported from the transport
+// crates (ADR-0030); their values are pinned to the specification by
+// `viva-gige`'s own literal table. How the fake answers each command is its
+// own reading of the specification.
+use viva_gencp::{OpCode, StatusCode};
+use viva_gige::consts::{
+    ACTION_ACK, ACTION_COMMAND as ACTION_CMD, DISCOVERY_ACK, DISCOVERY_COMMAND as DISCOVERY_CMD,
+    FORCEIP_ACK, FORCEIP_COMMAND as FORCEIP_CMD, GVCP_CMD_KEY, PENDING_ACK,
+};
 
-// GVCP command opcodes
-const DISCOVERY_CMD: u16 = 0x0002;
-const FORCEIP_CMD: u16 = 0x0004;
-const FORCEIP_ACK: u16 = 0x0005;
-const READREG_CMD: u16 = 0x0080;
-const WRITEREG_CMD: u16 = 0x0082;
-const READMEM_CMD: u16 = 0x0084;
-const WRITEMEM_CMD: u16 = 0x0086;
-/// Action command. Deliberately spelled out rather than reused from
-/// `viva-gige`: the fake must be able to disagree with the client, which is the
-/// whole point of asserting its bytes independently (ADR-0019).
-const ACTION_CMD: u16 = 0x0100;
-
-// GVCP ack opcodes
-const DISCOVERY_ACK: u16 = 0x0003;
-/// `PENDING_ACK`: "still working on it, wait this long". Payload: two
-/// reserved bytes, then `time_to_completion` in milliseconds as a `u16`.
-const PENDING_ACK: u16 = 0x0089;
-const READREG_ACK: u16 = 0x0081;
-const WRITEREG_ACK: u16 = 0x0083;
-const READMEM_ACK: u16 = 0x0085;
-const WRITEMEM_ACK: u16 = 0x0087;
-const ACTION_ACK: u16 = 0x0101;
+const READREG_CMD: u16 = OpCode::ReadRegister.command_code();
+const WRITEREG_CMD: u16 = OpCode::WriteRegister.command_code();
+const READMEM_CMD: u16 = OpCode::ReadMem.command_code();
+const WRITEMEM_CMD: u16 = OpCode::WriteMem.command_code();
+const READREG_ACK: u16 = OpCode::ReadRegister.ack_code();
+const WRITEREG_ACK: u16 = OpCode::WriteRegister.ack_code();
+const READMEM_ACK: u16 = OpCode::ReadMem.ack_code();
+const WRITEMEM_ACK: u16 = OpCode::WriteMem.ack_code();
 
 /// Action keys the fake accepts. A command whose keys do not match is ignored
 /// without an acknowledgement, which is how a real device behaves — the command
@@ -109,16 +101,12 @@ pub struct DiscoveryRequest {
     pub flags: u8,
 }
 
-/// Status code for success.
-const STATUS_SUCCESS: u16 = 0x0000;
-/// GigE Vision `GEV_STATUS_NOT_IMPLEMENTED`.
-const STATUS_NOT_IMPLEMENTED: u16 = 0x8001;
-/// GigE Vision `GEV_STATUS_INVALID_PARAMETER`.
-const STATUS_INVALID_PARAMETER: u16 = 0x8002;
-/// GigE Vision `GEV_STATUS_BAD_ALIGNMENT`.
-const STATUS_BAD_ALIGNMENT: u16 = 0x8005;
-/// GigE Vision `GEV_STATUS_ACCESS_DENIED`.
-const STATUS_ACCESS_DENIED: u16 = 0x8006;
+// GigE Vision status codes, imported as vocabulary (ADR-0030).
+const STATUS_SUCCESS: u16 = StatusCode::Success.to_raw();
+const STATUS_NOT_IMPLEMENTED: u16 = StatusCode::NotImplemented.to_raw();
+const STATUS_INVALID_PARAMETER: u16 = StatusCode::InvalidParameter.to_raw();
+const STATUS_BAD_ALIGNMENT: u16 = StatusCode::BadAlignment.to_raw();
+const STATUS_ACCESS_DENIED: u16 = StatusCode::AccessDenied.to_raw();
 
 /// The four GVCP register-access commands, as the fake counts them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -621,7 +609,7 @@ fn write_checked(
     data: &[u8],
     acquisition: Acquisition<'_>,
 ) -> Result<(), u16> {
-    if addr == crate::registers::CCP && data.len() == 4 {
+    if addr == crate::registers::CONTROL_CHANNEL_PRIVILEGE && data.len() == 4 {
         let value = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         return if store.write_ccp(peer, value) {
             Ok(())

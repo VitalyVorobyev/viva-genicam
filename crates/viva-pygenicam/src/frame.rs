@@ -92,7 +92,7 @@ fn status_parts(status: FrameStatus) -> (&'static str, Option<u32>, Option<u16>)
     match status {
         FrameStatus::Complete => ("Complete", None, None),
         FrameStatus::Incomplete { missing_packets } => ("Incomplete", Some(missing_packets), None),
-        FrameStatus::DeviceStatus(code) => ("DeviceStatus", None, Some(code)),
+        FrameStatus::DeviceStatus(code) => ("DeviceStatus", None, Some(code.to_raw())),
         FrameStatus::TrailerMissing => ("TrailerMissing", None, None),
         _ => ("Unknown", None, None),
     }

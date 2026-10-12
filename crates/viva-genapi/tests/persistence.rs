@@ -313,11 +313,7 @@ fn a_save_says_why_it_left_a_feature_out() {
 #[test]
 fn a_configuration_is_written_in_the_genapi_feature_bag_layout() {
     let configuration = Configuration {
-        identity: DocumentIdentity {
-            vendor_name: "Acme".into(),
-            model_name: "Test-1".into(),
-            version: "2.0.3".into(),
-        },
+        identity: DocumentIdentity::new("Acme", "Test-1", "2.0.3"),
         values: vec![
             value("GainSelector", &[], "AnalogAll"),
             value("Gain", &[("GainSelector", "DigitalAll")], "9"),
@@ -526,7 +522,10 @@ fn a_load_reports_every_value_it_could_not_write_and_writes_the_rest() {
         report.failures[1].error,
         GenApiError::InvalidText { .. }
     ));
-    assert!(matches!(report.failures[4].error, GenApiError::Range(_)));
+    assert!(matches!(
+        report.failures[4].error,
+        GenApiError::Range { .. }
+    ));
     assert_eq!(report.written, 1);
     let user_id: Vec<u8> = device.read(USER_ID, 7).unwrap();
     assert_eq!(user_id, b"cam one");

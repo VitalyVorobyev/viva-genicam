@@ -32,7 +32,7 @@ fn read_slope(
 }
 
 /// Parse a `<Converter>` element into a [`NodeDecl::Converter`].
-pub fn parse_converter(
+pub(crate) fn parse_converter(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -98,9 +98,7 @@ pub fn parse_converter(
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if target.is_empty() {
-                        return Err(XmlError::Invalid(format!(
-                            "Converter node {name} has empty <pVariable>"
-                        )));
+                        return Err(XmlError::invalid(&name, "has an empty <pVariable>"));
                     }
                     // Add to both lists by default; real cameras might use direction hints
                     variables_to.push((var_name.clone(), target.to_string()));
@@ -140,9 +138,7 @@ pub fn parse_converter(
                     let var_name = attribute_value_required(e, "Name")?;
                     if let Some(target) = attribute_value(e, "Value")? {
                         if target.is_empty() {
-                            return Err(XmlError::Invalid(format!(
-                                "Converter node {name} has empty <pVariable/>"
-                            )));
+                            return Err(XmlError::invalid(&name, "has an empty <pVariable>"));
                         }
                         variables_to.push((var_name.clone(), target.clone()));
                         variables_from.push((var_name, target));
@@ -152,18 +148,15 @@ pub fn parse_converter(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Converter node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
     }
 
-    let p_value = p_value
-        .ok_or_else(|| XmlError::Invalid(format!("Converter node {name} missing <pValue>")))?;
+    let p_value = p_value.ok_or_else(|| XmlError::missing(&name, "<pValue>"))?;
 
     // `<FormulaFrom>` converts the raw value to the feature value — the read
     // direction — and binds `TO` to `<pValue>`. `<FormulaTo>` goes the other
@@ -200,7 +193,7 @@ pub fn parse_converter(
 }
 
 /// Parse an `<IntConverter>` element into a [`NodeDecl::IntConverter`].
-pub fn parse_int_converter(
+pub(crate) fn parse_int_converter(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -265,9 +258,7 @@ pub fn parse_int_converter(
                     let text = read_text_start(reader, e)?;
                     let target = text.trim();
                     if target.is_empty() {
-                        return Err(XmlError::Invalid(format!(
-                            "IntConverter node {name} has empty <pVariable>"
-                        )));
+                        return Err(XmlError::invalid(&name, "has an empty <pVariable>"));
                     }
                     variables_to.push((var_name.clone(), target.to_string()));
                     variables_from.push((var_name, target.to_string()));
@@ -300,9 +291,7 @@ pub fn parse_int_converter(
                     let var_name = attribute_value_required(e, "Name")?;
                     if let Some(target) = attribute_value(e, "Value")? {
                         if target.is_empty() {
-                            return Err(XmlError::Invalid(format!(
-                                "IntConverter node {name} has empty <pVariable/>"
-                            )));
+                            return Err(XmlError::invalid(&name, "has an empty <pVariable>"));
                         }
                         variables_to.push((var_name.clone(), target.clone()));
                         variables_from.push((var_name, target));
@@ -312,18 +301,15 @@ pub fn parse_int_converter(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated IntConverter node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
     }
 
-    let p_value = p_value
-        .ok_or_else(|| XmlError::Invalid(format!("IntConverter node {name} missing <pValue>")))?;
+    let p_value = p_value.ok_or_else(|| XmlError::missing(&name, "<pValue>"))?;
 
     let formula_to = formula_to.unwrap_or_else(|| "FROM".to_string());
     let formula_from = formula_from.unwrap_or_else(|| "TO".to_string());
@@ -351,7 +337,7 @@ pub fn parse_int_converter(
 }
 
 /// Parse a `<StringReg>` or `<String>` element into a [`NodeDecl::String`].
-pub fn parse_string(
+pub(crate) fn parse_string(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -389,11 +375,9 @@ pub fn parse_string(
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated String node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();

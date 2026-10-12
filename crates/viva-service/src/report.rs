@@ -12,30 +12,11 @@ use viva_genicam::report::{ReportRequest, ReportTarget, build_report};
 use viva_zenoh_api::{DeviceReportRequest, DeviceReportResponse, keys};
 use zenoh::Session;
 
-use crate::device::DeviceHandle;
-
-/// Declare a queryable that answers with a report on the GigE camera
-/// `device`, which the report opens read-only by its address.
-pub async fn run(
-    session: Arc<Session>,
-    device: Arc<DeviceHandle>,
-    shutdown: watch::Receiver<bool>,
-) {
-    serve(
-        session,
-        device.device_id().to_string(),
-        format!("viva-service {}", env!("CARGO_PKG_VERSION")),
-        ReportTarget::Ip(device.info().ip),
-        shutdown,
-    )
-    .await;
-}
-
 /// Declare a queryable that answers for `device_id` with a report by `tool`
 /// describing `target`. A service whose camera the report cannot open itself
 /// — a USB3 Vision device admits one owner — passes
 /// [`ReportTarget::Open`] (backlog DX-06).
-pub async fn serve(
+pub(crate) async fn serve(
     session: Arc<Session>,
     device_id: String,
     tool: String,

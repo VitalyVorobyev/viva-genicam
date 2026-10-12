@@ -8,7 +8,7 @@
 //! (`arv_buffer_get_chunk_data`) and the vendor corpus's 32-bit `<ChunkID>`s
 //! corroborate it.
 
-use viva_gige::gvsp::{ChunkError, ChunkRaw, parse_chunks};
+use viva_gige::{ChunkError, ChunkRaw, parse_chunks};
 
 /// An image with two chunks, as a device lays out an extended chunk payload
 /// (`0x4001`): the image first, as a chunk of its own, then each chunk's data

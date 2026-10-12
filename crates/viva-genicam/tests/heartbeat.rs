@@ -21,7 +21,7 @@ mod common;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use viva_genicam::gige::gvcp::consts as gvcp_consts;
+use viva_genicam::gige::consts as gvcp_consts;
 use viva_genicam::{connect_gige, gige};
 
 /// Heartbeat window the fake reports for these tests. Short enough that waiting

@@ -10,7 +10,7 @@ use crate::util::{
 use crate::{CommandValueSrc, NodeDecl, NodeMeta, PredicateRefs, XmlError};
 
 /// Parse a `<Command>` element into a [`NodeDecl::Command`].
-pub fn parse_command(
+pub(crate) fn parse_command(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -36,7 +36,7 @@ pub fn parse_command(
                     let text = read_text_start(reader, e)?;
                     let value = parse_u64(&text)?;
                     length = Some(u32::try_from(value).map_err(|_| {
-                        XmlError::Invalid(format!("length out of range for node {name}"))
+                        XmlError::invalid(&name, "declares a <Length> out of range")
                     })?);
                 }
                 "pValue" => {
@@ -67,11 +67,9 @@ pub fn parse_command(
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Command node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -108,14 +106,12 @@ pub fn parse_command(
 /// the 38-document vendor corpus declare one. Writing an invented `1` instead
 /// is how a user-set command saves into the wrong set, so the node is refused
 /// and the reason recorded.
-pub fn missing_command_value(name: &str) -> XmlError {
-    XmlError::Invalid(format!(
-        "Command {name} declares neither <CommandValue> nor <pCommandValue>"
-    ))
+pub(crate) fn missing_command_value(name: &str) -> XmlError {
+    XmlError::missing(name, "<CommandValue> or <pCommandValue>")
 }
 
 /// Parse a `<Category>` element into a [`NodeDecl::Category`].
-pub fn parse_category(
+pub(crate) fn parse_category(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
@@ -153,11 +149,9 @@ pub fn parse_category(
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!(
-                    "unterminated Category node {name}"
-                )));
+                return Err(XmlError::invalid(&name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -172,7 +166,7 @@ pub fn parse_category(
 }
 
 /// Parse an empty `<Category />` element.
-pub fn parse_category_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError> {
+pub(crate) fn parse_category_empty(start: &BytesStart<'_>) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(start, "Name")?;
     Ok(NodeDecl::Category {
         name,

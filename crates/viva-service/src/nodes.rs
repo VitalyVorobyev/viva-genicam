@@ -13,7 +13,7 @@ use zenoh::Session;
 use crate::device::DeviceOps;
 
 /// Declare a queryable for node set operations.
-pub async fn run_set_queryable<D: DeviceOps>(
+pub(crate) async fn run_set_queryable<D: DeviceOps>(
     session: Arc<Session>,
     device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
@@ -101,7 +101,7 @@ pub async fn run_set_queryable<D: DeviceOps>(
 }
 
 /// Declare a queryable for command execution.
-pub async fn run_execute_queryable<D: DeviceOps>(
+pub(crate) async fn run_execute_queryable<D: DeviceOps>(
     session: Arc<Session>,
     device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
@@ -160,7 +160,7 @@ pub async fn run_execute_queryable<D: DeviceOps>(
 /// [`DeviceOps::get_feature_state`]. Clients (e.g. the Studio UI) use this to
 /// drive slider ranges, enum dropdowns, and access-gating without falling
 /// back to static XML defaults.
-pub async fn run_introspect_queryable<D: DeviceOps>(
+pub(crate) async fn run_introspect_queryable<D: DeviceOps>(
     session: Arc<Session>,
     device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
@@ -220,7 +220,7 @@ pub async fn run_introspect_queryable<D: DeviceOps>(
 /// Reply is a `HashMap<String, FeatureState>` JSON object. Reuses the same
 /// `BulkReadRequest` payload shape as `nodes/bulk/read` so existing
 /// producer/consumer patterns apply.
-pub async fn run_bulk_state_queryable<D: DeviceOps>(
+pub(crate) async fn run_bulk_state_queryable<D: DeviceOps>(
     session: Arc<Session>,
     device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
@@ -281,7 +281,7 @@ pub async fn run_bulk_state_queryable<D: DeviceOps>(
 }
 
 /// Declare a queryable for bulk node reads.
-pub async fn run_bulk_read_queryable<D: DeviceOps>(
+pub(crate) async fn run_bulk_read_queryable<D: DeviceOps>(
     session: Arc<Session>,
     device: Arc<D>,
     mut shutdown: watch::Receiver<bool>,
@@ -351,7 +351,7 @@ pub async fn run_bulk_read_queryable<D: DeviceOps>(
 }
 
 /// Publish initial values for common SFNC nodes after device connection.
-pub async fn publish_initial_values<D: DeviceOps>(session: &Session, device: &D) {
+pub(crate) async fn publish_initial_values<D: DeviceOps>(session: &Session, device: &D) {
     let device_id = device.device_id();
     // Read and publish key SFNC feature values.
     let sfnc_nodes = [

@@ -6,9 +6,8 @@
 //!   `Arc<RwLock<ImageMeta>>` and the stream info the viewer reads.
 //! - **frame subscriber** — receives framed payloads (`16-byte FrameHeader + raw
 //!   pixels`), decodes the inline header, and draws the pixels with
-//!   [`FrameEncoder`] — the same encoder embedded mode uses — in the PFNC
-//!   format the wire's names ([`PixelFormat::to_pfnc`]), as often as
-//!   [`FramePacer`] allows.
+//!   [`FrameEncoder`] — the same encoder embedded mode uses — in the frame's
+//!   PFNC format, as often as [`FramePacer`] allows.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +15,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::sync::{RwLock, watch};
 use tracing::{info, warn};
-use viva_zenoh_api::{FrameHeader, ImageMeta, PixelFormat};
+use viva_pfnc::PixelFormat;
+use viva_zenoh_api::{FrameHeader, ImageMeta};
 
 use crate::error::StreamerError;
 use crate::frame::{FrameEncoder, FramePacer};
@@ -166,20 +166,14 @@ async fn run_inner(
 
                 // The converter checks the payload against the geometry and
                 // ignores trailing bytes (e.g. GVSP padding).
-                let Some(format) = header
-                    .pixel_format
-                    .to_pfnc()
-                    .filter(|format| FrameEncoder::can_draw(*format))
-                else {
-                    if unsupported.as_ref() != Some(&header.pixel_format) {
-                        warn!(
-                            "Pixel format {:?} cannot be drawn; dropping its frames",
-                            header.pixel_format
-                        );
-                        unsupported = Some(header.pixel_format.clone());
+                let format = header.pixel_format;
+                if !FrameEncoder::can_draw(format) {
+                    if unsupported != Some(format) {
+                        warn!("Pixel format {format} cannot be drawn; dropping its frames");
+                        unsupported = Some(format);
                     }
                     continue;
-                };
+                }
                 let frame = match encoder.encode(format, header.width, header.height, None, pixel_data) {
                     Ok(frame) => frame,
                     Err(err) => {

@@ -14,7 +14,7 @@ fn camera_lock() -> Arc<Mutex<()>> {
 /// Guard that starts a fake GigE Vision camera and stops it on drop.
 ///
 /// Holds a global mutex to prevent port conflicts when tests run in parallel.
-pub struct TestCamera {
+pub(crate) struct TestCamera {
     camera: Option<FakeCamera>,
     _guard: OwnedMutexGuard<()>,
 }
@@ -26,13 +26,13 @@ impl TestCamera {
     // Each integration test is its own crate, so a helper only some of them use
     // reads as dead code in the others.
     #[allow(dead_code)]
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         Self::start_with(|builder| builder).await
     }
 
     /// Start a fake camera with extra builder customization applied on top
     /// of the standard loopback test configuration.
-    pub async fn start_with<F>(customize: F) -> Self
+    pub(crate) async fn start_with<F>(customize: F) -> Self
     where
         F: Fn(FakeCameraBuilder) -> FakeCameraBuilder,
     {
@@ -61,7 +61,7 @@ impl TestCamera {
 
     /// The running fake, for tests that inspect what reached it on the wire.
     #[allow(dead_code)]
-    pub fn fake(&self) -> &FakeCamera {
+    pub(crate) fn fake(&self) -> &FakeCamera {
         // `camera` is only taken in `drop`, so it is always present here.
         self.camera.as_ref().expect("fake camera is running")
     }
@@ -79,14 +79,14 @@ impl Drop for TestCamera {
 /// that reads nothing and sends nothing, held under the same lock as
 /// [`TestCamera`].
 #[allow(dead_code)]
-pub struct SilentCamera {
+pub(crate) struct SilentCamera {
     _socket: std::net::UdpSocket,
     _guard: OwnedMutexGuard<()>,
 }
 
 impl SilentCamera {
     #[allow(dead_code)]
-    pub async fn bind() -> Self {
+    pub(crate) async fn bind() -> Self {
         let guard = camera_lock().lock_owned().await;
         let socket = loop {
             match std::net::UdpSocket::bind(("127.0.0.1", 3956)) {

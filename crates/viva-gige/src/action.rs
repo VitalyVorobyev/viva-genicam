@@ -11,7 +11,8 @@ use tokio::net::UdpSocket;
 use tokio::time;
 use tracing::{debug, info, trace, warn};
 
-use crate::gvcp::{GVCP_PORT, GvcpAckHeader, GvcpRequestHeader, consts};
+use crate::consts;
+use crate::gvcp::{GVCP_PORT, GvcpAckHeader, GvcpRequestHeader};
 
 /// Size of an unscheduled action command payload in bytes.
 ///
@@ -44,6 +45,7 @@ pub struct ActionParams {
 
 /// Summary of the broadcast performed by [`send_action`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AckSummary {
     /// Number of GVCP datagrams transmitted.
     pub sent: usize,
@@ -77,7 +79,7 @@ fn parse_ack(buf: &[u8]) -> io::Result<GvcpAckHeader> {
     let length = u16::from_be_bytes([buf[4], buf[5]]);
     let request_id = u16::from_be_bytes([buf[6], buf[7]]);
     Ok(GvcpAckHeader {
-        status: viva_gencp::StatusCode::from_raw(status),
+        status: crate::GigeStatus::from_raw(status),
         command: opcode,
         length,
         request_id,
@@ -162,8 +164,8 @@ pub async fn send_action(
                     );
                     continue;
                 }
-                if header.status != viva_gencp::StatusCode::Success {
-                    warn!(status = ?header.status, %src, "device reported action failure");
+                if !header.status.is_success() {
+                    warn!(status = %header.status, %src, "device reported action failure");
                     continue;
                 }
                 if seen.insert(src.ip()) {

@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::{BufMut, BytesMut};
 use viva_gencp::StatusCode;
 use viva_u3v::U3vError;
-use viva_u3v::usb::UsbTransfer;
+use viva_u3v::UsbTransfer;
 
 use crate::registers::{
     LEADER_SIZE, REG_ACQ_START, REG_ACQ_STOP, RegisterMap, SIRM_CONTROL, TRAILER_SIZE,
@@ -23,16 +23,12 @@ use crate::registers::{
 const CONTROL_PREFIX: [u8; 4] = *b"U3VC";
 /// Prefix plus common command data.
 const HEADER_SIZE: usize = 12;
-/// GenCP 1.2 Table 4: the RequestAck flag.
-const REQUEST_ACK: u16 = 1 << 14;
-// GenCP 1.2 Table 7.
-const READMEM_CMD: u16 = 0x0800;
-const WRITEMEM_CMD: u16 = 0x0802;
-/// GenCP 1.2 Table 6: `GENCP_INVALID_HEADER`.
-const INVALID_HEADER: u16 = 0x800E;
+// GenCP's flag and command ids (Tables 4 and 7), imported as vocabulary
+// (ADR-0030).
+use viva_gencp::ccd_flags::REQUEST_ACK;
+use viva_gencp::command_id::{READMEM_CMD, WRITEMEM_CMD};
 
-/// The control endpoints, as [`FakeU3vCamera`](crate::FakeU3vCamera) opens them.
-const STREAM_EP: u8 = 0x82;
+use crate::STREAM_EP_IN as STREAM_EP;
 
 /// "U3VL" and "U3VT", little-endian.
 const LEADER_PREFIX: [u8; 4] = *b"U3VL";
@@ -173,7 +169,7 @@ impl UsbTransfer for FakeU3vTransport {
             return Err(U3vError::Timeout);
         };
         if buf.len() < ack.len() {
-            return Err(U3vError::Usb(format!(
+            return Err(U3vError::usb(format!(
                 "overflow: a {}-byte acknowledge into a {}-byte buffer",
                 ack.len(),
                 buf.len()
@@ -199,7 +195,7 @@ fn execute(state: &mut TransportState, packet: &[u8]) -> Option<Vec<u8>> {
     let ack_id = command | 1;
     if packet.len() != HEADER_SIZE + length as usize {
         return Some(build_ack(
-            StatusCode::from_raw(INVALID_HEADER),
+            StatusCode::InvalidHeader,
             ack_id,
             request_id,
             &[],
@@ -290,7 +286,7 @@ fn bytes_per_pixel(pixel_format: u32) -> usize {
 /// device sends overflows, as on USB.
 fn stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Result<usize, U3vError> {
     let overflow = |sent: usize, buf: &[u8]| {
-        U3vError::Usb(format!(
+        U3vError::usb(format!(
             "overflow: the device sent {sent} bytes into a {}-byte buffer",
             buf.len()
         ))
@@ -300,7 +296,7 @@ fn stream_transfer(state: &mut TransportState, buf: &mut [u8]) -> Result<usize, 
         // A new block: its leader.
         let layout = state.registers.host_layout();
         if layout.max_leader_size < LEADER_SIZE || layout.max_trailer_size < TRAILER_SIZE {
-            return Err(U3vError::Usb(format!(
+            return Err(U3vError::usb(format!(
                 "the SIRM's leader/trailer sizes {}/{} are below the {LEADER_SIZE}/{TRAILER_SIZE} the device requires",
                 layout.max_leader_size, layout.max_trailer_size
             )));
@@ -459,10 +455,11 @@ mod tests {
     use super::*;
     use crate::registers::{REG_ACQ_START, SIRM_BASE, SIRM_REQUIRED_LEADER_SIZE};
     use std::sync::Arc;
-    use viva_u3v::device::U3vDevice;
+    use viva_u3v::U3vDevice;
+    use viva_u3v::U3vStatus;
 
     fn open(transport: &Arc<FakeU3vTransport>) -> U3vDevice<FakeU3vTransport> {
-        U3vDevice::open(Arc::clone(transport), 0x81, 0x01, Some(STREAM_EP), None).unwrap()
+        crate::open(Arc::clone(transport)).unwrap()
     }
 
     #[test]
@@ -497,9 +494,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                U3vError::Status {
-                    status: StatusCode::AccessDenied
-                }
+                U3vError::Status(U3vStatus::Common(StatusCode::AccessDenied))
             ),
             "{err:?}"
         );
@@ -519,9 +514,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                U3vError::Status {
-                    status: StatusCode::WriteProtect
-                }
+                U3vError::Status(U3vStatus::Common(StatusCode::WriteProtect))
             ),
             "{err:?}"
         );
@@ -534,9 +527,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                U3vError::Status {
-                    status: StatusCode::InvalidAddress
-                }
+                U3vError::Status(U3vStatus::Common(StatusCode::InvalidAddress))
             ),
             "{err:?}"
         );

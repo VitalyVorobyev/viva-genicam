@@ -33,9 +33,6 @@ tiff = { version = "0.11.3", default-features = false, optional = true }
 
 # `cargo fuzz` builds with `--cfg fuzzing`, which compiles the fuzzing entry
 # point in `stream` (CI-09).
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
-
 [features]
 default = []
 u3v = ["viva-u3v"]
@@ -55,3 +52,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Enable Tokio's signal support for examples like `soak_bench`.
 tokio = { workspace = true, features = ["signal"] }
+
+[lints]
+workspace = true

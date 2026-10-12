@@ -29,18 +29,24 @@ impl NodeMap {
                 SkOutput::Integer => Ok((self.get_converter(name, io)? as i64).to_string()),
             },
             Some(Node::String(_)) => self.get_string(name, io),
-            Some(Node::Command(_)) => Err(GenApiError::Type(format!(
-                "{name} is a command, which has no value; execute it instead"
-            ))),
-            Some(Node::Category(_)) => Err(GenApiError::Type(format!(
-                "{name} is a category, which has no value"
-            ))),
+            Some(Node::Command(_)) => Err(GenApiError::wrong_kind(
+                name,
+                "Command",
+                "a feature with a value (a command is executed)",
+            )),
+            Some(Node::Category(_)) => Err(GenApiError::wrong_kind(
+                name,
+                "Category",
+                "a feature with a value",
+            )),
             // A `<Register>` is a byte array with no declared interpretation:
             // rendering it here would mean inventing an encoding nothing asked
             // for. Raw access goes through `get_register`.
-            Some(Node::Register(_)) => Err(GenApiError::Type(format!(
-                "{name} is a register, a byte array with no text form; read it as bytes"
-            ))),
+            Some(Node::Register(_)) => Err(GenApiError::wrong_kind(
+                name,
+                "Register",
+                "a feature with a text form (a register is read as bytes)",
+            )),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }
@@ -81,12 +87,14 @@ impl NodeMap {
                 self.set_bool(name, value, io)
             }
             Some(Node::String(_)) => self.set_string(name, text, io),
-            Some(Node::Command(_)) => Err(GenApiError::Type(format!(
-                "{name} is a command, which is executed, not set"
-            ))),
-            Some(Node::SwissKnife(_) | Node::Register(_) | Node::Category(_)) => {
-                Err(GenApiError::Type(name.to_string()))
-            }
+            Some(Node::Command(_)) => Err(GenApiError::wrong_kind(
+                name,
+                "Command",
+                "a feature that is set (a command is executed)",
+            )),
+            Some(other @ (Node::SwissKnife(_) | Node::Register(_) | Node::Category(_))) => Err(
+                GenApiError::wrong_kind(name, other.kind_name(), "a feature set from text"),
+            ),
             None => Err(GenApiError::NodeNotFound(name.to_string())),
         }
     }

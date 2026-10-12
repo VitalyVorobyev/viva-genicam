@@ -1,3 +1,5 @@
+//! Formula nodes (`<SwissKnife>`, `<IntSwissKnife>`) evaluated against an in-memory register map.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -83,7 +85,7 @@ fn run_real() -> Result<(), Box<dyn Error>> {
                 let mut dev = device.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     }))?;
@@ -151,9 +153,9 @@ impl RegisterIo for MockIo {
         let regs = self.regs.borrow();
         let data = regs
             .get(&addr)
-            .ok_or_else(|| GenApiError::Io(format!("read miss at 0x{addr:08X}")))?;
+            .ok_or_else(|| GenApiError::io(format!("read miss at 0x{addr:08X}")))?;
         if data.len() != len {
-            return Err(GenApiError::Io(format!(
+            return Err(GenApiError::io(format!(
                 "length mismatch at 0x{addr:08X}: expected {len}, have {}",
                 data.len()
             )));

@@ -2,7 +2,10 @@
 
 Zenoh bridge for USB3 Vision cameras.
 
-Extends the `viva-service` architecture to support USB3 Vision transport. Supports a `--fake` flag for testing without USB hardware.
+Runs `viva-service`'s service — the same queries, streams and camera
+lifecycle — over USB3 Vision: it rescans the bus, serves each camera it finds,
+and publishes a camera that disappears as disconnected. `--fake` serves
+in-process fake cameras instead, for testing without USB hardware.
 
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
@@ -16,6 +19,9 @@ cargo run -p viva-service-u3v -- --fake
 
 # Custom resolution for the fake camera
 cargo run -p viva-service-u3v -- --fake --width 1024 --height 768
+
+# Two fake cameras in Mono12Packed (any PFNC name)
+cargo run -p viva-service-u3v -- --fake --fake-count 2 --pixel-format Mono12Packed
 
 # With verbose logging
 cargo run -p viva-service-u3v -- --fake -vv

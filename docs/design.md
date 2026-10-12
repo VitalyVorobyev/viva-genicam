@@ -45,7 +45,7 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
   (`viva_pfnc::convert`) the library, Python and Viva Studio share.
 - `viva-sfnc` — Standard Feature Naming Convention constants.
 - `viva-zenoh-api` — the message payloads and topic names the services
-  publish. This is the contract, not the transport: despite the name it does
+  publish; pixel formats are `viva-pfnc`'s. This is the contract, not the transport: despite the name it does
   not depend on the `zenoh` crate, so a client can share the message format
   without linking a broker, and it compiles everywhere including wasm. Its
   optional `genapi` feature converts `viva-genapi`'s `FeatureState` into the
@@ -162,13 +162,19 @@ blocking; opened by `Camera::open_stream`. The U3V side wraps blocking USB bulk 
 `spawn_blocking` + an mpsc channel, created through `U3vStreamBuilder` or
 `U3vFrameStream::start()`.
 
-**`DeviceHandle`** (`viva-service`) — wraps `Camera<GigeRegisterIo>` in
-`spawn_blocking` for async-safe access from Zenoh queryable handlers, and owns
-reconnection with exponential backoff. Reconnection needs no keepalive
-coordination: the replacement camera brings its own, and the old one retires
-when the swap drops the camera that owned it. `U3vDeviceHandle<T>`
-(`viva-service-u3v`) is generic over `T: UsbTransfer`, so the same service code
-runs against `FakeU3vTransport` (`--fake` mode) and `RusbTransfer` (real USB).
+**`Discovery`, `DeviceOps`, `StreamSource`** (`viva-service`) — the one
+service implementation both transports run. A transport supplies a
+`Discovery` (find cameras, name each one's announce, connect); its device is
+`DeviceOps` for features — a `SharedCamera` that runs every call on the
+blocking pool — and a `StreamSource` for frames, whose `BlockStream` the
+acquisition queryable reads. `run_discovery` serves each new camera, re-announces
+the known ones and publishes a lost one disconnected; `run_service` wraps it in
+a Zenoh session and CTRL+C. GigE Vision's `DeviceHandle` also owns
+reconnection with exponential backoff, which needs no keepalive coordination:
+the replacement camera brings its own, and the old one retires when the swap
+drops the camera that owned it. `viva-service-u3v` is a USB `Discovery` and a
+`U3vDeviceHandle<T: UsbTransfer>`, so the same code runs against
+`FakeU3vTransport` (`--fake`) and `RusbTransfer`.
 
 ## Data flows
 
@@ -182,23 +188,43 @@ dependent cached values via the NodeMap dependency graph.
 places it in its block's buffer → `Frame` with block id, status and
 pixel-format metadata from `viva-pfnc`, counted in `StreamStats` → application
 via `FrameStream`/`U3vFrameStream`. A block that carries chunks is split into
-the image and its chunks by ID (`viva_gige::gvsp::parse_chunks`, read from the
+the image and its chunks by ID (`viva_gige::parse_chunks`, read from the
 end); their values are read through the nodemap's chunk ports, never decoded
 here.
 
-**Service path** — camera → `viva-service`/`viva-service-u3v` (`DeviceHandle`)
-→ Zenoh (types from `viva-zenoh-api`) → studio or other subscribers. The
-service owns discovery announcements, XML serving, node read/write, and frame
-publication.
+**Service path** — camera → `viva-service`/`viva-service-u3v` (one
+`run_discovery` over the transport's `Discovery`) → Zenoh (types from
+`viva-zenoh-api`) → studio or other subscribers. The service owns discovery
+announcements, XML serving, node read/write, and frame publication; a frame's
+format travels as its PFNC name in `image/meta` and as a one-byte code in the
+frame header, both `viva_pfnc::PixelFormat` in Rust.
 
 ## Error handling policy
 
-Each crate defines its own typed error enum; errors crossing crate boundaries
-carry their source (`#[source]` chains) rather than flattening into strings.
-Existing `Transport(String)`-style variants are acknowledged debt, tracked as
-API-03 in [roadmap](roadmap.md) Phase 5. Panics must never
-cross a public API in response to remote input — a malformed camera XML or a
-hostile packet is an `Err`, not a crash.
+Each crate defines its own typed error enum, and an error carries its cause
+([ADR-0030](adrs/adr0030-errors-and-public-surface.md)):
+
+- A failure from another crate or from `std` is the variant's `source`, never
+  `format!`ted into a `String`. A cause whose type is not ours to expose — a
+  transport behind `RegisterIo`, the XML reader, the USB library — is a
+  `Box<dyn Error + Send + Sync>` that can still be downcast: a GenApi
+  `GenApiError::Io` holds the `GigeError`, the `U3vError` or the facade's
+  `WriteRefused` that refused the register access.
+- A refusal of our own names what was refused in typed fields
+  (`Access { name, refused }`, `MaskedWriteUnreadable { name, address }`); a
+  fixed description is a `&'static str`.
+- The facade says what it was doing: `GenicamError::Gige { during, source }`.
+- `Display` prints the cause too (`"{during}: {source}"`), because Python,
+  Studio, the services and the logs print an error with `{e}` and nothing
+  else.
+- A status code decodes with its transport's table: `GigeStatus`, `U3vStatus`
+  over the shared `viva_gencp::StatusCode`
+  ([ADR-0020](adrs/adr0020-per-transport-status-codes.md)).
+- Every public error type is `#[non_exhaustive]`; where else the attribute
+  goes is ADR-0030's rule.
+
+Panics must never cross a public API in response to remote input — a
+malformed camera XML or a hostile packet is an `Err`, not a crash.
 
 ## Testing strategy
 
@@ -215,7 +241,9 @@ assumption pass every test together
 the cases). Consequences:
 
 - Fake behavior is derived from the spec text, not from what our receiver
-  happens to send.
+  happens to send. Fakes import the transport crates' vocabulary — register
+  addresses, opcodes, status codes — and nothing else: they encode and decode
+  every packet themselves ([ADR-0030](adrs/adr0030-errors-and-public-surface.md)).
 - Wire formats are pinned by spec-derived golden byte fixtures, asserted
   independently of the client parser — a round trip through our own code proves
   only that the two agree.

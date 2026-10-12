@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
-use viva_gencp::{StatusCode, ccd_flags, command_id};
+use viva_gencp::{ccd_flags, command_id};
+
+use crate::U3vStatus;
 
 use crate::U3vError;
 use crate::usb::UsbTransfer;
@@ -81,7 +83,7 @@ fn pending_ack_timeout_ms(scd: &[u8]) -> u64 {
 
 /// Default control channel timeout, before the device's Maximum Device
 /// Response Time is known.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
+pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// GenCP control channel over a USB3 Vision bulk endpoint pair.
 ///
@@ -160,11 +162,11 @@ impl<T: UsbTransfer> ControlChannel<T> {
             scd.put_u16_le(chunk as u16);
             let ack = self.transact(command_id::READMEM_CMD, command_id::READMEM_ACK, &scd)?;
             if ack.len() != chunk {
-                return Err(U3vError::Protocol(format!(
-                    "READMEM_ACK length mismatch at offset {offset}: \
-                     requested {chunk} bytes, got {}",
-                    ack.len()
-                )));
+                return Err(U3vError::Length {
+                    what: "READMEM_ACK payload",
+                    expected: chunk,
+                    got: ack.len(),
+                });
             }
             result.extend_from_slice(&ack);
             offset += chunk;
@@ -191,9 +193,11 @@ impl<T: UsbTransfer> ControlChannel<T> {
             if ack.len() >= 4 {
                 let written = u16::from_le_bytes([ack[2], ack[3]]) as usize;
                 if written != chunk {
-                    return Err(U3vError::Protocol(format!(
-                        "WRITEMEM_ACK at offset {offset}: wrote {written} of {chunk} bytes"
-                    )));
+                    return Err(U3vError::Length {
+                        what: "a WRITEMEM_ACK's bytes written",
+                        expected: chunk,
+                        got: written,
+                    });
                 }
             }
             offset += chunk;
@@ -208,10 +212,9 @@ impl<T: UsbTransfer> ControlChannel<T> {
             .saturating_sub(HEADER_SIZE)
             .min(u16::MAX as usize);
         if chunk == 0 {
-            return Err(U3vError::Protocol(format!(
-                "maximum acknowledge transfer of {} bytes leaves no room for data",
-                self.max_ack_transfer
-            )));
+            return Err(U3vError::Device(
+                "has a maximum acknowledge transfer too small to carry data",
+            ));
         }
         Ok(chunk)
     }
@@ -223,10 +226,9 @@ impl<T: UsbTransfer> ControlChannel<T> {
             .saturating_sub(HEADER_SIZE + WRITEMEM_ADDRESS_SIZE)
             .min(u16::MAX as usize - WRITEMEM_ADDRESS_SIZE);
         if chunk == 0 {
-            return Err(U3vError::Protocol(format!(
-                "maximum command transfer of {} bytes leaves no room for data",
-                self.max_cmd_transfer
-            )));
+            return Err(U3vError::Device(
+                "has a maximum command transfer too small to carry data",
+            ));
         }
         Ok(chunk)
     }
@@ -281,15 +283,20 @@ impl<T: UsbTransfer> ControlChannel<T> {
             // sent. Without this the request id alone was the only guard, so
             // any other ack that happened to carry a matching id was accepted.
             if ack.command != expected_ack {
-                return Err(U3vError::Protocol(format!(
-                    "unexpected acknowledgement command {:#06x}, expected {expected_ack:#06x}",
-                    ack.command,
-                )));
+                tracing::debug!(
+                    command = format_args!("{:#06x}", ack.command),
+                    expected = format_args!("{expected_ack:#06x}"),
+                    "acknowledge answers another command"
+                );
+                return Err(U3vError::Malformed {
+                    packet: "acknowledge",
+                    problem: "answers another command",
+                });
             }
 
             return match ack.status {
-                StatusCode::Success => Ok(ack.payload),
-                status => Err(U3vError::Status { status }),
+                status if status.is_success() => Ok(ack.payload),
+                status => Err(U3vError::Status(status)),
             };
         }
         Err(U3vError::Timeout)
@@ -325,7 +332,7 @@ fn encode_command(command: u16, request_id: u16, scd: &[u8]) -> Vec<u8> {
 
 /// Decoded U3V acknowledgement fields.
 struct AckPacket {
-    status: StatusCode,
+    status: U3vStatus,
     /// The acknowledgement's command id.
     ///
     /// Must be kept: a pending-acknowledge is distinguished from a real answer
@@ -338,17 +345,18 @@ struct AckPacket {
 /// Decode an acknowledge.
 fn decode_ack(buf: &[u8]) -> Result<AckPacket, U3vError> {
     if buf.len() < HEADER_SIZE {
-        return Err(U3vError::Protocol(format!(
-            "ack too short: {} bytes, need at least {HEADER_SIZE}",
-            buf.len()
-        )));
+        return Err(U3vError::Malformed {
+            packet: "acknowledge",
+            problem: "is shorter than its header",
+        });
     }
 
     let prefix = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if prefix != CONTROL_PREFIX {
-        return Err(U3vError::Protocol(format!(
-            "bad ack prefix: {prefix:#010x}, expected {CONTROL_PREFIX:#010x}"
-        )));
+        return Err(U3vError::Malformed {
+            packet: "acknowledge",
+            problem: "lacks the U3VC prefix",
+        });
     }
 
     let status_raw = u16::from_le_bytes([buf[4], buf[5]]);
@@ -358,14 +366,14 @@ fn decode_ack(buf: &[u8]) -> Result<AckPacket, U3vError> {
 
     let expected = HEADER_SIZE + length;
     if buf.len() < expected {
-        return Err(U3vError::Protocol(format!(
-            "ack truncated: got {} bytes, header says {expected}",
-            buf.len()
-        )));
+        return Err(U3vError::Malformed {
+            packet: "acknowledge",
+            problem: "is shorter than its header says",
+        });
     }
 
     Ok(AckPacket {
-        status: StatusCode::from_raw(status_raw),
+        status: U3vStatus::from_raw(status_raw),
         command,
         request_id,
         payload: buf[HEADER_SIZE..expected].to_vec(),
@@ -380,6 +388,7 @@ fn decode_ack(buf: &[u8]) -> Result<AckPacket, U3vError> {
 mod tests {
     use super::*;
     use crate::usb::MockUsbTransfer;
+    use viva_gencp::StatusCode;
 
     const EP_OUT: u8 = 0x01;
     const EP_IN: u8 = 0x81;
@@ -413,7 +422,7 @@ mod tests {
             &payload,
         );
         let ack = decode_ack(&buf).unwrap();
-        assert_eq!(ack.status, StatusCode::Success);
+        assert!(ack.status.is_success());
         assert_eq!(ack.request_id, 0x0042);
         assert_eq!(ack.payload, payload);
     }
@@ -517,7 +526,14 @@ mod tests {
 
         let err = ch.write_mem(0x1000, &[1, 2, 3, 4]).unwrap_err();
         assert!(
-            matches!(err, U3vError::Protocol(ref m) if m.contains("wrote 2 of 4")),
+            matches!(
+                err,
+                U3vError::Length {
+                    expected: 4,
+                    got: 2,
+                    ..
+                }
+            ),
             "{err:?}"
         );
     }
@@ -556,9 +572,7 @@ mod tests {
         let err = ch.read_mem(0xFFFF_FFFF, 4).unwrap_err();
         assert!(matches!(
             err,
-            U3vError::Status {
-                status: StatusCode::InvalidAddress
-            }
+            U3vError::Status(U3vStatus::Common(StatusCode::InvalidAddress))
         ));
     }
 
@@ -600,9 +614,7 @@ mod tests {
         let err = ch.read_mem(0x0000_1000, 4).unwrap_err();
         assert!(matches!(
             err,
-            U3vError::Status {
-                status: StatusCode::AccessDenied
-            }
+            U3vError::Status(U3vStatus::Common(StatusCode::AccessDenied))
         ));
         // One exchange, not 100.
         assert_eq!(mock.take_writes(EP_OUT).len(), 1);
@@ -625,8 +637,14 @@ mod tests {
 
         let err = ch.read_mem(0x0000_1000, 4).unwrap_err();
         assert!(
-            matches!(err, U3vError::Protocol(ref msg) if msg.contains("unexpected acknowledgement command")),
-            "expected a protocol error naming the command, got {err:?}"
+            matches!(
+                err,
+                U3vError::Malformed {
+                    problem: "answers another command",
+                    ..
+                }
+            ),
+            "expected an acknowledge for another command, got {err:?}"
         );
     }
 

@@ -16,7 +16,7 @@ use crate::XmlError;
 /// that span corrupts (or rejects) content where a bare `&` is legal XML — CDATA
 /// sections and comments. Vendor XML does use those, and a single tooltip must
 /// never block opening a camera (issue #45).
-pub fn read_text_start(
+pub(crate) fn read_text_start(
     reader: &mut Reader<&[u8]>,
     start: &BytesStart<'_>,
 ) -> Result<String, XmlError> {
@@ -57,9 +57,9 @@ fn read_text_events(reader: &mut Reader<&[u8]>, name: &str) -> Result<String, Xm
             }
             Ok(Event::GeneralRef(reference)) => push_reference(&mut text, &reference)?,
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid(format!("unterminated <{name}> element")));
+                return Err(XmlError::invalid(name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             // Comments, processing instructions and declarations carry no text.
             _ => {}
         }
@@ -75,10 +75,7 @@ fn read_text_events(reader: &mut Reader<&[u8]>, name: &str) -> Result<String, Xm
 /// GenICam documents declare no DTD, so anything else has no definition to
 /// resolve against and is kept verbatim rather than failing the document.
 fn push_reference(text: &mut String, reference: &BytesRef<'_>) -> Result<(), XmlError> {
-    if let Some(ch) = reference
-        .resolve_char_ref()
-        .map_err(|err| XmlError::Xml(err.to_string()))?
-    {
+    if let Some(ch) = reference.resolve_char_ref().map_err(XmlError::malformed)? {
         text.push(ch);
         return Ok(());
     }
@@ -98,13 +95,16 @@ fn push_reference(text: &mut String, reference: &BytesRef<'_>) -> Result<(), Xml
 }
 
 /// Extract an optional attribute value from an XML start element.
-pub fn attribute_value(event: &BytesStart<'_>, name: &str) -> Result<Option<String>, XmlError> {
+pub(crate) fn attribute_value(
+    event: &BytesStart<'_>,
+    name: &str,
+) -> Result<Option<String>, XmlError> {
     for attr in event.attributes() {
-        let attr = attr.map_err(|err| XmlError::Xml(err.to_string()))?;
+        let attr = attr.map_err(XmlError::malformed)?;
         if attr.key.as_ref() == name {
             let value = attr
                 .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                .map_err(|err| XmlError::Xml(err.to_string()))?;
+                .map_err(XmlError::malformed)?;
             let trimmed = value.trim().to_string();
             if trimmed.is_empty() {
                 return Ok(None);
@@ -116,22 +116,35 @@ pub fn attribute_value(event: &BytesStart<'_>, name: &str) -> Result<Option<Stri
 }
 
 /// Extract a required attribute value from an XML start element.
-pub fn attribute_value_required(event: &BytesStart<'_>, name: &str) -> Result<String, XmlError> {
-    attribute_value(event, name)?
-        .ok_or_else(|| XmlError::Invalid(format!("missing attribute {name}")))
+pub(crate) fn attribute_value_required(
+    event: &BytesStart<'_>,
+    name: &'static str,
+) -> Result<String, XmlError> {
+    attribute_value(event, name)?.ok_or_else(|| {
+        let tag = event.name().as_ref().to_string();
+        XmlError::missing(tag, missing_attribute(name))
+    })
+}
+
+/// How [`XmlError::Missing`] names a missing attribute.
+fn missing_attribute(name: &'static str) -> &'static str {
+    match name {
+        "Name" => "attribute Name",
+        _ => "a required attribute",
+    }
 }
 
 /// Parse an unsigned 64-bit integer from a string (supports hex with `0x` prefix).
-pub fn parse_u64(value: &str) -> Result<u64, XmlError> {
+pub(crate) fn parse_u64(value: &str) -> Result<u64, XmlError> {
     let trimmed = value.trim();
     if let Some(hex) = trimmed.strip_prefix("0x") {
         let hex = hex.replace('_', "");
         u64::from_str_radix(&hex, 16)
-            .map_err(|err| XmlError::Invalid(format!("invalid hex value: {err}")))
+            .map_err(|err| XmlError::number(trimmed, "a hexadecimal integer", err))
     } else {
         let dec = trimmed.replace('_', "");
         dec.parse()
-            .map_err(|err| XmlError::Invalid(format!("invalid integer: {err}")))
+            .map_err(|err| XmlError::number(trimmed, "an unsigned integer", err))
     }
 }
 
@@ -141,41 +154,41 @@ pub fn parse_u64(value: &str) -> Result<u64, XmlError> {
 /// (`<Address>-4</Address>`, Baumer HXG20). A hex address is read as the
 /// unsigned 64-bit pattern it spells and reinterpreted, so `0xFFFFFFFC`-style
 /// device addresses keep their value and a full-width `0xFF…FC` is `-4`.
-pub fn parse_address(value: &str) -> Result<i64, XmlError> {
+pub(crate) fn parse_address(value: &str) -> Result<i64, XmlError> {
     let trimmed = value.trim();
     if trimmed.starts_with("0x") {
         parse_u64(trimmed).map(|v| v as i64)
     } else {
         let dec = trimmed.replace('_', "");
         dec.parse()
-            .map_err(|err| XmlError::Invalid(format!("invalid address {trimmed:?}: {err}")))
+            .map_err(|err| XmlError::number(trimmed, "an address", err))
     }
 }
 
 /// Parse a signed 64-bit integer from a string (supports hex with `0x` prefix).
-pub fn parse_i64(value: &str) -> Result<i64, XmlError> {
+pub(crate) fn parse_i64(value: &str) -> Result<i64, XmlError> {
     let trimmed = value.trim();
     if let Some(hex) = trimmed.strip_prefix("0x") {
         let hex = hex.replace('_', "");
         i64::from_str_radix(&hex, 16)
-            .map_err(|err| XmlError::Invalid(format!("invalid hex value: {err}")))
+            .map_err(|err| XmlError::number(trimmed, "a hexadecimal integer", err))
     } else {
         let dec = trimmed.replace('_', "");
         dec.parse()
-            .map_err(|err| XmlError::Invalid(format!("invalid integer: {err}")))
+            .map_err(|err| XmlError::number(trimmed, "an integer", err))
     }
 }
 
 /// Parse a 64-bit floating point number from a string.
-pub fn parse_f64(value: &str) -> Result<f64, XmlError> {
-    value
-        .trim()
+pub(crate) fn parse_f64(value: &str) -> Result<f64, XmlError> {
+    let trimmed = value.trim();
+    trimmed
         .parse()
-        .map_err(|err| XmlError::Invalid(format!("invalid float: {err}")))
+        .map_err(|err| XmlError::number(trimmed, "a number", err))
 }
 
 /// Skip over an XML element and all of its children.
-pub fn skip_element(reader: &mut Reader<&[u8]>, _name: &str) -> Result<(), XmlError> {
+pub(crate) fn skip_element(reader: &mut Reader<&[u8]>, name: &str) -> Result<(), XmlError> {
     let mut depth = 1usize;
     let mut buf = Vec::new();
     while depth > 0 {
@@ -185,9 +198,9 @@ pub fn skip_element(reader: &mut Reader<&[u8]>, _name: &str) -> Result<(), XmlEr
                 depth -= 1;
             }
             Ok(Event::Eof) => {
-                return Err(XmlError::Invalid("unexpected end of file".into()));
+                return Err(XmlError::invalid(name, "ends before its closing tag"));
             }
-            Err(err) => return Err(XmlError::Xml(err.to_string())),
+            Err(err) => return Err(XmlError::malformed(err)),
             _ => {}
         }
         buf.clear();
@@ -196,22 +209,22 @@ pub fn skip_element(reader: &mut Reader<&[u8]>, _name: &str) -> Result<(), XmlEr
 }
 
 /// Parse a scale factor as a rational number (numerator, denominator).
-pub fn parse_scale(text: &str) -> Result<(i64, i64), XmlError> {
+pub(crate) fn parse_scale(text: &str) -> Result<(i64, i64), XmlError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Err(XmlError::Invalid("empty scale value".into()));
+        return Err(XmlError::invalid("<Scale>", "is empty"));
     }
     if let Some((num, den)) = trimmed.split_once('/') {
         let num = parse_i64(num)?;
         let den = parse_i64(den)?;
         if den == 0 {
-            return Err(XmlError::Invalid("scale denominator is zero".into()));
+            return Err(XmlError::invalid("<Scale>", "has a zero denominator"));
         }
         Ok((num, den))
     } else {
         let value = parse_f64(trimmed)?;
         if value == 0.0 {
-            return Err(XmlError::Invalid("scale value is zero".into()));
+            return Err(XmlError::invalid("<Scale>", "is zero"));
         }
         // Approximate decimal scale as a rational using denominator 1_000_000.
         let den = 1_000_000i64;

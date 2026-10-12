@@ -29,12 +29,11 @@ use tokio::net::UdpSocket;
 
 use crate::gvsp::{Datagram, header_only};
 
-/// GVCP `PACKETRESEND_CMD`.
-pub const PACKETRESEND_CMD: u16 = 0x0040;
-/// Flag byte bit 4 on `PACKETRESEND_CMD`: 64-bit block and 32-bit packet ids.
-const EXTENDED_IDS_FLAG: u8 = 0x10;
+// GVCP vocabulary, imported (ADR-0030).
+pub(crate) use viva_gige::consts::PACKET_RESEND_COMMAND as PACKETRESEND_CMD;
+use viva_gige::consts::PACKET_RESEND_EXTENDED_IDS as EXTENDED_IDS_FLAG;
 /// GVSP status of a packet the device can no longer send.
-pub const STATUS_PACKET_UNAVAILABLE: u16 = 0x800C;
+pub(crate) const STATUS_PACKET_UNAVAILABLE: u16 = viva_gige::GigeStatus::PacketUnavailable.to_raw();
 /// Packets of the last blocks the fake keeps for resending, by default.
 pub const DEFAULT_RETENTION: usize = 4;
 
@@ -100,7 +99,7 @@ pub struct ResendCounters {
     packets_unavailable: AtomicU64,
 }
 
-/// A snapshot of [`ResendCounters`].
+/// A snapshot of the fake's resend counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResendStats {
     /// `PACKETRESEND_CMD`s received, served or not.

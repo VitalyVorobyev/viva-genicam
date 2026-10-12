@@ -8,14 +8,14 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant};
 
-pub const SLOW_REGISTER: u32 = 0x2000;
-pub const NEXT_REGISTER: u32 = 0x2004;
-pub const VALUE: u32 = 0xcafe_babe;
-pub const HEARTBEAT_MS: u32 = 300;
-pub const REPLY_DELAY: Duration = Duration::from_millis(900);
+pub(crate) const SLOW_REGISTER: u32 = 0x2000;
+pub(crate) const NEXT_REGISTER: u32 = 0x2004;
+pub(crate) const VALUE: u32 = 0xcafe_babe;
+pub(crate) const HEARTBEAT_MS: u32 = 300;
+pub(crate) const REPLY_DELAY: Duration = Duration::from_millis(900);
 
 #[derive(Debug)]
-pub struct Observations {
+pub(crate) struct Observations {
     pub commands: usize,
     pub heartbeat_opcodes: Vec<u16>,
     pub expired: bool,
@@ -42,7 +42,7 @@ async fn send_ack(
 /// Acknowledge one file-like operation after several heartbeat windows.
 /// Process heartbeat requests while it is pending, enforce expiry, and leave
 /// duplicate heartbeat replies queued for the following operation to drain.
-pub async fn start(
+pub(crate) async fn start(
     pending_ack: bool,
 ) -> (
     SocketAddr,

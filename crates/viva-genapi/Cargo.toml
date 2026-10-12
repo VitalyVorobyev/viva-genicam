@@ -26,3 +26,6 @@ viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
 # can disagree with `viva-genapi-xml` about which registers those are.
 quick-xml = { workspace = true }
 bytes = { workspace = true }
+
+[lints]
+workspace = true

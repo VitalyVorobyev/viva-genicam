@@ -1,3 +1,5 @@
+//! Fit the camera's timestamp clock to the host's and map device ticks to host time.
+
 use std::env;
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -91,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let mut dev = control.lock().await;
                 dev.read_mem(address, length)
                     .await
-                    .map_err(|err| viva_genapi_xml::XmlError::Transport(err.to_string()))
+                    .map_err(viva_genapi_xml::XmlError::transport)
             }
         }
     })
@@ -152,6 +154,5 @@ fn read_timestamp<T: RegisterIo>(camera: &Camera<T>, node: &str) -> Result<u64, 
         .nodemap()
         .get_integer(node, camera.transport())
         .map_err(GenicamError::from)?;
-    u64::try_from(value)
-        .map_err(|_| GenicamError::Transport("timestamp node returned negative value".into()))
+    u64::try_from(value).map_err(|_| GenicamError::TimeSync("the timestamp reads negative"))
 }

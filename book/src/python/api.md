@@ -360,6 +360,20 @@ Keep `port=3956`: discovery only looks there, so `device_info()` and
 `vg.connect_gige` cannot find a fake bound elsewhere, and only one fake per
 host can hold that port at a time.
 
+```python
+from viva_genicam.testing import FakeU3vCamera
+
+class FakeU3vCamera:
+    def __init__(self, width: int = 640, height: int = 480,
+                 pixel_format: str = "Mono8") -> None: ...
+    def connect(self) -> Camera: ...                 # as connect_u3v opens one
+    def acquiring(self) -> bool: ...
+    def peek(self, address: int, length: int) -> bytes: ...
+```
+
+An in-process fake USB3 Vision camera. No USB enumeration finds it, so
+`connect()` opens it.
+
 ## Exceptions
 
 ```

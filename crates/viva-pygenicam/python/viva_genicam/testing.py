@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Mapping, Optional, Sequence
 
 from . import _native
+from .camera import Camera
 from .discovery import GigeDeviceInfo
 
 _Native = _native.FakeGigeCamera
@@ -159,4 +160,40 @@ class FakeGigeCamera:
         return repr(self._native)
 
 
-__all__ = ["FakeGigeCamera"]
+class FakeU3vCamera:
+    """An in-process USB3 Vision camera, for tests and demos.
+
+    Its registers, GenCP and stream protocol are laid out from the USB3 Vision
+    standard. No USB enumeration finds it: :meth:`connect` opens it, as
+    :func:`viva_genicam.connect_u3v` opens a camera on USB.
+
+    ``pixel_format`` is a PFNC name, as for :class:`FakeGigeCamera`.
+    :meth:`acquiring` and :meth:`peek` report the camera's own state, so a test
+    can check what reached the device.
+    """
+
+    __slots__ = ("_native",)
+
+    def __init__(
+        self, width: int = 640, height: int = 480, pixel_format: str = "Mono8"
+    ) -> None:
+        self._native = _native.FakeU3vCamera(width, height, pixel_format)
+
+    def connect(self) -> Camera:
+        """Open the camera."""
+        return Camera(self._native.connect())
+
+    def acquiring(self) -> bool:
+        """Whether ``AcquisitionStart`` reached the camera and
+        ``AcquisitionStop`` has not."""
+        return self._native.acquiring()
+
+    def peek(self, address: int, length: int) -> bytes:
+        """``length`` bytes of the camera's registers at ``address``."""
+        return self._native.peek(address, length)
+
+    def __repr__(self) -> str:
+        return repr(self._native)
+
+
+__all__ = ["FakeGigeCamera", "FakeU3vCamera"]

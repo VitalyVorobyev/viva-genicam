@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use tracing::info;
 
-use viva_gige::nic::IfaceSelector;
+use viva_gige::IfaceSelector;
 
 use crate::common;
 

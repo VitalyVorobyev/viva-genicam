@@ -462,7 +462,6 @@ dependencies = [
 name = "viva-gige"
 version = "0.8.0"
 dependencies = [
- "async-trait",
  "bytes",
  "fastrand",
  "if-addrs",

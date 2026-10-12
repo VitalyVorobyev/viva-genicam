@@ -70,6 +70,8 @@ pub mod abrm {
     pub const DEVICE_CONFIGURATION: u64 = 0x01E0;
     /// `u32`, milliseconds.
     pub const HEARTBEAT_TIMEOUT: u64 = 0x01E8;
+    /// `u32`: the id of the device's message channel (GenCP 1.2 Table 15).
+    pub const MESSAGE_CHANNEL_ID: u64 = 0x01EC;
     /// `u32`.
     pub const ACCESS_PRIVILEGE: u64 = 0x0204;
     /// `u32`: 0 big-endian, `0xFFFF_FFFF` little-endian, for the device's own
@@ -108,12 +110,17 @@ pub mod capability {
 pub struct Abrm {
     /// Major version in the upper 16 bits, minor in the lower.
     pub gencp_version: u32,
+    /// Manufacturer name.
     pub manufacturer_name: String,
+    /// Model name.
     pub model_name: String,
     /// Empty when the device has no Family Name register.
     pub family_name: String,
+    /// Device version.
     pub device_version: String,
+    /// Manufacturer-specific information.
     pub manufacturer_info: String,
+    /// Serial number.
     pub serial_number: String,
     /// Empty when the device has no User Defined Name register.
     pub user_defined_name: String,
@@ -122,7 +129,9 @@ pub struct Abrm {
     /// How long the device may take to execute a command, not counting the
     /// transfers, in milliseconds.
     pub max_device_response_time_ms: u32,
+    /// Where the manifest table is.
     pub manifest_table_address: u64,
+    /// Where the SBRM is.
     pub sbrm_address: u64,
 }
 
@@ -260,19 +269,25 @@ pub mod u3vcp_capability {
 /// USB3 Vision's technology-specific Bootstrap Register Map.
 #[derive(Debug, Clone)]
 pub struct Sbrm {
+    /// Where the SBRM is.
     pub base: u64,
     /// Major version in the upper 16 bits, minor in the lower.
     pub u3v_version: u32,
     /// [`u3vcp_capability`] bits.
     pub u3vcp_capability: u64,
+    /// Largest command transfer the device accepts, in bytes.
     pub max_cmd_transfer: u32,
+    /// Largest acknowledge transfer it sends, in bytes.
     pub max_ack_transfer: u32,
+    /// Number of stream channels.
     pub num_stream_channels: u32,
     /// 0 when the device has no SIRM.
     pub sirm_address: u64,
+    /// Length of the SIRM in bytes.
     pub sirm_length: u32,
     /// 0 when the device has no EIRM.
     pub eirm_address: u64,
+    /// Length of the EIRM in bytes.
     pub eirm_length: u32,
 }
 
@@ -312,9 +327,9 @@ impl Sbrm {
 /// failure is still a failure.
 fn or_absent<V: Default>(read: Result<V, U3vError>) -> Result<V, U3vError> {
     match read {
-        Err(U3vError::Status { status }) => {
+        Err(U3vError::Status(status)) => {
             tracing::debug!(
-                ?status,
+                %status,
                 "optional bootstrap register refused; reading as absent"
             );
             Ok(V::default())
@@ -363,11 +378,17 @@ pub mod sirm {
 /// What the device says about one stream channel.
 #[derive(Debug, Clone)]
 pub struct Sirm {
+    /// Where the SIRM is.
     pub base: u64,
+    /// `SI Info`: the transfer alignment, as a power of two in bits 24-31.
     pub info: u32,
+    /// `SI Control`: bit 0 enables streaming.
     pub control: u32,
+    /// `Required Payload Size`: bytes a block's payload takes.
     pub required_payload_size: u64,
+    /// `Required Leader Size`.
     pub required_leader_size: u32,
+    /// `Required Trailer Size`.
     pub required_trailer_size: u32,
 }
 
@@ -391,12 +412,8 @@ impl Sirm {
     /// The alignment every transfer size must keep, from Info bits 24-31.
     pub fn alignment(&self) -> Result<u32, U3vError> {
         let exponent = self.info >> 24;
-        1u32.checked_shl(exponent).ok_or_else(|| {
-            U3vError::Protocol(format!(
-                "SIRM Info {:#010x} asks for a 2^{exponent}-byte alignment",
-                self.info
-            ))
-        })
+        1u32.checked_shl(exponent)
+            .ok_or_else(|| U3vError::Device("asks for a transfer alignment beyond 2^31 bytes"))
     }
 
     /// Write the transfer layout the host will read with. The required sizes
@@ -441,15 +458,16 @@ impl Sirm {
 /// Manifest layout (GenCP 1.2, Tables 29-30).
 mod manifest {
     /// The table starts with a `u64` entry count.
-    pub const ENTRIES: u64 = 8;
+    pub(super) const ENTRIES: u64 = 8;
     /// Each entry is 64 bytes.
-    pub const ENTRY_LEN: u64 = 64;
+    pub(super) const ENTRY_LEN: u64 = 64;
     /// Entries looked at before giving up on finding a device XML.
-    pub const MAX_ENTRIES: u64 = 16;
+    pub(super) const MAX_ENTRIES: u64 = 16;
 }
 
 /// How a manifest file is stored (Schema / Filetype / Fileformat bits 10-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FileFormat {
     /// An uncompressed GenICam XML file.
     Uncompressed,
@@ -462,8 +480,11 @@ pub enum FileFormat {
 /// One entry of the device's Manifest Table: a GenICam file in its memory.
 #[derive(Debug, Clone)]
 pub struct ManifestEntry {
+    /// Where the file is.
     pub file_address: u64,
+    /// Its size in bytes.
     pub file_size: u64,
+    /// How it is stored.
     pub format: FileFormat,
 }
 
@@ -477,7 +498,7 @@ impl ManifestEntry {
     ) -> Result<Self, U3vError> {
         let count = read_u64(control, table_address)?;
         if count == 0 {
-            return Err(U3vError::Protocol("manifest table is empty".into()));
+            return Err(U3vError::Device("has an empty manifest table"));
         }
         for index in 0..count.min(manifest::MAX_ENTRIES) {
             let entry_address = table_address + manifest::ENTRIES + index * manifest::ENTRY_LEN;
@@ -498,9 +519,7 @@ impl ManifestEntry {
                 format,
             });
         }
-        Err(U3vError::Protocol(format!(
-            "none of the manifest's {count} entries is a device XML"
-        )))
+        Err(U3vError::Device("lists no device XML in its manifest"))
     }
 }
 

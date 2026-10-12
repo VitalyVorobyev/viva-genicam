@@ -48,10 +48,17 @@ To build the Python package from source and run its tests (with
 
 ```bash
 uv venv .venv
-uv pip install --python .venv/bin/python maturin numpy pytest
+uv pip install --python .venv/bin/python maturin numpy pytest mypy
 uv run --python .venv/bin/python maturin develop -m crates/viva-pygenicam/Cargo.toml
 .venv/bin/python -m pytest crates/viva-pygenicam/tests
+.venv/bin/python -m mypy.stubtest viva_genicam --allowlist crates/viva-pygenicam/stubtest-allowlist.txt
 ```
+
+The pytest suites start their own fake cameras on UDP 3956, like the Rust
+ones, and `test_book_snippets.py` runs the book's marked Python snippets
+against one. `stubtest` checks the hand-written `_native.pyi` against the built
+module, and the package's own code against both; run it from outside
+`crates/viva-pygenicam`, so `viva_genicam` is the installed package.
 
 Run the Tauri crate's clippy whenever a public type in the library changes,
 not only when `studio/` does: a new enum variant can break it with nothing else
@@ -141,6 +148,9 @@ and the changelog, is in [`CLAUDE.md`](CLAUDE.md#evidence-hierarchy).
   examples in `crates/viva-genicam/examples/` through `// ANCHOR:` markers, so
   they compile with the workspace; add a snippet by anchoring it in an example,
   never inline. `book_includes` fails on an include that does not resolve.
+  The Python snippets are hand-written: put `<!-- pytest: camera -->` above
+  one (or `device`, or `none`; `test_book_snippets.py` says what each
+  provides) and pytest runs it against the fake camera.
 - **`docs/`** is for developers: design, ADRs, roadmap, backlog.
 - **`doc_links`** fails on any relative link, in any Markdown file in the
   repository, that points at nothing.

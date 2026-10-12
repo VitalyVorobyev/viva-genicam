@@ -66,6 +66,8 @@
 //! | `0x20260`   | 32     | DeviceFirmwareVersion (RO)      | string   |
 //! | `0x20280`   | 32     | DeviceID (RO)                   | string   |
 //! | `0x20300`   | 4      | DeviceTemperature_Val (RO)      | i32 BE, °C × 256 |
+//! | `0x20400`   | 16     | DeviceUserID                    | string   |
+//! | `0x20410`   | 16     | DeviceUserBuffer                | bytes    |
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -392,6 +394,16 @@ pub const REG_DEVICE_SERIAL_NUMBER: u64 = 0x20240;
 pub const REG_DEVICE_FIRMWARE_VERSION: u64 = 0x20260;
 pub const REG_DEVICE_ID: u64 = 0x20280;
 
+/// `DeviceUserID`: SFNC's user-settable name, a read-write `<StringReg>`.
+pub const REG_DEVICE_USER_ID: u64 = 0x20400;
+/// Length of `DeviceUserID`, in bytes.
+pub const DEVICE_USER_ID_LEN: usize = 16;
+/// `DeviceUserBuffer`: a read-write `<Register>`, sixteen bytes the camera
+/// stores as written — the shape of a vendor's user data area.
+pub const REG_DEVICE_USER_BUFFER: u64 = 0x20410;
+/// Length of `DeviceUserBuffer`, in bytes.
+pub const DEVICE_USER_BUFFER_LEN: usize = 16;
+
 /// `DeviceTemperature_Val`: the sensor temperature in 1/256 °C, which the
 /// camera changes on its own — no write moves it. The XML declares it the
 /// way FLIR's BFS does (`FLIR_BFS_PGE_31S4C_C.xml`): `NoCache`, with a
@@ -470,6 +482,8 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>DeviceSerialNumber</pFeature>
     <pFeature>DeviceFirmwareVersion</pFeature>
     <pFeature>DeviceID</pFeature>
+    <pFeature>DeviceUserID</pFeature>
+    <pFeature>DeviceUserBuffer</pFeature>
     <pFeature>DeviceTemperature</pFeature>
   </Category>
 
@@ -580,6 +594,20 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Length>32</Length>
     <AccessMode>RO</AccessMode>
   </String>
+
+  <StringReg Name="DeviceUserID" NameSpace="Standard">
+    <ToolTip>A name the user gives the device</ToolTip>
+    <Address>0x20400</Address>
+    <Length>16</Length>
+    <AccessMode>RW</AccessMode>
+  </StringReg>
+
+  <Register Name="DeviceUserBuffer" NameSpace="Custom">
+    <ToolTip>Sixteen bytes of user data, stored as written</ToolTip>
+    <Address>0x20410</Address>
+    <Length>16</Length>
+    <AccessMode>RW</AccessMode>
+  </Register>
 
   <!-- A value the camera changes on its own, declared as FLIR's BFS declares
        it (FLIR_BFS_PGE_31S4C_C.xml): a Float over a Converter over an IntReg
@@ -1636,6 +1664,8 @@ impl RegisterMap {
         regs.insert(REG_DEVICE_SERIAL_NUMBER, pad_string("VIVA-FAKE-001", 16));
         regs.insert(REG_DEVICE_FIRMWARE_VERSION, pad_string("1.0.0-fake", 32));
         regs.insert(REG_DEVICE_ID, pad_string("VivaCam-0", 32));
+        regs.insert(REG_DEVICE_USER_ID, vec![0; DEVICE_USER_ID_LEN]);
+        regs.insert(REG_DEVICE_USER_BUFFER, vec![0; DEVICE_USER_BUFFER_LEN]);
 
         // ── Image format ────────────────────────────────────────────────
         regs.insert(REG_WIDTH, width.to_be_bytes().to_vec());

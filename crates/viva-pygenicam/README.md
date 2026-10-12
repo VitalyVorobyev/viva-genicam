@@ -14,17 +14,20 @@ toolchain. It is the right thing to attach to a bug report.
 import viva_genicam as vg
 
 cams = vg.discover(timeout_ms=500)
-cam = vg.connect_gige(cams[0])
+with vg.connect_gige(cams[0]) as cam:   # control is given back at the end
+    print(cam.get("DeviceModelName"))
+    cam.set_exposure_time(10_000.0)
 
-print(cam.get("DeviceModelName"))
-cam.set_exposure_time(10_000.0)
-
-with cam.stream() as frames:
-    for frame in frames:
-        arr = frame.to_numpy()          # shape and dtype follow the pixel format
-        print(frame.width, frame.height, frame.pixel_format)
-        break
+    with cam.stream() as frames:
+        for frame in frames:
+            arr = frame.to_numpy()      # (H, W) uint16 for a 12-bit camera, ...
+            print(frame.width, frame.height, frame.pixel_format)
+            break
 ```
+
+Cameras and frames work from any thread, and calls that wait on the camera
+release the GIL. `viva_genicam.testing.FakeGigeCamera` is a camera in the same
+process, for tests and demos without hardware.
 
 See the [documentation](https://vitalyvorobyev.github.io/viva-genicam/python.html) for the full API.
 

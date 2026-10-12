@@ -408,8 +408,8 @@ Monitor:
 
 A GigE Vision camera takes configuration from one application at a time: the
 one holding its *control privilege*. Opening a camera claims it, and closing
-it — dropping the `Camera`, or a Python camera being garbage-collected —
-gives it back, so the next application, or the next run of yours, can open
+it — dropping the `Camera`; in Python `close()`, the end of a `with` block, or
+garbage collection — gives it back, so the next application, or the next run of yours, can open
 the camera at once.
 
 While one application controls the camera, a second one opening it normally
@@ -421,14 +421,15 @@ is refused. It can still **watch**:
   refused with an error that says why.
 - If the controlling application streams to a **multicast group**, a monitor
   receives the same frames: `Camera::open_stream` with
-  `StreamOptions::monitor()` reads the group, port and packet size from the
-  camera and joins the group. A camera streaming to one host's own address
+  `StreamOptions::monitor()` (Python: `stream(monitor=True)`) reads the group,
+  port and packet size from the camera and joins the group. A camera streaming to one host's own address
   cannot be watched by another.
 
 An application that loses the privilege — its heartbeat lapsed, or, on a
 camera that names its controller, another application took it meanwhile — is
-told: the camera's `control_state()` becomes `Lost` (Rust), and
-`reclaim_control()` asks for it again.
+told: the camera's `control_state()` becomes `Lost` (in Python,
+`control_state` is `ControlState.LOST`), and `reclaim_control()` asks for it
+again.
 
 ---
 

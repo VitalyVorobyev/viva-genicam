@@ -407,6 +407,7 @@ impl FakeCameraBuilder {
         let counters = Arc::new(CommandCounters::default());
         let discoveries = Arc::new(std::sync::Mutex::new(Vec::new()));
         let expiries = Arc::new(AtomicU64::new(0));
+        let actions = Arc::new(AtomicU64::new(0));
         let blocks_sent = Arc::new(AtomicU64::new(0));
         let spoofed = Arc::new(AtomicU64::new(0));
         let resends = Arc::new(resend::ResendCounters::default());
@@ -446,6 +447,7 @@ impl FakeCameraBuilder {
                 discoveries: discoveries.clone(),
                 delayed_acks: Arc::new(self.delayed_acks),
                 expiries: expiries.clone(),
+                actions: actions.clone(),
             };
             let identity = self.identity;
             tokio::spawn(async move {
@@ -484,6 +486,7 @@ impl FakeCameraBuilder {
             resends,
             discoveries,
             expiries,
+            actions,
             local_addr,
         })
     }
@@ -503,6 +506,7 @@ pub struct FakeCamera {
     resends: Arc<resend::ResendCounters>,
     discoveries: Arc<std::sync::Mutex<Vec<DiscoveryRequest>>>,
     expiries: Arc<AtomicU64>,
+    actions: Arc<AtomicU64>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -572,6 +576,14 @@ impl FakeCamera {
     /// How often the heartbeat rule has revoked control privilege.
     pub fn heartbeat_expiries(&self) -> u64 {
         self.expiries.load(Ordering::Relaxed)
+    }
+
+    /// Action commands this camera acted on: its device key, group key and a
+    /// group mask that shares a bit with its own ([`FAKE_DEVICE_KEY`],
+    /// [`FAKE_GROUP_KEY`], [`FAKE_GROUP_MASK`]). One addressed elsewhere, or
+    /// malformed, is not counted.
+    pub fn actions(&self) -> u64 {
+        self.actions.load(Ordering::Relaxed)
     }
 
     /// Every `DISCOVERY_CMD` this camera received, in arrival order.

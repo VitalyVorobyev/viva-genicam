@@ -6,11 +6,6 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
 
-## Y — Python parity and threads
-
-**Goal**: the Python package offers what the Rust facade does, from any thread, with NumPy arrays of the right shape and type; the Windows wheel is tested.
-**Rows**: PY-01, PY-02, PY-03, PY-04, PY-05, CI-04.
-
 ## X — Errors, public surfaces, services
 
 **Goal**: freeze the surface the GenTL producer will wrap: error source chains, per-transport status codes, curated re-exports, one service for both transports.

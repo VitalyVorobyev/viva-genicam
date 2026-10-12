@@ -9,28 +9,34 @@ with cam.stream() as frames:
         ...
 ```
 
-No asyncio required — the stream's receive engine runs on a thread of its own inside the extension, and iteration blocks the calling thread while other Python threads stay runnable (the GIL is released during the blocking read). The stream object itself may be handed to another thread, for a producer–consumer loop.
+No asyncio required — the stream's receive engine runs on a thread of its own inside the extension, and iteration blocks the calling thread while other Python threads stay runnable (the GIL is released during the blocking read). The stream, and every frame, may be handed to another thread, for a producer–consumer loop.
 
-Only complete frames come out of the iterator. A frame that lost packets on the network is counted by the stream and skipped, so a gap in the frames you receive is frames the network lost, not frames the library mangled.
+Only complete frames come out of the iterator, unless you ask for the others
+(see [Incomplete frames](#incomplete-frames)). A frame that lost packets on the
+network is counted by the stream and skipped, so a gap in the frames you
+receive is frames the network lost, not frames the library mangled.
 
 ## The `Frame` object
 
 ```python
 frame.width              # int
 frame.height             # int
-frame.pixel_format       # "Mono8", "Mono16", "BayerRG8", "RGB8Packed", ...
+frame.pixel_format       # "Mono8", "Mono12p", "BayerRG8", "RGB8Packed", ...
 frame.pixel_format_code  # raw PFNC integer
+frame.block_id           # the camera's number for the frame
+frame.status             # vg.FrameStatus.COMPLETE, unless incomplete frames were asked for
 frame.ts_dev             # device tick count, Optional[int]
 frame.ts_host            # POSIX seconds, Optional[float]: None until cam.time_calibrate()
+frame.chunks             # {chunk_id: bytes}, or None without chunk mode
 frame.payload()          # raw bytes, one copy
 ```
 
 `ts_host` is the frame's device timestamp mapped onto the host clock, which
 needs a fit of the two clocks first. On a GigE camera, call
 `cam.time_calibrate()` before opening the stream; without it `ts_host` is
-`None`.
+`None`. `cam.map_dev_ts(ticks)` maps any device timestamp the same way.
 
-### `to_numpy()` — natural shape
+### `to_numpy()` — the camera's values
 
 ```python
 arr = frame.to_numpy()
@@ -39,12 +45,27 @@ arr = frame.to_numpy()
 | Pixel format | Array shape | dtype |
 |---|---|---|
 | Mono8 | `(H, W)` | `uint8` |
-| Mono16 | `(H, W)` | `uint16` |
-| RGB8Packed | `(H, W, 3)` | `uint8` |
-| BGR8Packed, BayerRG8, BayerGB8, BayerBG8, BayerGR8 | `(H, W, 3)` | `uint8` (auto-demosaiced / reordered) |
-| anything else | `(N,)` raw | `uint8` |
+| Mono10, Mono12, Mono14, Mono16, and the packed Mono10p, Mono12p, Mono10Packed, Mono12Packed | `(H, W)` | `uint16` |
+| Bayer, any depth | `(H, W)` — the mosaic as the camera sent it | `uint8` for 8 bits, else `uint16` |
+| Bayer with `to_numpy(demosaic=True)` | `(H, W, 3)` | the same depth |
+| RGB8, BGR8 (reordered to RGB), with or without alpha, and 8-bit Y'CbCr | `(H, W, 3)` | `uint8` |
+| anything else | `(N,)` raw bytes | `uint8` |
 
-Demosaicing is bilinear interpolation inside the Rust `to_rgb8()` path, the same kernel Viva Studio's viewer uses — fine for preview, not a substitute for an ISP.
+A 16-bit array holds the camera's values, not values scaled to 16 bits: a
+12-bit pixel is `0` to `4095`. Line padding the camera declares is skipped.
+Demosaicing is bilinear, the kernel Viva Studio's viewer uses — fine for
+preview, not a substitute for an ISP.
+
+<!-- pytest: none -->
+```python
+# Mono12p: two 12-bit pixels, 0xABC and 0x123, packed least significant bit first.
+frame = vg.Frame.from_bytes(bytes([0xBC, 0x3A, 0x12]), 2, 1, "Mono12p")
+arr = frame.to_numpy()
+assert arr.dtype == np.uint16 and arr.tolist() == [[0xABC, 0x123]]
+```
+
+`Frame.from_bytes(payload, width, height, pixel_format, padding_x=0)` builds a
+frame from bytes saved earlier or received elsewhere, for the same conversions.
 
 ### `to_rgb8()` — always RGB
 
@@ -92,6 +113,83 @@ drops it — see [Streaming → Packet size and MTU](../tutorials/streaming.md#4
 `iface=` takes the host NIC's IPv4 address or its OS name, the same two spellings `viva-camctl --iface` and `viva-service --iface` accept — so the address you read off `discover()` is a legal value here.
 
 For U3V cameras all options are silently ignored.
+
+### Incomplete frames
+
+```python
+with cam.stream(deliver_incomplete=True) as frames:
+    for frame in frames:
+        if frame.status is vg.FrameStatus.INCOMPLETE:
+            print(frame.block_id, "lost", frame.missing_packets, "packets")
+```
+
+Lost packets' bytes are zero in the payload. Every incomplete frame is counted
+in the stream's statistics either way.
+
+### Counters
+
+<!-- pytest: camera -->
+```python
+with cam.stream() as frames:
+    frames.next_frame(timeout_ms=5000)
+    stats = frames.stats()
+print(stats.frames_complete, stats.frames_lost, stats.resend_recovered)
+```
+
+`stats()` returns every counter of the GigE receive engine: each frame's fate
+(complete, incomplete, missed, dropped because the application fell behind),
+each packet's, the packets asked for again and what became of them, and
+rates. What each counts is in
+[Streaming → What the statistics tell you](../tutorials/streaming.md#43-what-the-statistics-tell-you).
+
+### Watching another application's stream
+
+A camera opened with `connect_gige(info, monitor=True)` claims and writes
+nothing. It can watch a multicast stream the controlling application set up:
+
+```python
+with vg.connect_gige(info, monitor=True) as watcher:
+    with watcher.stream(monitor=True) as frames:   # starts no acquisition
+        frame = frames.next_frame(timeout_ms=5000)
+```
+
+The group, port and packet size come from the camera; only `iface=` may be
+given. See [Networking → One camera, several applications](../networking.md#61-one-camera-several-applications).
+
+## Chunks
+
+A camera in chunk mode sends values with each frame — its timestamp, its
+exposure, its number. `configure_chunks` turns them on, and `chunk_features`
+reads them through the camera's XML, like any other feature:
+
+<!-- pytest: camera -->
+```python
+cam.configure_chunks(["FrameID", "Timestamp"])
+with cam.stream() as frames:
+    frame = frames.next_frame(timeout_ms=5000)
+cam.configure_chunks([], active=False)
+print(cam.chunk_features(frame))   # {"ChunkFrameID": "1", "ChunkTimestamp": "...", ...}
+```
+
+A value that could not be read maps to the exception that kept it, instead of
+a string.
+
+## Events
+
+A GigE camera reports what happens — an exposure ending, a frame starting —
+on its message channel:
+
+<!-- pytest: camera -->
+```python
+with cam.events(["ExposureEnd"]) as events:
+    with cam.stream():
+        event = events.next_event(timeout_ms=5000)
+print(hex(event.id), event.block_id, cam.event_features(event))
+```
+
+`event_features` reads the features the camera's XML derives from the event,
+such as `EventExposureEndTimestamp`. `events()` takes `iface=` and `port=` as
+`stream()` does.
 
 ## Timeouts and ending a stream
 

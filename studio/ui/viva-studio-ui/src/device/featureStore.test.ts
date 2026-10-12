@@ -210,6 +210,29 @@ describe("FeatureStore polling (GA-05)", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("reads a polled feature again when it comes back on screen, and polls it", async () => {
+    vi.useFakeTimers();
+    const { fetch, calls } = stateFetcher({
+      DeviceTemperature: { ...state(40), polling_ms: 500, caching: "NoCache" },
+    });
+    const store = new FeatureStore(fetch);
+    store.setEnabled(true);
+    const stop = store.subscribe("DeviceTemperature", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    stop();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(calls).toHaveLength(1);
+
+    // Back on screen: what the store kept is stale, so it is read at once,
+    // and polled from then on.
+    store.subscribe("DeviceTemperature", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toHaveLength(3);
+  });
+
   it("stops polling when the camera goes away", async () => {
     vi.useFakeTimers();
     const { fetch, calls } = stateFetcher({

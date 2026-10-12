@@ -81,7 +81,9 @@ export class FeatureStore {
 
   /**
    * Follow `name`. The first subscriber to a feature the store does not hold
-   * yet asks the camera for it.
+   * yet asks the camera for it. So does the first subscriber to a feature
+   * that is polled: what the store kept while nothing showed it is stale,
+   * and its polling stopped when it left the screen.
    */
   subscribe(name: string, listener: () => void): () => void {
     let set = this.listeners.get(name);
@@ -89,8 +91,12 @@ export class FeatureStore {
       set = new Set();
       this.listeners.set(name, set);
     }
+    const first = set.size === 0;
     set.add(listener);
-    if (!this.states.has(name)) this.request([name]);
+    const cached = this.states.get(name);
+    if (cached === undefined || (first && refreshInterval(cached) !== undefined)) {
+      this.request([name]);
+    }
     return () => {
       set.delete(listener);
       if (set.size === 0) {

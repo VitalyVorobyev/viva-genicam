@@ -1,0 +1,7 @@
+# `python -m mypy.stubtest viva_genicam --allowlist stubtest-allowlist.txt`
+# Only what stubtest cannot express. Each `class X(str, Enum)` is reported as
+# inconsistent with `str.__new__`'s stub (encoding, errors): a false positive
+# for a str-valued enum on Python 3.10, which has no `enum.StrEnum`.
+viva_genicam.node.NodeKind.__new__
+viva_genicam.camera.ControlState.__new__
+viva_genicam.frame.FrameStatus.__new__

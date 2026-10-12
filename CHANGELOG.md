@@ -12,6 +12,13 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **Python's `Frame.to_numpy()` returns the camera's values, in their own
+  depth**: 10- to 16-bit monochrome, packed formats included, is `(H, W)`
+  `uint16` (it was the payload as flat `uint8`, except `Mono16`); a Bayer frame
+  is its `(H, W)` mosaic, and `to_numpy(demosaic=True)` gives the `(H, W, 3)`
+  RGB a `Bayer*8` frame used to, `uint16` for a deeper one; declared line
+  padding is skipped. ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
+
 - **Values are cached only as the camera's XML allows** (`<Cachable>`): a
   `NoCache` value — a temperature, an exposure under auto exposure — is read
   from the camera every time, through the `<Converter>` or `<Float>` in front
@@ -131,6 +138,28 @@ release opens with what to read before upgrading.
   counts every frame not delivered complete. ([#194](https://github.com/VitalyVorobyev/viva-genicam/pull/194))
 
 ### Added
+
+- **Python offers what the Rust `Camera` does**: features by type, the
+  standard-feature helpers (exposure, gain, triggers, region of interest,
+  binning, frame rate, user sets), `feature_state`, `available_enum_entries`,
+  `generation`/`changed_since`/`poll`, chunks (`configure_chunks`,
+  `Frame.chunks`, `chunk_features`) and events (`Camera.events`,
+  `event_features`), a frame's `status`, `block_id` and `payload_type`,
+  incomplete frames on request, the stream's counters (`FrameStream.stats`),
+  raw registers, `send_action`, `force_ip`, `set_persistent_ip`, `map_dev_ts`,
+  `Frame.from_bytes`, and `close()` — or `with vg.connect_gige(info) as cam:` —
+  which gives control privilege back at once. ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
+- **Python monitors can stream, and control privilege is visible**:
+  `stream(monitor=True)` watches the multicast stream another application set
+  up; `control_state` says whether control is held, lost or released, and
+  `release_control` and `reclaim_control` act on it. ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
+- **Python's type stubs cover the whole module**, NumPy arrays typed, and are
+  checked against it; the Windows wheel runs the test suite, as the Linux and
+  macOS ones do. `viva_genicam.testing.FakeGigeCamera` reports what reached
+  it — who holds control, what a register holds, triggers and action
+  commands — and can drop packets or answer slowly; `viva-fake-gige` counts
+  the action commands it acts on and has a writable `DeviceUserID` and
+  `DeviceUserBuffer`. ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
 
 - **Polling and refresh** (ADR-0029): a value with a `<PollingTime>` is read
   again once that has passed, measured against a clock the application can
@@ -276,6 +305,17 @@ release opens with what to read before upgrading.
   ([#192](https://github.com/VitalyVorobyev/viva-genicam/pull/192))
 
 ### Fixed
+
+- **Python cameras and frames work from any thread**; touching one from a
+  second thread panicked. Calls to one camera from several threads take turns,
+  and every call that waits on the camera releases the GIL — `node_info` held
+  it. A GigE-only call on a USB3 Vision camera raises `GenicamError`
+  (`time_calibrate` raised `ParseError`). ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
+- **`NodeMap::set_clock` keeps what is polling active**: a command still
+  running stayed out of `poll()`, and a self-clearing enumeration was answered
+  from its cache, once the clock changed. ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
+- **Viva Studio polls a feature again when it comes back on screen**; a
+  polled feature that left the screen and came back was never read again. ([#202](https://github.com/VitalyVorobyev/viva-genicam/pull/202))
 
 - Saving a configuration walks the selectors of a feature's selectors too:
   a feature whose selector is itself selected was saved under the outer

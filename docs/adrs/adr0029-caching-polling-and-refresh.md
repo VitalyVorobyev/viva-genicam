@@ -146,9 +146,8 @@ the shortest polling time on the node's value path and
 `NodeMap::caching_mode(name)` its combined mode; `FeatureState` carries both,
 and the Zenoh wire state carries them as `polling_ms` and `caching`, so a
 remote viewer polls what a local one does. The `Camera` facade exposes
-`invalidate`, `invalidate_all`, `generation`, `changed_since` and `poll`;
-Python, for now, `invalidate` and `invalidate_all` (the rest is milestone Y,
-PY-03).
+`invalidate`, `invalidate_all`, `generation`, `changed_since` and `poll`,
+and so does Python.
 
 **Viva Studio polls the features on screen** at their polling time, with a
 floor of 50 ms — the shortest polling time in a vendor document of the

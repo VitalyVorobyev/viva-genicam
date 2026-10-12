@@ -9,7 +9,12 @@ use crate::camera::iface_from_str;
 use crate::errors::transport_error;
 use crate::runtime::runtime;
 
-#[pyclass(frozen, from_py_object, module = "viva_genicam._native")]
+#[pyclass(
+    name = "GigeDeviceInfo",
+    frozen,
+    from_py_object,
+    module = "viva_genicam._native"
+)]
 #[derive(Clone)]
 pub(crate) struct PyGigeDeviceInfo {
     #[pyo3(get)]
@@ -52,7 +57,12 @@ impl PyGigeDeviceInfo {
     }
 }
 
-#[pyclass(frozen, from_py_object, module = "viva_genicam._native")]
+#[pyclass(
+    name = "U3vDeviceInfo",
+    frozen,
+    from_py_object,
+    module = "viva_genicam._native"
+)]
 #[derive(Clone)]
 pub(crate) struct PyU3vDeviceInfo {
     #[pyo3(get)]

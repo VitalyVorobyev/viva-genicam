@@ -13,6 +13,10 @@
 //! # Start in RGB8 mode
 //! cargo run -p viva-fake-gige -- --pixel-format rgb8
 //!
+//! # Mono16, whose pixels are the byte ramp (i * 7 + block id) mod 256 that a
+//! # test can recompute exactly (the GenTL harnesses check them)
+//! cargo run -p viva-fake-gige -- --pixel-format mono16
+//!
 //! # A second camera of the same model, told apart by MAC, serial and name.
 //! # It needs its own address: two fakes can share 127.0.0.1:3956, but a
 //! # unicast discovery reaches only one of them. 127.0.0.2 must first exist on
@@ -42,7 +46,7 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     fps: u32,
 
-    /// Pixel format: mono8 or rgb8.
+    /// Pixel format: mono8, mono16 or rgb8.
     #[arg(long, default_value = "mono8")]
     pixel_format: String,
 
@@ -104,9 +108,10 @@ async fn main() {
 
     let pfnc_code = match args.pixel_format.to_ascii_lowercase().as_str() {
         "mono8" => viva_fake_gige::MONO8,
+        "mono16" => viva_fake_gige::MONO16,
         "rgb8" => viva_fake_gige::RGB8,
         other => {
-            eprintln!("Unknown pixel format '{other}'. Supported: mono8, rgb8");
+            eprintln!("Unknown pixel format '{other}'. Supported: mono8, mono16, rgb8");
             std::process::exit(1);
         }
     };

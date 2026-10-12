@@ -14,6 +14,7 @@ how the crates layer, in [design.md](design.md).
 | **USB3 Vision** | GenCP over USB bulk endpoints, plus a streaming interface; discovery by USB enumeration | `viva-u3v` |
 | **SFNC** | Standard feature names (`ExposureTime`, not `Exposure`) | `viva-sfnc` |
 | **PFNC** | Pixel-format codes (`Mono8` is `0x01080001`) | `viva-pfnc`, the single authority for codes and layouts |
+| **GenTL** (1.6) and **GenTL SFNC** (1.2) | The C interface a consumer such as Harvesters loads from a `.cti` file to drive any camera: System, Interface, Device, Data Stream and Buffer modules, each module's port and GenApi XML, the buffer queues, events. viva is the *producer* ([ADR-0031](adrs/adr0031-gentl-producer.md)); `GenTL.h` is not vendored (its licence) | `viva-gentl`, GigE Vision only |
 
 ## GenCP and GVCP
 

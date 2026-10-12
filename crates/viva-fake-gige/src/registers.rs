@@ -60,6 +60,7 @@
 //! | `0x2010c`   | 4      | HeightMax (RO)                  | u32 BE   |
 //! | `0x20110`   | 8      | ChunkTimestamp_Val (RO)         | u64 **LE** |
 //! | `0x20118`   | 4      | ChunkWidth_Val (RO)             | u32 **LE** |
+//! | `0x20120`   | 4      | PayloadSize (RO, computed)      | u32 BE   |
 //! | `0x20200`   | 32     | DeviceModelName (RO)            | string   |
 //! | `0x20220`   | 32     | DeviceVendorName (RO)           | string   |
 //! | `0x20240`   | 16     | DeviceSerialNumber (RO)         | string   |
@@ -168,6 +169,9 @@ pub const REG_PTP_OFFSET_LATCHED: u64 = 0x20078;
 /// them decoded byte-swapped, and nothing in the tree could notice.
 pub const REG_CHUNK_TIMESTAMP_LE: u64 = 0x20110;
 pub const REG_CHUNK_WIDTH_LE: u64 = 0x20118;
+/// `PayloadSize`: the bytes of the next block's payload, computed from the
+/// image format and the chunk configuration when read, as a camera does.
+pub const REG_PAYLOAD_SIZE: u64 = 0x20120;
 
 /// Value latched into [`REG_PTP_OFFSET_LATCHED`]: the slave leading the master
 /// by 1 234 567 ns. Stored as the two's-complement bit pattern a camera would
@@ -189,7 +193,7 @@ pub const CHUNK_WIDTH_PX: u32 = 1440;
 pub const REG_CHUNK_MODE_ACTIVE: u64 = 0x20080;
 pub const REG_CHUNK_SELECTOR: u64 = 0x20084;
 /// `ChunkEnable` for the selected chunk: a *selected* feature, backed by the
-/// set of enabled selector values — see [`RegisterMap::chunk_enabled`].
+/// set of enabled selector values (`RegisterMap::chunk_enabled`).
 pub const REG_CHUNK_ENABLE: u64 = 0x20088;
 
 /// `ChunkSelector` entry values, this fake's own numbering.
@@ -387,8 +391,11 @@ pub const DEVICE_TEMPERATURE_STEPS: u64 = 80;
 /// documented in the module-level doc comment.
 pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <RegisterDescription
-  ModelName="VivaCam Fake"
-  VendorName="vitavision.dev"
+  xmlns="http://www.genicam.org/GenApi/Version_1_1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.genicam.org/GenApi/Version_1_1 http://www.genicam.org/GenApi/GenApiSchema_Version_1_1.xsd"
+  ModelName="VivaCam_Fake"
+  VendorName="vitavision"
   ToolTip="Simulated GigE Vision camera for testing"
   StandardNameSpace="GEV"
   SchemaMajorVersion="1"
@@ -472,6 +479,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Category Name="TransportLayerControl">
     <DisplayName>Transport Layer Control</DisplayName>
+    <pFeature>PayloadSize</pFeature>
     <pFeature>TLParamsLocked</pFeature>
     <pFeature>GevTimestampTickFrequency</pFeature>
     <pFeature>GevTimestampValue</pFeature>
@@ -503,50 +511,60 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pFeature>EventExposureEndFrameID</pFeature>
   </Category>
 
+  <!-- The device's own register space: every register that is not on a
+       chunk or event port names it. -->
+  <Port Name="Device" NameSpace="Standard"/>
+
   <!-- ════════════════════════════════════════════════════════════════════
        Device Control Features
        ════════════════════════════════════════════════════════════════════ -->
 
-  <String Name="DeviceVendorName" NameSpace="Standard">
+  <StringReg Name="DeviceVendorName" NameSpace="Standard">
     <ToolTip>Name of the device vendor</ToolTip>
     <Address>0x20220</Address>
     <Length>32</Length>
     <AccessMode>RO</AccessMode>
-  </String>
+    <pPort>Device</pPort>
+  </StringReg>
 
-  <String Name="DeviceModelName" NameSpace="Standard">
+  <StringReg Name="DeviceModelName" NameSpace="Standard">
     <ToolTip>Name of the device model</ToolTip>
     <Address>0x20200</Address>
     <Length>32</Length>
     <AccessMode>RO</AccessMode>
-  </String>
+    <pPort>Device</pPort>
+  </StringReg>
 
-  <String Name="DeviceSerialNumber" NameSpace="Standard">
+  <StringReg Name="DeviceSerialNumber" NameSpace="Standard">
     <ToolTip>Serial number of the device</ToolTip>
     <Address>0x20240</Address>
     <Length>16</Length>
     <AccessMode>RO</AccessMode>
-  </String>
+    <pPort>Device</pPort>
+  </StringReg>
 
-  <String Name="DeviceFirmwareVersion" NameSpace="Standard">
+  <StringReg Name="DeviceFirmwareVersion" NameSpace="Standard">
     <ToolTip>Firmware version of the device</ToolTip>
     <Address>0x20260</Address>
     <Length>32</Length>
     <AccessMode>RO</AccessMode>
-  </String>
+    <pPort>Device</pPort>
+  </StringReg>
 
-  <String Name="DeviceID" NameSpace="Standard">
+  <StringReg Name="DeviceID" NameSpace="Standard">
     <ToolTip>User-configurable device identifier</ToolTip>
     <Address>0x20280</Address>
     <Length>32</Length>
     <AccessMode>RO</AccessMode>
-  </String>
+    <pPort>Device</pPort>
+  </StringReg>
 
   <StringReg Name="DeviceUserID" NameSpace="Standard">
     <ToolTip>A name the user gives the device</ToolTip>
     <Address>0x20400</Address>
     <Length>16</Length>
     <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
   </StringReg>
 
   <Register Name="DeviceUserBuffer" NameSpace="Custom">
@@ -554,6 +572,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20410</Address>
     <Length>16</Length>
     <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
   </Register>
 
   <!-- A value the camera changes on its own, declared as FLIR's BFS declares
@@ -575,6 +594,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20300</Address>
     <Length>4</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Cachable>NoCache</Cachable>
     <PollingTime>500</PollingTime>
     <Sign>Signed</Sign>
@@ -587,25 +607,19 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <Integer Name="SensorWidth" NameSpace="Standard">
     <ToolTip>Physical sensor width in pixels</ToolTip>
-    <Address>0x20014</Address>
-    <Length>4</Length>
-    <AccessMode>RO</AccessMode>
+    <pValue>SensorWidthReg</pValue>
     <Min>1</Min>
     <Max>4096</Max>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="SensorWidthReg"><Address>0x20014</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Integer Name="SensorHeight" NameSpace="Standard">
     <ToolTip>Physical sensor height in pixels</ToolTip>
-    <Address>0x20018</Address>
-    <Length>4</Length>
-    <AccessMode>RO</AccessMode>
+    <pValue>SensorHeightReg</pValue>
     <Min>1</Min>
     <Max>4096</Max>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="SensorHeightReg"><Address>0x20018</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- The ROI shape every corpus document shares: a size's maximum shrinks
        as its offset grows, and an offset's as the size grows, so the order
@@ -613,108 +627,91 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        format are locked while TLParamsLocked is set (FLIR, Basler, Hikrobot).
        Binning rescales the region (SFNC: WidthMax is counted after binning),
        which each node below says with a pInvalidator, as Basler's acA1600
-       does on its WidthMax register. -->
+       does on its WidthMax register — on the feature, and on the register
+       behind it, where a GenApi caches the value. -->
   <Integer Name="Width" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
-    <pInvalidator>BinningHorizontal</pInvalidator>
     <ToolTip>Width of the image in pixels</ToolTip>
-    <Address>0x20000</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
     <pIsLocked>TLParamsLocked</pIsLocked>
+    <pInvalidator>BinningHorizontal</pInvalidator>
+    <Streamable>Yes</Streamable>
+    <pValue>WidthReg</pValue>
     <pMin>WidthMin</pMin>
     <pMax>WidthMaxNow</pMax>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="WidthReg"><Address>0x20000</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><pInvalidator>BinningHorizontal</pInvalidator><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <IntSwissKnife Name="WidthMaxNow">
     <pVariable Name="WMAX">WidthMax</pVariable>
-    <pVariable Name="OX">OffsetX</pVariable>
+    <pVariable Name="OX">OffsetXReg</pVariable>
     <Formula>WMAX - OX</Formula>
   </IntSwissKnife>
-  <IntReg Name="WidthMin"><Address>0x20100</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
-  <IntReg Name="WidthMax"><Address>0x20104</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess><pInvalidator>BinningHorizontal</pInvalidator></IntReg>
+  <IntReg Name="WidthMin"><Address>0x20100</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="WidthMax"><Address>0x20104</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><pInvalidator>BinningHorizontal</pInvalidator><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Integer Name="Height" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
-    <pInvalidator>BinningVertical</pInvalidator>
     <ToolTip>Height of the image in pixels</ToolTip>
-    <Address>0x20004</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
     <pIsLocked>TLParamsLocked</pIsLocked>
+    <pInvalidator>BinningVertical</pInvalidator>
+    <Streamable>Yes</Streamable>
+    <pValue>HeightReg</pValue>
     <pMin>HeightMin</pMin>
     <pMax>HeightMaxNow</pMax>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="HeightReg"><Address>0x20004</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><pInvalidator>BinningVertical</pInvalidator><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <IntSwissKnife Name="HeightMaxNow">
     <pVariable Name="HMAX">HeightMax</pVariable>
-    <pVariable Name="OY">OffsetY</pVariable>
+    <pVariable Name="OY">OffsetYReg</pVariable>
     <Formula>HMAX - OY</Formula>
   </IntSwissKnife>
-  <IntReg Name="HeightMin"><Address>0x20108</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
-  <IntReg Name="HeightMax"><Address>0x2010c</Address><Length>4</Length><AccessMode>RO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess><pInvalidator>BinningVertical</pInvalidator></IntReg>
+  <IntReg Name="HeightMin"><Address>0x20108</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="HeightMax"><Address>0x2010c</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><pInvalidator>BinningVertical</pInvalidator><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Integer Name="OffsetX" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
-    <pInvalidator>BinningHorizontal</pInvalidator>
     <ToolTip>Horizontal offset from the sensor origin</ToolTip>
-    <Address>0x2000c</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
+    <pInvalidator>BinningHorizontal</pInvalidator>
+    <Streamable>Yes</Streamable>
+    <pValue>OffsetXReg</pValue>
     <Min>0</Min>
     <pMax>OffsetXMax</pMax>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="OffsetXReg"><Address>0x2000c</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><pInvalidator>BinningHorizontal</pInvalidator><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Integer Name="OffsetY" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
-    <pInvalidator>BinningVertical</pInvalidator>
     <ToolTip>Vertical offset from the sensor origin</ToolTip>
-    <Address>0x20010</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
+    <pInvalidator>BinningVertical</pInvalidator>
+    <Streamable>Yes</Streamable>
+    <pValue>OffsetYReg</pValue>
     <Min>0</Min>
     <pMax>OffsetYMax</pMax>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="OffsetYReg"><Address>0x20010</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><pInvalidator>BinningVertical</pInvalidator><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <IntSwissKnife Name="OffsetXMax">
     <pVariable Name="WMAX">WidthMax</pVariable>
-    <pVariable Name="W">Width</pVariable>
+    <pVariable Name="W">WidthReg</pVariable>
     <Formula>WMAX - W</Formula>
   </IntSwissKnife>
   <IntSwissKnife Name="OffsetYMax">
     <pVariable Name="HMAX">HeightMax</pVariable>
-    <pVariable Name="H">Height</pVariable>
+    <pVariable Name="H">HeightReg</pVariable>
     <Formula>HMAX - H</Formula>
   </IntSwissKnife>
 
   <Integer Name="BinningHorizontal" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Pixels combined horizontally</ToolTip>
-    <Address>0x200e4</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
-    <Min>1</Min>
-    <Max>4</Max>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
-  </Integer>
-  <Integer Name="BinningVertical" NameSpace="Standard">
     <Streamable>Yes</Streamable>
-    <ToolTip>Pixels combined vertically</ToolTip>
-    <Address>0x200e8</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
+    <pValue>BinningHorizontalReg</pValue>
     <Min>1</Min>
     <Max>4</Max>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="BinningHorizontalReg"><Address>0x200e4</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <Integer Name="BinningVertical" NameSpace="Standard">
+    <ToolTip>Pixels combined vertically</ToolTip>
+    <Streamable>Yes</Streamable>
+    <pValue>BinningVerticalReg</pValue>
+    <Min>1</Min>
+    <Max>4</Max>
+  </Integer>
+  <IntReg Name="BinningVerticalReg"><Address>0x200e8</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Enumeration Name="SensorType" NameSpace="Standard">
     <ToolTip>Sensor variant (Monochrome / BayerRG / Color). On real hardware this would be read-only sensor metadata; here it is RW so tests can reconfigure the simulator.</ToolTip>
@@ -723,51 +720,51 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <EnumEntry Name="Color"><Value>2</Value></EnumEntry>
     <pValue>SensorTypeReg</pValue>
   </Enumeration>
-  <IntReg Name="SensorTypeReg"><Address>0x20058</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="SensorTypeReg"><Address>0x20058</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Enumeration Name="PixelFormat" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Format of the pixel data — entries are gated by SensorType</ToolTip>
     <pIsLocked>TLParamsLocked</pIsLocked>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Mono8" NameSpace="Standard">
-      <Value>0x01080001</Value>
       <pIsImplemented>PfMono8Avail</pIsImplemented>
+      <Value>0x01080001</Value>
     </EnumEntry>
     <EnumEntry Name="Mono16" NameSpace="Standard">
-      <Value>0x01100007</Value>
       <pIsImplemented>PfMono16Avail</pIsImplemented>
+      <Value>0x01100007</Value>
     </EnumEntry>
     <EnumEntry Name="RGB8" NameSpace="Standard">
-      <Value>0x02180014</Value>
       <pIsImplemented>PfRGB8Avail</pIsImplemented>
+      <Value>0x02180014</Value>
     </EnumEntry>
     <EnumEntry Name="BayerRG8" NameSpace="Standard">
-      <Value>0x01080009</Value>
       <pIsImplemented>PfBayerRG8Avail</pIsImplemented>
+      <Value>0x01080009</Value>
     </EnumEntry>
     <pValue>PixelFormatReg</pValue>
   </Enumeration>
-  <IntReg Name="PixelFormatReg"><Address>0x20008</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="PixelFormatReg"><Address>0x20008</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- PixelFormat entry availability driven by SensorType:
          Monochrome (0) → Mono8, Mono16
          BayerRG    (1) → BayerRG8
          Color      (2) → RGB8 -->
   <IntSwissKnife Name="PfMono8Avail">
-    <Formula>ST = 0</Formula>
     <pVariable Name="ST">SensorTypeReg</pVariable>
+    <Formula>ST = 0</Formula>
   </IntSwissKnife>
   <IntSwissKnife Name="PfMono16Avail">
-    <Formula>ST = 0</Formula>
     <pVariable Name="ST">SensorTypeReg</pVariable>
+    <Formula>ST = 0</Formula>
   </IntSwissKnife>
   <IntSwissKnife Name="PfBayerRG8Avail">
-    <Formula>ST = 1</Formula>
     <pVariable Name="ST">SensorTypeReg</pVariable>
+    <Formula>ST = 1</Formula>
   </IntSwissKnife>
   <IntSwissKnife Name="PfRGB8Avail">
-    <Formula>ST = 2</Formula>
     <pVariable Name="ST">SensorTypeReg</pVariable>
+    <Formula>ST = 2</Formula>
   </IntSwissKnife>
 
   <!-- ════════════════════════════════════════════════════════════════════
@@ -787,6 +784,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x5C</Address>
     <Length>4</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Endianess>BigEndian</Endianess>
     <StructEntry Name="FrameRateControlInq_Bit"><Bit>0</Bit></StructEntry>
     <StructEntry Name="ChunkSupportInq_Bit"><Bit>1</Bit></StructEntry>
@@ -802,39 +800,36 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        ════════════════════════════════════════════════════════════════════ -->
   <Integer Name="GevStreamChannelSelector" NameSpace="Standard">
     <ToolTip>Stream channel the GevSCP* features address</ToolTip>
-    <Address>0x20090</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
-    <Sign>Unsigned</Sign>
+    <pValue>GevStreamChannelSelectorReg</pValue>
     <Min>0</Min>
     <Max>1</Max>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="GevStreamChannelSelectorReg"><Address>0x20090</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <Integer Name="GevSCPSPacketSize" NameSpace="Standard">
     <ToolTip>Stream channel packet size in bytes</ToolTip>
-    <Address>0x0D04</Address>
-    <pIndex Offset="0x40">GevStreamChannelSelector</pIndex>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
-    <Sign>Unsigned</Sign>
+    <pValue>GevSCPSPacketSizeReg</pValue>
     <Min>0</Min>
     <Max>65535</Max>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="GevSCPSPacketSizeReg">
+    <Address>0x0D04</Address>
+    <pIndex Offset="0x40">GevStreamChannelSelector</pIndex>
+    <Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+  </IntReg>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Acquisition Control Features
        ════════════════════════════════════════════════════════════════════ -->
 
   <Enumeration Name="AcquisitionMode" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Camera acquisition mode</ToolTip>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Continuous"><Value>0</Value></EnumEntry>
     <EnumEntry Name="SingleFrame"><Value>1</Value></EnumEntry>
     <EnumEntry Name="MultiFrame"><Value>2</Value></EnumEntry>
     <pValue>AcquisitionModeReg</pValue>
   </Enumeration>
-  <IntReg Name="AcquisitionModeReg"><Address>0x20020</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="AcquisitionModeReg"><Address>0x20020</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- Every <Command> here reaches its register through <pValue>, the shape
        all 490 commands in the vendor corpus use; none has an <Address> of its
@@ -844,7 +839,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pValue>AcquisitionStartReg</pValue>
     <CommandValue>1</CommandValue>
   </Command>
-  <IntReg Name="AcquisitionStartReg"><Address>0x20024</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="AcquisitionStartReg"><Address>0x20024</Address><Length>4</Length><AccessMode>WO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- The Hikrobot MV-CS050-10GC user-set block (Hikrobot_MV-CS050-10GC.xml,
        lines 23009-23148): both commands write the selected set's index,
@@ -859,7 +854,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pSelected>UserSetLoad</pSelected>
     <pSelected>UserSetSave</pSelected>
   </Enumeration>
-  <IntReg Name="UserSetSelectorReg"><Address>0x200a8</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="UserSetSelectorReg"><Address>0x200a8</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Command Name="UserSetLoad" NameSpace="Standard">
     <ToolTip>Load the selected user set</ToolTip>
@@ -871,7 +866,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pVariable Name="VALUE">UserSetSelectorReg</pVariable>
     <Formula>VALUE</Formula>
   </IntSwissKnife>
-  <IntReg Name="UserSetLoadReg"><Address>0x200ac</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="UserSetLoadReg"><Address>0x200ac</Address><Length>4</Length><AccessMode>WO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Command Name="UserSetSave" NameSpace="Standard">
     <ToolTip>Save the current settings into the selected user set</ToolTip>
@@ -888,7 +883,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pVariable Name="VAL">UserSetSelectorReg</pVariable>
     <Formula>(VAL = 0)? 0:1</Formula>
   </IntSwissKnife>
-  <IntReg Name="UserSetSaveReg"><Address>0x200b4</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="UserSetSaveReg"><Address>0x200b4</Address><Length>4</Length><AccessMode>WO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- profile:user-set-default -->
   <Enumeration Name="UserSetDefault" NameSpace="Standard">
@@ -899,13 +894,13 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pValue>UserSetDefaultReg</pValue>
   </Enumeration>
   <!-- /profile:user-set-default -->
-  <IntReg Name="UserSetDefaultReg"><Address>0x200ec</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="UserSetDefaultReg"><Address>0x200ec</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- Triggers, as the Basler acA1600 and Hikrobot documents shape them: the
        selector's value indexes the mode and source registers. -->
   <Enumeration Name="TriggerSelector" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Trigger that TriggerMode, TriggerSource and TriggerSoftware act on</ToolTip>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="FrameStart"><Value>0</Value></EnumEntry>
     <EnumEntry Name="AcquisitionStart"><Value>1</Value></EnumEntry>
     <pValue>TriggerSelectorReg</pValue>
@@ -913,10 +908,10 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pSelected>TriggerSource</pSelected>
     <pSelected>TriggerSoftware</pSelected>
   </Enumeration>
-  <IntReg Name="TriggerSelectorReg"><Address>0x200c0</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="TriggerSelectorReg"><Address>0x200c0</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <Enumeration Name="TriggerMode" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Whether the selected trigger is active</ToolTip>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
     <EnumEntry Name="On"><Value>1</Value></EnumEntry>
     <pValue>TriggerModeReg</pValue>
@@ -924,11 +919,11 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <IntReg Name="TriggerModeReg">
     <Address>0x200c4</Address>
     <pIndex Offset="4">TriggerSelectorReg</pIndex>
-    <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+    <Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </IntReg>
   <Enumeration Name="TriggerSource" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Signal the selected trigger waits for</ToolTip>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Line1"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Software"><Value>1</Value></EnumEntry>
     <pValue>TriggerSourceReg</pValue>
@@ -936,14 +931,14 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <IntReg Name="TriggerSourceReg">
     <Address>0x200d0</Address>
     <pIndex Offset="4">TriggerSelectorReg</pIndex>
-    <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+    <Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </IntReg>
   <Command Name="TriggerSoftware" NameSpace="Standard">
     <ToolTip>Fire the selected trigger once</ToolTip>
     <pValue>TriggerSoftwareReg</pValue>
     <CommandValue>1</CommandValue>
   </Command>
-  <IntReg Name="TriggerSoftwareReg"><Address>0x200e0</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="TriggerSoftwareReg"><Address>0x200e0</Address><Length>4</Length><AccessMode>WO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- A write-only register addressed bit by bit. Each entry inherits WO from
        the StructReg, so setting one bit cannot read the register for the
@@ -952,6 +947,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x200b0</Address>
     <Length>4</Length>
     <AccessMode>WO</AccessMode>
+    <pPort>Device</pPort>
     <Endianess>BigEndian</Endianess>
     <StructEntry Name="SoftwareSignal0Pulse"><Bit>0</Bit></StructEntry>
     <StructEntry Name="SoftwareSignal1Pulse"><Bit>1</Bit></StructEntry>
@@ -962,43 +958,42 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pValue>AcquisitionStopReg</pValue>
     <CommandValue>1</CommandValue>
   </Command>
-  <IntReg Name="AcquisitionStopReg"><Address>0x20028</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="AcquisitionStopReg"><Address>0x20028</Address><Length>4</Length><AccessMode>WO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Boolean Name="AcquisitionFrameRateEnable" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Enable manual control of AcquisitionFrameRate. When false, the frame rate is unavailable for read/write.</ToolTip>
+    <Streamable>Yes</Streamable>
     <pValue>AcquisitionFrameRateEnableReg</pValue>
   </Boolean>
-  <IntReg Name="AcquisitionFrameRateEnableReg"><Address>0x20054</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+  <IntReg Name="AcquisitionFrameRateEnableReg">
     <pIsImplemented>FrameRateControlInq_Bit</pIsImplemented>
+    <Address>0x20054</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </IntReg>
 
   <!-- profile:frame-rate -->
   <Float Name="AcquisitionFrameRate" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Target frame rate in Hz</ToolTip>
-    <Address>0x2002c</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
+    <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
+    <Streamable>Yes</Streamable>
+    <pValue>AcquisitionFrameRateReg</pValue>
     <Min>1.0</Min>
     <Max>120.0</Max>
     <Unit>Hz</Unit>
-    <Endianess>BigEndian</Endianess>
-    <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
   </Float>
+  <FloatReg Name="AcquisitionFrameRateReg"><Address>0x2002c</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Endianess>BigEndian</Endianess></FloatReg>
   <!-- /profile:frame-rate -->
 
   <!-- profile:exposure -->
   <Float Name="ExposureTime" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Exposure time in microseconds — locked to RO when ExposureAuto is not Off</ToolTip>
-    <pValue>ExposureTimeReg</pValue>
-    <Unit>us</Unit>
-    <Min>10.0</Min>
-    <Max>1000000.0</Max>
     <pIsImplemented>ExposureTime_Imp</pIsImplemented>
     <pIsAvailable>ExposureTime_Avl</pIsAvailable>
     <pIsLocked>ExposureAutoActive</pIsLocked>
+    <Streamable>Yes</Streamable>
+    <pValue>ExposureTimeReg</pValue>
+    <Min>10.0</Min>
+    <Max>1000000.0</Max>
+    <Unit>us</Unit>
   </Float>
   <!-- /profile:exposure -->
   <!-- The FLIR shape: the register, not the feature, carries <pInvalidator>,
@@ -1009,8 +1004,9 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20030</Address>
     <Length>8</Length>
     <AccessMode>RW</AccessMode>
-    <Endianess>BigEndian</Endianess>
+    <pPort>Device</pPort>
     <pInvalidator>UserSetLoadReg</pInvalidator>
+    <Endianess>BigEndian</Endianess>
   </FloatReg>
 
   <!-- Feature-status bits in one big-endian word, the shape FLIR ships and the
@@ -1019,27 +1015,27 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        to 0xC0000000. Read from the wrong end these both come out zero and
        ExposureTime becomes unavailable, which is what the reporter saw. -->
   <MaskedIntReg Name="ExposureTime_Imp">
-    <Address>0x2009c</Address><Length>4</Length><AccessMode>RO</AccessMode>
+    <Address>0x2009c</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort>
     <Bit>0</Bit><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </MaskedIntReg>
   <MaskedIntReg Name="ExposureTime_Avl">
-    <Address>0x2009c</Address><Length>4</Length><AccessMode>RO</AccessMode>
+    <Address>0x2009c</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort>
     <Bit>1</Bit><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </MaskedIntReg>
 
   <Enumeration Name="ExposureAuto" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Automatic exposure control</ToolTip>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Once"><Value>1</Value></EnumEntry>
     <EnumEntry Name="Continuous"><Value>2</Value></EnumEntry>
     <pValue>ExposureAutoReg</pValue>
   </Enumeration>
-  <IntReg Name="ExposureAutoReg"><Address>0x20038</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="ExposureAutoReg"><Address>0x20038</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <IntSwissKnife Name="ExposureAutoActive">
-    <Formula>EA &lt;&gt; 0</Formula>
     <pVariable Name="EA">ExposureAutoReg</pVariable>
+    <Formula>EA &lt;&gt; 0</Formula>
   </IntSwissKnife>
 
   <!-- ════════════════════════════════════════════════════════════════════
@@ -1048,50 +1044,54 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <!-- profile:gain -->
   <Float Name="Gain" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <!-- CDATA-wrapped tooltip, as shipped by several vendors: the literal `&`
          and `<` inside are legal here and must survive parsing (issue #45). -->
     <ToolTip><![CDATA[Gain applied to the image in dB — locked to RO when GainAuto is not Off (0 < gain & gain < 48)]]></ToolTip>
-    <Address>0x20040</Address>
-    <Length>8</Length>
-    <AccessMode>RW</AccessMode>
+    <pIsLocked>GainAutoActive</pIsLocked>
+    <Streamable>Yes</Streamable>
+    <pValue>GainReg</pValue>
     <Min>0.0</Min>
     <Max>48.0</Max>
-    <Endianess>BigEndian</Endianess>
-    <pIsLocked>GainAutoActive</pIsLocked>
   </Float>
+  <FloatReg Name="GainReg"><Address>0x20040</Address><Length>8</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Endianess>BigEndian</Endianess></FloatReg>
   <!-- /profile:gain -->
 
   <Enumeration Name="GainAuto" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Automatic gain control</ToolTip>
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Once"><Value>1</Value></EnumEntry>
     <EnumEntry Name="Continuous"><Value>2</Value></EnumEntry>
     <pValue>GainAutoReg</pValue>
   </Enumeration>
-  <IntReg Name="GainAutoReg"><Address>0x20048</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="GainAutoReg"><Address>0x20048</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <IntSwissKnife Name="GainAutoActive">
-    <Formula>GA &lt;&gt; 0</Formula>
     <pVariable Name="GA">GainAutoReg</pVariable>
+    <Formula>GA &lt;&gt; 0</Formula>
   </IntSwissKnife>
 
   <Integer Name="BlackLevel" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Analog black level offset</ToolTip>
-    <Address>0x20050</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
+    <Streamable>Yes</Streamable>
+    <pValue>BlackLevelReg</pValue>
     <Min>0</Min>
     <Max>255</Max>
-    <Sign>Unsigned</Sign>
-    <Endianess>BigEndian</Endianess>
   </Integer>
+  <IntReg Name="BlackLevelReg"><Address>0x20050</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Transport Layer Control (Timestamp)
        ════════════════════════════════════════════════════════════════════ -->
+
+  <!-- SFNC's PayloadSize: what a host sizes its buffers by, computed by the
+       device from the format and the chunks, and so never cached. -->
+  <Integer Name="PayloadSize" NameSpace="Standard">
+    <ToolTip>Bytes of one block's payload: the image, and its chunks in chunk mode</ToolTip>
+    <ImposedAccessMode>RO</ImposedAccessMode>
+    <pValue>PayloadSizeReg</pValue>
+  </Integer>
+  <IntReg Name="PayloadSizeReg"><Address>0x20120</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><Cachable>NoCache</Cachable><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- A variable the host sets while it streams, with no register behind
        it: FLIR, Basler and Hikrobot declare it so (27 corpus documents use an
@@ -1106,14 +1106,15 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Integer>
   <!-- /profile:tl-params-locked -->
 
-  <Integer Name="GevTimestampTickFrequency" NameSpace="Standard">
+  <IntReg Name="GevTimestampTickFrequency" NameSpace="Standard">
     <ToolTip>Device timestamp tick frequency in Hz (1 GHz)</ToolTip>
     <Address>0x20060</Address>
     <Length>4</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
-  </Integer>
+  </IntReg>
 
   <!-- An Integer over an IntReg, as every timestamp in the vendor corpus is
        declared, and with nothing linking it to the latch: the cache holds the
@@ -1126,6 +1127,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20068</Address>
     <Length>8</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
   </IntReg>
@@ -1135,6 +1137,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20078</Address>
     <Length>8</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Sign>Unsigned</Sign>
     <Endianess>BigEndian</Endianess>
   </IntReg>
@@ -1144,6 +1147,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20110</Address>
     <Length>8</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Sign>Unsigned</Sign>
     <Endianess>LittleEndian</Endianess>
   </IntReg>
@@ -1153,6 +1157,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Address>0x20118</Address>
     <Length>4</Length>
     <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
     <Sign>Unsigned</Sign>
     <Endianess>LittleEndian</Endianess>
   </IntReg>
@@ -1162,7 +1167,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pValue>TimestampLatchReg</pValue>
     <CommandValue>1</CommandValue>
   </Command>
-  <IntReg Name="TimestampLatchReg"><Address>0x20070</Address><Length>4</Length><AccessMode>WO</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="TimestampLatchReg"><Address>0x20070</Address><Length>4</Length><AccessMode>WO</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Chunk Data Control
@@ -1174,11 +1179,11 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
        here made Camera::configure_chunks, which correctly calls set_bool,
        fail against the only camera we can test with. -->
   <Boolean Name="ChunkModeActive" NameSpace="Standard">
-    <Streamable>Yes</Streamable>
     <ToolTip>Enable chunk data in image frames</ToolTip>
+    <Streamable>Yes</Streamable>
     <pValue>ChunkModeActiveReg</pValue>
   </Boolean>
-  <IntReg Name="ChunkModeActiveReg"><Address>0x20080</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="ChunkModeActiveReg"><Address>0x20080</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Enumeration Name="ChunkSelector" NameSpace="Standard">
     <ToolTip>Select which chunk feature to configure</ToolTip>
@@ -1189,13 +1194,13 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <EnumEntry Name="ImageInfo" NameSpace="Custom"><Value>5</Value></EnumEntry>
     <pValue>ChunkSelectorReg</pValue>
   </Enumeration>
-  <IntReg Name="ChunkSelectorReg"><Address>0x20084</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="ChunkSelectorReg"><Address>0x20084</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Boolean Name="ChunkEnable" NameSpace="Standard">
     <ToolTip>Enable the selected chunk feature</ToolTip>
     <pValue>ChunkEnableReg</pValue>
   </Boolean>
-  <IntReg Name="ChunkEnableReg"><Address>0x20088</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="ChunkEnableReg"><Address>0x20088</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- Chunk ports (GenICam Standard v2.1.1 §2.8.16): each register below
        addresses one chunk of a frame, from the chunk's start, not device
@@ -1260,7 +1265,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <EnumEntry Name="ExposureEnd"><Value>0x9001</Value></EnumEntry>
     <pValue>EventSelectorReg</pValue>
   </Enumeration>
-  <IntReg Name="EventSelectorReg"><Address>0x200A0</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="EventSelectorReg"><Address>0x200A0</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <Enumeration Name="EventNotification" NameSpace="Standard">
     <ToolTip>Enable notification for the selected event</ToolTip>
@@ -1268,7 +1273,7 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <EnumEntry Name="On"><Value>1</Value></EnumEntry>
     <pValue>EventNotificationReg</pValue>
   </Enumeration>
-  <IntReg Name="EventNotificationReg"><Address>0x200A4</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="EventNotificationReg"><Address>0x200A4</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
 
   <!-- The ExposureEnd event port: its registers address the event as it was
        sent, header included — the event id at 0x2 and the timestamp at 0x8,
@@ -1321,11 +1326,11 @@ const LEGACY_SECTIONS: &[(&str, &str)] = &[
         "exposure",
         r#"<Float Name="ExposureTimeAbs" NameSpace="Standard">
     <ToolTip>Directly sets the camera's exposure time in microseconds</ToolTip>
+    <pIsLocked>ExposureAutoActive</pIsLocked>
     <pValue>ExposureTimeReg</pValue>
     <Min>10.0</Min>
     <Max>1000000.0</Max>
     <Unit>us</Unit>
-    <pIsLocked>ExposureAutoActive</pIsLocked>
   </Float>"#,
     ),
     (
@@ -1336,15 +1341,13 @@ const LEGACY_SECTIONS: &[(&str, &str)] = &[
         "frame-rate",
         r#"<Float Name="AcquisitionFrameRateAbs" NameSpace="Standard">
     <ToolTip>Acquisition frame rate in frames per second, when enabled</ToolTip>
-    <Address>0x2002c</Address>
-    <Length>4</Length>
-    <AccessMode>RW</AccessMode>
+    <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
+    <pValue>AcquisitionFrameRateAbsReg</pValue>
     <Min>1.0</Min>
     <Max>120.0</Max>
     <Unit>Hz</Unit>
-    <Endianess>BigEndian</Endianess>
-    <pIsAvailable>AcquisitionFrameRateEnable</pIsAvailable>
-  </Float>"#,
+  </Float>
+  <FloatReg Name="AcquisitionFrameRateAbsReg"><Address>0x2002c</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Endianess>BigEndian</Endianess></FloatReg>"#,
     ),
     (
         "gain-category",
@@ -1360,18 +1363,18 @@ const LEGACY_SECTIONS: &[(&str, &str)] = &[
     <pValue>GainSelectorReg</pValue>
     <pSelected>GainRaw</pSelected>
   </Enumeration>
-  <IntReg Name="GainSelectorReg"><Address>0x200fc</Address><Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="GainSelectorReg"><Address>0x200fc</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
   <Integer Name="GainRaw" NameSpace="Standard">
     <ToolTip>Sets the selected gain control in device specific units</ToolTip>
+    <pIsLocked>GainAutoActive</pIsLocked>
     <pValue>GainRawReg</pValue>
     <Min>0</Min>
     <Max>1023</Max>
-    <pIsLocked>GainAutoActive</pIsLocked>
   </Integer>
   <IntReg Name="GainRawReg">
     <Address>0x200f0</Address>
     <pIndex Offset="4">GainSelectorReg</pIndex>
-    <Length>4</Length><AccessMode>RW</AccessMode><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+    <Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
   </IntReg>"#,
     ),
     (
@@ -1982,6 +1985,14 @@ impl RegisterMap {
             return result;
         }
 
+        // The next block's size follows the format and the chunks.
+        if addr == REG_PAYLOAD_SIZE {
+            let mut result = self.payload_size().to_be_bytes().to_vec();
+            result.resize(len, 0);
+            result.truncate(len);
+            return result;
+        }
+
         // The temperature moves with time, not with writes.
         if addr == REG_DEVICE_TEMPERATURE {
             let mut result = self.device_temperature_raw().to_be_bytes().to_vec();
@@ -2363,6 +2374,28 @@ impl RegisterMap {
         u32::from_be_bytes([data[0], data[1], data[2], data[3]]) != 0
     }
 
+    /// `PayloadSize`: the bytes of a block's payload as the sender builds
+    /// it — the image, and in chunk mode the image chunk and every enabled
+    /// chunk, each with its tag.
+    pub fn payload_size(&self) -> u32 {
+        let image = crate::gvsp::image_size(self.pixel_format_code(), self.width(), self.height());
+        let size = if self.chunk_mode_active() {
+            let enabled: Vec<u32> = [
+                CHUNK_SELECTOR_TIMESTAMP,
+                CHUNK_SELECTOR_EXPOSURE_TIME,
+                CHUNK_SELECTOR_FRAME_ID,
+                CHUNK_SELECTOR_IMAGE_INFO,
+            ]
+            .into_iter()
+            .filter(|selector| self.chunk_enabled(*selector))
+            .collect();
+            crate::gvsp_sender::chunk_block_len(&enabled, image)
+        } else {
+            image
+        };
+        u32::try_from(size).unwrap_or(u32::MAX)
+    }
+
     /// Current exposure time in microseconds.
     pub fn exposure_time(&self) -> f64 {
         let data = self.read(REG_EXPOSURE_TIME, 8);
@@ -2583,6 +2616,71 @@ mod tests {
             "<pFeature>Gain</pFeature>",
         ] {
             assert!(!xml.contains(absent), "still declares {absent}");
+        }
+    }
+
+    /// The elements of every `<tag ...>` block in `xml`, comments' bare
+    /// `<Tag>` mentions aside.
+    fn blocks<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+        let open = format!("<{tag} ");
+        let close = format!("</{tag}>");
+        let mut found = Vec::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find(&open) {
+            let after = &rest[start..];
+            let end = after.find(&close).map_or(after.len(), |e| e + close.len());
+            found.push(&after[..end]);
+            rest = &after[end..];
+        }
+        found
+    }
+
+    /// What EMVA's reference GenApi, and the GenApi 1.1 schema, require of
+    /// the XML a camera serves — the rules this fake broke until GenTL
+    /// consumers read it (ADR-0031): the schema's namespace, model and vendor
+    /// names that are `CName_t`s, an `<Address>` only on a register node, and
+    /// a `<pPort>` on every register. Our parser accepted all of it, which is
+    /// why it went unnoticed.
+    #[test]
+    fn the_xml_is_genapi_schema_shaped() {
+        let name_ok = |name: &str| {
+            name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        for profile in [XmlProfile::Sfnc, XmlProfile::Legacy] {
+            let xml = genapi_xml(profile);
+            assert!(
+                xml.contains(r#"xmlns="http://www.genicam.org/GenApi/Version_1_1""#),
+                "{profile:?}: the GenApi 1.1 namespace"
+            );
+            for attribute in ["ModelName=\"", "VendorName=\""] {
+                let at = xml.find(attribute).expect("attribute") + attribute.len();
+                let value = &xml[at..at + xml[at..].find('"').expect("closing quote")];
+                assert!(name_ok(value), "{profile:?}: {attribute}{value}");
+            }
+            for tag in ["Integer", "Float", "String"] {
+                for block in blocks(&xml, tag) {
+                    assert!(
+                        !block.contains("<Address>"),
+                        "{profile:?}: a <{tag}> has no address of its own:\n{block}"
+                    );
+                }
+            }
+            for tag in [
+                "IntReg",
+                "MaskedIntReg",
+                "FloatReg",
+                "StringReg",
+                "Register",
+                "StructReg",
+            ] {
+                for block in blocks(&xml, tag) {
+                    assert!(
+                        block.contains("<pPort>"),
+                        "{profile:?}: every register names its port:\n{block}"
+                    );
+                }
+            }
         }
     }
 }

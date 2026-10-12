@@ -53,7 +53,7 @@ pub const PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK: u16 = PAYLOAD_TYPE_IMAGE | EXTENDED
 /// Bits of the payload type that name the type.
 const PAYLOAD_TYPE_MASK: u16 = 0x3FFF;
 /// A chunk's tag: its ID, then its data length, both 32-bit big-endian.
-const CHUNK_TAG_LEN: usize = 8;
+pub(crate) const CHUNK_TAG_LEN: usize = 8;
 
 /// Lay `chunks` out as a GigE Vision chunk payload, in order: each chunk's
 /// data, then its tag — chunk ID and data length, 32-bit big-endian each.

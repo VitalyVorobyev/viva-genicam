@@ -1,0 +1,45 @@
+[package]
+name = "viva-gentl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "GenTL producer (a .cti) over viva-genicam: GigE Vision cameras for any GenTL consumer"
+keywords = ["genicam", "gentl", "gige", "camera"]
+categories = ["hardware-support", "network-programming"]
+# Shipped as `viva_gentl.cti` attached to each release (ADR-0031), not as a
+# crate: nothing links against it from Rust.
+publish = false
+
+[lib]
+# The cdylib is the producer; the rlib lets the integration tests call the
+# exported functions directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+viva-genicam = { version = "0.8", path = "../viva-genicam" }
+bytes = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync"] }
+tracing = { workspace = true }
+# A consumer installs no subscriber: with RUST_LOG set, the producer logs to
+# standard error itself.
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+# The host's interfaces, with their netmasks: one Interface module per NIC.
+if-addrs = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# `dladdr`: the path of the loaded `.cti` (TL_INFO_PATHNAME).
+libc = "0.2.190"
+
+[target.'cfg(windows)'.dependencies]
+# `GetModuleHandleExW` + `GetModuleFileNameW`: the path of the loaded `.cti`.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+viva-fake-gige = { path = "../viva-fake-gige" }
+viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
+
+[lints]
+workspace = true

@@ -102,10 +102,28 @@ cargo test -p viva-u3v     --test gencp_conformance  # wire layouts from GenCP 1
 # Services
 cargo test -p viva-service --test fake_camera_e2e    # viva-service end to end over Zenoh
 cargo test -p viva-service-u3v                       # the USB3 Vision service over Zenoh: serving, cameras coming and going
+# GenTL producer (ADR-0031), its C functions called in process, against viva-fake-gige
+cargo test -p viva-gentl --test lifecycle            # GCInitLib/GCCloseLib, open and close, closing cascades
+cargo test -p viva-gentl --test enumeration          # interfaces, devices, info commands, access modes
+cargo test -p viva-gentl --test ports                # each module's XML and registers; the remote port
+cargo test -p viva-gentl --test acquisition          # announce, queue, deliver, flush, incomplete frames, chunks
+cargo test -p viva-gentl --test soundness            # invalid handles, null pointers, panics, per-thread errors
+cargo test -p viva-gentl --test logging              # RUST_LOG makes the producer log
 # Documentation
 cargo test -p viva-genicam --test book_includes      # every code include in the book resolves
 cargo test -p viva-genicam --test doc_links          # every relative Markdown link resolves
 ```
+
+The GenTL producer is also driven as consumers load it: `scripts/gentl-harness.sh`
+builds `viva_gentl.cti` (`scripts/build-cti.sh`), compiles a C program against
+the EMVA's `GenTL.h` — fetched by `scripts/fetch-gentl-header.sh`, not
+committed — and acquires frames from `viva-fake-gige`, then validates every
+port's XML with `xmllint` against the GenApi 1.1 schema. With
+`HARVESTERS_PYTHON` naming a Python that has `harvesters==1.4.3`,
+`genicam==1.6.0` and `numpy` installed, it also acquires through Harvesters
+(`scripts/gentl-harvesters.py`), a consumer we did not write. CI's `GenTL
+producer` job runs all three on Linux; `GENICAM_PACKAGE_ZIP` reuses a downloaded
+EMVA package.
 
 GVSP parsing and block assembly also have fuzz targets, in `fuzz/` (outside
 the workspace; needs nightly and `cargo install cargo-fuzz`):

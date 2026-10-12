@@ -92,9 +92,10 @@ fn geometry_size(image: &viva_gige::ImageLeader) -> usize {
 
 /// Where frame buffers come from.
 ///
-/// The default allocates. A GenTL producer (milestone T) hands in the buffers
-/// its consumer announced instead, which is why the assembler is handed a
-/// buffer rather than allocating one itself.
+/// The default allocates. The seam is where frames could be assembled straight
+/// into a GenTL consumer's announced buffers (backlog GT-05); `viva-gentl`
+/// copies each block once instead, because a `Vec` cannot soundly wrap memory
+/// the consumer owns (ADR-0031).
 pub(crate) trait BufferSource: Send {
     /// A zeroed buffer of exactly `len` bytes.
     fn acquire(&mut self, len: usize) -> Vec<u8>;

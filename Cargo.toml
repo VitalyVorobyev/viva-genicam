@@ -14,6 +14,7 @@ members = [
   "crates/viva-fake-gige",
   "crates/viva-fake-u3v",
   "crates/viva-service-u3v",
+  "crates/viva-gentl",
 ]
 exclude = ["crates/viva-pygenicam", "studio", "fuzz"]
 resolver = "3"

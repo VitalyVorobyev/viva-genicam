@@ -3505,6 +3505,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "viva-gentl"
+version = "0.8.0"
+dependencies = [
+ "bytes",
+ "if-addrs",
+ "libc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "viva-fake-gige",
+ "viva-genapi-xml",
+ "viva-genicam",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "viva-gige"
 version = "0.8.0"
 dependencies = [

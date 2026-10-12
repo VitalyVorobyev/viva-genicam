@@ -26,6 +26,7 @@ Strict layering, bottom to top (see
 viva-service / viva-service-u3v  - Zenoh bridges: GigE / U3V cameras → GUI consumers
 viva-camctl                      - CLI binary (crates.io + prebuilt release binaries)
 viva-pygenicam                   - Python bindings (PyO3, PyPI wheels)
+viva-gentl                       - GenTL producer: a .cti for GenTL consumers (release asset)
         ↓
 viva-genicam (facade)   - End-user API: Camera<T>, discovery, streaming
         ↓
@@ -51,6 +52,12 @@ viva-gencp              - Protocol primitives: GenCP encode/decode
   optional `genapi` feature converts `viva-genapi`'s `FeatureState` into the
   wire form, so every service that reads features builds that payload the same
   way.
+
+`viva-gentl` is a C ABI over the facade (ADR-0031): it uses only
+`viva-genicam`'s public API and runs no GenApi of its own — the consumer does
+— so each module's XML and register map are its own tables, and the remote
+port is the camera's `GigeRegisterIo`. It is not published to crates.io; the
+release attaches it as `viva_gentl-<target>.cti`.
 
 **Test crates (not published):**
 
@@ -252,6 +259,9 @@ the cases). Consequences:
 - A protocol feature with no fake implementation is not considered implemented.
 - Predicates and test fixtures wire onto real SFNC features; no synthetic
   `Test*` nodes in fake-camera XML.
+- An independent consumer reads the fakes too: the GenTL job drives
+  `viva-fake-gige` through Harvesters and EMVA's reference GenApi
+  (ADR-0031), which rejected the fake's XML that our own parser accepted.
 
 ## Design tenets
 

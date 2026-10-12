@@ -78,15 +78,26 @@ pub struct Frame {
     /// Bytes the camera sends after every line of the image: the GVSP image
     /// leader's `padding_x`, 0 for none. See [`row_stride`](Self::row_stride).
     pub padding_x: u16,
+    /// The block's whole payload as the camera sent it: for an image with
+    /// chunks (`0x4001`), the image chunk first, then every other chunk and
+    /// the tags between them; otherwise the same bytes as
+    /// [`payload`](Self::payload). [`payload`](Self::payload) is a slice of
+    /// it, so keeping both costs no copy.
+    ///
+    /// What a consumer that parses the chunk layout itself needs — a GenTL
+    /// consumer, which locates chunks in the buffer the producer fills.
+    pub raw_payload: Bytes,
 }
 
 /// Payload type of an image block.
 const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
 
 impl Frame {
-    /// A complete image frame with no chunks, timestamps or block id.
+    /// A complete image frame with no chunks, timestamps or block id; its
+    /// [`raw_payload`](Self::raw_payload) is `payload`.
     pub fn new(payload: Bytes, width: u32, height: u32, pixel_format: PixelFormat) -> Self {
         Self {
+            raw_payload: payload.clone(),
             payload,
             width,
             height,

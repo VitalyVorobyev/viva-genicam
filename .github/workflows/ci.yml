@@ -113,6 +113,53 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps
 
+  # The GenTL producer as consumers load it (ADR-0031): the .cti driven by a C
+  # program compiled against the EMVA's GenTL.h, its port XMLs validated
+  # against the GenApi 1.1 schema, then frames acquired through Harvesters —
+  # a consumer we did not write, on EMVA's reference GenApi — all against
+  # viva-fake-gige. GenTL.h is not in the repository; the script fetches the
+  # EMVA's package and checks its SHA-256, and the cache spares emva.org a
+  # 135 MB download per run.
+  gentl:
+    name: GenTL producer
+    runs-on: ubuntu-latest
+    env:
+      GENTL_EMVA_DIR: ${{ github.workspace }}/../emva
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache the EMVA header and schema
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.GENTL_EMVA_DIR }}
+          key: emva-genicam-package-2026.07-e74b8d98
+
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Pinned: a new Harvesters or GenApi release should change this job
+      # in a commit of its own, not from one run to the next.
+      - name: Install Harvesters
+        run: |
+          python -m venv "$RUNNER_TEMP/harvesters"
+          "$RUNNER_TEMP/harvesters/bin/python" -m pip install harvesters==1.4.3 genicam==1.6.0 numpy==2.5.4
+          echo "HARVESTERS_PYTHON=$RUNNER_TEMP/harvesters/bin/python" >> "$GITHUB_ENV"
+
+      - name: C harness, schema check and Harvesters
+        run: scripts/gentl-harness.sh 10
+
   # Each crate on its own, with each of its features alone (CI-01). The
   # workspace build above unifies features: `viva-camctl` enables `u3v-usb`, so
   # `viva-genicam` with its own defaults (none), or `viva-u3v` without `usb`,

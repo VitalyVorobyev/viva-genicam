@@ -42,6 +42,7 @@ of the record.
 | [0028](adr0028-configuration-persistence.md) | Saving and restoring a configuration in GenApi's feature-file layout | Accepted |
 | [0029](adr0029-caching-polling-and-refresh.md) | Caching modes, polling and a changed-since query | Accepted |
 | [0030](adr0030-errors-and-public-surface.md) | Errors carry their causes; the public surface is chosen | Accepted |
+| [0031](adr0031-gentl-producer.md) | A GenTL producer over the facade | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

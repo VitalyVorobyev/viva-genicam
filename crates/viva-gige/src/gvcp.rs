@@ -1064,6 +1064,8 @@ pub struct GigeDevice {
     /// Whether the device names its primary application (GVCP Capability
     /// `0x0800_0000`), read once when first needed.
     names_primary_application: Option<bool>,
+    /// Claim exclusive access (CCP `0x1`) rather than control access.
+    exclusive_access: bool,
 }
 
 /// Stream negotiation outcome describing the values written to the device.
@@ -1117,6 +1119,7 @@ impl GigeDevice {
             rng: Rng::new(),
             memory_access_only,
             names_primary_application: None,
+            exclusive_access: false,
         })
     }
 
@@ -1166,14 +1169,41 @@ impl GigeDevice {
         self.memory_access_only
     }
 
+    /// Ask for exclusive access (CCP `0x1`, bit 31 in GigE Vision's
+    /// numbering: no other application may even read) instead of control
+    /// access (`0x2`) whenever this session claims control, the first claim
+    /// and every later one alike.
+    pub fn set_exclusive_access(&mut self, exclusive: bool) {
+        self.exclusive_access = exclusive;
+    }
+
+    /// Whether [`Self::claim_control`] asks for exclusive access.
+    pub fn exclusive_access(&self) -> bool {
+        self.exclusive_access
+    }
+
     /// Claim control channel privilege (CCP).
     ///
     /// Required by the GigE Vision specification before the device accepts
     /// stream configuration or acquisition commands.
+    ///
+    /// Asks for control access (CCP `0x2`), or exclusive access (`0x1`) once
+    /// [`Self::set_exclusive_access`] says so. That bit alone is what the
+    /// GigE Vision bit definitions call exclusive access; no camera has yet
+    /// confirmed it, and aravis never writes it.
     pub async fn claim_control(&mut self) -> Result<(), GigeError> {
-        self.write_u32(consts::CONTROL_CHANNEL_PRIVILEGE, consts::CCP_CONTROL)
+        let privilege = if self.exclusive_access {
+            consts::CCP_EXCLUSIVE
+        } else {
+            consts::CCP_CONTROL
+        };
+        self.write_u32(consts::CONTROL_CHANNEL_PRIVILEGE, privilege)
             .await?;
-        debug!(addr = %self.remote, "claimed control channel privilege");
+        debug!(
+            addr = %self.remote,
+            exclusive = self.exclusive_access,
+            "claimed control channel privilege"
+        );
         Ok(())
     }
 

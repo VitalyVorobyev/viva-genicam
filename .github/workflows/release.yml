@@ -62,6 +62,18 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p viva-camctl -p viva-service
 
+      # The GenTL producer (ADR-0031): a .cti beside the archive, named for
+      # its target, since a consumer loads it from any directory it is told.
+      - name: Build the GenTL producer
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          CTI="$(scripts/build-cti.sh target/gentl --target "$TARGET")"
+          cp "$CTI" "viva_gentl-${TARGET}.cti"
+          echo "CTI_FILE=viva_gentl-${TARGET}.cti" >> "$GITHUB_ENV"
+
       - name: Package archive
         shell: bash
         env:
@@ -95,7 +107,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.ARCHIVE_FILE }}
+          path: |
+            ${{ env.ARCHIVE_FILE }}
+            ${{ env.CTI_FILE }}
           if-no-files-found: error
 
   # Viva Studio as unsigned desktop bundles, versioned with the library
@@ -206,7 +220,7 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            The `viva-studio-*` files are Viva Studio for macOS (Apple Silicon), Linux and Windows. They are not signed, so the first launch asks for confirmation: see [Viva Studio → First launch](https://vitalyvorobyev.github.io/viva-genicam/studio.html#first-launch) in the user guide.
+            The `viva_gentl-*.cti` files are the GenTL producer, for GenTL consumers such as Harvesters: see [Use viva from other tools](https://vitalyvorobyev.github.io/viva-genicam/gentl.html) in the user guide. The `viva-studio-*` files are Viva Studio for macOS (Apple Silicon), Linux and Windows. They are not signed, so the first launch asks for confirmation: see [Viva Studio → First launch](https://vitalyvorobyev.github.io/viva-genicam/studio.html#first-launch) in the user guide.
           files: |
             dist/*.tar.gz
             dist/*.zip
@@ -214,4 +228,5 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.msi
+            dist/*.cti
             dist/SHA256SUMS.txt

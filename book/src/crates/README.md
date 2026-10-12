@@ -40,6 +40,14 @@ of `viva-genicam`.
 
 ---
 
+### I want to use my camera from software that loads GenTL producers
+
+Use `viva_gentl.cti`, built from the `viva-gentl` crate and attached to each
+release: Harvesters and other GenTL consumers load it as they load a vendor's
+`.cti` ([Use viva from other tools](../gentl.md)).
+
+---
+
 ### I need to touch GigE Vision packets / low-level transport
 
 Use `viva-gige` (and `viva-gencp` as needed).

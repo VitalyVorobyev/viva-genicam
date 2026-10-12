@@ -175,6 +175,7 @@ impl GenericStreamBlock {
 /// An incomplete block is not split: its missing packets are zeros, and zeros
 /// read as tags would invent chunks.
 fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Option<ChunkError>) {
+    let raw_payload = block.payload.clone();
     let (payload, chunks) = if block.status.is_complete() {
         crate::chunks::split(block.payload, block.payload_type)
     } else {
@@ -215,6 +216,7 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
         }),
         None => {
             let mut frame = Frame::new(payload, width, height, pixel_format);
+            frame.raw_payload = raw_payload;
             frame.padding_x = padding_x;
             frame.chunks = chunks;
             frame.ts_dev = ts_dev;
@@ -959,6 +961,7 @@ pub struct StreamOptions {
     packet_delay: Option<Duration>,
     resend: ResendPolicy,
     monitor: bool,
+    payload_size: Option<usize>,
 }
 
 impl StreamOptions {
@@ -1037,16 +1040,25 @@ impl StreamOptions {
         self.rcvbuf_bytes = Some(bytes);
         self
     }
+
+    /// The camera's `PayloadSize`: the exact size of every frame buffer
+    /// ([`FrameStream::set_payload_size`]), in place before the first frame.
+    /// [`Camera::open_stream`](crate::Camera::open_stream) reads it from the
+    /// camera itself; [`GigeRegisterIo::open_stream`](crate::GigeRegisterIo::open_stream),
+    /// which has no node map to read it with, sizes each frame from its
+    /// leader without it.
+    pub fn payload_size(mut self, bytes: usize) -> Self {
+        self.payload_size = Some(bytes).filter(|&b| b > 0);
+        self
+    }
 }
 
 impl crate::Camera<crate::GigeRegisterIo> {
     /// Open a GVSP stream from this camera, ready for `acquisition_start`.
     ///
-    /// The one recipe every consumer uses (API-17): claim control (again, if
-    /// it was released) before anything is written, bind the socket, point
-    /// the stream channel at it — or at a multicast group — negotiate the
-    /// packet size, read whether the camera supports resend, and start the
-    /// receive engine with the camera's `PayloadSize` and time sync. A camera
+    /// The one recipe every consumer uses (API-17), as
+    /// [`GigeRegisterIo::open_stream`](crate::GigeRegisterIo::open_stream)
+    /// describes it, with the camera's `PayloadSize` and time sync. A camera
     /// without a readable `PayloadSize` still streams: buffers are then sized
     /// from each leader.
     ///
@@ -1054,69 +1066,17 @@ impl crate::Camera<crate::GigeRegisterIo> {
     /// application configured, claiming and writing nothing; it is the only
     /// stream a camera opened with [`Access::Monitor`](crate::Access::Monitor)
     /// can open.
-    // The device lock is held for the whole setup, outside the future that
-    // borrows the device: nothing else may use the control channel while the
-    // stream channel is being configured.
     pub fn open_stream(&mut self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
         if options.monitor {
             return self.watch_stream(options);
         }
-        if self.transport().control_state() == crate::ControlState::Monitor {
-            return Err(GenicamError::NotInControl(crate::ControlState::Monitor));
+        let mut options = options;
+        if options.payload_size.is_none() {
+            options.payload_size = read_payload_size(self);
         }
-        let payload_size = read_payload_size(self);
-        let time_sync = self.time_sync().clone();
-        let transport = self.transport();
-        let mut guard = transport.lock_device()?;
-        let device: &mut GigeDevice = &mut guard;
-        let stream = transport.block_on(async move {
-            device
-                .claim_control()
-                .await
-                .map_err(gige("claim control"))?;
-            // A session that had lost or released control holds it again,
-            // whatever happens to the setup below: the camera says so.
-            transport.note_claimed();
-            let iface = match options.iface {
-                Some(iface) => iface,
-                None => {
-                    let camera_ip = match device.remote_addr().ip() {
-                        IpAddr::V4(ip) => ip,
-                        IpAddr::V6(_) => {
-                            return Err(GigeError::NotIpv4("camera").into());
-                        }
-                    };
-                    Iface::from_remote_ipv4(camera_ip).map_err(|source| GenicamError::NoRoute {
-                        camera: camera_ip,
-                        source,
-                    })?
-                }
-            };
-            // The stream channel is configured through the bootstrap registers,
-            // multicast included, and only now that control is held: a device
-            // refuses those writes from an application without privilege.
-            let mut builder = StreamBuilder::new(device)
-                .iface(iface)
-                .resend(options.resend);
-            builder.packet_size_mode = options.packet_size;
-            builder.packet_delay = options.packet_delay;
-            if let Some(bytes) = options.rcvbuf_bytes {
-                builder = builder.rcvbuf_bytes(bytes);
-            }
-            if let Some(group) = options.multicast {
-                builder = builder.multicast(Some(group));
-            }
-            if let Some(port) = options.destination_port {
-                builder = builder.destination_port(port);
-            }
-            builder.build().await
-        })??;
-        drop(guard);
-        Ok(FrameStream::start_with(
-            stream,
-            Some(time_sync),
-            payload_size,
-        ))
+        let mut frames = self.transport().open_stream(options)?;
+        frames.set_time_sync(self.time_sync().clone());
+        Ok(frames)
     }
 
     /// [`StreamOptions::monitor`]: join the multicast group the camera
@@ -1180,6 +1140,76 @@ impl crate::Camera<crate::GigeRegisterIo> {
         frames.set_payload_size(payload_size);
         frames.set_time_sync(time_sync);
         Ok(frames)
+    }
+}
+
+impl crate::GigeRegisterIo {
+    /// Open a GVSP stream from this transport's camera, ready for
+    /// acquisition: the recipe [`Camera::open_stream`](crate::Camera::open_stream)
+    /// runs, for a caller without a node map — a GenTL producer, which the
+    /// GenTL standard (§2.1.2) asks not to run GenApi itself.
+    ///
+    /// Claims control (again, if it was released) before anything is
+    /// written, binds the socket, points the stream channel at it — or at a
+    /// multicast group — negotiates the packet size, reads whether the camera
+    /// supports resend, and starts the receive engine. Without
+    /// [`StreamOptions::payload_size`] each frame is sized from its leader.
+    /// [`StreamOptions::monitor`] needs the camera's node map; here it is
+    /// refused.
+    // The device lock is held for the whole setup, outside the future that
+    // borrows the device: nothing else may use the control channel while the
+    // stream channel is being configured.
+    pub fn open_stream(&self, options: StreamOptions) -> Result<FrameStream, GenicamError> {
+        if options.monitor || self.control_state() == crate::ControlState::Monitor {
+            return Err(GenicamError::NotInControl(crate::ControlState::Monitor));
+        }
+        let payload_size = options.payload_size;
+        let mut guard = self.lock_device()?;
+        let device: &mut GigeDevice = &mut guard;
+        let stream = self.block_on(async move {
+            device
+                .claim_control()
+                .await
+                .map_err(gige("claim control"))?;
+            // A session that had lost or released control holds it again,
+            // whatever happens to the setup below: the camera says so.
+            self.note_claimed();
+            let iface = match options.iface {
+                Some(iface) => iface,
+                None => {
+                    let camera_ip = match device.remote_addr().ip() {
+                        IpAddr::V4(ip) => ip,
+                        IpAddr::V6(_) => {
+                            return Err(GigeError::NotIpv4("camera").into());
+                        }
+                    };
+                    Iface::from_remote_ipv4(camera_ip).map_err(|source| GenicamError::NoRoute {
+                        camera: camera_ip,
+                        source,
+                    })?
+                }
+            };
+            // The stream channel is configured through the bootstrap registers,
+            // multicast included, and only now that control is held: a device
+            // refuses those writes from an application without privilege.
+            let mut builder = StreamBuilder::new(device)
+                .iface(iface)
+                .resend(options.resend);
+            builder.packet_size_mode = options.packet_size;
+            builder.packet_delay = options.packet_delay;
+            if let Some(bytes) = options.rcvbuf_bytes {
+                builder = builder.rcvbuf_bytes(bytes);
+            }
+            if let Some(group) = options.multicast {
+                builder = builder.multicast(Some(group));
+            }
+            if let Some(port) = options.destination_port {
+                builder = builder.destination_port(port);
+            }
+            builder.build().await
+        })??;
+        drop(guard);
+        Ok(FrameStream::start_with(stream, None, payload_size))
     }
 }
 
@@ -2226,6 +2256,32 @@ mod tests {
             chunks.get(0x0504_0008).map(|c| c.to_vec()),
             Some(vec![0x88, 0x13, 0x00, 0x00])
         );
+    }
+
+    /// The raw payload is the whole block, chunks and tags included, for an
+    /// image with chunks as for a plain image.
+    #[test]
+    fn the_raw_payload_is_the_whole_block() {
+        #[rustfmt::skip]
+        let payload = Bytes::from_static(&[
+            1, 2, 3, 4, 5, 6, 7, 8,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x08,
+            0x88, 0x13, 0x00, 0x00,
+            0x05, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x04,
+        ]);
+        for payload_type in [0x4001, 0x0001] {
+            let mut block = assembled(payload.clone(), 4, 2, 0x0108_0001, 5, 2);
+            block.payload_type = payload_type;
+            let (block, _) = classify_completed_block(block);
+            let StreamBlock::Image(frame) = StreamBlock::from(block) else {
+                panic!("an image");
+            };
+            assert_eq!(
+                frame.raw_payload, payload,
+                "payload type {payload_type:#06x}"
+            );
+            assert!(frame.raw_payload.starts_with(&frame.payload));
+        }
     }
 
     /// A layout that does not parse keeps the whole payload, carries no

@@ -19,6 +19,7 @@
   - [Testing without hardware](tutorials/fake-camera.md)
 - [Networking Guide (GigE Vision)](networking.md)
 - [The command line (viva-camctl)](camctl.md)
+- [Use viva from other tools (GenTL)](gentl.md)
 
 # Python
 

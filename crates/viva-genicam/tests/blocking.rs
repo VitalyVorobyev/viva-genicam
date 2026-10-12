@@ -96,3 +96,36 @@ async fn a_connect_cancelled_on_a_current_thread_runtime_does_not_panic() {
         "a camera that never answers cannot be opened"
     );
 }
+
+/// `PayloadSize` is the size of the blocks the camera sends — the image
+/// alone, then the image with its chunks once chunk mode is on — which a
+/// host that sizes its buffers by it, a GenTL consumer among them, relies on.
+#[test]
+fn payload_size_is_the_size_of_each_block() {
+    let fake_runtime = tokio::runtime::Runtime::new().expect("runtime for the fake");
+    let _cam = fake_runtime.block_on(common::TestCamera::start());
+    let mut camera = blocking::connect(&fake_info()).expect("open");
+    for chunks in [false, true] {
+        if chunks {
+            camera.set("ChunkSelector", "FrameID").expect("select");
+            camera.set_bool("ChunkEnable", true).expect("enable");
+            camera
+                .set_bool("ChunkModeActive", true)
+                .expect("chunk mode");
+        }
+        let payload = camera.get_integer("PayloadSize").expect("PayloadSize");
+        let mut frames = camera.open_stream(StreamOptions::new()).expect("stream");
+        camera.acquisition_start().expect("start");
+        let frame = frames
+            .next_frame_blocking(Duration::from_secs(2))
+            .expect("a frame")
+            .expect("the stream is open");
+        camera.acquisition_stop().expect("stop");
+        drop(frames);
+        assert_eq!(
+            frame.raw_payload.len() as i64,
+            payload,
+            "chunk mode {chunks}"
+        );
+    }
+}

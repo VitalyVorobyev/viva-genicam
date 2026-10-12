@@ -22,6 +22,10 @@ ignore = [
     "RUSTSEC-2024-0436",
     # rustls-pemfile 2.2.0 -- unmaintained; zenoh-link-commons depends on it
     "RUSTSEC-2025-0134",
+    # unsafe-libyaml -- unmaintained; zenoh-config 1.10.1 (the newest zenoh,
+    # checked 2026-10-12) requires serde_yaml ^0.9.34, which depends on it.
+    # First fired on CI 2026-10-12, with no change to the lock.
+    "RUSTSEC-2024-0449",
 ]
 
 [licenses]

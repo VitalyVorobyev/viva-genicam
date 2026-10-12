@@ -127,6 +127,33 @@ async fn a_refused_release_keeps_the_session_watching_control() {
     other.release_control().await.expect("release");
 }
 
+/// A session that asks for exclusive access claims it with CCP bit 0 alone,
+/// keeps it when it claims control again, and another application cannot
+/// even read while it holds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn exclusive_access_is_claimed_and_kept() {
+    let cam = common::TestCamera::start().await;
+    let ccp = || async {
+        let value = cam.fake().peek(CCP, 4).await;
+        u32::from_be_bytes(value.try_into().expect("a register"))
+    };
+    let mut device = GigeDevice::open(fake_addr()).await.expect("open");
+    device.set_exclusive_access(true);
+    assert!(device.exclusive_access());
+    device.claim_control().await.expect("claim");
+    assert_eq!(ccp().await, gige::consts::CCP_EXCLUSIVE);
+    let mut other = GigeDevice::open(fake_addr()).await.expect("open");
+    let refused = other.read_register_or_mem(REG_BLACK_LEVEL, 4).await;
+    assert!(
+        refused.is_err(),
+        "another application reads nothing: {refused:?}"
+    );
+    device.claim_control().await.expect("claim again");
+    assert_eq!(ccp().await, gige::consts::CCP_EXCLUSIVE, "kept");
+    device.release_control().await.expect("release");
+    assert_eq!(ccp().await, 0);
+}
+
 /// A dropped camera on a current-thread runtime sends its release without
 /// waiting, and sends it the way the session reaches registers: a device
 /// that refuses WRITEREG gets a WRITEMEM.

@@ -404,7 +404,7 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "viva-genapi"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "thiserror",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genapi-xml"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "quick-xml",
  "serde",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gencp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genicam"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gige"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "fastrand",
@@ -476,11 +476,11 @@ dependencies = [
 
 [[package]]
 name = "viva-pfnc"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "viva-sfnc"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "wasi"

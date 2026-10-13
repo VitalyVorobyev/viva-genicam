@@ -18,7 +18,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-viva-genicam = { version = "0.8", path = "../viva-genicam" }
+viva-genicam = { version = "0.9", path = "../viva-genicam" }
 bytes = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync"] }
 tracing = { workspace = true }
@@ -39,7 +39,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 viva-fake-gige = { path = "../viva-fake-gige" }
-viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
+viva-genapi-xml = { version = "0.9", path = "../viva-genapi-xml" }
 
 [lints]
 workspace = true

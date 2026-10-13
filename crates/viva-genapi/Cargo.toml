@@ -19,7 +19,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
+viva-genapi-xml = { version = "0.9", path = "../viva-genapi-xml" }
 
 [dev-dependencies]
 # The corpus test finds port-bound registers with a reader of its own, so it

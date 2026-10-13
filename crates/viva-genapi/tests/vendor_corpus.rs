@@ -49,12 +49,7 @@ const EXPECTED_SKIPS: &[(&str, &str)] = &[];
 /// catch. A tag not listed here fails outright.
 ///
 /// Use `""` as the substring to allow a tag unconditionally.
-const EXPECTED_SKIP_REASONS: &[(&str, &str)] = &[
-    // GA-09 phase two: `<pLength>`, a register length resolved from another
-    // node at runtime. 22 of the corpus's 64 `<Register>` declarations use it
-    // (recounted 2026-09-30); the other 42 are supported and must build.
-    ("Register", "<pLength>"),
-];
+const EXPECTED_SKIP_REASONS: &[(&str, &str)] = &[];
 
 /// Nodes that legitimately fail under the [`PatternIo`] pass, as
 /// `(document, node name, required error substring)`.
@@ -194,6 +189,9 @@ fn failure_class(err: &GenApiError) -> &'static str {
         GenApiError::Access { .. } => "access",
         GenApiError::Type { .. } => "kind",
         GenApiError::NotAttached { .. } => "no chunk or event attached",
+        // A `<pLength>` node that reads no sane length: the pattern's
+        // `FF FE FD FC` is 4 GiB.
+        GenApiError::BadLength { .. } => "length",
         GenApiError::Unavailable(_) => "unavailable",
         // Backlog GA-49: a `<Float>` whose value is a constant `<Value>`,
         // which the XML layer does not read (GA-17's embedded address knives
@@ -231,6 +229,7 @@ fn vendor_xml_corpus_builds_nodemaps() {
     let mut failures = Vec::new();
     let mut total_nodes = 0usize;
     let mut total_evaluated = 0usize;
+    let mut total_ignored = 0usize;
     // Reads that failed for a reason the pass allows, by pass and class.
     let mut allowed: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
 
@@ -306,9 +305,36 @@ fn vendor_xml_corpus_builds_nodemaps() {
             let mut defects: BTreeMap<String, String> = BTreeMap::new();
             for name in &names {
                 total_evaluated += 1;
-                // A node is readable through whichever accessor matches its
-                // kind; trying float first and falling back covers integer,
-                // boolean and enum nodes without switching on the kind here.
+                // A string or a raw register has an accessor of its own: a
+                // `<String>` reads through its `<pValue>`, and a register
+                // reads the length its `<pLength>` node gives (H-1, H-3).
+                let own = match nodemap.node(name) {
+                    Some(viva_genapi::Node::String(_)) => {
+                        Some(nodemap.get_string(name, io.as_ref()).map(drop))
+                    }
+                    Some(viva_genapi::Node::Register(_)) => {
+                        Some(nodemap.get_register(name, io.as_ref()).map(drop))
+                    }
+                    _ => None,
+                };
+                if let Some(result) = own {
+                    match result {
+                        Ok(()) => {}
+                        Err(err) if pass.is_defect(&err) => {
+                            defects.insert(name.clone(), format!("{}: {err}", failure_class(&err)));
+                        }
+                        Err(err) => {
+                            *allowed
+                                .entry((pass.label(), failure_class(&err)))
+                                .or_default() += 1;
+                        }
+                    }
+                    continue;
+                }
+                // Any other node is readable through whichever accessor
+                // matches its kind; trying float first and falling back
+                // covers integer, boolean and enum nodes without switching on
+                // the kind here.
                 let err = match nodemap.get_float(name, io.as_ref()) {
                     Ok(_) => continue,
                     Err(err) => err,
@@ -348,6 +374,16 @@ fn vendor_xml_corpus_builds_nodemaps() {
             }
         }
 
+        // H-2: what the parser read past, carried by the nodemap. Classified
+        // by `viva-genapi-xml`'s corpus test (`EXPECTED_IGNORED`); listed
+        // here so that a consumer holding only the nodemap sees the same.
+        if nodemap.ignored() != model.ignored().as_slice() {
+            failures.push(format!(
+                "{document}: the nodemap's ignored elements differ from the model's"
+            ));
+        }
+        total_ignored += nodemap.ignored().len();
+
         if clean && nodemap.skipped().is_empty() {
             println!(
                 "ok    {document}: {} nodes built and evaluated twice",
@@ -357,7 +393,8 @@ fn vendor_xml_corpus_builds_nodemaps() {
     }
 
     println!(
-        "\n{} documents, {total_nodes} nodes built, {total_evaluated} evaluated",
+        "\n{} documents, {total_nodes} nodes built, {total_evaluated} evaluated, \
+         {total_ignored} child elements read past",
         documents.len()
     );
     // Reads that fail without a camera, by why: a kind with no value, a
@@ -496,9 +533,15 @@ const PGR_USER_SET_LOAD: CommandCase = CommandCase {
 /// `RegTriggerSourceInqSoftware`, `<Bit>25</Bit>` (big-endian: 0x00000040) of
 /// 0x13408 + selector × 64. `AcquisitionStart` is selector value 3, so the
 /// predicate lives at 0x13408 + 0xC0 = 0x134C8 and the command writes 1 << 3.
+/// The entry itself is implemented by `RegTriggerInqAcquisitionStart`,
+/// `<Bit>20</Bit>` (big-endian: 0x00000800) of 0x13000; an entry not
+/// implemented cannot be selected (H-4).
 const AVT_TRIGGER_SOFTWARE: CommandCase = CommandCase {
     document: "",
-    device: &[(0x134C8, &[0x00, 0x00, 0x00, 0x40])],
+    device: &[
+        (0x13000, &[0x00, 0x00, 0x08, 0x00]),
+        (0x134C8, &[0x00, 0x00, 0x00, 0x40]),
+    ],
     set: &[Set::Entry("TriggerSelector", "AcquisitionStart")],
     command: "TriggerSoftware",
     writes: &[(0x13160, &[0x00, 0x00, 0x00, 0x08])],
@@ -511,10 +554,12 @@ const COMMAND_CASES: &[CommandCase] = &[
     // 0x0003180C (1323-1325). `UserSetSelector_Reg` is at 0x00031804
     // (1326-1328); `UserSet2` is 2 (23122). The inquiry `<StructReg>` at
     // `UserSetInq_RegAddr` 0x00010800 (2271-2273) has `UserSetLoad_Inq` bit 0,
-    // `UserSetSave_Inq` bit 1, `UserSetSelector_Inq` bit 2 (22956-22964).
+    // `UserSetSave_Inq` bit 1, `UserSetSelector_Inq` bit 2 (22956-22964), and
+    // the entry's own `UserSetSelector_UserSet2_Inq` bit 5 (22971-22973): an
+    // entry not implemented cannot be selected (H-4).
     CommandCase {
         document: "Hikrobot_MV-CS050-10GC.xml",
-        device: &[(0x0001_0800, &[0xE0, 0x00, 0x00, 0x00])],
+        device: &[(0x0001_0800, &[0xE4, 0x00, 0x00, 0x00])],
         set: &[Set::Entry("UserSetSelector", "UserSet2")],
         command: "UserSetSave",
         writes: &[
@@ -527,7 +572,7 @@ const COMMAND_CASES: &[CommandCase] = &[
     // `UserSetLoad_Reg` (23024-23032) at 0x00031808 (1320-1322).
     CommandCase {
         document: "Hikrobot_MV-CS050-10GC.xml",
-        device: &[(0x0001_0800, &[0xE0, 0x00, 0x00, 0x00])],
+        device: &[(0x0001_0800, &[0xE4, 0x00, 0x00, 0x00])],
         set: &[Set::Entry("UserSetSelector", "UserSet2")],
         command: "UserSetLoad",
         writes: &[
@@ -541,12 +586,15 @@ const COMMAND_CASES: &[CommandCase] = &[
     // (12933-12941). The selector writes `UserSetSelector_CtrlValueFao` at
     // 0x60044 (12990-13000); `UserSet2` is 2 (4989). Presence bits:
     // `UserSetLoad_InqPresenceFao` 0x60000 bit 0 (12942-12953),
-    // `UserSetSelector_InqPresenceFao` 0x60040 bit 0 (12978-12989).
+    // `UserSetSelector_InqPresenceFao` 0x60040 bit 0 (12978-12989), and the
+    // entry's `UserSetSelector_UserSet2_InqPresenceFao` 0x6004C bit 2
+    // (13025-13036).
     CommandCase {
         document: "Basler_acA1600_20gm.xml",
         device: &[
             (0x60000, &[0x80, 0x00, 0x00, 0x00]),
             (0x60040, &[0x80, 0x00, 0x00, 0x00]),
+            (0x6004C, &[0x20, 0x00, 0x00, 0x00]),
         ],
         set: &[Set::Entry("UserSetSelector", "UserSet2")],
         command: "UserSetLoad",
@@ -771,9 +819,10 @@ struct RefusedCase {
 const REFUSED_CASES: &[RefusedCase] = &[
     // Hikrobot_MV-CS050-10GC.xml: `UserSetSave`'s `<pIsAvailable>IsDefaultSet`
     // (23039) is `(VAL = 0)? 0:1` over the selector register (23087-23090).
+    // `UserSetSelector_Default_Inq` is bit 3 (22965-22967).
     RefusedCase {
         document: "Hikrobot_MV-CS050-10GC.xml",
-        device: &[(0x0001_0800, &[0xE0, 0x00, 0x00, 0x00])],
+        device: &[(0x0001_0800, &[0xF0, 0x00, 0x00, 0x00])],
         set: &[Set::Entry("UserSetSelector", "Default")],
         command: "UserSetSave",
         writes: &[(0x0003_1804, &[0x00, 0x00, 0x00, 0x00])],
@@ -915,6 +964,15 @@ fn corpus_commands_are_refused_where_their_document_says_so() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Whether `name` takes its length from a `<pLength>` node.
+fn has_length_node(nodemap: &NodeMap, name: &str) -> bool {
+    match nodemap.node(name) {
+        Some(viva_genapi::Node::Register(reg)) => reg.length_node().is_some(),
+        Some(viva_genapi::Node::String(string)) => string.length_node().is_some(),
+        _ => false,
+    }
 }
 
 /// GA-11: a register reads in the byte order its document declares.
@@ -1183,8 +1241,7 @@ fn corpus_port_registers_never_read_device_memory() {
         for reg in &registers {
             *counts.entry((reg.class, reg.tag.clone())).or_default() += 1;
             if nodemap.node(&reg.name).is_none() {
-                // Dropped by the XML layer for a reason the build test
-                // already polices (a `<Register>` with `<pLength>`).
+                // Dropped for a reason the build test already polices.
                 not_built += 1;
                 continue;
             }
@@ -1242,7 +1299,13 @@ fn corpus_port_registers_never_read_device_memory() {
             let at_own_address = reg
                 .literal_address
                 .is_some_and(|addr| io.reads.borrow().iter().any(|(a, _)| *a as i64 == addr));
-            if at_own_address || result.is_err() {
+            // A register whose `<pLength>` node reads the pattern gets the
+            // pattern's length, which no 1 024-byte chunk holds: out of
+            // range is the honest answer (Baumer's `ChunkImage`, FLIR's
+            // `ChunkSerialData`).
+            let length_from_data = matches!(result, Err(GenApiError::PortOutOfRange { .. }))
+                && has_length_node(&nodemap, &reg.name);
+            if at_own_address || (result.is_err() && !length_from_data) {
                 failures.push(format!(
                     "{document}: <{}> {} with data attached: {result:?}, device read at own \
                      address: {at_own_address}",

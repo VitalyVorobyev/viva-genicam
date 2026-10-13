@@ -353,6 +353,14 @@ pub struct NodeMeta {
     /// (§2.8.10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polling_time_ms: Option<u64>,
+    /// Child elements the parser read past without interpreting them, by
+    /// tag, in document order: `<Extension>`, `<DocuURL>`, or something that
+    /// changes the value and is not supported yet. A child of an
+    /// enumeration's entry is written `EnumEntry/<tag>`; a `<StructReg>`'s
+    /// own are its entries', as everything else it declares is.
+    /// [`XmlModel::ignored`] lists them for a whole document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
 }
 
 /// `<Cachable>`: whether a register's value may be answered from a cache.
@@ -486,6 +494,13 @@ pub enum Addressing {
         /// §2.8.16). [`XmlModel::ports`] says which port is which.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         port: Option<String>,
+        /// `<pLength>`: the node the length is read from at runtime, in
+        /// place of `len` — "alternatively the length can be read from another
+        /// node" (GenICam Standard v2.1.1 §2.8.3). `len` is then `0`, unless
+        /// the document declares a `<Length>` as well. A bare `<pIndex>`
+        /// strides by the length read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_length: Option<String>,
     },
 }
 
@@ -528,13 +543,22 @@ impl Addressing {
             terms: vec![AddressTerm::Fixed(address)],
             len,
             port: None,
+            p_length: None,
         }
     }
 
-    /// Register block length in bytes.
+    /// Register block length in bytes, as declared by `<Length>`; `0` for a
+    /// register whose length is read from [`Addressing::length_node`].
     pub fn byte_len(&self) -> u32 {
         match self {
             Addressing::Sum { len, .. } => *len,
+        }
+    }
+
+    /// The `<pLength>` node the length is read from at runtime, if any.
+    pub fn length_node(&self) -> Option<&str> {
+        match self {
+            Addressing::Sum { p_length, .. } => p_length.as_deref(),
         }
     }
 
@@ -551,7 +575,9 @@ impl Addressing {
     /// address changes, so anything cached against it is stale.
     pub fn referenced_nodes(&self) -> Vec<&str> {
         match self {
-            Addressing::Sum { terms, .. } => terms
+            Addressing::Sum {
+                terms, p_length, ..
+            } => terms
                 .iter()
                 .flat_map(|term| match term {
                     AddressTerm::Fixed(_) => Vec::new(),
@@ -561,6 +587,7 @@ impl Addressing {
                         _ => vec![node.as_str()],
                     },
                 })
+                .chain(p_length.as_deref())
                 .collect(),
         }
     }
@@ -835,7 +862,9 @@ pub struct IntConverterDecl {
     pub predicates: PredicateRefs,
 }
 
-/// Declaration of a StringReg node for string-typed register access.
+/// Declaration of a string feature: a `<StringReg>`, which reads a register,
+/// or a `<String>`, which holds a `<Value>` or takes its value from the node
+/// `<pValue>` names (GenICam Standard v2.1.1 §2.8.11 and §2.8.12).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct StringDecl {
@@ -843,9 +872,18 @@ pub struct StringDecl {
     pub name: String,
     /// Shared metadata.
     pub meta: NodeMeta,
-    /// Addressing metadata for the register block.
-    pub addressing: Addressing,
-    /// Access privileges.
+    /// The register a `<StringReg>` reads; `None` for a `<String>`.
+    pub addressing: Option<Addressing>,
+    /// `<pValue>`: the node a `<String>` reads and writes its value through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pvalue: Option<String>,
+    /// `<Value>`: the start value of a `<String>` that has no `<pValue>`, a
+    /// floating node holding whatever is written to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Access privileges: a `<StringReg>`'s `<AccessMode>`, read-only when it
+    /// declares none. A `<String>` declares none: a floating one is `RW`, and
+    /// one with a `<pValue>` is as writable as the node it names.
     pub access: AccessMode,
     /// Predicate refs gating implementation / availability / lock state.
     #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
@@ -863,8 +901,8 @@ pub struct StringDecl {
 ///
 /// The length lives in [`Addressing`] rather than in a field here, because a
 /// bare `<pIndex>` strides by the register's length and address resolution
-/// already reads it from there. When `<pLength>` lands (GA-09 phase two) it
-/// gains a length that overrides that value *after* the address resolves.
+/// already reads it from there — a `<Length>`, or the node a `<pLength>`
+/// names ([`Addressing::length_node`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RegisterDecl {
@@ -1183,6 +1221,41 @@ impl SkippedNode {
     }
 }
 
+/// A child element of a node that the parser read past without interpreting
+/// it: the node loaded, but whatever the element says was not taken into
+/// account.
+///
+/// Most such elements are documentation or presentation — `<Extension>`, a
+/// vendor's own block — but not all: a `<String>`'s `<pValue>` was read past
+/// this way, so the string read empty and nothing said why (found on an
+/// mvBlueFOX3-2004G). These records make that class of loss visible, as
+/// [`SkippedNode`] does for whole nodes. See [`XmlModel::ignored`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct IgnoredElement {
+    /// The node's name.
+    pub node: String,
+    /// The node's kind, as [`NodeDecl::kind`] names it, or `Port`.
+    pub kind: String,
+    /// The element's tag, as [`NodeMeta::ignored`] writes it.
+    pub element: String,
+}
+
+impl IgnoredElement {
+    /// An element of `node`, a node of `kind`, read past.
+    pub fn new(
+        node: impl Into<String>,
+        kind: impl Into<String>,
+        element: impl Into<String>,
+    ) -> Self {
+        Self {
+            node: node.into(),
+            kind: kind.into(),
+            element: element.into(),
+        }
+    }
+}
+
 /// What a `<Port>` gives access to.
 ///
 /// GenICam Standard v2.1.1 §2.8.16: a port "is just a proxy that forwards Read
@@ -1217,6 +1290,10 @@ pub struct PortDecl {
     pub name: String,
     /// What the port reads.
     pub kind: PortKind,
+    /// Child elements read past without interpretation, as
+    /// [`NodeMeta::ignored`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
 }
 
 /// Which camera a document describes, and which revision of the document it
@@ -1271,6 +1348,27 @@ pub struct XmlModel {
     /// document.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<SkippedNode>,
+}
+
+impl XmlModel {
+    /// Every child element the parser read past without interpreting it,
+    /// node by node in document order, then the ports'. Empty when the
+    /// parser understood every element of every node it kept; see
+    /// [`IgnoredElement`].
+    pub fn ignored(&self) -> Vec<IgnoredElement> {
+        let nodes = self.nodes.iter().flat_map(|node| {
+            node.meta()
+                .ignored
+                .iter()
+                .map(|element| IgnoredElement::new(node.name(), node.kind(), element.as_str()))
+        });
+        let ports = self.ports.iter().flat_map(|port| {
+            port.ignored
+                .iter()
+                .map(|element| IgnoredElement::new(port.name.as_str(), "Port", element.as_str()))
+        });
+        nodes.chain(ports).collect()
+    }
 }
 
 /// Minimal metadata extracted from a quick XML scan.
@@ -2697,6 +2795,131 @@ mod tests {
         parse(&xml).expect("parse fragment")
     }
 
+    fn string_decl(model: &XmlModel, name: &str) -> StringDecl {
+        match model.nodes.iter().find(|n| n.name() == name) {
+            Some(NodeDecl::String(decl)) => decl.clone(),
+            other => panic!("{name}: not a string: {other:?}"),
+        }
+    }
+
+    /// GenICam Standard v2.1.1 §2.8.12 and the GenApi schema: a `<String>`
+    /// has no register; it holds a `<Value>` or names a `<pValue>`. Parsed as
+    /// a `<StringReg>`, the mvBlueFOX3-2004G's `DeviceFirmwareVersion` got
+    /// address 0, length 0, and read empty.
+    #[test]
+    fn a_string_keeps_its_p_value_or_its_value_and_has_no_register() {
+        let model = parse_fragment(
+            r#"<String Name="DeviceFirmwareVersion"><pIsImplemented>QO</pIsImplemented><pValue>DBB</pValue></String>
+               <String Name="StringNodeB"><Value>Hello World!</Value></String>
+               <StringReg Name="DBB"><Address>0x1000134</Address><Length>32</Length><AccessMode>RO</AccessMode></StringReg>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        let delegating = string_decl(&model, "DeviceFirmwareVersion");
+        assert_eq!(delegating.pvalue.as_deref(), Some("DBB"));
+        assert!(delegating.addressing.is_none());
+        assert_eq!(delegating.access, AccessMode::RW, "a String declares none");
+        assert!(
+            delegating.meta.ignored.is_empty(),
+            "{:?}",
+            delegating.meta.ignored
+        );
+        let floating = string_decl(&model, "StringNodeB");
+        assert_eq!(floating.value.as_deref(), Some("Hello World!"));
+        assert!(floating.addressing.is_none());
+        let register = string_decl(&model, "DBB");
+        assert_eq!(register.access, AccessMode::RO);
+        assert_eq!(register.addressing.map(|a| a.byte_len()), Some(32));
+    }
+
+    /// The schema requires one of the two; a `<String>` with neither has no
+    /// value at all, and is skipped with the reason rather than read as an
+    /// empty register.
+    #[test]
+    fn a_string_with_neither_value_nor_p_value_is_skipped() {
+        let model = parse_fragment(r#"<String Name="Nothing"><ToolTip>t</ToolTip></String>"#);
+        assert!(model.nodes.is_empty());
+        assert_eq!(model.skipped.len(), 1);
+        assert!(
+            model.skipped[0].error.contains("<Value> or <pValue>"),
+            "{:?}",
+            model.skipped
+        );
+    }
+
+    /// GenICam Standard v2.1.1 §2.8.3's `<pLength>` on a `<StringReg>`:
+    /// Basler's acA1600-20gm `DeviceFirmwareVersion` and FLIR's
+    /// `ChunkSerialData`. It used to be read past, leaving a length of 0.
+    #[test]
+    fn a_string_reg_keeps_its_p_length() {
+        let model = parse_fragment(
+            r#"<StringReg Name="DeviceFirmwareVersion"><Address>0xf2f01014</Address><pLength>DeviceFirmwareVersion_InqLengthFao</pLength><AccessMode>RO</AccessMode></StringReg>"#,
+        );
+        let decl = string_decl(&model, "DeviceFirmwareVersion");
+        let addressing = decl.addressing.expect("a register");
+        assert_eq!(
+            addressing.length_node(),
+            Some("DeviceFirmwareVersion_InqLengthFao")
+        );
+        assert!(decl.meta.ignored.is_empty(), "{:?}", decl.meta.ignored);
+    }
+
+    /// H-2: a child element no parser interprets is recorded on its node, in
+    /// document order, and listed for the whole document — the class of loss
+    /// a `<String>`'s `<pValue>` fell into.
+    #[test]
+    fn an_element_no_parser_reads_is_recorded_on_its_node() {
+        let model = parse_fragment(
+            r#"<Integer Name="Gain">
+                 <Extension><Vendor>1</Vendor></Extension>
+                 <pValue>GainReg</pValue>
+                 <DocuURL>http://example.com</DocuURL>
+               </Integer>
+               <Enumeration Name="Mode">
+                 <EnumEntry Name="Off"><Value>0</Value><NumericValue>0</NumericValue></EnumEntry>
+                 <Value>0</Value>
+               </Enumeration>
+               <Port Name="Device"><ToolTip>the device</ToolTip></Port>"#,
+        );
+        assert_eq!(
+            model.ignored(),
+            vec![
+                IgnoredElement::new("Gain", "Integer", "Extension"),
+                IgnoredElement::new("Gain", "Integer", "DocuURL"),
+                IgnoredElement::new("Mode", "Enum", "EnumEntry/NumericValue"),
+                IgnoredElement::new("Device", "Port", "ToolTip"),
+            ]
+        );
+    }
+
+    /// GenICam Standard v2.1.1 §2.8.6: each entry "gets [...] all elements
+    /// from the StructReg node which are not present already in the
+    /// <StructEntry> element". 202 corpus `<StructReg>`s declare a
+    /// `<Visibility>`, which their entries used to lose.
+    #[test]
+    fn a_struct_entry_inherits_what_its_struct_reg_declares() {
+        let model = parse_fragment(
+            r#"<StructReg Comment="Inq">
+                 <Address>0x10</Address><Length>4</Length><AccessMode>RO</AccessMode>
+                 <Visibility>Invisible</Visibility><ToolTip>shared</ToolTip><Extension/>
+                 <StructEntry Name="A"><Bit>0</Bit></StructEntry>
+                 <StructEntry Name="B"><Bit>1</Bit><Visibility>Guru</Visibility></StructEntry>
+               </StructReg>"#,
+        );
+        let meta = |name: &str| {
+            model
+                .nodes
+                .iter()
+                .find(|n| n.name() == name)
+                .expect(name)
+                .meta()
+                .clone()
+        };
+        assert_eq!(meta("A").visibility, Visibility::Invisible);
+        assert_eq!(meta("A").tooltip.as_deref(), Some("shared"));
+        assert_eq!(meta("B").visibility, Visibility::Guru, "its own wins");
+        assert_eq!(meta("A").ignored, vec!["Extension".to_string()]);
+    }
+
     /// GA-14: `<Streamable>` on every node kind that GenICam Standard v2.1.1
     /// §3.2 gives a Streamable default — the numeric, symbolic and string
     /// features, the register types and the struct entries. `No`, an absent
@@ -3312,17 +3535,22 @@ mod tests {
             vec![
                 PortDecl {
                     name: "Device".into(),
-                    kind: PortKind::Device
+                    kind: PortKind::Device,
+                    ignored: Vec::new(),
                 },
                 PortDecl {
                     name: "TimestampPort".into(),
                     kind: PortKind::Chunk {
                         chunk_id: 0x0508_000E
-                    }
+                    },
+                    ignored: Vec::new(),
                 },
                 PortDecl {
                     name: "EventExposureEndPort".into(),
-                    kind: PortKind::Event { event_id: 0x9C43 }
+                    kind: PortKind::Event { event_id: 0x9C43 },
+                    // A port is not a feature: its documentation has nowhere
+                    // to go, and is recorded as read past.
+                    ignored: vec!["ToolTip".into()],
                 },
             ]
         );
@@ -3332,7 +3560,7 @@ mod tests {
                 NodeDecl::Integer { addressing, .. } | NodeDecl::Float { addressing, .. } => {
                     addressing.clone().expect("addressed")
                 }
-                NodeDecl::String(decl) => decl.addressing.clone(),
+                NodeDecl::String(decl) => decl.addressing.clone().expect("a StringReg"),
                 NodeDecl::Register(decl) => decl.addressing.clone(),
                 other => panic!("unexpected {other:?}"),
             };

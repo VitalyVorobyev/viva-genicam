@@ -33,7 +33,8 @@ pub enum Node {
     Converter(ConverterNode),
     /// IntConverter transforming raw values to/from integer values via formulas.
     IntConverter(IntConverterNode),
-    /// StringReg for string-typed register access.
+    /// A string feature: a `<StringReg>`, or a `<String>` holding a value or
+    /// delegating through `<pValue>`.
     String(StringNode),
     /// Raw byte-array register access.
     Register(RegisterNode),
@@ -560,15 +561,23 @@ pub struct IntConverterNode {
     pub(crate) cache: RefCell<Option<(i64, u64)>>,
 }
 
-/// StringReg node for string-typed register access.
+/// A string feature: a `<StringReg>`, which reads a register, or a
+/// `<String>`, which holds a value or reads and writes the node its
+/// `<pValue>` names (GenICam Standard v2.1.1 §2.8.11, §2.8.12).
 #[derive(Debug)]
 pub struct StringNode {
     /// Unique feature name.
     pub name: String,
     /// Shared metadata (visibility, description, tooltip, etc.).
     pub meta: NodeMeta,
-    /// Register addressing metadata.
-    pub(crate) addressing: Addressing,
+    /// A `<StringReg>`'s register; `None` for a `<String>`.
+    pub(crate) addressing: Option<Addressing>,
+    /// `<pValue>`: the node a `<String>` delegates to.
+    pub(crate) pvalue: Option<String>,
+    /// `<Value>`: a floating `<String>`'s start value.
+    pub(crate) value: Option<String>,
+    /// What was last written to a floating `<String>`.
+    pub(crate) floating: RefCell<Option<String>>,
     /// Declared access rights.
     pub access: AccessMode,
     /// Predicate refs gating implementation / availability / lock state.
@@ -598,21 +607,34 @@ pub struct RegisterNode {
 }
 
 impl StringNode {
-    /// Declared length of the string register in bytes: the longest string
-    /// it holds, its terminating NUL included.
-    pub fn declared_len(&self) -> u32 {
-        self.addressing.byte_len()
+    /// Declared length of a `<StringReg>` in bytes: the longest string it
+    /// holds, its terminating NUL included. `None` for a `<String>`, which
+    /// has no register, and `Some(0)` for a register whose length is read
+    /// from a `<pLength>` node.
+    pub fn declared_len(&self) -> Option<u32> {
+        self.addressing.as_ref().map(Addressing::byte_len)
     }
 
     /// The `<pPort>` the register's address is relative to; `None` means the
-    /// device.
+    /// device, or a `<String>`, which has no register.
     pub fn port(&self) -> Option<&str> {
-        self.addressing.port()
+        self.addressing.as_ref().and_then(Addressing::port)
+    }
+
+    /// The node a `<String>` reads and writes through, if it delegates.
+    pub fn pvalue(&self) -> Option<&str> {
+        self.pvalue.as_deref()
+    }
+
+    /// The `<pLength>` node a `<StringReg>`'s length is read from, if any.
+    pub fn length_node(&self) -> Option<&str> {
+        self.addressing.as_ref().and_then(Addressing::length_node)
     }
 }
 
 impl RegisterNode {
-    /// Declared length of the register block in bytes.
+    /// Declared length of the register block in bytes; `0` when a
+    /// `<pLength>` node gives it ([`RegisterNode::length_node`]).
     ///
     /// This exists so a consumer can report a register's size without naming
     /// `Addressing`, which is not re-exported (backlog `API-02`).
@@ -625,6 +647,11 @@ impl RegisterNode {
     pub fn port(&self) -> Option<&str> {
         self.addressing.port()
     }
+
+    /// The `<pLength>` node the length is read from at runtime, if any.
+    pub fn length_node(&self) -> Option<&str> {
+        self.addressing.length_node()
+    }
 }
 
 /// The addressing of a register-backed node, if it has its own.
@@ -634,7 +661,7 @@ pub(crate) fn node_addressing(node: &Node) -> Option<&Addressing> {
         Node::Float(n) => n.addressing.as_ref(),
         Node::Enum(n) => n.addressing.as_ref(),
         Node::Boolean(n) => n.addressing.as_ref(),
-        Node::String(n) => Some(&n.addressing),
+        Node::String(n) => n.addressing.as_ref(),
         Node::Register(n) => Some(&n.addressing),
         _ => None,
     }

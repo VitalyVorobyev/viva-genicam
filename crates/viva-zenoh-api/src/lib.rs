@@ -170,8 +170,13 @@ pub fn gige_device_id(mac: &[u8; 6]) -> String {
 /// again, wherever (backlog UV-03). On the one camera this has met, a MATRIX
 /// VISION mvBlueFOX3-2004G, it is the serial its bootstrap registers report
 /// too. A camera without one is named by its `bus` and `address`, and may get
-/// a new id when plugged in again. Characters a Zenoh key cannot carry
-/// become `_`.
+/// a new id when plugged in again.
+///
+/// Letters, digits, `-` and `.` are kept; every other byte of the serial's
+/// UTF-8, `_` included, becomes `_` and two lowercase hex digits (`/` is
+/// `_2f`, `_` is `_5f`). The escape is reversible, so two serials never share
+/// an id: replacing each by a bare `_` made `a/b` and `a*b` one camera
+/// (Codex review of #205).
 pub fn u3v_device_id(
     vendor_id: u16,
     product_id: u16,
@@ -183,14 +188,14 @@ pub fn u3v_device_id(
         Some(serial) => serial.to_string(),
         None => format!("{bus}-{address}"),
     };
-    let instance: String = instance
-        .chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,
-            _ => '_',
-        })
-        .collect();
-    format!("cam-u3v-{vendor_id:04x}{product_id:04x}-{instance}")
+    let mut escaped = String::with_capacity(instance.len());
+    for byte in instance.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' => escaped.push(char::from(byte)),
+            _ => escaped.push_str(&format!("_{byte:02x}")),
+        }
+    }
+    format!("cam-u3v-{vendor_id:04x}{product_id:04x}-{escaped}")
 }
 
 // ── Connection Lifecycle ─────────────────────────────────────────────────────
@@ -971,8 +976,19 @@ mod tests {
         );
         assert_eq!(
             u3v_device_id(0x2676, 0xba02, Some("a/b*c$#?"), "2", 7),
-            "cam-u3v-2676ba02-a_b_c___"
+            "cam-u3v-2676ba02-a_2fb_2ac_24_23_3f"
         );
+    }
+
+    /// Codex review of #205: replacing each character a key cannot carry by
+    /// `_` made `a/b` and `a*b` one id, and discovery skipped the second
+    /// camera. The escape is reversible, so distinct serials stay distinct.
+    #[test]
+    fn serials_that_differ_only_where_a_key_cannot_carry_them_stay_distinct() {
+        let id = |serial| u3v_device_id(0x2676, 0xba02, Some(serial), "2", 7);
+        assert_ne!(id("a/b"), id("a*b"));
+        assert_ne!(id("a_b"), id("a/b"));
+        assert_ne!(id("a_2fb"), id("a/b"));
     }
 
     #[test]

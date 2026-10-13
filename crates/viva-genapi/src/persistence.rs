@@ -23,7 +23,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
-use tracing::warn;
+use tracing::{debug, warn};
 use viva_genapi_xml::{AccessMode, DocumentIdentity};
 
 use crate::nodemap::Limit;
@@ -453,6 +453,13 @@ impl NodeMap {
     /// Read every streamable feature from the device: each selected one
     /// under every entry of its selectors, which are put back afterwards.
     ///
+    /// A selector selects only while it can be set: one that is not
+    /// implemented, not available, locked or read-only now leaves the
+    /// feature a single value, which is saved once, without that selector.
+    /// The mvBlueFOX3-2004G does not implement `ExposureTimeSelector`, and
+    /// `ExposureTime` used to be left out of every save for it (ADR-0028,
+    /// amendment of 2026-10-13).
+    ///
     /// A feature is left out, with the reason in [`Configuration::omitted`],
     /// when it cannot be both read and written — declared read-only or
     /// write-only — or when, now, it is not implemented, not available,
@@ -484,7 +491,7 @@ impl NodeMap {
                 reads: 0,
                 abandoned: None,
             };
-            self.walk_selectors(&mut walk, io);
+            self.walk_selectors(&mut walk, io, 0);
             match walk.abandoned {
                 Some(reason) => saved.omitted.push(Omission {
                     feature: feature.name.clone(),
@@ -511,12 +518,12 @@ impl NodeMap {
         }
     }
 
-    /// Set each of `walk.selectors` from `walk.context.len()` on to each of
-    /// its entries in turn, read the feature under every combination, and
-    /// put each selector back as it was.
-    fn walk_selectors(&mut self, walk: &mut SelectorWalk<'_>, io: &dyn RegisterIo) {
-        let depth = walk.context.len();
-        let Some(selector) = walk.selectors.get(depth) else {
+    /// Set each of `walk.selectors` from `index` on to each of its entries
+    /// in turn, read the feature under every combination, and put each
+    /// selector that moved back as it was. A selector that cannot be set now
+    /// selects nothing, and is passed over.
+    fn walk_selectors(&mut self, walk: &mut SelectorWalk<'_>, io: &dyn RegisterIo, index: usize) {
+        let Some(selector) = walk.selectors.get(index) else {
             walk.reads += 1;
             if walk.reads > MAX_SELECTOR_COMBINATIONS {
                 walk.abandoned = Some(format!(
@@ -538,6 +545,22 @@ impl NodeMap {
             }
             return;
         };
+        match self.selects_now(selector, io) {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(feature = walk.feature, %selector, "the selector cannot be set now; saving the feature without it");
+                self.walk_selectors(walk, io, index + 1);
+                return;
+            }
+            Err(err) => {
+                walk.omitted.push(Omission {
+                    feature: walk.feature.to_string(),
+                    selectors: walk.context.clone(),
+                    reason: format!("the state of its selector {selector}: {err}"),
+                });
+                return;
+            }
+        }
         let original = match self.get_text(selector, io) {
             Ok(value) => value,
             Err(err) => {
@@ -556,6 +579,9 @@ impl NodeMap {
                 return;
             }
         };
+        // The entry the selector holds after our writes; `None` while none
+        // succeeded, and it has not moved.
+        let mut holds: Option<String> = None;
         for entry in entries {
             if walk.abandoned.is_some() {
                 break;
@@ -570,13 +596,33 @@ impl NodeMap {
                 });
                 continue;
             }
+            holds = Some(entry.clone());
             walk.context.push((selector.clone(), entry));
-            self.walk_selectors(walk, io);
+            self.walk_selectors(walk, io, index + 1);
             walk.context.pop();
         }
-        if let Err(err) = self.set_text(selector, &original, io) {
+        // Put it back only if the walk moved it.
+        if holds.is_some_and(|entry| entry != original)
+            && let Err(err) = self.set_text(selector, &original, io)
+        {
             warn!(%selector, %original, error = %err, "could not put the selector back");
         }
+    }
+
+    /// Whether `selector` selects now: it can be set — implemented,
+    /// available, not locked, and declared writable. One that cannot be set
+    /// leaves the features it selects one value each.
+    fn selects_now(&self, selector: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
+        if !matches!(
+            self.declared_access_mode(selector),
+            Some(AccessMode::RW | AccessMode::WO)
+        ) {
+            return Ok(false);
+        }
+        if !self.is_available(selector, io)? {
+            return Ok(false);
+        }
+        Ok(self.locked_by(selector, io)?.is_none())
     }
 
     /// The entries a save iterates a selector over: an enumeration's
@@ -772,6 +818,11 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         for (selector, entry) in &value.selectors {
             let original = self.get_text(selector, io)?;
+            // A selector that already holds the entry is not moved, and so
+            // has nothing to be put back to.
+            if original == *entry {
+                continue;
+            }
             self.set_text(selector, entry, io)?;
             moved.push((selector, original));
         }

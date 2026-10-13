@@ -129,9 +129,12 @@ EMVA package.
 A real USB3 Vision camera has a smoke suite of its own, which neither
 `cargo test --workspace` nor CI runs: every test is `#[ignore]`d. With a camera
 plugged in, it discovers, opens, streams, reads chunks and events, restarts a
-stream and fits the clock, and turns off what it turned on; it writes nothing
-non-volatile. One test at a time, since a USB device admits one owner;
-`VIVA_U3V_INDEX` picks a camera other than the first:
+stream and fits the clock, reads string and `<pLength>` features, tries an
+enumeration entry the camera does not offer, and saves and loads its
+configuration; it puts back what it changed and writes nothing non-volatile.
+Point the camera at a lit scene: the stream test fails on a flat frame. One
+test at a time, since a USB device admits one owner; `VIVA_U3V_INDEX` picks a
+camera other than the first:
 
 ```bash
 cargo test -p viva-genicam --features u3v-usb --test u3v_hardware -- --ignored --test-threads=1
@@ -173,6 +176,12 @@ cargo test -p viva-genicam    --test sfnc_corpus   -- --nocapture   # + the Came
 
 `VIVA_GENICAM_XML_CORPUS` points them at another directory — XML dumped from
 your own camera with `viva-camctl xml`, for instance.
+
+The parse test also fails on a child element the parser reads past without
+interpreting (`XmlModel::ignored`) unless `EXPECTED_IGNORED` allows it, with
+the reason: documentation, or a known gap's backlog row. A new vendor
+document that brings a new element fails it until the element is
+implemented or allowed.
 
 ## Evidence
 

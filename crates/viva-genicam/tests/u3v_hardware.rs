@@ -301,3 +301,98 @@ fn a_fitted_clock_gives_frames_host_time() {
         assert!(off < Duration::from_secs(2));
     }
 }
+
+/// H-1 and H-3: a `<String>` reads through its `<pValue>`, and a
+/// `<Register>` reads the length its `<pLength>` node gives. On the
+/// mvBlueFOX3-2004G, `DeviceFirmwareVersion` read empty and
+/// `mvDeviceFirmwareHashCode` was not built at all.
+#[test]
+#[ignore = "needs a USB3 Vision camera"]
+fn strings_and_registers_read_what_the_camera_holds() {
+    let camera = connect_u3v(&device()).expect("connect");
+    for name in ["DeviceFirmwareVersion", "SensorName"] {
+        if camera.nodemap().node(name).is_none() {
+            println!("{name}: not in this camera's XML");
+            continue;
+        }
+        let value = camera.get_string(name).expect(name);
+        println!("{name}: {value:?}");
+        assert!(!value.is_empty(), "{name} reads empty");
+    }
+    let hash = "mvDeviceFirmwareHashCode";
+    if camera.nodemap().node(hash).is_some() {
+        let bytes = camera.get_register(hash).expect(hash);
+        println!("{hash}: {} bytes {bytes:02x?}", bytes.len());
+        assert!(!bytes.is_empty());
+    } else {
+        println!("{hash}: not in this camera's XML");
+    }
+}
+
+/// H-4: an entry the camera does not offer now is refused, and the feature
+/// keeps its value. The mvBlueFOX3-2004G accepted `TestPattern` =
+/// `GreyHorizontalRamp`, which it does not implement, and streamed zeros.
+#[test]
+#[ignore = "needs a USB3 Vision camera"]
+fn an_entry_the_camera_does_not_offer_is_refused() {
+    let mut camera = connect_u3v(&device()).expect("connect");
+    let feature = "TestPattern";
+    let Ok(before) = camera.get_enum(feature) else {
+        println!("{feature}: not on this camera");
+        return;
+    };
+    let all = camera.enum_entries(feature).expect("entries");
+    let offered = camera
+        .feature_state(feature)
+        .expect("state")
+        .enum_entries
+        .unwrap_or_default();
+    let Some(missing) = all.iter().find(|entry| !offered.contains(entry)) else {
+        println!("{feature}: every entry is offered now");
+        return;
+    };
+    println!("{feature}: offered {offered:?}; trying {missing}");
+    let err = camera
+        .set_enum(feature, missing)
+        .expect_err("an entry not offered is refused");
+    println!("refused: {err}");
+    assert!(err.to_string().contains("not available"), "{err}");
+    assert_eq!(camera.get_enum(feature).expect(feature), before);
+}
+
+/// H-5: `ExposureTime` is saved even though the camera does not implement
+/// its selector, and a load restores it.
+#[test]
+#[ignore = "needs a USB3 Vision camera"]
+fn a_saved_exposure_time_is_restored() {
+    let mut camera = connect_u3v(&device()).expect("connect");
+    let original = camera.get_float("ExposureTime").expect("ExposureTime");
+    let mut file = Vec::new();
+    let saved = camera.save_features(&mut file).expect("save");
+    let text = String::from_utf8(file).expect("utf-8");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("ExposureTime\t"))
+        .unwrap_or_else(|| panic!("ExposureTime not saved; omitted: {:?}", saved.omitted));
+    println!("saved {} values; {line}", saved.values.len());
+
+    let changed = if original > 1000.0 { 500.0 } else { 20000.0 };
+    camera.set_float("ExposureTime", changed).expect("change");
+    let report = camera.load_features(&mut text.as_bytes()).expect("load");
+    let restored = camera.get_float("ExposureTime").expect("ExposureTime");
+    println!(
+        "loaded {} values, {} not written; ExposureTime {original} -> {changed} -> {restored}",
+        report.written,
+        report.failures.len()
+    );
+    for failure in &report.failures {
+        println!("  not written: {failure}");
+    }
+    assert!(
+        (restored - original).abs() < 1.0,
+        "{restored} != {original}"
+    );
+    camera
+        .set_float("ExposureTime", original)
+        .expect("put back");
+}

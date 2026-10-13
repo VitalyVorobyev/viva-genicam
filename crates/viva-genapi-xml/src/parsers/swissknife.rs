@@ -4,7 +4,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{NodeMetaBuilder, TAG_VALUE, handle_predicate_start};
-use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
+use crate::util::{attribute_value, attribute_value_required, read_text_start};
 use crate::{FormulaBindings, NodeDecl, PredicateRefs, SkOutput, SwissKnifeDecl, XmlError};
 
 /// Parse a `<SwissKnife>` or `<IntSwissKnife>` element into a
@@ -81,8 +81,8 @@ pub(crate) fn parse_swissknife(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
@@ -116,7 +116,7 @@ pub(crate) fn parse_swissknife(
                         output = kind;
                     }
                 }
-                _ => {}
+                _ => meta_builder.ignore_empty(e),
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {

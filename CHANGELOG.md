@@ -12,6 +12,25 @@ release opens with what to read before upgrading.
 
 ### Read before upgrading
 
+- **An enumeration refuses an entry that is not available now**: `set_enum`,
+  `set_text`, `Camera::set`, Python's `set` and a configuration load return
+  `GenApiError::EnumEntryUnavailable { node, entry }` for an entry whose
+  `pIsImplemented` or `pIsAvailable` reads false, and write nothing, as GenApi
+  does. It used to be written: an mvBlueFOX3-2004G took `TestPattern =
+  GreyHorizontalRamp`, which it does not implement, and streamed zeros. A load
+  lists such a value as not written. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **XML model: a `<String>` is not a register.** `StringDecl::addressing` is
+  an `Option`, and `StringDecl` gains `pvalue` and `value`;
+  `StringNode::declared_len()` is an `Option` too. `Addressing::Sum` gains
+  `p_length` (`Addressing::length_node()`), and `GenApiError::BadLength` refuses
+  a length it reads that no register has. `NodeMeta` and `PortDecl` gain
+  `ignored`, listed by `XmlModel::ignored()` and `NodeMap::ignored()` as
+  `IgnoredElement`s. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **A USB3 Vision device id escapes its serial reversibly**: a byte other than
+  a letter, a digit, `-` or `.` is `_` and two hex digits (`a/b` is
+  `cam-u3v-…-a_2fb`), so a camera whose serial has one gets a new id. Two
+  serials that differed only there shared an id, and the second camera was
+  not served. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
 - **Errors carry their causes, typed** (ADR-0030), so every error enum changed
   shape, and every one is `#[non_exhaustive]`: a `match` needs a wildcard arm.
   `GenicamError::Transport(String)` and `Parse(String)` are gone: a transport
@@ -214,6 +233,16 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Registers whose length another node gives** (`<pLength>`, GenICam
+  Standard v2.1.1 §2.8.3): a `<Register>` or `<StringReg>` reads the length
+  its node holds now. The mvBlueFOX3-2004G's `mvDeviceFirmwareHashCode` and
+  `LUTValueAll` were dropped from its node map; 22 `<Register>`s in the vendor
+  corpus were too. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **What the XML parser reads past is listed**: a child element no parser
+  interprets is recorded on its node (`XmlModel::ignored()`,
+  `NodeMap::ignored()`), `viva-camctl report` prints them by kind and element,
+  and the corpus tests fail on one that is neither documentation nor a known
+  gap. A `<String>`'s `<pValue>` used to vanish this way without a trace. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
 - **A GenTL producer, `viva_gentl.cti`** (ADR-0031): GenTL consumers such as
   Harvesters list, open, configure and stream GigE Vision cameras through
   viva, with no vendor SDK; releases attach one for Linux x86_64, macOS (Apple
@@ -418,6 +447,31 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **A `<String>` reads its value**: one that takes it from `<pValue>` read as
+  an empty register, and a floating one with a `<Value>` read empty too. The
+  mvBlueFOX3-2004G's `DeviceFirmwareVersion` now reads `2.32.1676.0`, and its
+  `SensorName` `IMX287`. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **A `<StringReg>` with `<pLength>` reads its text**: its length was read
+  past and taken as 0 (Basler acA1600-20gm's `DeviceFirmwareVersion`, FLIR's
+  `ChunkSerialData` and `EventSerialData`). ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **A `<StructEntry>` takes what its `<StructReg>` declares** — visibility,
+  tooltip, display name — as GenICam Standard v2.1.1 §2.8.6 has it; the entries
+  of 202 corpus `<StructReg>`s that declare a `<Visibility>` lost it. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **A saved configuration holds a feature whose selector cannot be set now**:
+  a selector that is not implemented, not available, locked or read-only
+  selects nothing, so the feature is saved once, without it, and a load
+  restores it (ADR-0028). The mvBlueFOX3-2004G does not implement
+  `ExposureTimeSelector`, and `ExposureTime` was left out of every save. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **Saving and loading move a selector only when they must, and put back only
+  what they moved**: a save warned "could not put the selector back" for
+  selectors it never moved (24 times on the mvBlueFOX3-2004G), and a load set
+  a selector to the entry it already held. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **`viva-camctl` prints an error's cause once**: an unplugged camera's
+  stream ended with "read a frame: the device is disconnected: the device is
+  disconnected". ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
+- **A USB3 Vision event reader whose transfers the host keeps cancelling
+  ends** once more than eight fail in a row, as the stream does; it
+  resubmitted them forever. ([#206](https://github.com/VitalyVorobyev/viva-genicam/pull/206))
 - **A USB3 Vision stream starts clean**: the stream endpoint is reset before
   streaming is enabled, so a camera starts at block 0 with nothing left over;
   the event endpoint likewise, so a new event stream does not first deliver an

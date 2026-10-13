@@ -19,7 +19,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **TC-37**: GigE Vision's chunk and event layouts (ADR-0026) have met no camera; one capture with chunk mode on settles them.
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.
 - **DC-03**: `Scan3d*` scale, offset and invalid value; one capture ([#93](https://github.com/VitalyVorobyev/viva-genicam/pull/93)) is the only evidence of what a 3D device sends.
-- **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture; behind GA-09.
+- **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture.
 - **DC-05**: event-vision blocks in Python; their format is known only from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)'s camera.
 - **SR-23**: the receive engine's block-id and packet heuristics (late window, restart on block 1, refusing an oversized data packet); a capture through an AcquisitionStop/Start settles them.
 - **SR-24**: whether cameras accept a packet resend request sent from the stream socket rather than the control channel's port; a lossy stream's `-vv` log, or a capture, settles it.

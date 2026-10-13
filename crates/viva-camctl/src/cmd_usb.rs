@@ -196,7 +196,7 @@ pub fn run_stream(
     frames.close();
     print_counters("Summary:", &stats);
     if let Some(err) = ended {
-        eprintln!("stream error: {err:#}");
+        eprintln!("stream error: {}", common::error_line(&err));
         if camera.transport().is_lost() {
             eprintln!("the camera is gone: unplugged or reset");
         }

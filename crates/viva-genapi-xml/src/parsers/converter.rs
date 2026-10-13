@@ -1,14 +1,14 @@
-//! Parsers for Converter, IntConverter, and StringReg nodes.
+//! Parsers for Converter, IntConverter, StringReg and String nodes.
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    NodeMetaBuilder, TAG_P_VALUE, handle_addressing_empty, handle_addressing_start,
+    NodeMetaBuilder, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
     handle_invalidator_start, handle_predicate_start,
 };
 use crate::builders::AddressingBuilder;
-use crate::util::{attribute_value, attribute_value_required, read_text_start, skip_element};
+use crate::util::{attribute_value, attribute_value_required, read_text_start};
 use crate::{
     AccessMode, ConverterDecl, FormulaBindings, IntConverterDecl, NodeDecl, PredicateRefs,
     SkOutput, Slope, StringDecl, XmlError,
@@ -123,8 +123,8 @@ pub(crate) fn parse_converter(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
@@ -144,7 +144,7 @@ pub(crate) fn parse_converter(
                         variables_from.push((var_name, target));
                     }
                 }
-                _ => {}
+                _ => meta_builder.ignore_empty(e),
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -276,8 +276,8 @@ pub(crate) fn parse_int_converter(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
@@ -297,7 +297,7 @@ pub(crate) fn parse_int_converter(
                         variables_from.push((var_name, target));
                     }
                 }
-                _ => {}
+                _ => meta_builder.ignore_empty(e),
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -337,16 +337,30 @@ pub(crate) fn parse_int_converter(
 }
 
 /// Parse a `<StringReg>` or `<String>` element into a [`NodeDecl::String`].
+///
+/// The two are different nodes (GenICam Standard v2.1.1 §2.8.11 and
+/// §2.8.12). A `<StringReg>` is a register: an address, a `<Length>` or
+/// `<pLength>`, an `<AccessMode>` that defaults to read-only. A `<String>`
+/// has no register: it holds a `<Value>`, a floating node, or reads and
+/// writes the node its `<pValue>` names. Reading a `<String>` as a register
+/// is how the mvBlueFOX3-2004G's `DeviceFirmwareVersion` read empty.
 pub(crate) fn parse_string(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
 ) -> Result<NodeDecl, XmlError> {
     let name = attribute_value_required(&start, "Name")?;
+    let node_name = start.name().as_ref().to_string();
+    let is_register = node_name == "StringReg";
     let mut addressing = AddressingBuilder::default();
-    let mut access = AccessMode::RO;
+    let mut access = if is_register {
+        AccessMode::RO
+    } else {
+        AccessMode::RW
+    };
+    let mut pvalue: Option<String> = None;
+    let mut value: Option<String> = None;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
-    let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
 
@@ -357,22 +371,40 @@ pub(crate) fn parse_string(
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
+                TAG_P_VALUE if !is_register => {
+                    let text = read_text_start(reader, e)?;
+                    let target = text.trim();
+                    if !target.is_empty() {
+                        pvalue = Some(target.to_string());
+                    }
+                }
+                // The text as written: a string's spaces are its own.
+                TAG_VALUE if !is_register => {
+                    value = Some(read_text_start(reader, e)?);
+                }
                 _ => {
-                    // `<Address>`, `<pAddress>`, `<pIndex>`, `<Length>` and
-                    // `<pPort>` mean what they mean on any register.
+                    // `<Address>`, `<pAddress>`, `<pIndex>`, `<Length>`,
+                    // `<pLength>` and `<pPort>` mean what they mean on any
+                    // register.
                     if handle_addressing_start(reader, e, &name, &mut addressing)?
                         || handle_predicate_start(reader, e, &mut predicates)?
                         || handle_invalidator_start(reader, e, &mut invalidators)?
                     {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
-            Ok(Event::Empty(ref e)) => {
-                handle_addressing_empty(e, &mut addressing)?;
-            }
+            Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                // `<Value/>`: an empty start value.
+                TAG_VALUE if !is_register => value = Some(String::new()),
+                _ => {
+                    if !handle_addressing_empty(e, &mut addressing)? {
+                        meta_builder.ignore_empty(e);
+                    }
+                }
+            },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::invalid(&name, "ends before its closing tag"));
@@ -383,12 +415,23 @@ pub(crate) fn parse_string(
         buf.clear();
     }
 
-    let addressing = addressing.build();
+    // A `<String>` that declares a register anyway keeps it: the address is
+    // what the document says, and nothing else would give the node a value.
+    let addressing = if is_register || addressing.has_terms() {
+        Some(addressing.build())
+    } else {
+        None
+    };
+    if addressing.is_none() && pvalue.is_none() && value.is_none() {
+        return Err(XmlError::missing(&name, "<Value> or <pValue>"));
+    }
 
     Ok(NodeDecl::String(StringDecl {
         name,
         meta: meta_builder.build(),
         addressing,
+        pvalue,
+        value,
         access,
         predicates,
         invalidators,

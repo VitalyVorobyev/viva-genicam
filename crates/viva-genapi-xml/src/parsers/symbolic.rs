@@ -12,8 +12,7 @@ use super::{
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
-    attribute_value, attribute_value_required, parse_address, parse_i64, parse_u64,
-    read_text_start, skip_element,
+    attribute_value, attribute_value_required, parse_address, parse_i64, parse_u64, read_text_start,
 };
 use crate::{
     AccessMode, BitField, ByteOrder, EnumEntryDecl, EnumValueSrc, NodeDecl, PredicateRefs, XmlError,
@@ -66,7 +65,7 @@ pub(crate) fn parse_enum(
                 "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_INT_SWISS_KNIFE | TAG_P_PORT
                 | "Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
-                        skip_element(reader, e.name().as_ref())?;
+                        meta_builder.ignore(reader, e, None)?;
                     }
                 }
                 "AccessMode" => {
@@ -74,7 +73,7 @@ pub(crate) fn parse_enum(
                     access = AccessMode::parse(&text)?;
                 }
                 "EnumEntry" => {
-                    let entry = parse_enum_entry(reader, e.clone())?;
+                    let entry = parse_enum_entry(reader, e.clone(), &mut meta_builder)?;
                     entries.push(entry);
                 }
                 TAG_P_SELECTED => {
@@ -90,14 +89,16 @@ pub(crate) fn parse_enum(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
             Ok(Event::Empty(ref e)) => {
                 if e.name().as_ref() == "EnumEntry" {
                     entries.push(parse_enum_entry_empty(e)?);
+                } else {
+                    meta_builder.ignore_empty(e);
                 }
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
@@ -251,8 +252,8 @@ pub(crate) fn parse_boolean(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
@@ -302,7 +303,7 @@ pub(crate) fn parse_boolean(
                         bitfield.note_byte_order(order);
                     }
                 }
-                _ => {}
+                _ => meta_builder.ignore_empty(e),
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -353,10 +354,12 @@ pub(crate) fn parse_boolean(
     })
 }
 
-/// Parse an `<EnumEntry>` start element.
+/// Parse an `<EnumEntry>` start element. A child it does not interpret is
+/// recorded on the enumeration, as `EnumEntry/<tag>`.
 fn parse_enum_entry(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
+    enumeration: &mut NodeMetaBuilder,
 ) -> Result<EnumEntryDecl, XmlError> {
     let mut name = attribute_value_required(&start, "Name")?;
     let mut literal = attribute_value(&start, TAG_VALUE)?;
@@ -404,7 +407,7 @@ fn parse_enum_entry(
                 }
                 _ => {
                     if !handle_predicate_start(reader, e, &mut predicates)? {
-                        skip_element(reader, e.name().as_ref())?;
+                        enumeration.ignore(reader, e, Some("EnumEntry"))?;
                     }
                 }
             },

@@ -44,12 +44,125 @@ const EXPECTED_SKIPS: &[(&str, &str)] = &[];
 /// catch. A tag not listed here fails outright.
 ///
 /// Use `""` as the substring to allow a tag unconditionally.
-const EXPECTED_SKIP_REASONS: &[(&str, &str)] = &[
-    // GA-09 phase two: `<pLength>`, a register length resolved from another
-    // node at runtime. 21 of the corpus's 63 `<Register>` declarations use it;
-    // the other 42 are supported and must now build.
-    ("Register", "<pLength>"),
+const EXPECTED_SKIP_REASONS: &[(&str, &str)] = &[];
+
+/// Child elements the parser reads past without interpreting, as `(node kind,
+/// element, why that is acceptable or which backlog row tracks it)`: the
+/// allow-list of [`viva_genapi_xml::XmlModel::ignored`].
+///
+/// An element not listed fails the test: it is the class of loss that hid a
+/// `<String>`'s `<pValue>` until a camera showed it (H-2). The node kind is
+/// [`viva_genapi_xml::NodeDecl::kind`]'s, so `Integer` covers `<IntReg>`,
+/// `<MaskedIntReg>` and a `<StructEntry>` too; an entry's child is written
+/// `EnumEntry/<tag>`. The reasons are checked by nothing but a reader: keep
+/// each one true.
+const EXPECTED_IGNORED: &[(&str, &str, &str)] = &[
+    // GenICam Standard v2.1.1 §2.8.1: "All elements placed inside the
+    // <Extension> element are ignored."
+    ("Boolean", "Extension", EXTENSION),
+    ("Category", "Extension", EXTENSION),
+    ("Command", "Extension", EXTENSION),
+    ("Converter", "Extension", EXTENSION),
+    ("Enum", "Extension", EXTENSION),
+    ("Enum", "EnumEntry/Extension", EXTENSION),
+    ("Float", "Extension", EXTENSION),
+    ("Integer", "Extension", EXTENSION),
+    ("String", "Extension", EXTENSION),
+    // Documentation and presentation for a GUI, which change no value
+    // (GA-41).
+    ("Command", "IsDeprecated", DEPRECATED),
+    ("Enum", "IsDeprecated", DEPRECATED),
+    ("Integer", "IsDeprecated", DEPRECATED),
+    ("String", "IsDeprecated", DEPRECATED),
+    (
+        "Enum",
+        "EnumEntry/Description",
+        "documentation of an entry (GA-41)",
+    ),
+    (
+        "Enum",
+        "EnumEntry/ToolTip",
+        "documentation of an entry (GA-41)",
+    ),
+    (
+        "Enum",
+        "EnumEntry/Visibility",
+        "the user level a GUI shows an entry at (GA-41)",
+    ),
+    (
+        "Float",
+        "DisplayNotation",
+        "how a GUI formats the number (GA-41)",
+    ),
+    (
+        "Float",
+        "DisplayPrecision",
+        "how a GUI formats the number (GA-41)",
+    ),
+    (
+        "Float",
+        "pAlias",
+        "§2.8.1: the same feature described another way, \"mainly used in a GUI\" (GA-41)",
+    ),
+    ("Port", "Description", PORT_DOCUMENTATION),
+    ("Port", "ToolTip", PORT_DOCUMENTATION),
+    ("Port", "Visibility", PORT_DOCUMENTATION),
+    (
+        "Port",
+        "ImposedAccessMode",
+        "every occurrence in the corpus is RW, which imposes nothing",
+    ),
+    // Known gaps, each with its backlog row.
+    ("Float", "Inc", "GA-43: a Float's increment is not enforced"),
+    (
+        "Float",
+        "pInc",
+        "GA-43: a Float's increment is not enforced",
+    ),
+    (
+        "Float",
+        "Value",
+        "GA-49: a Float's constant <Value> is not read",
+    ),
+    (
+        "Float",
+        "Sign",
+        "GA-18: the sign of a scaled Float's payload",
+    ),
+    ("Integer", "ValueIndexed", INDEXED),
+    ("Integer", "ValueDefault", INDEXED),
+    ("Integer", "pValueIndexed", INDEXED),
+    ("Integer", "pValueDefault", INDEXED),
+    ("Float", "ValueIndexed", INDEXED),
+    ("Float", "ValueDefault", INDEXED),
+    ("Float", "pValueIndexed", INDEXED),
+    ("Float", "pValueDefault", INDEXED),
+    (
+        "Integer",
+        "pValueCopy",
+        "GA-51: a write is not copied to <pValueCopy>",
+    ),
+    (
+        "Integer",
+        "EventID",
+        "GA-52: an event does not invalidate the node its <EventID> names",
+    ),
+    (
+        "Port",
+        "pInvalidator",
+        "GA-53: a change of a port's <pInvalidator> does not invalidate its registers",
+    ),
+    (
+        "Enum",
+        "EnumEntry/ImposedAccessMode",
+        "GA-54: an entry's <ImposedAccessMode> is not honoured",
+    ),
 ];
+
+const EXTENSION: &str = "vendor data, ignored by definition (§2.8.1)";
+const DEPRECATED: &str = "a note for new designs (§2.8.1, GA-41)";
+const PORT_DOCUMENTATION: &str = "a port is not a feature: its documentation has nowhere to go";
+const INDEXED: &str = "GA-50: an indexed value (<pIndex> with <ValueIndexed>) is not supported";
 
 /// Count declarations that carry a resolved bitfield, as `(single-bit, ranged)`.
 ///
@@ -299,6 +412,8 @@ fn vendor_xml_corpus_parses() {
     let mut polling_elements = 0usize;
     let mut polling_documents = 0usize;
     let mut polling_nodes = 0usize;
+    // H-2: (kind, element) -> (occurrences, documents, an example node).
+    let mut ignored: BTreeMap<(String, String), (usize, usize, String)> = BTreeMap::new();
 
     for path in &documents {
         let document = path
@@ -394,6 +509,17 @@ fn vendor_xml_corpus_parses() {
                         "{document}: declares <PollingTime> on {declared_polling} nodes, parsed {parsed_polling}"
                     ));
                 }
+                let mut seen_here = std::collections::BTreeSet::new();
+                for element in model.ignored() {
+                    let key = (element.kind.clone(), element.element.clone());
+                    let entry = ignored
+                        .entry(key.clone())
+                        .or_insert_with(|| (0, 0, format!("{document}: {}", element.node)));
+                    entry.0 += 1;
+                    if seen_here.insert(key) {
+                        entry.1 += 1;
+                    }
+                }
                 let unexpected: Vec<_> = model
                     .skipped
                     .iter()
@@ -433,6 +559,34 @@ fn vendor_xml_corpus_parses() {
         }
     }
 
+    let mut ignored_total = 0usize;
+    for ((kind, element), (count, docs, example)) in &ignored {
+        ignored_total += count;
+        let allowed = EXPECTED_IGNORED
+            .iter()
+            .find(|(k, e, _)| k == kind && e == element);
+        match allowed {
+            Some((_, _, reason)) => {
+                println!(
+                    "ignored {kind:<12} {element:<28} {count:>6} in {docs:>2} documents: {reason}"
+                )
+            }
+            None => {
+                println!(
+                    "IGNORED {kind:<12} {element:<28} {count:>6} in {docs:>2} documents, not allowed (e.g. {example})"
+                );
+                failures.push(format!(
+                    "<{element}> on {kind} is read past without interpretation \
+                     ({count} in {docs} documents, e.g. {example}): implement it, or allow it \
+                     in EXPECTED_IGNORED with the reason"
+                ));
+            }
+        }
+    }
+    println!(
+        "=== ignored: {ignored_total} elements of {} kinds ===",
+        ignored.len()
+    );
     println!(
         "=== {} documents, {total_nodes} nodes, {bitfields} bitfields, \
          {streamable} streamable in {streamable_documents} documents, {} failures ===",

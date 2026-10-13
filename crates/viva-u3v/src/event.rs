@@ -165,18 +165,12 @@ impl U3vEventStream {
             match completion.status {
                 Ok(()) => self.take(&completion.data),
                 Err(U3vError::Disconnected) => return Err(U3vError::Disconnected),
-                // The stream cancels only while recovering, below: this one
-                // the host ended, which an unplug on macOS does (UV-03).
-                Err(U3vError::Cancelled) => {
-                    let error = unless_gone(
-                        U3vError::Cancelled,
-                        || self.queue.is_present(),
-                        Duration::ZERO,
-                    );
-                    if matches!(error, U3vError::Disconnected) {
-                        return Err(error);
-                    }
-                }
+                // Any other failure — a transfer the host cancelled too,
+                // which the reader cancels only while recovering, below, and
+                // an unplug on macOS does (UV-03) — is counted, and the
+                // endpoint reset, as the stream does: cancellations that
+                // never stop end the reader rather than spin it (Codex review
+                // of #205).
                 Err(error) => {
                     let error = unless_gone(error, || self.queue.is_present(), Duration::ZERO);
                     if matches!(error, U3vError::Disconnected) {
@@ -312,5 +306,30 @@ mod tests {
         mock.enqueue_error(EP, not_responding());
         let result = events.next_event_within(idle);
         assert!(matches!(result, Err(U3vError::Disconnected)), "{result:?}");
+    }
+
+    /// Codex review of #205: a transfer the host cancelled, on a device still
+    /// listed, is a failure like any other — counted, and the endpoint reset —
+    /// so that cancellations that never stop end the reader instead of
+    /// spinning it. A good event in between starts the count again.
+    #[test]
+    fn transfers_the_host_keeps_cancelling_end_the_event_reader() {
+        use crate::usb::{MockUsbTransfer, UsbTransfer};
+        use std::sync::Arc;
+        const EP: u8 = 0x83;
+        let idle = Duration::from_millis(1);
+
+        let mock = Arc::new(MockUsbTransfer::new());
+        mock.set_present(Some(true));
+        mock.enqueue_error(EP, U3vError::Cancelled);
+        mock.enqueue_read(EP, command(0, &[0, 0, 0x01, 0x90, 1, 0, 0, 0, 0, 0, 0, 0]));
+        for _ in 0..=MAX_CONSECUTIVE_FAILURES {
+            mock.enqueue_error(EP, U3vError::Cancelled);
+        }
+        let mut events = U3vEventStream::new(mock.bulk_in(EP).unwrap(), 0, None);
+        let event = events.next_event_within(idle).unwrap().expect("an event");
+        assert_eq!(event.id, 0x9001);
+        let result = events.next_event_within(idle);
+        assert!(matches!(result, Err(U3vError::Cancelled)), "{result:?}");
     }
 }

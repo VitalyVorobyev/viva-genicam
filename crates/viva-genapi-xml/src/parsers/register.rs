@@ -8,7 +8,7 @@ use super::{
     handle_predicate_start,
 };
 use crate::builders::AddressingBuilder;
-use crate::util::{attribute_value_required, read_text_start, skip_element};
+use crate::util::{attribute_value_required, read_text_start};
 use crate::{AccessMode, NodeDecl, PredicateRefs, RegisterDecl, XmlError};
 
 /// Parse a `<Register>` element into a [`NodeDecl::Register`].
@@ -22,15 +22,13 @@ use crate::{AccessMode, NodeDecl, PredicateRefs, RegisterDecl, XmlError};
 /// `IndexedRegister` is the case that needs it: a bare `<pIndex>` strides by the
 /// register's own length.
 ///
-/// # `<pLength>` is rejected, deliberately and loudly
+/// # `<pLength>`
 ///
-/// A `<Register>` may take its length from another node at runtime. Nothing in
-/// this workspace resolves a dynamic length yet, and 21 of the vendor corpus's
-/// 63 `<Register>` declarations use it. Rather than parse such a node and
-/// silently read the wrong number of bytes, this returns an error naming
-/// `<pLength>`, which `parse` records as a [`crate::SkippedNode`]. Per ADR-0018
-/// an incomplete implementation is acceptable where the gap is *visible*; this
-/// is what makes it visible.
+/// A `<Register>` may take its length from another node at runtime (GenICam
+/// Standard v2.1.1 §2.8.3); 22 of the vendor corpus's `<Register>`
+/// declarations do, and the mvBlueFOX3-2004G's `mvDeviceFirmwareHashCode`.
+/// [`handle_addressing_start`] records it in the [`crate::Addressing`], and
+/// the GenApi layer reads the length before each access.
 pub(crate) fn parse_register(
     reader: &mut Reader<&[u8]>,
     start: BytesStart<'_>,
@@ -40,7 +38,6 @@ pub(crate) fn parse_register(
     let mut access = AccessMode::RO;
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
-    let mut p_length: Option<String> = None;
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -52,22 +49,19 @@ pub(crate) fn parse_register(
                     let text = read_text_start(reader, e)?;
                     access = AccessMode::parse(&text)?;
                 }
-                "pLength" => {
-                    let text = read_text_start(reader, e)?;
-                    p_length = Some(text.trim().to_string());
-                }
                 _ => {
                     let handled = handle_addressing_start(reader, e, &name, &mut addressing)?
                         || handle_predicate_start(reader, e, &mut predicates)?
-                        || handle_invalidator_start(reader, e, &mut invalidators)?
-                        || meta_builder.handle_start(reader, e)?;
+                        || handle_invalidator_start(reader, e, &mut invalidators)?;
                     if !handled {
-                        skip_element(reader, e.name().as_ref())?;
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
             Ok(Event::Empty(ref e)) => {
-                handle_addressing_empty(e, &mut addressing)?;
+                if !handle_addressing_empty(e, &mut addressing)? {
+                    meta_builder.ignore_empty(e);
+                }
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -77,15 +71,6 @@ pub(crate) fn parse_register(
             _ => {}
         }
         buf.clear();
-    }
-
-    if let Some(target) = p_length {
-        // GA-09: a register length resolved from another node at runtime.
-        return Err(XmlError::Unsupported {
-            node: name,
-            element: "pLength",
-            text: target,
-        });
     }
 
     Ok(NodeDecl::Register(RegisterDecl {
@@ -220,27 +205,30 @@ mod tests {
         assert_eq!(decl.addressing.port(), None);
     }
 
-    /// The gap must name itself. A `<Register>` dropped for any *other* reason
-    /// is a regression, and the corpus test relies on this substring to tell
-    /// the two apart.
+    /// GenICam Standard v2.1.1 §2.8.3: the length "can be read from another
+    /// node using an <pLength> entry". Once refused as GA-09; the
+    /// mvBlueFOX3-2004G's `mvDeviceFirmwareHashCode` is one.
     #[test]
-    fn p_length_is_rejected_with_a_reason_naming_it() {
-        let err = parse_one(
-            r#"<Register Name="DynamicLen">
-                 <Address>0x10</Address>
-                 <pLength>LengthNode</pLength>
+    fn p_length_names_the_node_the_length_is_read_from() {
+        let decl = parse_one(
+            r#"<Register Name="mvDeviceFirmwareHashCode">
+                 <Address>0x10001a0</Address>
+                 <pLength>mvDeviceFirmwareHash_InqLength</pLength>
+                 <AccessMode>RO</AccessMode>
                </Register>"#,
         )
-        .expect_err("a dynamic length must not be accepted");
+        .expect("a <pLength> register parses");
 
-        let text = err.to_string();
-        assert!(
-            text.contains("<pLength>"),
-            "the error must name <pLength> so the skip can be attributed: {text}"
+        assert_eq!(
+            decl.addressing.length_node(),
+            Some("mvDeviceFirmwareHash_InqLength")
         );
+        assert_eq!(len_of(&decl.addressing), 0, "no static length");
         assert!(
-            text.contains("LengthNode"),
-            "the error should name the node supplying the length: {text}"
+            decl.addressing
+                .referenced_nodes()
+                .contains(&"mvDeviceFirmwareHash_InqLength"),
+            "a change of the length node must reach the register"
         );
     }
 }

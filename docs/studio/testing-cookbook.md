@@ -145,7 +145,7 @@ how you saw it fail.
   bug worth reporting with the XML attached.
 
 ### No frames during acquisition
-- Check the service log for `first GVSP frame received` and
+- Check the service log for `first frame received` and
   `published first stream block to Zenoh`.
 - Check Studio's log for `First image/meta received`,
   `First raw image frame received` and

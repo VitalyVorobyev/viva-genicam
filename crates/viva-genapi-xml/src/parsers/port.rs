@@ -32,6 +32,7 @@ pub(crate) fn parse_port(
     let name = attribute_value_required(&start, "Name")?;
     let mut chunk_id = None;
     let mut event_id = None;
+    let mut ignored = Vec::new();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -61,9 +62,14 @@ pub(crate) fn parse_port(
                 }
                 other => {
                     let other = other.to_string();
+                    tracing::debug!(port = %name, element = %other, "reading past an element this parser does not interpret");
                     skip_element(reader, &other)?;
+                    ignored.push(other);
                 }
             },
+            Ok(Event::Empty(ref e)) => {
+                ignored.push(e.name().as_ref().to_string());
+            }
             Ok(Event::End(ref e)) if e.name().as_ref() == "Port" => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::invalid(&name, "ends before its closing tag"));
@@ -84,7 +90,11 @@ pub(crate) fn parse_port(
             ));
         }
     };
-    Ok(PortDecl { name, kind })
+    Ok(PortDecl {
+        name,
+        kind,
+        ignored,
+    })
 }
 
 /// A port with no children: `<Port Name="Device"/>`.
@@ -92,6 +102,7 @@ pub(crate) fn parse_port_empty(start: &BytesStart<'_>) -> Result<PortDecl, XmlEr
     Ok(PortDecl {
         name: attribute_value_required(start, "Name")?,
         kind: PortKind::Device,
+        ignored: Vec::new(),
     })
 }
 

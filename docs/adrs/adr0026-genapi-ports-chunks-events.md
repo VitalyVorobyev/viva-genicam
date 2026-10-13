@@ -142,4 +142,6 @@ attachment; the facade's scoped forms are the convenient path.
   `ChunkImageLength` from the standard's text alone. TC-21 stays open until
   #112's reporter confirms.
 - USB3 Vision chunks (the same layout, little-endian tags, per aravis) and
-  events are not wired (API-11, TC-27).
+  events are not wired (API-11, TC-27). *Amended by
+  [ADR-0032](adr0032-usb3-vision-transport.md):* both are wired, and one
+  camera confirmed the little-endian tags and its event ports' offsets.

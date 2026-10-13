@@ -472,12 +472,13 @@ class Camera:
         iface: Optional[str] = None,
         port: int = 0,
     ) -> EventStream:
-        """Receive the events ``names`` (``["ExposureEnd"]``) on ``iface``
-        (GigE Vision only).
+        """Receive the events ``names`` (``["ExposureEnd"]``).
 
-        Binds a UDP socket (``port``, 0 for any), points the camera's message
-        channel at it, and enables each event. ``iface`` as for
-        :meth:`stream`.
+        GigE Vision: binds a UDP socket on ``iface`` (``port``, 0 for any),
+        points the camera's message channel at it, and enables each event;
+        ``iface`` as for :meth:`stream`. USB3 Vision: enables each event and
+        reads the camera's event interface; ``iface`` and ``port`` do not
+        apply.
         """
         return EventStream(self._native.open_event_stream(list(names), iface, port))
 

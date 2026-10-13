@@ -9,10 +9,40 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::U3vError;
-use crate::bootstrap::{Abrm, FileFormat, ManifestEntry, Sbrm, Sirm, sbrm, sirm};
+use crate::bootstrap::{
+    Abrm, Eirm, FileFormat, ManifestEntry, Sbrm, Sirm, UsbSpeed, abrm, capability, sbrm, sirm,
+    u3vcp_capability,
+};
 use crate::control::{ControlChannel, DEFAULT_TIMEOUT};
-use crate::stream::{DEFAULT_MAX_TRANSFER_SIZE, StreamLayout, U3vStream};
-use crate::usb::UsbTransfer;
+use crate::event::U3vEventStream;
+use crate::stream::{
+    DEFAULT_MAX_TRANSFER_SIZE, DEFAULT_TRANSFERS_IN_FLIGHT, StreamLayout, U3vStream,
+};
+use crate::usb::{GONE_GRACE, UsbTransfer, unless_gone};
+
+/// How a stream reads: the payload size to use when the device does not say,
+/// and the transfers it keeps queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U3vStreamOptions {
+    /// Bytes of payload in one block — from the `PayloadSize` feature, say —
+    /// used only when the SIRM's Required Payload Size is 0; 0 for none.
+    pub payload_size_hint: u64,
+    /// The largest payload transfer to ask for
+    /// ([`DEFAULT_MAX_TRANSFER_SIZE`]).
+    pub max_transfer_size: u32,
+    /// Transfers to keep queued ([`DEFAULT_TRANSFERS_IN_FLIGHT`]).
+    pub transfers_in_flight: usize,
+}
+
+impl Default for U3vStreamOptions {
+    fn default() -> Self {
+        Self {
+            payload_size_hint: 0,
+            max_transfer_size: DEFAULT_MAX_TRANSFER_SIZE,
+            transfers_in_flight: DEFAULT_TRANSFERS_IN_FLIGHT,
+        }
+    }
+}
 
 /// ZIP local file header magic: `PK\x03\x04`.
 const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
@@ -45,14 +75,15 @@ const TRANSFER_MARGIN: Duration = Duration::from_millis(100);
 /// High-level handle for a USB3 Vision device.
 ///
 /// Wraps a [`ControlChannel`] and parsed bootstrap registers. The generic
-/// `T` parameter allows production use with [`RusbTransfer`](crate::usb::RusbTransfer)
-/// and testing with [`MockUsbTransfer`](crate::usb::MockUsbTransfer).
+/// `T` parameter allows production use with `NusbTransfer` (the `usb`
+/// feature) and testing with [`MockUsbTransfer`](crate::usb::MockUsbTransfer).
 pub struct U3vDevice<T: UsbTransfer> {
     control: ControlChannel<T>,
     abrm: Abrm,
     sbrm: Sbrm,
     stream_ep: Option<u8>,
     event_ep: Option<u8>,
+    speed: Option<UsbSpeed>,
 }
 
 impl<T: UsbTransfer> U3vDevice<T> {
@@ -82,6 +113,18 @@ impl<T: UsbTransfer> U3vDevice<T> {
 
         let sbrm = Sbrm::read_from(&mut control, abrm.sbrm_address)?;
         control.set_max_transfer(sbrm.max_cmd_transfer, sbrm.max_ack_transfer);
+        // The host's word for the link, else the device's own register.
+        let speed = control.transport().link_speed().or(sbrm.current_speed);
+        if let Some(speed) = speed.filter(|s| s.is_below_superspeed()) {
+            // Backlog UV-03: a USB 2 port, cable or hub; streaming at a
+            // fraction of the camera's bandwidth, if at all.
+            tracing::warn!(
+                %speed,
+                model = %abrm.model_name,
+                "the USB3 Vision camera runs below SuperSpeed: plug it into a USB 3 port, \
+                 directly or through a USB 3 hub and cable"
+            );
+        }
 
         Ok(Self {
             control,
@@ -89,6 +132,7 @@ impl<T: UsbTransfer> U3vDevice<T> {
             sbrm,
             stream_ep,
             event_ep,
+            speed,
         })
     }
 
@@ -105,6 +149,26 @@ impl<T: UsbTransfer> U3vDevice<T> {
     /// Reference to the parsed SBRM.
     pub fn sbrm(&self) -> &Sbrm {
         &self.sbrm
+    }
+
+    /// The bus speed the device runs at: as the host's USB stack reports
+    /// it, or else as the SBRM's current speed register says.
+    pub fn current_speed(&self) -> Option<UsbSpeed> {
+        self.speed
+    }
+
+    /// The device time, in ns: latched, then read from the GenCP timestamp
+    /// registers (GenCP 1.3.1 §5.4.16-17); `None` when the device has none
+    /// (Device Capability bit 3). The clock a stream's leaders and events
+    /// are stamped with.
+    pub fn timestamp(&mut self) -> Result<Option<u64>, U3vError> {
+        if self.abrm.device_capability & capability::TIMESTAMP == 0 {
+            return Ok(None);
+        }
+        self.control
+            .write_mem(abrm::TIMESTAMP_LATCH, &1u32.to_le_bytes())?;
+        let bytes = self.control.read_mem(abrm::TIMESTAMP, 8)?;
+        Ok(Some(u64::from_le_bytes(bytes[..8].try_into().unwrap())))
     }
 
     /// Read `len` bytes from device memory at `addr`.
@@ -153,19 +217,42 @@ impl<T: UsbTransfer> U3vDevice<T> {
         self.event_ep
     }
 
-    /// Configure the SIRM and enable streaming, returning a
-    /// [`U3vStream`] that reads with the configured transfer layout.
+    /// [`open_stream_with`](Self::open_stream_with) the default transfer
+    /// settings and `payload_hint`.
+    pub fn open_stream(&mut self, payload_hint: u64) -> Result<U3vStream, U3vError>
+    where
+        T: 'static,
+    {
+        self.open_stream_with(&U3vStreamOptions {
+            payload_size_hint: payload_hint,
+            ..U3vStreamOptions::default()
+        })
+    }
+
+    /// Configure the SIRM, reset the stream endpoint and enable streaming,
+    /// returning a [`U3vStream`] that reads with the configured transfer
+    /// layout.
     ///
     /// The payload size is the SIRM's Required Payload Size: the device's
-    /// own figure for this stream channel. `payload_hint` — from the
+    /// own figure for this stream channel. The options' hint — from the
     /// `PayloadSize` feature, say — is used only when the device leaves that
-    /// register at 0.
-    pub fn open_stream(&mut self, payload_hint: u64) -> Result<U3vStream<T>, U3vError> {
+    /// register at 0. Every transfer is a multiple of the SIRM's alignment
+    /// and of the endpoint's packet size, whichever is larger.
+    ///
+    /// The endpoint is reset — halted and cleared, so the device drops
+    /// whatever an earlier stream left on it — after the layout is written
+    /// and before StreamEnable is set, as aravis does
+    /// (`arv_uv_device_reset_stream_endpoint`; backlog TC-27 (3)).
+    pub fn open_stream_with(&mut self, options: &U3vStreamOptions) -> Result<U3vStream, U3vError>
+    where
+        T: 'static,
+    {
         let ep = self
             .stream_ep
             .ok_or(U3vError::Device("has no streaming endpoint"))?;
 
         let sirm = self.read_sirm()?;
+        let payload_hint = options.payload_size_hint;
         let payload_size = match sirm.required_payload_size {
             0 => payload_hint,
             required => {
@@ -179,17 +266,29 @@ impl<T: UsbTransfer> U3vDevice<T> {
                 required
             }
         };
+        let transport = Arc::clone(self.control.transport());
+        let packet = transport
+            .max_packet_size(ep)
+            .and_then(|size| u32::try_from(size).ok())
+            .unwrap_or(1);
+        let alignment = sirm.alignment()?.max(packet);
         let layout = StreamLayout::new(
             payload_size,
             sirm.required_leader_size,
             sirm.required_trailer_size,
-            sirm.alignment()?,
-            DEFAULT_MAX_TRANSFER_SIZE,
+            alignment,
+            options.max_transfer_size,
         )?;
+        let mut queue = transport.bulk_in(ep)?;
         sirm.configure(&mut self.control, &layout)?;
+        queue
+            .reset()
+            .map_err(|error| unless_gone(error, || queue.is_present(), GONE_GRACE))?;
         sirm.enable(&mut self.control)?;
 
-        Ok(U3vStream::new(self.control.transport().clone(), ep, layout))
+        let mut stream = U3vStream::new(queue, layout);
+        stream.set_transfers_in_flight(options.transfers_in_flight);
+        Ok(stream)
     }
 
     /// Clear StreamEnable: the device stops sending on the stream endpoint.
@@ -198,10 +297,52 @@ impl<T: UsbTransfer> U3vDevice<T> {
         sirm.disable(&mut self.control)
     }
 
+    /// The device's event interface registers; an error when it has none
+    /// (U3VCP Capability bit 1, or an EIRM address of 0).
+    pub fn read_eirm(&mut self) -> Result<Eirm, U3vError> {
+        if self.sbrm.eirm_address == 0
+            || self.sbrm.u3vcp_capability & u3vcp_capability::EIRM_AVAILABLE == 0
+        {
+            return Err(U3vError::Device("has no event interface (EIRM)"));
+        }
+        Eirm::read_from(&mut self.control, self.sbrm.eirm_address)
+    }
+
+    /// Set EventEnable and return a [`U3vEventStream`] reading the event
+    /// endpoint (backlog TC-27 (4)). Which events the device sends is the
+    /// XML's `EventSelector` / `EventNotification` to choose.
+    pub fn open_events(&mut self) -> Result<U3vEventStream, U3vError>
+    where
+        T: 'static,
+    {
+        let ep = self
+            .event_ep
+            .ok_or(U3vError::Device("has no event endpoint"))?;
+        let eirm = self.read_eirm()?;
+        let transport = Arc::clone(self.control.transport());
+        let mut queue = transport.bulk_in(ep)?;
+        // As for the stream: whatever an earlier session left queued on the
+        // endpoint is dropped before events are enabled.
+        queue
+            .reset()
+            .map_err(|error| unless_gone(error, || queue.is_present(), GONE_GRACE))?;
+        eirm.set_enabled(&mut self.control, true)?;
+        Ok(U3vEventStream::new(
+            queue,
+            eirm.maximum_event_transfer_length,
+            transport.max_packet_size(ep),
+        ))
+    }
+
+    /// Clear EventEnable: the device stops sending events.
+    pub fn stop_events(&mut self) -> Result<(), U3vError> {
+        let eirm = self.read_eirm()?;
+        eirm.set_enabled(&mut self.control, false)
+    }
+
     /// The bootstrap registers as read, decoded and raw, for a diagnostic
-    /// report. Nothing about USB3 Vision has been checked against a camera
-    /// (backlog TC-27), so the raw SBRM and SIRM bytes are what settles a
-    /// disagreement. A register the device refuses is listed as such.
+    /// report. One camera has been checked against this (backlog TC-27), so
+    /// the raw SBRM and SIRM bytes are what settles a disagreement. A register the device refuses is listed as such.
     pub fn describe(&mut self) -> Vec<(String, String)> {
         let abrm = &self.abrm;
         let sbrm = &self.sbrm;
@@ -269,17 +410,18 @@ impl<T: UsbTransfer> U3vDevice<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Open from rusb device (convenience)
+// Open a discovered device over nusb (convenience)
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "usb")]
-impl U3vDevice<crate::usb::RusbTransfer> {
+impl U3vDevice<crate::native::NusbTransfer> {
     /// Open a USB3 Vision device from a [`U3vDeviceInfo`](crate::discovery::U3vDeviceInfo)
     /// obtained via [`discover()`](crate::discovery::discover).
     pub fn open_device(info: &crate::discovery::U3vDeviceInfo) -> Result<Self, U3vError> {
-        let iface = &info.interface_info;
+        let transport = crate::native::NusbTransfer::open(info)?;
+        let iface = transport.interfaces().clone();
         Self::open(
-            Arc::new(crate::usb::RusbTransfer::open(info)?),
+            Arc::new(transport),
             iface.control_ep_in,
             iface.control_ep_out,
             iface.stream_ep_in,

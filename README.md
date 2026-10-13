@@ -23,8 +23,8 @@
 
 Pre-1.0, and working: users have run discovery, control and streaming against
 real GigE Vision cameras from several vendors, on Linux, Windows and macOS.
-USB3 Vision has not run on a real camera yet, and the API still changes
-between releases. What has been verified is on the user guide's
+USB3 Vision has run on one camera so far, and the API still changes between
+releases. What has been verified is on the user guide's
 [welcome page](https://vitalyvorobyev.github.io/viva-genicam/welcome.html#status);
 the full list of known gaps is [issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191).
 If your camera hits something, [open an issue](https://github.com/VitalyVorobyev/viva-genicam/issues/new/choose).
@@ -33,7 +33,7 @@ If your camera hits something, [open an issue](https://github.com/VitalyVorobyev
 
 - **Discovery** -- find GigE Vision cameras via GVCP broadcast; USB3 Vision cameras via USB enumeration
 - **Control** -- read and write device registers and GenApi features (Integer, Float, Enumeration, Boolean, Command, String, Register, SwissKnife, Converter, IntConverter)
-- **Streaming** -- GigE: a GVSP receive thread per stream, tolerant of reordering and extended IDs, counting every frame's fate, plus raw capture from event-vision cameras; U3V: async frame iterator over USB bulk reads
+- **Streaming** -- GigE: a GVSP receive thread per stream, tolerant of reordering and extended IDs, counting every frame's fate, plus raw capture from event-vision cameras; U3V: a reader thread per stream with several USB transfers in flight, recovering from a failed transfer, with the same counters
 - **IP configuration** -- FORCEIP for temporary assignment; persistent IP registers for permanent configuration
 - **Events & actions** -- subscribe to camera events; trigger synchronized acquisition via action commands
 - **Time, chunks & events** -- map device timestamps to host time; read chunk and event features (timestamp, exposure, frame id, ...) through the camera's own XML
@@ -158,5 +158,4 @@ and the wire contract in [docs/studio/zenoh-api.md](docs/studio/zenoh-api.md).
 
 ## License
 
-MIT -- see [LICENSE](LICENSE). The Python wheel also links libusb statically, which makes it
-`MIT AND LGPL-2.1-or-later` ([details](crates/viva-pygenicam/README.md#licensing)).
+MIT -- see [LICENSE](LICENSE), for the crates and the Python package alike.

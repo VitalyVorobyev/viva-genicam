@@ -6,8 +6,8 @@ use tracing::warn;
 
 use super::{
     NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_DISPLAY_NAME, TAG_ENDIANESS, TAG_ENDIANNESS,
-    TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX,
-    TAG_P_PORT, TAG_P_SELECTED, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty,
+    TAG_INT_SWISS_KNIFE, TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS,
+    TAG_P_INDEX, TAG_P_PORT, TAG_P_SELECTED, TAG_P_VALUE, TAG_VALUE, handle_addressing_empty,
     handle_addressing_start, handle_p_selected_start, handle_predicate_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder};
@@ -63,7 +63,8 @@ pub(crate) fn parse_enum(
                     let text = read_text_start(reader, e)?;
                     value = Some(parse_i64(&text)?);
                 }
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT | "Length" => {
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_INT_SWISS_KNIFE | TAG_P_PORT
+                | "Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
                         skip_element(reader, e.name().as_ref())?;
                     }
@@ -183,7 +184,7 @@ pub(crate) fn parse_boolean(
                 }
                 // Shared handling so `<Address>`, `<pAddress>` and
                 // `<pIndex>` all contribute their term.
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_P_PORT => {
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_INT_SWISS_KNIFE | TAG_P_PORT => {
                     handle_addressing_start(reader, e, &name, &mut addressing)?;
                 }
                 "Length" => {

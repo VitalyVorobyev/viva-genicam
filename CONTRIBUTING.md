@@ -97,8 +97,9 @@ cargo test -p viva-genapi  --test persistence        # the save plan, the restor
 cargo test -p viva-genapi  --test caching            # Cachable, PollingTime, changed_since and poll, on a scripted device
 cargo test -p viva-gige    --test chunk_layout       # the chunk layout, from hand-written bytes
 # USB3 Vision
-cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva-fake-u3v
+cargo test -p viva-genicam --test fake_u3v_camera --features u3v  # against viva-fake-u3v: transfers in flight, stalls, unplug, chunks, events, time
 cargo test -p viva-u3v     --test gencp_conformance  # wire layouts from GenCP 1.2 and vendor XML
+cargo test -p viva-u3v     --lib stream              # the stream engine against scripted transfers: replanning, recovery, disconnect
 # Services
 cargo test -p viva-service --test fake_camera_e2e    # viva-service end to end over Zenoh
 cargo test -p viva-service-u3v                       # the USB3 Vision service over Zenoh: serving, cameras coming and going
@@ -124,6 +125,20 @@ port's XML with `xmllint` against the GenApi 1.1 schema. With
 (`scripts/gentl-harvesters.py`), a consumer we did not write. CI's `GenTL
 producer` job runs all three on Linux; `GENICAM_PACKAGE_ZIP` reuses a downloaded
 EMVA package.
+
+A real USB3 Vision camera has a smoke suite of its own, which neither
+`cargo test --workspace` nor CI runs: every test is `#[ignore]`d. With a camera
+plugged in, it discovers, opens, streams, reads chunks and events, restarts a
+stream and fits the clock, and turns off what it turned on; it writes nothing
+non-volatile. One test at a time, since a USB device admits one owner;
+`VIVA_U3V_INDEX` picks a camera other than the first:
+
+```bash
+cargo test -p viva-genicam --features u3v-usb --test u3v_hardware -- --ignored --test-threads=1
+```
+
+It was written against one camera (ADR-0032 §8). Run it with any other, and
+attach the output to the pull request or issue.
 
 GVSP parsing and block assembly also have fuzz targets, in `fuzz/` (outside
 the workspace; needs nightly and `cargo install cargo-fuzz`):

@@ -24,7 +24,7 @@ use viva_genicam::{
     connect_gige_as, open_u3v_device, Access, Camera, ChunkConfig, ControlState, GenicamError,
     GigeRegisterIo, Roi, U3vRegisterIo,
 };
-use viva_u3v::{RusbTransfer, U3vDevice, U3vError, UsbTransfer};
+use viva_u3v::{BulkIn, NusbTransfer, U3vDevice, U3vError, UsbSpeed, UsbTransfer};
 
 use crate::discovery::{PyGigeDeviceInfo, PyU3vDeviceInfo};
 use crate::errors::{genicam_error, gige_only, parse_error, to_py, transport_error, IntoPyErr};
@@ -44,7 +44,7 @@ pub(crate) type U3vCamera = Camera<U3vRegisterIo<UsbLink>>;
 /// (`viva_genicam.testing.FakeU3vCamera`), behind one type so Python sees
 /// one `Camera` class.
 pub(crate) enum UsbLink {
-    Usb(RusbTransfer),
+    Usb(Arc<NusbTransfer>),
     Fake(Arc<viva_fake_u3v::FakeU3vTransport>),
 }
 
@@ -65,6 +65,36 @@ impl UsbTransfer for UsbLink {
         match self {
             UsbLink::Usb(usb) => usb.bulk_read(endpoint, buf, timeout),
             UsbLink::Fake(fake) => fake.bulk_read(endpoint, buf, timeout),
+        }
+    }
+
+    // Each link's own queue: several transfers in flight on USB.
+    fn bulk_in(self: &Arc<Self>, endpoint: u8) -> Result<Box<dyn BulkIn>, U3vError> {
+        match self.as_ref() {
+            UsbLink::Usb(usb) => usb.bulk_in(endpoint),
+            UsbLink::Fake(fake) => fake.bulk_in(endpoint),
+        }
+    }
+
+    fn max_packet_size(&self, endpoint: u8) -> Option<usize> {
+        match self {
+            UsbLink::Usb(usb) => usb.max_packet_size(endpoint),
+            UsbLink::Fake(fake) => fake.max_packet_size(endpoint),
+        }
+    }
+
+    fn link_speed(&self) -> Option<UsbSpeed> {
+        match self {
+            UsbLink::Usb(usb) => usb.link_speed(),
+            UsbLink::Fake(fake) => fake.link_speed(),
+        }
+    }
+
+    // How an unplug is told apart on macOS, whose transfers do not say.
+    fn is_present(&self) -> Option<bool> {
+        match self {
+            UsbLink::Usb(usb) => usb.is_present(),
+            UsbLink::Fake(fake) => fake.is_present(),
         }
     }
 }
@@ -257,11 +287,11 @@ fn connect_gige(
 fn connect_u3v(py: Python<'_>, device_info: PyU3vDeviceInfo) -> PyResult<PyCamera> {
     let info = device_info.inner;
     py.detach(|| {
-        let iface = &info.interface_info;
-        let device = RusbTransfer::open(&info)
+        let device = NusbTransfer::open(&info)
             .and_then(|usb| {
+                let iface = usb.interfaces().clone();
                 U3vDevice::open(
-                    Arc::new(UsbLink::Usb(usb)),
+                    Arc::new(UsbLink::Usb(Arc::new(usb))),
                     iface.control_ep_in,
                     iface.control_ep_out,
                     iface.stream_ep_in,
@@ -747,8 +777,10 @@ impl PyCamera {
         feature_values(py, values)
     }
 
-    /// Bind an event socket on `iface` (and `port`, 0 for any), point the
-    /// camera's message channel at it, and enable the events `events` names.
+    /// Enable the events `events` names and receive them: on GigE Vision,
+    /// bind an event socket on `iface` (and `port`, 0 for any) and point the
+    /// camera's message channel at it; on USB3 Vision, read the camera's
+    /// event interface (`iface` and `port` do not apply).
     #[pyo3(signature = (events, iface=None, port=0))]
     fn open_event_stream(
         &self,
@@ -757,6 +789,19 @@ impl PyCamera {
         iface: Option<&str>,
         port: u16,
     ) -> PyResult<PyEventStream> {
+        if let CameraInner::U3v { camera, .. } = &self.inner {
+            let ids: Vec<&str> = events.iter().map(String::as_str).collect();
+            let stream = py.detach(|| {
+                let mut guard = lock_open(camera)?;
+                let cam = guard
+                    .as_mut()
+                    .expect("lock_open checked the camera is open");
+                cam.configure_events(&ids)
+                    .and_then(|()| cam.open_event_stream())
+                    .into_py_err()
+            })?;
+            return Ok(PyEventStream::u3v(stream));
+        }
         let iface = self.receive_iface(iface)?;
         let local_ip = iface.ipv4().ok_or_else(|| {
             parse_error(format!("interface {} has no IPv4 address", iface.name()))

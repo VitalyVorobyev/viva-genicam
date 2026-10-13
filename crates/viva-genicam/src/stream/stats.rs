@@ -1,4 +1,5 @@
-//! Counters for one GVSP stream (SR-07), written by its receive engine.
+//! Counters for one stream (SR-07), written by its receive engine: GVSP's,
+//! or a USB3 Vision stream's reader (API-11).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -6,7 +7,13 @@ use std::time::{Duration, Instant};
 
 const EWMA_ALPHA: f64 = 0.2;
 
-/// Snapshot of one GVSP stream's counters (backlog SR-07).
+/// Snapshot of one stream's counters (backlog SR-07).
+///
+/// **USB3 Vision** streams fill the frame counters the same way, and of the
+/// packet counters: `packets_received` counts bulk transfers,
+/// `packets_ignored_malformed` the transfers that were not the leader,
+/// payload or trailer due, and `transfer_errors` the failed transfers the
+/// stream recovered from. The other packet and resend counters stay 0.
 ///
 /// **Frames.** Every block the camera sends is counted exactly once, when its
 /// fate is decided, so that
@@ -72,6 +79,10 @@ pub struct StreamStats {
     pub resend_recovered: u64,
     /// Packets asked for again that the camera answered it no longer has.
     pub resend_unavailable: u64,
+    /// USB3 Vision: transfers that failed — a stall, a fault — and that the
+    /// stream recovered from by resetting its endpoint, at the cost of the
+    /// block in progress. 0 on GigE Vision.
+    pub transfer_errors: u64,
     /// Payload bytes of complete frames handed to the application.
     pub bytes: u64,
     /// Time between the last two complete frames.
@@ -156,6 +167,7 @@ struct StatsInner {
     resend_requested: AtomicU64,
     resend_recovered: AtomicU64,
     resend_unavailable: AtomicU64,
+    transfer_errors: AtomicU64,
     bytes: AtomicU64,
     rates: Mutex<Rates>,
 }
@@ -198,6 +210,7 @@ impl StreamStatsAccumulator {
                 resend_requested: zero(),
                 resend_recovered: zero(),
                 resend_unavailable: zero(),
+                transfer_errors: zero(),
                 bytes: zero(),
                 rates: Mutex::new(Rates {
                     last_frame_dt: Duration::ZERO,
@@ -213,6 +226,24 @@ impl StreamStatsAccumulator {
     /// A datagram was read from the socket.
     pub(crate) fn record_packet_received(&self) {
         add(&self.inner.packets_received, 1);
+    }
+
+    /// `count` transfers were read from a USB3 Vision stream.
+    #[cfg(feature = "u3v")]
+    pub(crate) fn record_packets_received(&self, count: u64) {
+        add(&self.inner.packets_received, count);
+    }
+
+    /// `count` transfers were neither the leader, payload nor trailer due.
+    #[cfg(feature = "u3v")]
+    pub(crate) fn record_malformed_packets(&self, count: u64) {
+        add(&self.inner.ignored_malformed, count);
+    }
+
+    /// `count` transfers failed and the stream recovered.
+    #[cfg(feature = "u3v")]
+    pub(crate) fn record_transfer_errors(&self, count: u64) {
+        add(&self.inner.transfer_errors, count);
     }
 
     /// A packet arrived that had already been received.
@@ -344,6 +375,7 @@ impl StreamStatsAccumulator {
             resend_requested: get(&inner.resend_requested),
             resend_recovered: get(&inner.resend_recovered),
             resend_unavailable: get(&inner.resend_unavailable),
+            transfer_errors: get(&inner.transfer_errors),
             bytes: get(&inner.bytes),
             last_frame_dt: rates.last_frame_dt,
             avg_fps: rates.avg_fps,

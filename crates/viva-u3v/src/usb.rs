@@ -1,12 +1,19 @@
 //! USB transfer abstraction for testability.
 //!
-//! [`UsbTransfer`] decouples all U3V protocol logic from the `rusb` crate,
+//! [`UsbTransfer`] decouples all U3V protocol logic from the USB library,
 //! allowing the control channel, streaming, and bootstrap parsing to be
-//! tested with [`MockUsbTransfer`] — no USB hardware required.
+//! tested with [`MockUsbTransfer`] and `viva-fake-u3v` — no USB hardware
+//! required. [`BulkIn`] is how a stream keeps several transfers in flight
+//! (backlog UV-01): a transport that can queue them, as `nusb` does,
+//! implements it; any other gets one read at a time through
+//! [`UsbTransfer::bulk_read`].
 
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::U3vError;
+use crate::bootstrap::UsbSpeed;
 
 /// Abstraction over a claimed USB device for bulk endpoint I/O.
 ///
@@ -21,92 +28,186 @@ pub trait UsbTransfer: Send + Sync {
     /// Returns the number of bytes actually read.
     fn bulk_read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration)
     -> Result<usize, U3vError>;
+
+    /// Reads on the bulk IN `endpoint` that can be queued ahead of the
+    /// device, as a stream needs them.
+    ///
+    /// The default reads one transfer at a time through
+    /// [`bulk_read`](Self::bulk_read), when the next completion is asked for:
+    /// correct, but with nothing queued while the host is busy elsewhere. A
+    /// transport that can keep transfers in flight overrides it.
+    fn bulk_in(self: &Arc<Self>, endpoint: u8) -> Result<Box<dyn BulkIn>, U3vError>
+    where
+        Self: Sized + 'static,
+    {
+        Ok(Box::new(Unqueued {
+            transport: Arc::clone(self),
+            endpoint,
+            requested: VecDeque::new(),
+            cancelled: 0,
+        }))
+    }
+
+    /// The largest packet the endpoint carries, from its descriptor; `None`
+    /// when unknown. Every IN transfer a stream asks for is a multiple of
+    /// it, so that a packet never straddles two transfers.
+    fn max_packet_size(&self, _endpoint: u8) -> Option<usize> {
+        None
+    }
+
+    /// The speed the host's USB stack reports the device runs at; `None`
+    /// when this transport cannot tell.
+    fn link_speed(&self) -> Option<UsbSpeed> {
+        None
+    }
+
+    /// Whether the operating system still lists the device, asked after a
+    /// transfer failed in a way that does not say whether it is gone;
+    /// `None` when this transport cannot tell. One look, no waiting.
+    fn is_present(&self) -> Option<bool> {
+        None
+    }
 }
 
-// ---------------------------------------------------------------------------
-// rusb-backed implementation (behind `usb` feature)
-// ---------------------------------------------------------------------------
+/// How long a device whose transfer failed gets to leave the operating
+/// system's list before it counts as still attached. On macOS the transfer
+/// in flight fails before the unplugged device leaves the registry; an
+/// mvBlueFOX3-2004G's next control transfer failed 3 ms later.
+pub(crate) const GONE_GRACE: Duration = Duration::from_millis(500);
 
-#[cfg(feature = "usb")]
-pub use self::rusb_impl::RusbTransfer;
+/// How often the list is looked at within [`GONE_GRACE`].
+const GONE_POLL: Duration = Duration::from_millis(20);
 
-#[cfg(feature = "usb")]
-mod rusb_impl {
-    use super::*;
-    use std::sync::Arc;
-
-    /// [`UsbTransfer`] backed by a real `rusb::DeviceHandle`.
-    pub struct RusbTransfer {
-        handle: Arc<rusb::DeviceHandle<rusb::Context>>,
+/// `error`, or [`U3vError::Disconnected`] when it is one a missing device
+/// also causes ([`U3vError::may_mean_gone`]) and `present` says the
+/// operating system no longer lists the device — now, or within `grace`
+/// (backlog UV-03). A transport that cannot tell leaves `error` as it is.
+pub(crate) fn unless_gone(
+    error: U3vError,
+    present: impl Fn() -> Option<bool>,
+    grace: Duration,
+) -> U3vError {
+    if !error.may_mean_gone() {
+        return error;
     }
-
-    impl RusbTransfer {
-        /// Wrap an already-opened and claimed device handle.
-        pub fn new(handle: Arc<rusb::DeviceHandle<rusb::Context>>) -> Self {
-            Self { handle }
-        }
-
-        /// Open the device enumeration reported as `info` and claim its
-        /// USB3 Vision interfaces: control, and streaming and events where it
-        /// has them. [`U3vDevice::open_device`](crate::U3vDevice::open_device)
-        /// opens one this way.
-        pub fn open(info: &crate::U3vDeviceInfo) -> Result<Self, U3vError> {
-            use rusb::UsbContext;
-            let context = rusb::Context::new().map_err(U3vError::usb)?;
-            let devices = context.devices().map_err(U3vError::usb)?;
-            let device = devices
-                .iter()
-                .find(|d| d.bus_number() == info.bus && d.address() == info.address)
-                .ok_or(U3vError::NotFound {
-                    bus: info.bus,
-                    address: info.address,
-                })?;
-            let handle = device.open().map_err(U3vError::usb)?;
-            let iface = &info.interface_info;
-            handle
-                .claim_interface(iface.control_iface)
-                .map_err(U3vError::usb)?;
-            if let Some(si) = iface.stream_iface {
-                let _ = handle.claim_interface(si);
+    let deadline = Instant::now() + grace;
+    loop {
+        match present() {
+            Some(false) => {
+                tracing::debug!(%error, "the device is no longer listed: it is gone");
+                return U3vError::Disconnected;
             }
-            if let Some(ei) = iface.event_iface {
-                let _ = handle.claim_interface(ei);
+            Some(true) if Instant::now() < deadline => std::thread::sleep(GONE_POLL),
+            Some(true) | None => return error,
+        }
+    }
+}
+
+/// A bulk IN endpoint's queue of transfers: submitted in order, completed in
+/// order (USB bulk transfers on one endpoint complete in the order they were
+/// queued).
+pub trait BulkIn: Send {
+    /// Queue a read of `len` bytes. It completes when `len` bytes have
+    /// arrived, or earlier at a short packet.
+    fn submit(&mut self, len: usize);
+
+    /// Transfers queued and not yet returned by [`wait_next`](Self::wait_next).
+    fn pending(&self) -> usize;
+
+    /// The oldest queued transfer once it completes, waiting up to
+    /// `timeout`; `None` if none completed in time — it stays queued — or if
+    /// nothing is queued.
+    fn wait_next(&mut self, timeout: Duration) -> Option<Completion>;
+
+    /// Ask every queued transfer to end. Each still comes back from
+    /// [`wait_next`](Self::wait_next), with whatever bytes arrived before it
+    /// ended and a [`U3vError::Cancelled`] status unless it completed first.
+    fn cancel_all(&mut self);
+
+    /// Reset the endpoint, with nothing queued: halt it and clear the halt,
+    /// so the device drops whatever it had queued on it and both sides
+    /// restart the endpoint's data toggle. A stream does this before it is
+    /// enabled, as aravis does (`arv_uv_device_reset_stream_endpoint`), and
+    /// to recover from a stall.
+    fn reset(&mut self) -> Result<(), U3vError>;
+
+    /// [`UsbTransfer::is_present`] for the device this endpoint is on.
+    fn is_present(&self) -> Option<bool> {
+        None
+    }
+}
+
+/// A transfer [`BulkIn::wait_next`] hands back.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Completion {
+    /// The bytes that arrived, as many as were received: a cancelled or
+    /// failed transfer may still carry some.
+    pub data: Vec<u8>,
+    /// How the transfer ended.
+    pub status: Result<(), U3vError>,
+}
+
+impl Completion {
+    /// A transfer that ended with `status`, carrying `data`.
+    pub fn new(data: Vec<u8>, status: Result<(), U3vError>) -> Self {
+        Self { data, status }
+    }
+}
+
+/// [`UsbTransfer::bulk_in`]'s default: each queued read is performed, one at
+/// a time, when its completion is asked for.
+struct Unqueued<T: UsbTransfer> {
+    transport: Arc<T>,
+    endpoint: u8,
+    requested: VecDeque<usize>,
+    /// How many of the oldest requests were cancelled before being read.
+    cancelled: usize,
+}
+
+impl<T: UsbTransfer + 'static> BulkIn for Unqueued<T> {
+    fn submit(&mut self, len: usize) {
+        self.requested.push_back(len);
+    }
+
+    fn pending(&self) -> usize {
+        self.requested.len()
+    }
+
+    fn wait_next(&mut self, timeout: Duration) -> Option<Completion> {
+        let len = *self.requested.front()?;
+        if self.cancelled > 0 {
+            self.cancelled -= 1;
+            self.requested.pop_front();
+            return Some(Completion::new(Vec::new(), Err(U3vError::Cancelled)));
+        }
+        let mut data = vec![0; len];
+        match self.transport.bulk_read(self.endpoint, &mut data, timeout) {
+            // Nothing within the wait: the request stays queued.
+            Err(U3vError::Timeout) => None,
+            Ok(n) => {
+                self.requested.pop_front();
+                data.truncate(n);
+                Some(Completion::new(data, Ok(())))
             }
-            Ok(Self::new(Arc::new(handle)))
+            Err(error) => {
+                self.requested.pop_front();
+                Some(Completion::new(Vec::new(), Err(error)))
+            }
         }
     }
 
-    impl UsbTransfer for RusbTransfer {
-        fn bulk_write(
-            &self,
-            endpoint: u8,
-            data: &[u8],
-            timeout: Duration,
-        ) -> Result<usize, U3vError> {
-            self.handle
-                .write_bulk(endpoint, data, timeout)
-                .map_err(usb_error)
-        }
-
-        fn bulk_read(
-            &self,
-            endpoint: u8,
-            buf: &mut [u8],
-            timeout: Duration,
-        ) -> Result<usize, U3vError> {
-            self.handle
-                .read_bulk(endpoint, buf, timeout)
-                .map_err(usb_error)
-        }
+    fn cancel_all(&mut self) {
+        self.cancelled = self.requested.len();
     }
 
-    /// A timeout is its own error: a stream waiting for its next frame, as in
-    /// trigger mode, times out without anything being wrong.
-    fn usb_error(error: rusb::Error) -> U3vError {
-        match error {
-            rusb::Error::Timeout => U3vError::Timeout,
-            other => U3vError::usb(other),
-        }
+    fn reset(&mut self) -> Result<(), U3vError> {
+        // Nothing is queued on the device on our behalf between reads.
+        Ok(())
+    }
+
+    fn is_present(&self) -> Option<bool> {
+        self.transport.is_present()
     }
 }
 
@@ -114,8 +215,11 @@ mod rusb_impl {
 // Mock implementation for testing
 // ---------------------------------------------------------------------------
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Mutex;
+
+/// What one endpoint of [`MockUsbTransfer`] answers, in order.
+type ReadQueue = VecDeque<Result<Vec<u8>, U3vError>>;
 
 /// In-memory mock of [`UsbTransfer`] for unit tests.
 ///
@@ -131,9 +235,11 @@ use std::sync::Mutex;
 /// overlapping `borrow_mut()`s and alias the same `&mut`.
 pub struct MockUsbTransfer {
     /// Queued read responses per endpoint address.
-    reads: Mutex<HashMap<u8, VecDeque<Vec<u8>>>>,
+    reads: Mutex<HashMap<u8, ReadQueue>>,
     /// Captured write payloads per endpoint address.
     writes: Mutex<HashMap<u8, Vec<Vec<u8>>>>,
+    /// What [`UsbTransfer::is_present`] answers.
+    present: Mutex<Option<bool>>,
 }
 
 impl MockUsbTransfer {
@@ -142,18 +248,35 @@ impl MockUsbTransfer {
         Self {
             reads: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
+            present: Mutex::new(None),
         }
+    }
+
+    /// What [`UsbTransfer::is_present`] answers from now on: `Some(false)`
+    /// for a device the operating system no longer lists. `None`, cannot
+    /// tell, until set.
+    pub fn set_present(&self, present: Option<bool>) {
+        *self.present.lock().expect("mock presence poisoned") = present;
     }
 
     /// Enqueue a response that will be returned by the next `bulk_read`
     /// on the given `endpoint`.
     pub fn enqueue_read(&self, endpoint: u8, data: Vec<u8>) {
+        self.enqueue(endpoint, Ok(data));
+    }
+
+    /// Enqueue an error the next `bulk_read` on `endpoint` fails with.
+    pub fn enqueue_error(&self, endpoint: u8, error: U3vError) {
+        self.enqueue(endpoint, Err(error));
+    }
+
+    fn enqueue(&self, endpoint: u8, read: Result<Vec<u8>, U3vError>) {
         self.reads
             .lock()
             .expect("mock read queue poisoned")
             .entry(endpoint)
             .or_default()
-            .push_back(data);
+            .push_back(read);
     }
 
     /// Return all captured write payloads for the given `endpoint`.
@@ -196,10 +319,14 @@ impl UsbTransfer for MockUsbTransfer {
         let data = reads
             .get_mut(&endpoint)
             .and_then(VecDeque::pop_front)
-            .ok_or(U3vError::Timeout)?;
+            .ok_or(U3vError::Timeout)??;
         let n = data.len().min(buf.len());
         buf[..n].copy_from_slice(&data[..n]);
         Ok(n)
+    }
+
+    fn is_present(&self) -> Option<bool> {
+        *self.present.lock().expect("mock presence poisoned")
     }
 }
 
@@ -242,5 +369,38 @@ mod tests {
             .bulk_read(0x81, &mut buf, Duration::from_millis(100))
             .unwrap_err();
         assert!(matches!(err, U3vError::Timeout));
+    }
+
+    /// The default queue reads in submission order, keeps a request queued
+    /// across a timeout, and hands back cancelled requests as such.
+    #[test]
+    fn the_default_queue_reads_one_request_at_a_time() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        let mut queue = mock.bulk_in(0x82).unwrap();
+        queue.submit(8);
+        queue.submit(8);
+        assert_eq!(queue.pending(), 2);
+        assert!(queue.wait_next(Duration::from_millis(1)).is_none());
+        assert_eq!(queue.pending(), 2, "a timeout keeps the request");
+
+        mock.enqueue_read(0x82, vec![1, 2, 3]);
+        let first = queue.wait_next(Duration::from_millis(1)).expect("done");
+        assert_eq!(first.data, [1, 2, 3]);
+        assert!(first.status.is_ok());
+
+        mock.enqueue_error(0x82, U3vError::Stalled { endpoint: 0x82 });
+        let failed = queue.wait_next(Duration::from_millis(1)).expect("done");
+        assert!(matches!(
+            failed.status,
+            Err(U3vError::Stalled { endpoint: 0x82 })
+        ));
+
+        queue.submit(4);
+        queue.cancel_all();
+        mock.enqueue_read(0x82, vec![9; 4]);
+        let cancelled = queue.wait_next(Duration::from_millis(1)).expect("done");
+        assert!(matches!(cancelled.status, Err(U3vError::Cancelled)));
+        assert_eq!(queue.pending(), 0);
+        assert!(queue.wait_next(Duration::from_millis(1)).is_none());
     }
 }

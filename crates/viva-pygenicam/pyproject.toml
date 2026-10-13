@@ -7,10 +7,9 @@ name = "viva-genicam"
 version = "0.8.0"
 description = "Pure-Rust GenICam stack for Python: discover, control, and stream GigE Vision / USB3 Vision cameras"
 readme = "README.md"
-# MIT for the project's own code; the binary wheel statically links
-# vendored libusb (LGPL-2.1-or-later) -- see THIRD-PARTY-NOTICES.md.
-license = { text = "MIT AND LGPL-2.1-or-later" }
-license-files = ["THIRD-PARTY-NOTICES.md", "LICENSES/*"]
+# USB3 Vision goes through nusb (pure Rust, MIT OR Apache-2.0), so the wheel
+# links no LGPL code since 0.9 (ADR-0032).
+license = { text = "MIT" }
 authors = [
     { name = "Vitaly Vorobyev" },
 ]
@@ -20,7 +19,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
-    "License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

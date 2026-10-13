@@ -1,4 +1,4 @@
-//! Chunk data in a GigE Vision payload.
+//! Chunk data in a GigE Vision or USB3 Vision payload.
 //!
 //! A camera in chunk mode sends each frame as a run of chunks — the image
 //! first, then one chunk per enabled value — each its data followed by a tag
@@ -55,6 +55,34 @@ pub(crate) fn split(
                 .next()
                 .filter(|_| is_image_payload(payload_type))
                 .map(|(_, first)| first.clone());
+            (image.unwrap_or(payload), Some(Ok(data)))
+        }
+        Err(err) => (payload, Some(Err(err))),
+    }
+}
+
+/// A USB3 Vision block's image and chunks: GigE Vision's layout with
+/// little-endian tags ([`viva_u3v::parse_chunks`]). Any payload type with
+/// the chunk flag (`0x4000`) carries chunks; with an image (`0x4001`) the
+/// image is the first chunk, and comes back on its own.
+#[cfg(feature = "u3v")]
+pub(crate) fn split_u3v(
+    payload: Bytes,
+    payload_type: u16,
+) -> (Bytes, Option<Result<ChunkData, viva_u3v::U3vError>>) {
+    if payload_type & 0x4000 == 0 {
+        return (payload, None);
+    }
+    match viva_u3v::parse_chunks(&payload) {
+        Ok(chunks) => {
+            let data: ChunkData = chunks
+                .iter()
+                .map(|&(id, offset, len)| (u64::from(id), payload.slice(offset..offset + len)))
+                .collect();
+            let image = chunks
+                .first()
+                .filter(|_| payload_type & 0x3FFF == 0x0001)
+                .map(|&(_, offset, len)| payload.slice(offset..offset + len));
             (image.unwrap_or(payload), Some(Ok(data)))
         }
         Err(err) => (payload, Some(Err(err))),

@@ -4,23 +4,19 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
 
-**One release.** The milestones below ship together as **0.9.0**, at the end of the sequence: one PR per milestone, merged in this order. U, like the receive engine, packet resend, the chunk and event ports and the GigE session lifecycle already on `main`, is derived from the specifications and arithmetic, so the release notes say what was verified only on fakes.
-
-## U — USB3 Vision robustness
-
-**Goal**: several transfers in flight, recovery from transfer errors, hot-unplug, and parity with GigE. Last, because no USB3 Vision camera has run any of it.
-**Rows**: UV-01, UV-02, UV-03, API-11; TC-27 stays blocked.
+**One release.** Every 0.9.0 milestone has merged; 0.9.0 ships what is on `main`. The receive engine, packet resend, the chunk and event ports and the GigE session lifecycle are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes; USB3 Vision met one camera ([ADR-0032](adrs/adr0032-usb3-vision-transport.md) §8).
 
 ## Waiting on hardware
 
 - **GA-44**: whether cameras clear a command register once the command is done, which `IsDone` relies on.
 - **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, now possible: `PENDING_ACK` is enabled where the camera offers it.
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
-- **TC-27**: USB3 Vision has never met a camera; needs `viva-camctl report --usb 0` from one.
-- **UV-04**: whether a USB rescan still reads the strings of a camera the U3V service holds; a minute of `viva-service-u3v -v` against one settles it.
+- **TC-27**: USB3 Vision on Linux, Windows, a SuperSpeed link, another vendor's camera, and through an unplug mid-stream; one camera on macOS over USB 2 has run it.
+- **UV-05**: which transfer errors a camera recovers from; a `-vv` log of a stream that hit one settles it.
+- **UV-06**: an event that asks for an acknowledgement the USB3 Vision event interface cannot send.
 - **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.
 - **GT-07**: whether a camera grants exclusive access as the GenTL producer asks for it (CCP `0x1`).
-- **TC-37**: the chunk and event layouts (ADR-0026) have met no camera; one capture with chunk mode on settles them.
+- **TC-37**: GigE Vision's chunk and event layouts (ADR-0026) have met no camera; one capture with chunk mode on settles them.
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.
 - **DC-03**: `Scan3d*` scale, offset and invalid value; one capture ([#93](https://github.com/VitalyVorobyev/viva-genicam/pull/93)) is the only evidence of what a 3D device sends.
 - **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture; behind GA-09.

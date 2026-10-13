@@ -64,18 +64,19 @@ for c in cams:
     print(f"  model={c.model}  serial={c.serial}")
 ```
 
-`vg.discover_u3v()` enumerates USB devices whose interface descriptors match the USB3 Vision class/subclass/protocol triple. Returns a list of `U3vDeviceInfo`:
+`vg.discover_u3v()` lists the USB devices with a USB3 Vision interface (class `0xEF`, subclass `0x05`). It reads what the operating system already knows about each device — strings and link speed included — without opening it, so a camera another program holds is listed too. Returns a list of `U3vDeviceInfo`:
 
 ```python
 @dataclass(frozen=True)
 class U3vDeviceInfo:
-    bus: int
+    bus: str                    # the OS's bus identifier; its form varies by OS
     address: int
     vendor_id: int
     product_id: int
     serial: Optional[str]
     manufacturer: Optional[str]
     model: Optional[str]
+    speed: Optional[str]        # e.g. "high speed (480 Mbit/s, USB 2)"
     transport: Literal["u3v"]
 ```
 

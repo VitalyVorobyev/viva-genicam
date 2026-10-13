@@ -15,12 +15,12 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 viva-gencp = { version = "0.8", path = "../viva-gencp" }
-rusb = { workspace = true, optional = true }
+nusb = { workspace = true, optional = true }
 zip.workspace = true
 
 [features]
 default = []
-usb = ["rusb"]
+usb = ["dep:nusb"]
 
 [lints]
 workspace = true

@@ -10,7 +10,7 @@ from .frame import Frame
 
 @dataclass(frozen=True)
 class StreamStats:
-    """A GigE Vision stream's counters (``viva_genicam::StreamStats``).
+    """A stream's counters (``viva_genicam::StreamStats``).
 
     Every block the camera sends is counted once, when its fate is decided::
 
@@ -18,6 +18,9 @@ class StreamStats:
                     + frames_backpressure + frames_unsupported
 
     once nothing is in flight and the frames taken. Durations are seconds.
+    A USB3 Vision stream counts bulk transfers in ``packets_received``, and
+    the failed transfers it recovered from in ``transfer_errors``; its other
+    packet and resend counters stay 0.
     """
 
     frames_complete: int
@@ -38,6 +41,8 @@ class StreamStats:
     resend_requested: int
     resend_recovered: int
     resend_unavailable: int
+    #: USB3 Vision: failed transfers recovered from by resetting the endpoint.
+    transfer_errors: int
     bytes: int
     #: Frames not received complete: incomplete, missed and dropped to
     #: backpressure.
@@ -102,7 +107,7 @@ class FrameStream:
         return None if native is None else Frame(native)
 
     def stats(self) -> StreamStats:
-        """The stream's counters so far (GigE Vision)."""
+        """The stream's counters so far."""
         return StreamStats.from_dict(self._native.stats())
 
     def close(self) -> None:

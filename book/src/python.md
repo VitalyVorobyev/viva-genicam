@@ -1,6 +1,6 @@
 # Python bindings
 
-The `viva-genicam` Python package wraps the Rust workspace behind a NumPy-friendly API. It ships as a pre-built wheel on PyPI — no C toolchain, no aravis, libusb is statically bundled.
+The `viva-genicam` Python package wraps the Rust workspace behind a NumPy-friendly API. It ships as a pre-built wheel on PyPI — no C toolchain, no aravis, no system USB library.
 
 ```bash
 pip install viva-genicam

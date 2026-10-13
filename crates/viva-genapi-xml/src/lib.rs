@@ -1428,7 +1428,9 @@ fn parse_isolated_node(element: &str) -> Result<Vec<NodeDecl>, XmlError> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let start = e.into_owned();
-                return parse_node(&mut reader, start);
+                let mut nodes = parse_node(&mut reader, start)?;
+                nodes.extend(parsers::embedded_knives(element)?);
+                return Ok(nodes);
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::invalid("node element", "is empty"));
@@ -1843,6 +1845,91 @@ mod tests {
             }
             other => panic!("unexpected node: {other:?}"),
         }
+    }
+
+    /// GA-17: an `<IntSwissKnife>` embedded in a register is one of its
+    /// address terms (GenICam Standard v2.1.1 §2.8.3), declared as a node of
+    /// the document under its own name — the schema's node-name key covers
+    /// it. A StructReg takes one the same way; one that does not parse costs
+    /// its register, recorded as skipped.
+    #[test]
+    fn an_embedded_intswissknife_is_declared_and_summed() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <MaskedIntReg Name="MacHigh">
+                    <Address>0x10</Address>
+                    <IntSwissKnife Name="MacHighAddress">
+                        <pVariable Name="INTERFACE">InterfaceSelector</pVariable>
+                        <Formula>(INTERFACE = 0)? 0x0008 : 0x0680</Formula>
+                    </IntSwissKnife>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <pPort>Device</pPort>
+                    <LSB>31</LSB>
+                    <MSB>16</MSB>
+                </MaskedIntReg>
+                <StructReg Comment="flags">
+                    <IntSwissKnife Name="FlagsAddress">
+                        <Formula>0x2000 + 4</Formula>
+                    </IntSwissKnife>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <pPort>Device</pPort>
+                    <StructEntry Name="FlagA"><Bit>0</Bit></StructEntry>
+                </StructReg>
+                <IntReg Name="Broken">
+                    <IntSwissKnife Name="BrokenAddress">
+                        <Formula></Formula>
+                    </IntSwissKnife>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <pPort>Device</pPort>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+
+        let model = parse(XML).expect("parse");
+        let terms = |name: &str| match model.nodes.iter().find(|n| n.name() == name) {
+            Some(NodeDecl::Integer {
+                addressing: Some(Addressing::Sum { terms, .. }),
+                ..
+            }) => terms.clone(),
+            other => panic!("{name}: {other:?}"),
+        };
+        assert_eq!(
+            terms("MacHigh"),
+            [
+                AddressTerm::Fixed(0x10),
+                AddressTerm::Node("MacHighAddress".to_string())
+            ]
+        );
+        assert_eq!(
+            terms("FlagA"),
+            [AddressTerm::Node("FlagsAddress".to_string())]
+        );
+        let knife = |name: &str| match model.nodes.iter().find(|n| n.name() == name) {
+            Some(NodeDecl::SwissKnife(knife)) => knife.clone(),
+            other => panic!("{name}: {other:?}"),
+        };
+        let mac = knife("MacHighAddress");
+        assert_eq!(mac.output, SkOutput::Integer);
+        assert_eq!(mac.expr, "(INTERFACE = 0)? 0x0008 : 0x0680");
+        assert_eq!(
+            mac.variables,
+            [("INTERFACE".to_string(), "InterfaceSelector".to_string())]
+        );
+        assert_eq!(knife("FlagsAddress").expr, "0x2000 + 4");
+
+        assert!(model.nodes.iter().all(|n| n.name() != "Broken"));
+        assert!(model.nodes.iter().all(|n| n.name() != "BrokenAddress"));
+        assert!(
+            model
+                .skipped
+                .iter()
+                .any(|s| s.name.as_deref() == Some("Broken")),
+            "{:?}",
+            model.skipped
+        );
     }
 
     #[test]

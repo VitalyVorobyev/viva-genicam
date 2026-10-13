@@ -1,31 +1,35 @@
 //! USB3 Vision device enumeration.
 //!
-//! Scans all connected USB devices for USB3 Vision interfaces and returns
-//! descriptive information for each discovered camera.
+//! Lists the USB devices with a USB3 Vision interface, from what the
+//! operating system already knows about them: no device is opened, so a
+//! scan neither disturbs nor depends on a camera another handle — this
+//! process's own, say — holds (backlog UV-04).
 
 #[cfg(feature = "usb")]
 use crate::U3vError;
-use crate::descriptor::U3vInterfaceInfo;
+use crate::bootstrap::UsbSpeed;
 
 /// Information about a discovered USB3 Vision device.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct U3vDeviceInfo {
-    /// USB bus number.
-    pub bus: u8,
-    /// USB device address on the bus.
+    /// The USB bus — the host controller — as the operating system names it.
+    pub bus: String,
+    /// USB device address on the bus. It changes when the device is plugged
+    /// in again; the serial does not.
     pub address: u8,
     /// USB vendor ID.
     pub vendor_id: u16,
     /// USB product ID.
     pub product_id: u16,
-    /// Device serial number (from USB string descriptor, if available).
+    /// Serial number, from the USB string descriptor the operating system
+    /// caches; `None` when the device reports none.
     pub serial: Option<String>,
-    /// Manufacturer name (from USB string descriptor, if available).
+    /// Manufacturer name, likewise. Windows caches none.
     pub manufacturer: Option<String>,
-    /// Product/model name (from USB string descriptor, if available).
+    /// Product/model name, likewise.
     pub model: Option<String>,
-    /// Parsed U3V interface and endpoint information.
-    pub interface_info: U3vInterfaceInfo,
+    /// The speed the device enumerated at, when the operating system says.
+    pub speed: Option<UsbSpeed>,
 }
 
 impl std::fmt::Display for U3vDeviceInfo {
@@ -44,68 +48,42 @@ impl std::fmt::Display for U3vDeviceInfo {
 
 /// Enumerate all USB3 Vision devices currently connected to the system.
 ///
-/// Returns an empty list if no U3V cameras are found. Devices that cannot
-/// be opened or whose descriptors fail to parse are silently skipped.
+/// A device is one when an interface — or, on Windows, the interface
+/// association grouping them — has class `0xEF` and subclass `0x05`. Its
+/// strings come from the operating system's cache; a device is opened only
+/// when it is connected to, which warns of a camera below SuperSpeed.
 #[cfg(feature = "usb")]
 pub fn discover() -> Result<Vec<U3vDeviceInfo>, U3vError> {
-    use crate::descriptor::{is_likely_u3v_device, parse_u3v_interfaces};
-    use rusb::UsbContext;
+    use nusb::MaybeFuture;
 
-    let context = rusb::Context::new().map_err(U3vError::usb)?;
-    let devices = context.devices().map_err(U3vError::usb)?;
+    let devices = nusb::list_devices()
+        .wait()
+        .map_err(U3vError::usb)?
+        .filter(is_u3v)
+        .map(|d| U3vDeviceInfo {
+            bus: d.bus_id().to_string(),
+            address: d.device_address(),
+            vendor_id: d.vendor_id(),
+            product_id: d.product_id(),
+            serial: d.serial_number().map(str::to_string),
+            manufacturer: d.manufacturer_string().map(str::to_string),
+            model: d.product_string().map(str::to_string),
+            speed: d.speed().map(crate::native::speed),
+        })
+        .collect();
+    Ok(devices)
+}
 
-    let mut found = Vec::new();
-
-    for device in devices.iter() {
-        let desc = match device.device_descriptor() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        if !is_likely_u3v_device(&desc) {
-            continue;
-        }
-
-        let config = match device.active_config_descriptor() {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let interface_info = match parse_u3v_interfaces(&config) {
-            Some(info) => info,
-            None => continue,
-        };
-
-        // Try to read string descriptors (may fail if device is busy).
-        let (serial, manufacturer, model) = match device.open() {
-            Ok(handle) => {
-                let timeout = std::time::Duration::from_millis(500);
-                let serial = desc
-                    .serial_number_string_index()
-                    .and_then(|i| handle.read_string_descriptor_ascii(i).ok());
-                let manufacturer = desc
-                    .manufacturer_string_index()
-                    .and_then(|i| handle.read_string_descriptor_ascii(i).ok());
-                let model = desc
-                    .product_string_index()
-                    .and_then(|i| handle.read_string_descriptor_ascii(i).ok());
-                let _ = timeout;
-                (serial, manufacturer, model)
-            }
-            Err(_) => (None, None, None),
-        };
-
-        found.push(U3vDeviceInfo {
-            bus: device.bus_number(),
-            address: device.address(),
-            vendor_id: desc.vendor_id(),
-            product_id: desc.product_id(),
-            serial,
-            manufacturer,
-            model,
-            interface_info,
-        });
+/// Whether `device` has a USB3 Vision interface (class `0xEF`, subclass
+/// `0x05`). A device bound whole to one driver lists no interfaces on
+/// Windows; it counts when it declares the interface association triple
+/// (`0xEF`/`0x02`/`0x01`), and opening it settles whether it is one.
+#[cfg(feature = "usb")]
+fn is_u3v(device: &nusb::DeviceInfo) -> bool {
+    use crate::descriptor::{U3V_INTERFACE_CLASS, U3V_INTERFACE_SUBCLASS};
+    let mut interfaces = device.interfaces().peekable();
+    if interfaces.peek().is_none() {
+        return (device.class(), device.subclass(), device.protocol()) == (0xEF, 0x02, 0x01);
     }
-
-    Ok(found)
+    interfaces.any(|i| i.class() == U3V_INTERFACE_CLASS && i.subclass() == U3V_INTERFACE_SUBCLASS)
 }

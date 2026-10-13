@@ -28,3 +28,32 @@ def test_monitor_is_refused_on_usb3_vision():
     with pytest.raises(vg.GenicamError, match="GigE Vision only"):
         camera.stream(monitor=True)
     assert not fake.acquiring()
+
+
+def test_a_u3v_stream_counts_what_it_reads():
+    """USB3 Vision streams have the same counters as GigE Vision's."""
+    fake = FakeU3vCamera(width=64, height=48)
+    camera = fake.connect()
+    with camera.stream() as frames:
+        for _ in range(3):
+            frames.next_frame(timeout_ms=5000)
+        stats = frames.stats()
+    assert stats.frames_complete >= 3
+    assert stats.bytes == stats.frames_complete * 64 * 48
+    assert stats.packets_received > 0
+    assert stats.transfer_errors == 0
+
+
+def test_u3v_events_arrive_from_the_event_interface():
+    """USB3 Vision events read through the camera's event ports."""
+    fake = FakeU3vCamera(width=64, height=48)
+    camera = fake.connect()
+    events = camera.events(["ExposureEnd"])
+    with camera.stream() as frames:
+        frames.next_frame(timeout_ms=5000)
+        event = events.next_event(timeout_ms=5000)
+    assert event.id == 0x9001
+    features = camera.event_features(event)
+    assert features["EventExposureEnd"] == str(0x9001)
+    assert int(features["EventExposureEndTimestamp"]) == event.ts_dev
+    events.close()

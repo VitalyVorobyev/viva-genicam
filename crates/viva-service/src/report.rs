@@ -55,9 +55,7 @@ pub(crate) async fn serve(
                     warn!(device_id, error = %e, "failed to reply to the report query");
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() { break; }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }

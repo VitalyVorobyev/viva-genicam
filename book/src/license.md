@@ -4,9 +4,7 @@ viva-genicam is licensed under the [MIT License](https://opensource.org/licenses
 the [LICENSE](https://github.com/VitalyVorobyev/viva-genicam/blob/main/LICENSE)
 file in the repository root has the full text.
 
-The Python wheel additionally links [libusb](https://libusb.info)
-(LGPL-2.1-or-later) statically, for USB3 Vision, so the Python package's
-license is `MIT AND LGPL-2.1-or-later`.
-[`THIRD-PARTY-NOTICES.md`](https://github.com/VitalyVorobyev/viva-genicam/blob/main/crates/viva-pygenicam/THIRD-PARTY-NOTICES.md),
-shipped in the wheel and the sdist, gives the details, including how to rebuild
-the native module against another libusb.
+The Python package is MIT too. Up to 0.8 its wheel linked libusb
+(LGPL-2.1-or-later) for USB3 Vision; since 0.9 USB goes through
+[nusb](https://crates.io/crates/nusb), which is pure Rust, and no C USB library
+is linked anywhere.

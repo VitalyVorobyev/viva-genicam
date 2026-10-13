@@ -32,6 +32,3 @@ once_cell = "1"
 bytes = "1"
 tracing = "0.1"
 if-addrs = { version = "0.15", features = ["link-local"] }
-# Statically bundle libusb so wheels don't depend on a system shared library.
-# Feature unification applies `vendored` to the rusb pulled in via viva-u3v.
-rusb = { version = "0.9", features = ["vendored"] }

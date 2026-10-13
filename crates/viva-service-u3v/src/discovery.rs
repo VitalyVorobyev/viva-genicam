@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use viva_fake_u3v::FakeU3vTransport;
 use viva_genicam::{GenicamError, open_u3v_device};
 use viva_service::Discovery;
-use viva_u3v::{RusbTransfer, U3vDeviceInfo};
+use viva_u3v::{NusbTransfer, U3vDeviceInfo};
 use viva_zenoh_api::DeviceAnnounce;
 
 use crate::device::U3vDeviceHandle;
@@ -17,7 +17,7 @@ pub(crate) struct UsbDiscovery;
 #[async_trait::async_trait]
 impl Discovery for UsbDiscovery {
     type Found = U3vDeviceInfo;
-    type Device = U3vDeviceHandle<RusbTransfer>;
+    type Device = U3vDeviceHandle<NusbTransfer>;
 
     async fn discover(&self) -> Result<Vec<U3vDeviceInfo>, GenicamError> {
         tokio::task::spawn_blocking(viva_u3v::discover)
@@ -33,7 +33,8 @@ impl Discovery for UsbDiscovery {
         let id = viva_zenoh_api::u3v_device_id(
             found.vendor_id,
             found.product_id,
-            found.bus,
+            found.serial.as_deref(),
+            &found.bus,
             found.address,
         );
         let model = found.model.clone().unwrap_or_else(|| "Unknown".to_string());
@@ -54,7 +55,7 @@ impl Discovery for UsbDiscovery {
     async fn connect(
         &self,
         found: &U3vDeviceInfo,
-    ) -> Result<U3vDeviceHandle<RusbTransfer>, GenicamError> {
+    ) -> Result<U3vDeviceHandle<NusbTransfer>, GenicamError> {
         let announce = self.announce(found);
         let found = found.clone();
         let (camera, xml) =
@@ -86,6 +87,9 @@ pub(crate) struct FakeSpec {
 #[derive(Clone, Default)]
 pub(crate) struct FakeDiscovery {
     cameras: Arc<Mutex<Vec<FakeSpec>>>,
+    /// The device behind each camera connected, by id: what a test asks the
+    /// fake about.
+    connected: Arc<Mutex<std::collections::HashMap<String, Arc<FakeU3vTransport>>>>,
 }
 
 impl FakeDiscovery {
@@ -101,6 +105,16 @@ impl FakeDiscovery {
             .lock()
             .expect("fake list")
             .retain(|camera| camera.id != id);
+    }
+
+    /// The device the camera published as `id` was last connected to.
+    #[cfg(test)]
+    pub(crate) fn device(&self, id: &str) -> Option<Arc<FakeU3vTransport>> {
+        self.connected
+            .lock()
+            .expect("fake devices")
+            .get(id)
+            .cloned()
     }
 }
 
@@ -126,6 +140,10 @@ impl Discovery for FakeDiscovery {
             found.height,
             found.pixel_format,
         ));
+        self.connected
+            .lock()
+            .expect("fake devices")
+            .insert(found.id.clone(), Arc::clone(&transport));
         let device = viva_fake_u3v::open(transport)?;
         let (camera, xml) = open_u3v_device(device)?;
         Ok(U3vDeviceHandle::new(camera, xml, self.announce(found)))

@@ -80,6 +80,11 @@ pub(crate) fn parse_struct_reg(
                         });
                     }
                 }
+                // Declared as a node by `embedded_knives`; here, its term.
+                super::TAG_INT_SWISS_KNIFE => {
+                    terms.push(AddressTerm::Node(super::embedded_knife_name(e)?));
+                    skip_element(reader, e.name().as_ref())?;
+                }
                 "Length" => {
                     let text = read_text_start(reader, e)?;
                     length = parse_u64(&text)? as u32;
@@ -158,7 +163,7 @@ pub(crate) fn parse_struct_reg(
         // registers that read the wrong memory and never say so.
         return Err(XmlError::missing(
             "<StructReg>",
-            "<Address>, <pAddress> or <pIndex>",
+            "<Address>, <pAddress>, <IntSwissKnife> or <pIndex>",
         ));
     }
     let addressing = Addressing::Sum {

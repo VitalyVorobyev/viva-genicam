@@ -46,11 +46,7 @@ pub(crate) async fn run(
                     }
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
-                }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }

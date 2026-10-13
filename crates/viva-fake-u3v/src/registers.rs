@@ -10,6 +10,9 @@
 //!   (`PGR_GS3_U3_23S6M.xml`), and the SIRM address where aravis and
 //!   Wireshark agree it is.
 //! - **SIRM**: aravis's and Wireshark's layout.
+//! - **EIRM**: the three registers Wireshark names.
+//! - **Timestamp**: GenCP 1.3.1 §5.4.16-18 — a device clock in ns, latched
+//!   by a write.
 //!
 //! Every register is little-endian: the bootstrap registers because GenCP
 //! ties them to USB3 Vision's little-endian framing (§2.3), the camera's own
@@ -18,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use viva_u3v::registers::{abrm, sbrm, sirm};
+use viva_u3v::registers::{abrm, eirm, sbrm, sirm};
 
 // Feature register addresses (same layout as viva-fake-gige).
 pub const REG_WIDTH: u64 = 0x20000;
@@ -48,13 +51,41 @@ pub const REG_ACTION_DEVICE_KEY: u64 = 0x20040;
 /// -- only [`FakeU3vTransport::reads`](crate::FakeU3vTransport::reads) shows
 /// whether a client read a command register it had no reason to read.
 pub const REG_TRIGGER_SOFTWARE: u64 = 0x20044;
+/// `ChunkModeActive`: 1 sends each frame as chunks.
+pub const REG_CHUNK_MODE_ACTIVE: u64 = 0x20050;
+/// `ChunkSelector`: which chunk `ChunkEnable` is for.
+pub const REG_CHUNK_SELECTOR: u64 = 0x20054;
+/// `ChunkEnable`, one register per selector entry, four bytes apart in the
+/// selector's order: the timestamp, then the frame ID.
+pub const REG_CHUNK_ENABLE: u64 = 0x20058;
+/// `EventSelector`: which event `EventNotification` is for.
+pub const REG_EVENT_SELECTOR: u64 = 0x20060;
+/// `EventNotification` for the one event the fake sends, ExposureEnd.
+pub const REG_EVENT_NOTIFICATION: u64 = 0x20064;
+
+/// The image's chunk ID: what a MATRIX VISION mvBlueFOX3-2004G sends, which
+/// declares no port for it. Corpus GigE Vision documents declare 1; nothing
+/// may depend on either, since the image is the first chunk whatever its ID.
+pub const CHUNK_ID_IMAGE: u32 = 0x1122_3344;
+/// The fake's chunk carrying the block's device timestamp, 8 bytes.
+pub const CHUNK_ID_TIMESTAMP: u32 = 0x0000_1001;
+/// The fake's chunk carrying the block id, 8 bytes.
+pub const CHUNK_ID_FRAME_ID: u32 = 0x0000_1002;
+/// The event sent at the end of each frame while notification is on: in
+/// GenCP's device-specific namespace (bits 15-14 = 2, GenCP 1.3.1 Table 2).
+pub const EVENT_ID_EXPOSURE_END: u16 = 0x9001;
 
 /// Registers the XML declares `WO`. A read touching any of them is refused
 /// with `ACCESS_DENIED`, as a real device refuses it.
 ///
 /// Listed explicitly rather than derived from the XML, so the fake can
 /// disagree with our parser (ADR-0019).
-pub const WRITE_ONLY_REGISTERS: &[u64] = &[REG_ACQ_START, REG_ACQ_STOP, REG_ACTION_DEVICE_KEY];
+pub const WRITE_ONLY_REGISTERS: &[u64] = &[
+    REG_ACQ_START,
+    REG_ACQ_STOP,
+    REG_ACTION_DEVICE_KEY,
+    ABRM_TIMESTAMP_LATCH,
+];
 
 /// XML blob address in the register space, just past the ABRM's 64 KiB.
 pub const XML_BLOB_BASE: u64 = 0x1_0000;
@@ -80,13 +111,16 @@ pub const ABRM_HEARTBEAT_TIMEOUT: u64 = abrm::HEARTBEAT_TIMEOUT;
 pub const ABRM_MESSAGE_CHANNEL_ID: u64 = abrm::MESSAGE_CHANNEL_ID;
 pub const ABRM_ACCESS_PRIVILEGE: u64 = abrm::ACCESS_PRIVILEGE;
 pub const ABRM_IMPLEMENTATION_ENDIANNESS: u64 = abrm::IMPLEMENTATION_ENDIANNESS;
+pub const ABRM_TIMESTAMP: u64 = abrm::TIMESTAMP;
+pub const ABRM_TIMESTAMP_LATCH: u64 = abrm::TIMESTAMP_LATCH;
+pub const ABRM_TIMESTAMP_INCREMENT: u64 = abrm::TIMESTAMP_INCREMENT;
 
-/// Device capability (GenCP 1.2 Table 17): a user defined name (bit 0),
-/// UTF-8 strings (bits 4-7 = 1), a family name (8), an SBRM (9), the
-/// Implementation Endianness register (10), and the written length in a
-/// WRITEMEM_ACK (11).
+/// Device capability (GenCP 1.2 Table 17): a user defined name (bit 0), a
+/// timestamp (3), UTF-8 strings (bits 4-7 = 1), a family name (8), an SBRM
+/// (9), the Implementation Endianness register (10), and the written length
+/// in a WRITEMEM_ACK (11).
 pub const DEVICE_CAPABILITY: u64 =
-    (1 << 0) | (1 << 4) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11);
+    (1 << 0) | (1 << 3) | (1 << 4) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11);
 
 /// Where the SBRM sits.
 pub const SBRM_BASE: u64 = 0x1_0000_0000;
@@ -116,6 +150,20 @@ pub const SIRM_PAYLOAD_TRANSFER_COUNT: u64 = SIRM_BASE + sirm::PAYLOAD_TRANSFER_
 pub const SIRM_FINAL_TRANSFER1_SIZE: u64 = SIRM_BASE + sirm::FINAL_TRANSFER1_SIZE;
 pub const SIRM_FINAL_TRANSFER2_SIZE: u64 = SIRM_BASE + sirm::FINAL_TRANSFER2_SIZE;
 pub const SIRM_MAX_TRAILER_SIZE: u64 = SIRM_BASE + sirm::MAX_TRAILER_SIZE;
+
+/// Where the EIRM sits.
+pub const EIRM_BASE: u64 = 0x2_0000_1000;
+pub const EIRM_CONTROL: u64 = EIRM_BASE + eirm::CONTROL;
+pub const EIRM_MAXIMUM_EVENT_TRANSFER_LENGTH: u64 = EIRM_BASE + eirm::MAXIMUM_EVENT_TRANSFER_LENGTH;
+pub const EIRM_EVENT_TEST_CONTROL: u64 = EIRM_BASE + eirm::EVENT_TEST_CONTROL;
+/// The longest event command the fake sends.
+pub const MAX_EVENT_TRANSFER: u32 = 1024;
+
+/// The SBRM's current speed when nothing says otherwise: bit 3, SuperSpeed
+/// (the Grasshopper3's XML reads 8 as SuperSpeed).
+pub const SUPERSPEED: u32 = 0b1000;
+/// The SBRM's current speed for a USB 2 link: bit 2, high speed.
+pub const HIGH_SPEED: u32 = 0b0100;
 
 /// Transfers must be multiples of 2^10 bytes, a SuperSpeed bulk packet: big
 /// enough that a small frame's payload does not fill whole transfers, so
@@ -175,6 +223,9 @@ impl RegisterMap {
         map.write_u32(ABRM_MESSAGE_CHANNEL_ID, 0);
         map.write_u32(ABRM_ACCESS_PRIVILEGE, 0);
         map.write_u32(ABRM_IMPLEMENTATION_ENDIANNESS, 0xFFFF_FFFF); // little
+        map.write_u64(ABRM_TIMESTAMP, 0);
+        map.write_u32(ABRM_TIMESTAMP_LATCH, 0);
+        map.write_u64(ABRM_TIMESTAMP_INCREMENT, 1); // 1 ns a tick
         // Everything but the user name and the device configuration,
         // heartbeat, message channel and access privilege is the device's.
         map.read_only
@@ -185,20 +236,23 @@ impl RegisterMap {
             ABRM_IMPLEMENTATION_ENDIANNESS,
             ABRM_IMPLEMENTATION_ENDIANNESS + 4,
         ));
+        map.read_only.push((ABRM_TIMESTAMP, ABRM_TIMESTAMP + 8));
+        map.read_only
+            .push((ABRM_TIMESTAMP_INCREMENT, ABRM_TIMESTAMP_INCREMENT + 8));
 
         // -- SBRM --
         map.write_u32(SBRM_U3V_VERSION, 0x0001_0000); // U3V 1.0
-        map.write_u64(SBRM_U3VCP_CAPABILITY, 0b001); // a SIRM; no EIRM, no IIDC2
+        map.write_u64(SBRM_U3VCP_CAPABILITY, 0b011); // a SIRM and an EIRM; no IIDC2
         map.write_u64(SBRM_U3VCP_CONFIGURATION, 0);
         map.write_u32(SBRM_MAX_CMD_TRANSFER, 4096);
         map.write_u32(SBRM_MAX_ACK_TRANSFER, 4096);
         map.write_u32(SBRM_NUM_STREAM_CHANNELS, 1);
         map.write_u64(SBRM_SIRM_ADDRESS, SIRM_BASE);
         map.write_u32(SBRM_SIRM_LENGTH, 0x30);
-        map.write_u64(SBRM_EIRM_ADDRESS, 0);
-        map.write_u32(SBRM_EIRM_LENGTH, 0);
+        map.write_u64(SBRM_EIRM_ADDRESS, EIRM_BASE);
+        map.write_u32(SBRM_EIRM_LENGTH, 0x0C);
         map.write_u64(SBRM_IIDC2_ADDRESS, 0);
-        map.write_u32(SBRM_CURRENT_SPEED, 0b1000); // SuperSpeed
+        map.write_u32(SBRM_CURRENT_SPEED, SUPERSPEED);
         map.read_only
             .push((SBRM_U3V_VERSION, SBRM_U3VCP_CONFIGURATION));
         map.read_only
@@ -223,6 +277,15 @@ impl RegisterMap {
         map.read_only.push((SIRM_INFO, SIRM_CONTROL));
         map.read_only
             .push((SIRM_REQUIRED_PAYLOAD_SIZE, SIRM_MAX_LEADER_SIZE));
+
+        // -- EIRM: the maximum transfer length is the device's --
+        map.write_u32(EIRM_CONTROL, 0);
+        map.write_u32(EIRM_MAXIMUM_EVENT_TRANSFER_LENGTH, MAX_EVENT_TRANSFER);
+        map.write_u32(EIRM_EVENT_TEST_CONTROL, 0);
+        map.read_only.push((
+            EIRM_MAXIMUM_EVENT_TRANSFER_LENGTH,
+            EIRM_MAXIMUM_EVENT_TRANSFER_LENGTH + 4,
+        ));
 
         // -- Manifest, GenCP 1.2 Tables 29-30 --
         map.write_u64(MANIFEST_TABLE, 1);
@@ -249,7 +312,7 @@ impl RegisterMap {
         map.write_u32(REG_ACQ_MODE, 0); // Continuous
         map.write_u32(REG_ACQ_START, 0);
         map.write_u32(REG_ACQ_STOP, 0);
-        map.write_u32(REG_ACQ_FRAME_RATE, 30_f32.to_bits());
+        map.write_u32(REG_ACQ_FRAME_RATE, 200_f32.to_bits());
         map.regs
             .insert(REG_EXPOSURE_TIME, 10000.0f64.to_le_bytes().to_vec());
         map.write_u32(REG_PAYLOAD_SIZE, 0); // synced below
@@ -257,6 +320,12 @@ impl RegisterMap {
         map.write_string(REG_DEVICE_VENDOR, "FakeCorp", 32);
         map.write_u32(REG_ACTION_DEVICE_KEY, 0);
         map.write_u32(REG_TRIGGER_SOFTWARE, 0);
+        map.write_u32(REG_CHUNK_MODE_ACTIVE, 0);
+        map.write_u32(REG_CHUNK_SELECTOR, 0);
+        map.write_u32(REG_CHUNK_ENABLE, 0);
+        map.write_u32(REG_CHUNK_ENABLE + 4, 0);
+        map.write_u32(REG_EVENT_SELECTOR, u32::from(EVENT_ID_EXPOSURE_END));
+        map.write_u32(REG_EVENT_NOTIFICATION, 0);
 
         map.sync_payload_size();
         map
@@ -325,12 +394,57 @@ impl RegisterMap {
 
     /// Bytes in one frame: width × height × the pixel format's bit depth
     /// (PFNC bits 23-16), rounded up to whole bytes — so a packed format such
-    /// as `Mono12Packed` takes 1.5 bytes a pixel, as on a real camera.
+    /// as `Mono12Packed` takes 1.5 bytes a pixel, as on a real camera — and,
+    /// in chunk mode, the image's tag and each enabled chunk with its tag.
     pub fn payload_size(&self) -> u64 {
-        payload_bytes(self.width(), self.height(), self.pixel_format_code())
+        let image = payload_bytes(self.width(), self.height(), self.pixel_format_code());
+        if !self.chunk_mode() {
+            return image;
+        }
+        image + 8 + 16 * self.enabled_chunks().len() as u64
     }
 
-    fn read_u32(&self, addr: u64) -> u32 {
+    /// `AcquisitionFrameRate`, in frames a second.
+    pub fn frame_rate(&self) -> f64 {
+        f64::from(f32::from_bits(self.read_u32(REG_ACQ_FRAME_RATE)))
+    }
+
+    /// Whether `ChunkModeActive` is set.
+    pub fn chunk_mode(&self) -> bool {
+        self.read_u32(REG_CHUNK_MODE_ACTIVE) & 1 != 0
+    }
+
+    /// The chunk IDs enabled, in the selector's order.
+    pub fn enabled_chunks(&self) -> Vec<u32> {
+        [CHUNK_ID_TIMESTAMP, CHUNK_ID_FRAME_ID]
+            .into_iter()
+            .enumerate()
+            .filter(|&(index, _)| self.read_u32(REG_CHUNK_ENABLE + 4 * index as u64) & 1 != 0)
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    /// Whether the host has set the EIRM's EventEnable.
+    pub fn events_enabled(&self) -> bool {
+        self.read_u32(EIRM_CONTROL) & 1 != 0
+    }
+
+    /// Whether `EventNotification` is on for ExposureEnd.
+    pub fn exposure_end_notification(&self) -> bool {
+        self.read_u32(REG_EVENT_NOTIFICATION) == 1
+    }
+
+    /// Set the device's clock reading, as a latch does.
+    pub fn latch_timestamp(&mut self, ns: u64) {
+        self.write_u64(ABRM_TIMESTAMP, ns);
+    }
+
+    /// Set the SBRM's current speed register.
+    pub fn set_current_speed(&mut self, bits: u32) {
+        self.write_u32(SBRM_CURRENT_SPEED, bits);
+    }
+
+    pub(crate) fn read_u32(&self, addr: u64) -> u32 {
         u32::from_le_bytes(self.read(addr, 4).try_into().unwrap())
     }
 
@@ -406,12 +520,56 @@ fn generate_xml() -> String {
     <pFeature>DeviceControl</pFeature>
     <pFeature>ImageFormatControl</pFeature>
     <pFeature>AcquisitionControl</pFeature>
+    <pFeature>ChunkDataControl</pFeature>
+    <pFeature>EventControl</pFeature>
   </Category>
 
   <Category Name="DeviceControl" NameSpace="Standard">
     <pFeature>DeviceModelName</pFeature>
     <pFeature>DeviceVendorName</pFeature>
+    <pFeature>TimestampLatch</pFeature>
+    <pFeature>Timestamp</pFeature>
+    <pFeature>TimestampIncrement</pFeature>
   </Category>
+
+  <!-- The timestamp features over GenCP's bootstrap registers, named as a
+       MATRIX VISION mvBlueFOX3-2004G and a Grasshopper3 name them: the latch
+       at 0x1F8, the latched value in ns at 0x1F0, ns a tick at 0x1FC. -->
+  <Command Name="TimestampLatch" NameSpace="Standard">
+    <pValue>TimestampLatchReg</pValue>
+    <CommandValue>1</CommandValue>
+  </Command>
+  <IntReg Name="TimestampLatchReg">
+    <Address>0x1F8</Address>
+    <Length>4</Length>
+    <AccessMode>WO</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="Timestamp" NameSpace="Standard">
+    <pValue>TimestampReg</pValue>
+  </Integer>
+  <IntReg Name="TimestampReg">
+    <Address>0x1F0</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
+    <Cachable>NoCache</Cachable>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="TimestampIncrement" NameSpace="Standard">
+    <pValue>TimestampIncrementReg</pValue>
+  </Integer>
+  <IntReg Name="TimestampIncrementReg">
+    <Address>0x1FC</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
 
   <StringReg Name="DeviceModelName" NameSpace="Standard">
     <Address>0x20200</Address>
@@ -494,6 +652,7 @@ fn generate_xml() -> String {
 
   <Category Name="AcquisitionControl" NameSpace="Standard">
     <pFeature>AcquisitionMode</pFeature>
+    <pFeature>AcquisitionFrameRate</pFeature>
     <pFeature>AcquisitionStart</pFeature>
     <pFeature>AcquisitionStop</pFeature>
     <pFeature>TriggerSoftware</pFeature>
@@ -513,6 +672,20 @@ fn generate_xml() -> String {
     <Sign>Unsigned</Sign>
     <Endianess>LittleEndian</Endianess>
   </IntReg>
+
+  <!-- The rate blocks start at while acquiring. -->
+  <Float Name="AcquisitionFrameRate" NameSpace="Standard">
+    <Min>1</Min>
+    <Max>1000</Max>
+    <pValue>AcquisitionFrameRateReg</pValue>
+  </Float>
+  <FloatReg Name="AcquisitionFrameRateReg">
+    <Address>0x2002C</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Endianess>LittleEndian</Endianess>
+  </FloatReg>
 
   <Command Name="AcquisitionStart" NameSpace="Standard">
     <pValue>AcquisitionStartReg</pValue>
@@ -571,7 +744,157 @@ fn generate_xml() -> String {
     <Endianess>LittleEndian</Endianess>
   </IntReg>
 
+  <!-- Chunks: the image first, then each enabled value, every tag
+       little-endian. -->
+  <Category Name="ChunkDataControl" NameSpace="Standard">
+    <pFeature>ChunkModeActive</pFeature>
+    <pFeature>ChunkSelector</pFeature>
+    <pFeature>ChunkEnable</pFeature>
+    <pFeature>ChunkTimestamp</pFeature>
+    <pFeature>ChunkFrameID</pFeature>
+  </Category>
+  <Boolean Name="ChunkModeActive" NameSpace="Standard">
+    <pValue>ChunkModeActiveReg</pValue>
+    <OnValue>1</OnValue>
+    <OffValue>0</OffValue>
+  </Boolean>
+  <IntReg Name="ChunkModeActiveReg">
+    <Address>0x20050</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Enumeration Name="ChunkSelector" NameSpace="Standard">
+    <EnumEntry Name="Timestamp" NameSpace="Standard"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="FrameID" NameSpace="Standard"><Value>1</Value></EnumEntry>
+    <pValue>ChunkSelectorReg</pValue>
+    <pSelected>ChunkEnable</pSelected>
+  </Enumeration>
+  <IntReg Name="ChunkSelectorReg">
+    <Address>0x20054</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Boolean Name="ChunkEnable" NameSpace="Standard">
+    <pValue>ChunkEnableReg</pValue>
+    <OnValue>1</OnValue>
+    <OffValue>0</OffValue>
+  </Boolean>
+  <IntReg Name="ChunkEnableReg">
+    <Address>0x20058</Address>
+    <pIndex>ChunkSelectorReg</pIndex>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="ChunkTimestamp" NameSpace="Standard">
+    <pValue>ChunkTimestampReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkTimestampReg">
+    <Address>0x0</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>TimestampChunkPort</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="ChunkFrameID" NameSpace="Standard">
+    <pValue>ChunkFrameIDReg</pValue>
+  </Integer>
+  <IntReg Name="ChunkFrameIDReg">
+    <Address>0x0</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>FrameIDChunkPort</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+
+  <!-- Events: GenCP's event layout on the event port — the ID at 0x2, the
+       timestamp at 0x4, the data from 0xC — with the data as a MATRIX VISION
+       mvBlueFOX3-2004G sends it: the stream channel index (u32) at 0xC, the
+       frame ID (u64) at 0x10. -->
+  <Category Name="EventControl" NameSpace="Standard">
+    <pFeature>EventSelector</pFeature>
+    <pFeature>EventNotification</pFeature>
+    <pFeature>EventExposureEndData</pFeature>
+  </Category>
+  <Enumeration Name="EventSelector" NameSpace="Standard">
+    <EnumEntry Name="ExposureEnd" NameSpace="Standard"><Value>36865</Value></EnumEntry>
+    <pValue>EventSelectorReg</pValue>
+    <pSelected>EventNotification</pSelected>
+  </Enumeration>
+  <IntReg Name="EventSelectorReg">
+    <Address>0x20060</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Enumeration Name="EventNotification" NameSpace="Standard">
+    <EnumEntry Name="Off" NameSpace="Standard"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="On" NameSpace="Standard"><Value>1</Value></EnumEntry>
+    <pValue>EventNotificationReg</pValue>
+  </Enumeration>
+  <IntReg Name="EventNotificationReg">
+    <Address>0x20064</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Category Name="EventExposureEndData" NameSpace="Standard">
+    <pFeature>EventExposureEnd</pFeature>
+    <pFeature>EventExposureEndTimestamp</pFeature>
+    <pFeature>EventExposureEndFrameID</pFeature>
+  </Category>
+  <Integer Name="EventExposureEnd" NameSpace="Standard">
+    <pValue>EventExposureEndReg</pValue>
+  </Integer>
+  <IntReg Name="EventExposureEndReg">
+    <Address>0x2</Address>
+    <Length>2</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>EventExposureEndPort</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="EventExposureEndTimestamp" NameSpace="Standard">
+    <pValue>EventExposureEndTimestampReg</pValue>
+  </Integer>
+  <IntReg Name="EventExposureEndTimestampReg">
+    <Address>0x4</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>EventExposureEndPort</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="EventExposureEndFrameID" NameSpace="Standard">
+    <pValue>EventExposureEndFrameIDReg</pValue>
+  </Integer>
+  <IntReg Name="EventExposureEndFrameIDReg">
+    <Address>0x10</Address>
+    <Length>8</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>EventExposureEndPort</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+
   <Port Name="Device" NameSpace="Standard" />
+  <Port Name="TimestampChunkPort"><ChunkID>1001</ChunkID></Port>
+  <Port Name="FrameIDChunkPort"><ChunkID>1002</ChunkID></Port>
+  <Port Name="EventExposureEndPort"><EventID>9001</EventID></Port>
 </RegisterDescription>"#
         .to_string()
 }

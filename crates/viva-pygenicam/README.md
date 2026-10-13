@@ -38,9 +38,5 @@ in the repository.
 
 ## Licensing
 
-The `viva-genicam` code is MIT-licensed. The binary wheel additionally
-statically links [libusb](https://libusb.info) (LGPL-2.1-or-later) for
-USB3 Vision support, so the package license is
-`MIT AND LGPL-2.1-or-later`. See `THIRD-PARTY-NOTICES.md` (shipped in the
-wheel and sdist) for details, including how to rebuild the native module
-against a modified or system libusb per LGPL §6.
+MIT. USB3 Vision support is pure Rust ([nusb](https://crates.io/crates/nusb)),
+so the wheel links no C USB library.

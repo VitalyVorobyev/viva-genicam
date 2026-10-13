@@ -29,7 +29,7 @@ use viva_gencp::{ccd_flags, command_id};
 use crate::U3vStatus;
 
 use crate::U3vError;
-use crate::usb::UsbTransfer;
+use crate::usb::{GONE_GRACE, UsbTransfer, unless_gone};
 
 /// `U3VC` read as a little-endian `u32`: the prefix of every control-channel
 /// command and acknowledge. aravis `ARV_UVCP_MAGIC`; Wireshark
@@ -245,13 +245,21 @@ impl<T: UsbTransfer> ControlChannel<T> {
     ) -> Result<Vec<u8>, U3vError> {
         let request_id = self.next_request_id();
         let packet = encode_command(command, request_id, scd);
+        // A failure that does not say whether the device is gone is checked
+        // against whether it is still listed: on macOS an unplugged
+        // camera's control endpoint answers `kIOReturnNotReady` (UV-03).
+        let present = || self.transport.is_present();
         self.transport
-            .bulk_write(self.ep_out, &packet, self.timeout)?;
+            .bulk_write(self.ep_out, &packet, self.timeout)
+            .map_err(|error| unless_gone(error, present, GONE_GRACE))?;
 
         let mut ack_buf = vec![0u8; (self.max_ack_transfer as usize).max(HEADER_SIZE)];
         let mut wait = self.timeout;
         for _ in 0..MAX_ACKS_PER_COMMAND {
-            let n = self.transport.bulk_read(self.ep_in, &mut ack_buf, wait)?;
+            let n = self
+                .transport
+                .bulk_read(self.ep_in, &mut ack_buf, wait)
+                .map_err(|error| unless_gone(error, present, GONE_GRACE))?;
             let ack = decode_ack(&ack_buf[..n])?;
 
             // An answer to an earlier command — one that timed out here and
@@ -446,6 +454,30 @@ mod tests {
             &[1, 2, 3, 4],
         );
         assert!(decode_ack(&buf[..HEADER_SIZE]).is_err());
+    }
+
+    /// UV-03 on macOS: a register read that fails with an unknown error —
+    /// `kIOReturnNotReady`, as an unplugged mvBlueFOX3-2004G's control
+    /// endpoint answered — on a device the operating system no longer lists
+    /// is a disconnect. On a device still listed it is the error it was.
+    #[test]
+    fn an_unknown_failure_is_a_disconnect_only_once_the_device_is_unlisted() {
+        let not_ready = || U3vError::usb("unknown (error 0xe00002d8)");
+        let mock = Arc::new(MockUsbTransfer::new());
+        let mut ch = make_channel(&mock);
+
+        mock.set_present(Some(true));
+        mock.enqueue_error(EP_IN, not_ready());
+        let listed = ch.read_mem(0x0, 4);
+        assert!(matches!(listed, Err(U3vError::Usb(_))), "{listed:?}");
+
+        mock.set_present(Some(false));
+        mock.enqueue_error(EP_IN, not_ready());
+        let unlisted = ch.read_mem(0x0, 4);
+        assert!(
+            matches!(unlisted, Err(U3vError::Disconnected)),
+            "{unlisted:?}"
+        );
     }
 
     #[test]

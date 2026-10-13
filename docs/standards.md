@@ -37,13 +37,15 @@ range too, for acknowledgements and GVSP packets alike) and
 
 ## USB3 Vision sources
 
-USB3 Vision devices use bulk endpoints: one pair for GenCP control, another for
-image data. Discovery is standard USB enumeration — interface class `0xEF`,
-subclass `0x05`, with the protocol telling control, event and streaming
-interfaces apart. Bootstrap registers (ABRM, SBRM, SIRM) describe the device
-and configure its stream. The USB3 Vision standard is not freely available;
-what this implementation follows, and where that comes from, is in
-`crates/viva-u3v/src/bootstrap.rs`.
+USB3 Vision devices use bulk endpoints: one pair for GenCP control, one IN
+endpoint for image data and one for events. Discovery is standard USB
+enumeration — interface class `0xEF`, subclass `0x05`, with the protocol
+telling control, event and streaming interfaces apart. Bootstrap registers
+(ABRM, SBRM, SIRM, EIRM) describe the device and configure its stream and its
+events; an event is a GenCP `EVENT_CMD` (GenCP 1.3). The USB3 Vision standard
+is not freely available; what this implementation follows, and where that comes
+from, is in `crates/viva-u3v/src/bootstrap.rs`, and what one camera confirmed
+of it is in [ADR-0032](adrs/adr0032-usb3-vision-transport.md).
 
 ## Further reading
 

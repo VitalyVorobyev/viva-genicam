@@ -1,8 +1,8 @@
 //! USB descriptor parsing for USB3 Vision devices.
 //!
-//! USB3 Vision devices are identified by their Interface Association Descriptor
-//! (IAD) class codes and interface class/subclass values. This module extracts
-//! endpoint addresses and interface numbers from USB descriptors.
+//! USB3 Vision devices are identified by their interfaces' class, subclass
+//! and protocol. This module extracts endpoint addresses and interface
+//! numbers from USB descriptors.
 
 #[cfg(any(feature = "usb", test))]
 /// USB3 Vision interface class code: Miscellaneous.
@@ -76,12 +76,16 @@ pub struct U3vInterfaceInfo {
     pub event_ep_in: Option<u8>,
 }
 
-/// Check whether a USB device's interface descriptors indicate a USB3 Vision device
-/// and extract endpoint information.
-///
-/// Returns `None` if no U3V control interface is found.
+/// The USB3 Vision interfaces and endpoints in a device's active
+/// configuration, and each bulk endpoint's maximum packet size; `None` if
+/// it has no USB3 Vision control interface with both bulk endpoints.
 #[cfg(feature = "usb")]
-pub(crate) fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3vInterfaceInfo> {
+pub(crate) fn parse_u3v_interfaces(
+    config: &nusb::descriptors::ConfigurationDescriptor<'_>,
+) -> Option<(U3vInterfaceInfo, Vec<(u8, usize)>)> {
+    use nusb::descriptors::TransferType;
+    use nusb::transfer::Direction;
+
     let mut control_iface = None;
     let mut control_ep_in = None;
     let mut control_ep_out = None;
@@ -89,81 +93,45 @@ pub(crate) fn parse_u3v_interfaces(config: &rusb::ConfigDescriptor) -> Option<U3
     let mut stream_ep_in = None;
     let mut event_iface = None;
     let mut event_ep_in = None;
+    let mut packet_sizes = Vec::new();
 
-    for interface in config.interfaces() {
-        for desc in interface.descriptors() {
-            let kind = classify_interface(
-                desc.class_code(),
-                desc.sub_class_code(),
-                desc.protocol_code(),
-            );
-            match kind {
-                Some(U3vInterfaceKind::Control) => {
-                    control_iface = Some(desc.interface_number());
-                    for ep in desc.endpoint_descriptors() {
-                        if ep.transfer_type() != rusb::TransferType::Bulk {
-                            continue;
-                        }
-                        match ep.direction() {
-                            rusb::Direction::In => control_ep_in = Some(ep.address()),
-                            rusb::Direction::Out => control_ep_out = Some(ep.address()),
-                        }
-                    }
-                }
-                Some(U3vInterfaceKind::Event) => {
-                    event_iface = Some(desc.interface_number());
-                    for ep in desc.endpoint_descriptors() {
-                        if ep.transfer_type() == rusb::TransferType::Bulk
-                            && ep.direction() == rusb::Direction::In
-                        {
-                            event_ep_in = Some(ep.address());
-                        }
-                    }
-                }
-                Some(U3vInterfaceKind::Stream) => {
-                    stream_iface = Some(desc.interface_number());
-                    for ep in desc.endpoint_descriptors() {
-                        if ep.transfer_type() == rusb::TransferType::Bulk
-                            && ep.direction() == rusb::Direction::In
-                        {
-                            stream_ep_in = Some(ep.address());
-                        }
-                    }
-                }
-                None => {}
+    for desc in config.interface_alt_settings() {
+        let Some(kind) = classify_interface(desc.class(), desc.subclass(), desc.protocol()) else {
+            continue;
+        };
+        let number = desc.interface_number();
+        for ep in desc
+            .endpoints()
+            .filter(|ep| ep.transfer_type() == TransferType::Bulk)
+        {
+            packet_sizes.push((ep.address(), ep.max_packet_size()));
+            match (kind, ep.direction()) {
+                (U3vInterfaceKind::Control, Direction::In) => control_ep_in = Some(ep.address()),
+                (U3vInterfaceKind::Control, Direction::Out) => control_ep_out = Some(ep.address()),
+                (U3vInterfaceKind::Event, Direction::In) => event_ep_in = Some(ep.address()),
+                (U3vInterfaceKind::Stream, Direction::In) => stream_ep_in = Some(ep.address()),
+                _ => {}
             }
+        }
+        match kind {
+            U3vInterfaceKind::Control => control_iface = Some(number),
+            U3vInterfaceKind::Event => event_iface = Some(number),
+            U3vInterfaceKind::Stream => stream_iface = Some(number),
         }
     }
 
-    let control_iface = control_iface?;
-    let control_ep_in = control_ep_in?;
-    let control_ep_out = control_ep_out?;
-
-    Some(U3vInterfaceInfo {
-        control_iface,
-        control_ep_in,
-        control_ep_out,
-        stream_iface,
-        stream_ep_in,
-        event_iface,
-        event_ep_in,
-    })
-}
-
-/// Check whether a device descriptor looks like it could be a U3V device.
-///
-/// USB3 Vision uses IAD class `0xEF`, subclass `0x02`, protocol `0x01`
-/// at the device level, but some cameras use `0x00` (per-interface).
-/// This is a coarse filter; full detection requires inspecting interface
-/// descriptors via [`parse_u3v_interfaces`].
-#[cfg(feature = "usb")]
-pub(crate) fn is_likely_u3v_device(desc: &rusb::DeviceDescriptor) -> bool {
-    // IAD class at device level
-    if desc.class_code() == 0xEF && desc.sub_class_code() == 0x02 && desc.protocol_code() == 0x01 {
-        return true;
-    }
-    // Per-interface class: device descriptor says 0x00, need to check interfaces
-    desc.class_code() == 0x00
+    Some((
+        U3vInterfaceInfo {
+            control_iface: control_iface?,
+            control_ep_in: control_ep_in?,
+            control_ep_out: control_ep_out?,
+            stream_iface,
+            stream_ep_in,
+            event_iface,
+            event_ep_in,
+        },
+        packet_sizes,
+    ))
 }
 
 #[cfg(test)]

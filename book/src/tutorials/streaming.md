@@ -106,7 +106,7 @@ cargo run -p viva-camctl -- stream \
   --ip 192.168.0.10 --iface 192.168.0.5 --duration-s 5 --save 3 --save-format tiff
 ```
 
-`stream-usb` takes the same `--save-format`.
+`stream --usb 0` takes the same `--save-format`.
 
 Every format can be saved that the library converts: monochrome and Bayer at 8
 to 16 bits, including the packed `Mono10p`/`Mono12p` and GigE Vision
@@ -242,8 +242,8 @@ and read an event's features from the event itself:
 The names come from your camera's XML — SFNC calls them `ChunkTimestamp`,
 `ChunkExposureTime`, `EventExposureEndTimestamp` and so on — which
 `viva-camctl xml --ip <CAMERA-IP> --out camera.xml` saves for you to read.
-Chunks and events are GigE Vision only for now; USB3 Vision frames carry no
-chunks yet.
+USB3 Vision cameras carry both too: chunks in the frame, events on the
+camera's event interface (`viva-camctl events --usb 0`).
 
 ---
 

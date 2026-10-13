@@ -44,41 +44,42 @@ const DATAGRAM_MAX: usize = 65_536;
 
 /// The end of a stream as the queue reports it.
 #[derive(Debug)]
-enum End {
-    /// The receive thread failed, doing what, with which socket error; reported
+enum End<E> {
+    /// The receive thread failed, doing what, with which error; reported
     /// once.
-    Failed(&'static str, std::io::Error),
+    Failed(&'static str, E),
     /// The receive thread stopped.
     Finished,
 }
 
 /// What a pop found.
 #[derive(Debug)]
-pub(crate) enum Popped<T> {
+pub(crate) enum Popped<T, E = std::io::Error> {
     Item(T),
-    Failed(&'static str, std::io::Error),
+    Failed(&'static str, E),
     Finished,
     /// Nothing within the time allowed.
     Empty,
 }
 
 #[derive(Debug)]
-struct QueueState<T> {
+struct QueueState<T, E> {
     items: VecDeque<T>,
-    end: Option<End>,
+    end: Option<End<E>>,
 }
 
 /// A bounded, drop-oldest hand-off from the receive thread to one consumer,
-/// with a blocking and an async side.
+/// with a blocking and an async side. `E` is what the thread fails with: a
+/// socket's error for GVSP, a USB transfer's for USB3 Vision.
 #[derive(Debug)]
-pub(crate) struct DeliveryQueue<T> {
-    state: Mutex<QueueState<T>>,
+pub(crate) struct DeliveryQueue<T, E = std::io::Error> {
+    state: Mutex<QueueState<T, E>>,
     ready: Condvar,
     notify: tokio::sync::Notify,
     capacity: usize,
 }
 
-impl<T> DeliveryQueue<T> {
+impl<T, E> DeliveryQueue<T, E> {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             state: Mutex::new(QueueState {
@@ -91,7 +92,7 @@ impl<T> DeliveryQueue<T> {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState<T>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState<T, E>> {
         // A poisoned lock means a thread panicked while holding it; the
         // state is a queue of values, still coherent, so carry on.
         self.state.lock().unwrap_or_else(|e| e.into_inner())
@@ -120,7 +121,7 @@ impl<T> DeliveryQueue<T> {
 
     /// Record that the stream failed. Items already queued are still handed
     /// out first.
-    pub(crate) fn fail(&self, during: &'static str, err: std::io::Error) {
+    pub(crate) fn fail(&self, during: &'static str, err: E) {
         {
             let mut state = self.lock();
             if state.end.is_none() {
@@ -141,7 +142,7 @@ impl<T> DeliveryQueue<T> {
         self.wake();
     }
 
-    fn try_pop_locked(state: &mut QueueState<T>) -> Popped<T> {
+    fn try_pop_locked(state: &mut QueueState<T, E>) -> Popped<T, E> {
         if let Some(item) = state.items.pop_front() {
             return Popped::Item(item);
         }
@@ -160,12 +161,12 @@ impl<T> DeliveryQueue<T> {
     }
 
     /// Take the next item without waiting.
-    pub(crate) fn try_pop(&self) -> Popped<T> {
+    pub(crate) fn try_pop(&self) -> Popped<T, E> {
         Self::try_pop_locked(&mut self.lock())
     }
 
     /// Wait up to `timeout` for the next item.
-    pub(crate) fn pop_blocking(&self, timeout: Duration) -> Popped<T> {
+    pub(crate) fn pop_blocking(&self, timeout: Duration) -> Popped<T, E> {
         let deadline = Instant::now().checked_add(timeout);
         let mut state = self.lock();
         loop {
@@ -194,7 +195,7 @@ impl<T> DeliveryQueue<T> {
 
     /// Wait for the next item. Cancel-safe: an item is taken only by the poll
     /// that returns it.
-    pub(crate) async fn pop(&self) -> Popped<T> {
+    pub(crate) async fn pop(&self) -> Popped<T, E> {
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
@@ -829,7 +830,7 @@ mod tests {
 
     #[test]
     fn the_queue_drops_the_oldest_when_full() {
-        let queue = DeliveryQueue::new(2);
+        let queue: DeliveryQueue<i32> = DeliveryQueue::new(2);
         assert!(queue.push(1).is_none());
         assert!(queue.push(2).is_none());
         assert_eq!(queue.push(3), Some(1));
@@ -852,7 +853,7 @@ mod tests {
 
     #[test]
     fn a_blocking_pop_times_out_then_sees_a_push_from_another_thread() {
-        let queue = Arc::new(DeliveryQueue::new(4));
+        let queue: Arc<DeliveryQueue<i32>> = Arc::new(DeliveryQueue::new(4));
         let started = Instant::now();
         assert!(matches!(
             queue.pop_blocking(Duration::from_millis(20)),
@@ -876,7 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_async_pop_wakes_on_a_push_from_another_thread() {
-        let queue = Arc::new(DeliveryQueue::new(4));
+        let queue: Arc<DeliveryQueue<i32>> = Arc::new(DeliveryQueue::new(4));
         let pusher = {
             let queue = queue.clone();
             thread::spawn(move || {

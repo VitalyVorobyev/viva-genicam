@@ -53,9 +53,9 @@ viva-camctl report --usb 0 --out viva-report.txt
 ```
 
 A USB3 Vision report also lists the camera's bootstrap registers, decoded and
-as raw bytes, and still does when its XML cannot be read. USB3 Vision has
-[not run on a real camera yet](welcome.md#status), so those bytes are exactly
-what we need to see.
+as raw bytes, and still does when its XML cannot be read. USB3 Vision has run
+on [one camera so far](welcome.md#status), so those bytes are exactly what we
+need to see.
 
 The `.txt` extension is not cosmetic: GitHub rejects `.xml` attachments, so the
 bundle is written as text you can drag onto an issue. Zip the raw XML if you
@@ -81,7 +81,7 @@ Sections, in order:
 | Environment | `viva-camctl` version, host OS and architecture |
 | Network interfaces | Every interface **as the library sees it**, with index and IPv4 addresses |
 | Discovery | Each camera that answered: IP, MAC, manufacturer, model, version, serial, user name |
-| USB3 Vision devices | Each USB3 Vision camera on the host: vendor and product, bus position, manufacturer, model, serial |
+| USB3 Vision devices | Each USB3 Vision camera on the host: vendor and product, bus position, manufacturer, model, serial, link speed |
 | Camera | Which device the rest of the report is about |
 | Bootstrap registers | The GVCP standard register block, decoded (GigE Vision only) |
 | GenApi | XML size, schema version, node and feature counts, and any node that was dropped |

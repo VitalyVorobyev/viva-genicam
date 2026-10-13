@@ -25,13 +25,14 @@ class GigeDeviceInfo:
 
 @dataclass(frozen=True)
 class U3vDeviceInfo:
-    bus: int
+    bus: str                    # the OS's bus identifier; its form varies by OS
     address: int
     vendor_id: int
     product_id: int
     serial: Optional[str]
     manufacturer: Optional[str]
     model: Optional[str]
+    speed: Optional[str]        # e.g. "high speed (480 Mbit/s, USB 2)"
     transport: Literal["u3v"]
 ```
 

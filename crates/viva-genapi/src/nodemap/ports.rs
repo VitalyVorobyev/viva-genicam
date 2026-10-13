@@ -306,7 +306,7 @@ impl NodeMap {
     ) -> Result<Location<'a>, GenApiError> {
         let (port, bytes, from_end) = match self.route(node, addressing)? {
             Route::Device => {
-                let (address, len) = self.resolve_address(node, addressing, io)?;
+                let (address, len) = self.resolve_device_address(node, addressing, io)?;
                 return Ok(Location::Device { address, len });
             }
             Route::Chunk { port, id } => (port, self.attached.chunks.get(id), true),
@@ -338,7 +338,7 @@ impl NodeMap {
         io: &dyn RegisterIo,
     ) -> Result<(u64, u32), GenApiError> {
         match self.route(node, addressing)? {
-            Route::Device => self.resolve_address(node, addressing, io),
+            Route::Device => self.resolve_device_address(node, addressing, io),
             Route::Chunk { port, .. } | Route::Event { port, .. } => {
                 Err(GenApiError::PortNotWritable {
                     node: node.to_string(),

@@ -18,8 +18,8 @@ use crate::util::{
     skip_element,
 };
 use crate::{
-    AccessMode, AddressTerm, Addressing, BitField, ByteOrder, CachingMode, NodeDecl, NodeMeta,
-    PredicateRefs, Sign, XmlError,
+    AccessMode, AddressTerm, Addressing, BitField, ByteOrder, CachingMode, NodeDecl, PredicateRefs,
+    Sign, XmlError,
 };
 
 /// Parse a `<StructReg>` element, producing one `NodeDecl::Integer` per `<StructEntry>`.
@@ -42,6 +42,11 @@ pub(crate) fn parse_struct_reg(
     // its own (Point Grey's GPIO registers do).
     let mut cachable: Option<CachingMode> = None;
     let mut polling_time_ms: Option<u64> = None;
+    // "From each <StructEntry> element one MaskedInt node is created which
+    // gets [...] all its sub-elements, plus all elements from the StructReg
+    // node which are not present already in the <StructEntry> element"
+    // (GenICam Standard v2.1.1 §2.8.6): its visibility, tooltip, ...
+    let mut shared_meta = NodeMetaBuilder::default();
     let mut entries = Vec::new();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
@@ -118,8 +123,11 @@ pub(crate) fn parse_struct_reg(
                     entries.push(entry);
                 }
                 _ => {
-                    if !handle_invalidator_start(reader, e, &mut invalidators)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    if !handle_invalidator_start(reader, e, &mut invalidators)?
+                        && !shared_meta.handle_start(reader, e)?
+                    {
+                        // Inherited by every entry, as what it does read is.
+                        shared_meta.ignore(reader, e, None)?;
                     }
                 }
             },
@@ -143,7 +151,7 @@ pub(crate) fn parse_struct_reg(
                         }
                     }
                 }
-                _ => {}
+                _ => shared_meta.ignore_empty(e),
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -170,6 +178,7 @@ pub(crate) fn parse_struct_reg(
         terms,
         len: length,
         port,
+        p_length: None,
     };
 
     // Convert each StructEntry into a NodeDecl::Integer with shared addressing.
@@ -179,6 +188,8 @@ pub(crate) fn parse_struct_reg(
             let entry_sign = entry.sign.unwrap_or(sign);
             let (min, max) = bitfield_range(entry.bitfield.bit_length, entry_sign);
             let mut meta = entry.meta;
+            meta.inherit(&shared_meta);
+            let mut meta = meta.build();
             meta.cachable = meta.cachable.or(cachable);
             meta.polling_time_ms = meta.polling_time_ms.or(polling_time_ms);
             NodeDecl::Integer {
@@ -241,7 +252,7 @@ struct StructEntryData {
     sign: Option<Sign>,
     /// The entry's own metadata: a `<StructEntry>` is a node of its own, with
     /// a tooltip, a visibility and `<Streamable>` (GenICam Standard v2.1.1 §3.2).
-    meta: NodeMeta,
+    meta: NodeMetaBuilder,
 }
 
 fn parse_struct_entry(
@@ -289,12 +300,9 @@ fn parse_struct_entry(
                         byte_order = order;
                     }
                 }
-                _ => {
-                    if !meta.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
-                    }
-                }
+                _ => meta.handle_or_ignore(reader, e)?,
             },
+            Ok(Event::Empty(ref e)) => meta.ignore_empty(e),
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::invalid(&name, "ends before its closing tag"));
@@ -327,6 +335,6 @@ fn parse_struct_entry(
         bitfield,
         access,
         sign,
-        meta: meta.build(),
+        meta,
     })
 }

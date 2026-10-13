@@ -244,6 +244,15 @@ pub enum GenApiError {
         /// The value read.
         value: i64,
     },
+    /// The enumeration entry exists but cannot be selected now: its
+    /// `pIsImplemented` or `pIsAvailable` reads false. Nothing was written.
+    #[error("enum {node}'s entry {entry} is not available now")]
+    EnumEntryUnavailable {
+        /// The enumeration.
+        node: String,
+        /// The entry asked for.
+        entry: String,
+    },
     /// Attempted to select an enum entry that does not exist.
     #[error("enum {node} has no entry named {entry}")]
     EnumNoSuchEntry {
@@ -315,6 +324,18 @@ pub enum GenApiError {
         name: String,
         /// The address its `<pAddress>` or `<pIndex>` resolved to.
         addr: i64,
+    },
+    /// A `<pLength>` node reads a length no register can have: negative,
+    /// beyond `u32`, or, for device memory, beyond 16 MiB. Nothing was read
+    /// or written.
+    #[error("{name}: its <pLength> {length_node} reads {len}, which is not a register length")]
+    BadLength {
+        /// The register.
+        name: String,
+        /// The node its `<pLength>` names.
+        length_node: String,
+        /// The length it read.
+        len: i64,
     },
     /// Bitfield metadata exceeded the backing register width.
     #[error(

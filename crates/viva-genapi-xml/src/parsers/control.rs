@@ -5,7 +5,7 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::{NodeMetaBuilder, handle_predicate_start};
 use crate::util::{
-    attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start, skip_element,
+    attribute_value, attribute_value_required, parse_i64, parse_u64, read_text_start,
 };
 use crate::{CommandValueSrc, NodeDecl, NodeMeta, PredicateRefs, XmlError};
 
@@ -60,11 +60,12 @@ pub(crate) fn parse_command(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
+            Ok(Event::Empty(ref e)) => meta_builder.ignore_empty(e),
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::invalid(&name, "ends before its closing tag"));
@@ -135,8 +136,8 @@ pub(crate) fn parse_category(
                 _ => {
                     if handle_predicate_start(reader, e, &mut predicates)? {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
@@ -147,6 +148,7 @@ pub(crate) fn parse_category(
                     children.push(value);
                 }
             }
+            Ok(Event::Empty(ref e)) => meta_builder.ignore_empty(e),
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
                 return Err(XmlError::invalid(&name, "ends before its closing tag"));

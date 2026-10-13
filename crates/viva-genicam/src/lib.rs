@@ -349,7 +349,9 @@ impl<T: RegisterIo> Camera<T> {
     /// Save the camera's configuration — every feature its XML marks
     /// `<Streamable>` — to `out`, in the GenApi feature-file layout
     /// (ADR-0028). A feature behind a selector is saved under each of the
-    /// selector's entries, and the selector is put back.
+    /// selector's entries, and the selector is put back; behind a selector
+    /// that cannot be set now — not implemented, not available, locked — it
+    /// has one value, saved once.
     ///
     /// Returns what was saved, and in [`Configuration::omitted`] what was
     /// left out and why; the file carries the same as comments. Save while

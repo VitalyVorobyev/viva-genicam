@@ -37,8 +37,8 @@ by a real register comes out zero, so read structure from it, not data.
 | `Node::SwissKnife` | `SwissKnife`, `IntSwissKnife` |
 | `Node::Converter` | `Converter` |
 | `Node::IntConverter` | `IntConverter` |
-| `Node::String` | `StringReg` |
-| `Node::Register` | `Register` (plain `<Length>` only; `<pLength>` is not supported yet) |
+| `Node::String` | `StringReg`, `String` (a `<Value>`, or delegating through `<pValue>`) |
+| `Node::Register` | `Register` (a `<Length>`, or a `<pLength>` read each time) |
 
 `Node::kind_name()` returns the GenICam name, `name()` the feature name, and
 `access_mode()` the declared mode — which is not the same as the effective one,
@@ -163,11 +163,17 @@ value:
 | `nodes_at_visibility(level)` | `Beginner` / `Expert` / `Guru` / `Invisible` filtering |
 | `version()` | The document's schema version |
 | `skipped()` | Nodes that could not be built |
+| `ignored()` | Child elements of the nodes that were built, read past without interpretation |
 
 `skipped()` is the important one. A construct this crate cannot handle does
 not fail the whole document — it lands here, and the parser's own losses
 (`XmlModel::skipped`) are carried along with it, so a consumer sees both. The
 camera still opens, minus the features that could not be built.
+
+`ignored()` lists the smaller losses: an element of a node that loaded, which
+the parser read past. Most are documentation (`<Extension>`, an entry's
+`<ToolTip>`); one that changes a value is worth reporting, as a skipped node
+is. `viva-camctl report` prints both.
 
 ---
 

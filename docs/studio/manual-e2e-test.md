@@ -175,7 +175,7 @@ the identity (MAC, model, serial, user name).
 If the image view stays blank, check the logs:
 
 - **Terminal 1**: confirm `Fake camera running on ...` is shown
-- **Terminal 2 (viva-service)**: look for `connected` and `first GVSP frame received`
+- **Terminal 2 (viva-service)**: look for `connected` and `first frame received`
 - **Terminal 3 (viva_streamer)**: look for `First image/meta received`,
   `First raw image frame received`, `First BMP frame published`
 - **Browser/Tauri console**: look for `WebSocket opened` and

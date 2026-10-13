@@ -302,9 +302,23 @@ pub(crate) fn handle_addressing_start(
             addressing.set_length(len);
             Ok(true)
         }
+        // GenICam Standard v2.1.1 §2.8.3: "Alternatively the length can be
+        // read from another node using an <pLength> entry."
+        TAG_P_LENGTH => {
+            let text = read_text_start(reader, event)?;
+            let target = text.trim();
+            if target.is_empty() {
+                return Err(XmlError::invalid(name, "has an empty <pLength>"));
+            }
+            addressing.set_p_length(target);
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
+
+/// `<pLength>`: a register length read from another node at runtime.
+pub(crate) const TAG_P_LENGTH: &str = "pLength";
 
 /// Accumulates metadata fields during node parsing.
 #[derive(Debug, Default)]
@@ -318,6 +332,8 @@ pub(crate) struct NodeMetaBuilder {
     pub streamable: bool,
     pub cachable: Option<crate::CachingMode>,
     pub polling_time_ms: Option<u64>,
+    /// Child elements read past, as [`NodeMeta::ignored`](crate::NodeMeta::ignored).
+    pub ignored: Vec<String>,
 }
 
 impl NodeMetaBuilder {
@@ -391,6 +407,72 @@ impl NodeMetaBuilder {
         }
     }
 
+    /// Handle a start element as a metadata tag, or read past it and record
+    /// it in [`NodeMetaBuilder::ignored`]: the fallback of every node parser,
+    /// so that an element no parser interprets is never lost silently.
+    pub(crate) fn handle_or_ignore(
+        &mut self,
+        reader: &mut Reader<&[u8]>,
+        event: &BytesStart<'_>,
+    ) -> Result<(), XmlError> {
+        if !self.handle_start(reader, event)? {
+            self.ignore(reader, event, None)?;
+        }
+        Ok(())
+    }
+
+    /// Read past a start element no parser interprets and record it, under
+    /// `parent` (`EnumEntry`) when it is a child of one.
+    pub(crate) fn ignore(
+        &mut self,
+        reader: &mut Reader<&[u8]>,
+        event: &BytesStart<'_>,
+        parent: Option<&str>,
+    ) -> Result<(), XmlError> {
+        self.record(event, parent);
+        crate::util::skip_element(reader, event.name().as_ref())
+    }
+
+    /// Record an empty element no parser interprets. An empty metadata tag,
+    /// such as `<Streamable/>`, means its default and is not recorded.
+    pub(crate) fn ignore_empty(&mut self, event: &BytesStart<'_>) {
+        if !is_meta_tag(event.name().as_ref()) {
+            self.record(event, None);
+        }
+    }
+
+    fn record(&mut self, event: &BytesStart<'_>, parent: Option<&str>) {
+        let tag = event.name().as_ref().to_string();
+        let element = match parent {
+            Some(parent) => format!("{parent}/{tag}"),
+            None => tag,
+        };
+        tracing::debug!(%element, "reading past an element this parser does not interpret");
+        self.ignored.push(element);
+    }
+
+    /// Fill what this builder lacks from `outer`: a `<StructEntry>` takes
+    /// every element of its `<StructReg>` it does not declare itself
+    /// (GenICam Standard v2.1.1 §2.8.6).
+    pub(crate) fn inherit(&mut self, outer: &NodeMetaBuilder) {
+        self.visibility = self.visibility.or(outer.visibility);
+        if self.description.is_none() {
+            self.description.clone_from(&outer.description);
+        }
+        if self.tooltip.is_none() {
+            self.tooltip.clone_from(&outer.tooltip);
+        }
+        if self.display_name.is_none() {
+            self.display_name.clone_from(&outer.display_name);
+        }
+        self.representation = self.representation.or(outer.representation);
+        self.imposed_access = self.imposed_access.or(outer.imposed_access);
+        self.streamable |= outer.streamable;
+        self.cachable = self.cachable.or(outer.cachable);
+        self.polling_time_ms = self.polling_time_ms.or(outer.polling_time_ms);
+        self.ignored.extend(outer.ignored.iter().cloned());
+    }
+
     /// Build the final [`NodeMeta`].
     pub(crate) fn build(self) -> NodeMeta {
         NodeMeta {
@@ -403,8 +485,26 @@ impl NodeMetaBuilder {
             streamable: self.streamable,
             cachable: self.cachable,
             polling_time_ms: self.polling_time_ms,
+            ignored: self.ignored,
         }
     }
+}
+
+/// The tags [`NodeMetaBuilder::handle_start`] reads.
+fn is_meta_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        TAG_VISIBILITY
+            | TAG_DESCRIPTION
+            | TAG_TOOLTIP
+            | TAG_DISPLAY_NAME
+            | TAG_REPRESENTATION
+            | TAG_IMPOSED_ACCESS_MODE
+            | TAG_STREAMABLE
+            | TAG_CACHABLE
+            | TAG_CACHEABLE
+            | TAG_POLLING_TIME
+    )
 }
 
 /// Read a `<PollingTime>`. One that is not a number is a hint lost, logged

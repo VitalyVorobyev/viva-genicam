@@ -148,11 +148,14 @@ class Camera:
         self._native.set_enum(name, entry)
 
     def get_string(self, name: str) -> str:
-        """Read a ``StringReg``."""
+        """Read a string feature: a ``StringReg``, or a ``String`` holding a
+        value or reading the node its ``pValue`` names."""
         return self._native.get_string(name)
 
     def set_string(self, name: str, value: str) -> None:
-        """Write a ``StringReg``, NUL-padded to its length."""
+        """Write a string feature: a ``StringReg``, NUL-padded to its
+        length, or a ``String`` (its value, or the node its ``pValue``
+        names)."""
         self._native.set_string(name, value)
 
     def get_register(self, name: str) -> bytes:
@@ -399,7 +402,7 @@ class Camera:
         streamable — to ``path``.
 
         A feature behind a selector is saved under each of the selector's
-        entries. Returns ``{"values": int, "left_out": [(feature, reason)]}``;
+        entries; behind one that cannot be set now, once. Returns ``{"values": int, "left_out": [(feature, reason)]}``;
         the file says the same in comments. Save while the camera is not
         acquiring: what acquisition locks is left out otherwise.
         """

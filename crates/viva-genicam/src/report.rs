@@ -564,6 +564,7 @@ fn genapi(out: &mut String, xml: &str, include_xml: bool) {
                         );
                     }
                 }
+                ignored_elements(out, nodemap.ignored());
             }
             Err(err) => {
                 let _ = writeln!(out, "NODEMAP BUILD FAILED: {err}");
@@ -584,6 +585,37 @@ fn genapi(out: &mut String, xml: &str, include_xml: bool) {
         let _ = writeln!(out, "{xml}");
     }
     let _ = writeln!(out);
+}
+
+/// The child elements the parser read past, by node kind and element, with
+/// a count and the first node that has one. Most are documentation; one that
+/// changes a value is as worth reporting as a dropped feature.
+fn ignored_elements(out: &mut String, ignored: &[viva_genapi::IgnoredElement]) {
+    if ignored.is_empty() {
+        return;
+    }
+    let mut groups: Vec<(&str, &str, usize, &str)> = Vec::new();
+    for element in ignored {
+        match groups
+            .iter_mut()
+            .find(|(kind, tag, _, _)| *kind == element.kind && *tag == element.element)
+        {
+            Some(group) => group.2 += 1,
+            None => groups.push((&element.kind, &element.element, 1, &element.node)),
+        }
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{} element(s) of {} kind(s) the parser read past without interpreting \
+         (documentation, or a gap):",
+        ignored.len(),
+        groups.len()
+    );
+    let _ = writeln!(out);
+    for (kind, tag, count, example) in groups {
+        let _ = writeln!(out, "  <{tag}> on {kind} x{count} (e.g. {example})");
+    }
 }
 
 fn opt(value: &Option<String>) -> &str {
@@ -634,6 +666,23 @@ mod tests {
         genapi(&mut out, XML, false);
         assert!(out.contains("<ConfRom> DeviceConfRom"), "{out}");
         assert!(out.contains("cannot expose"), "{out}");
+    }
+
+    /// H-2: what the parser read past is listed, grouped, so a report shows
+    /// an element we do not interpret — as a `<String>`'s `<pValue>` once was.
+    #[test]
+    fn elements_read_past_are_listed() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <Integer Name="A"><Value>1</Value><Extension/><EventID>9C43</EventID></Integer>
+                <Integer Name="B"><Value>2</Value><Extension/></Integer>
+            </RegisterDescription>
+        "#;
+        let mut out = String::new();
+        genapi(&mut out, XML, false);
+        assert!(out.contains("3 element(s) of 2 kind(s)"), "{out}");
+        assert!(out.contains("<Extension> on Integer x2 (e.g. A)"), "{out}");
+        assert!(out.contains("<EventID> on Integer x1 (e.g. A)"), "{out}");
     }
 
     #[test]

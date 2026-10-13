@@ -42,7 +42,7 @@ opaque string without `/`).
   the device's serial (`viva_zenoh_api::u3v_device_id`, `cam-u3v-164c5533-FF003089`),
   so a camera keeps its id on another port and identical cameras still differ; a
   camera without a serial falls back to its bus and address (`cam-u3v-1e10300a-2-7`),
-  which a replug can change. Characters a key expression cannot carry become `_`. `name` is the user-defined name, else the model, else the address. `serial` is
+  which a replug can change. Any byte other than a letter, a digit, `-` or `.` — `_` included — becomes `_` and two hex digits (`a/b` is `a_2fb`), so two serials never share an id. `name` is the user-defined name, else the model, else the address. `serial` is
   the device's own serial, empty when it reports none (services before version 3 put the
   device id there). `ip`, `mac`, `user_name` and `manufacturer` are optional and absent
   when unknown; USB3 Vision has no `ip` or `mac`. The app labels a device by its

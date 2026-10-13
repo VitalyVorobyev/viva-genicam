@@ -306,7 +306,7 @@ impl BlockPublisher {
                 height = frame.height,
                 pixel_format = ?frame.pixel_format,
                 payload = frame.payload.len(),
-                "first GVSP frame received"
+                "first frame received"
             );
             self.logged_first_gvsp_frame = true;
         }

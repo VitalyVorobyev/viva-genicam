@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
 use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
     AccessMode, AddressTerm, Addressing, ByteOrder, CommandValueSrc, DocumentIdentity,
-    EnumEntryDecl, EnumValueSrc, FloatEncoding, FormulaBindings, IndexOffset, NodeDecl, PortKind,
-    PredicateRefs, Sign, SkippedNode, Slope, Visibility, XmlModel,
+    EnumEntryDecl, EnumValueSrc, FloatEncoding, FormulaBindings, IgnoredElement, IndexOffset,
+    NodeDecl, PortKind, PredicateRefs, Sign, SkippedNode, Slope, Visibility, XmlModel,
 };
 
 use crate::bitops::{extract, insert};
@@ -46,6 +46,8 @@ pub struct NodeMap {
     /// See [`NodeMap::command_targets`]; fixed once the map is built.
     command_targets: HashSet<String>,
     skipped: Vec<SkippedNode>,
+    /// Child elements the XML parser read past; see [`NodeMap::ignored`].
+    ignored: Vec<IgnoredElement>,
     generation: Cell<u64>,
     /// `<Port>` declarations by name: which addresses are the device's and
     /// which a chunk's or an event's.
@@ -141,9 +143,16 @@ fn value_provider(node: &Node) -> Option<&str> {
         Node::Command(n) => n.pvalue.as_deref(),
         Node::Converter(n) => Some(n.p_value.as_str()),
         Node::IntConverter(n) => Some(n.p_value.as_str()),
+        Node::String(n) => n.pvalue.as_deref(),
         _ => None,
     }
 }
+
+/// The longest device register a `<pLength>` node may give: 16 MiB, two
+/// hundred times the largest `<Length>` the vendor corpus declares (the
+/// Micro-Epsilon scanCONTROL's 100 000-byte `FileAccessBuffer`). A chunk or
+/// event port is bounded by the data attached to it instead.
+pub(crate) const MAX_DEVICE_LENGTH: u32 = 16 * 1024 * 1024;
 
 /// A restriction parameter of a numeric node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +361,7 @@ impl NodeMap {
         // consumer holding a NodeMap has no access to the XmlModel it was
         // built from, so leaving them behind would make a feature the parser
         // could not read indistinguishable from one the camera does not have.
+        let ignored = model.ignored();
         let mut skipped = model.skipped;
         let ports: HashMap<String, PortKind> = model
             .ports
@@ -396,6 +406,7 @@ impl NodeMap {
             dependents,
             command_targets: HashSet::new(),
             skipped,
+            ignored,
             generation: Cell::new(0),
             ports,
             attached: ports::Attached::default(),
@@ -452,6 +463,18 @@ impl NodeMap {
     /// as a bug. `viva-camctl report` prints it.
     pub fn skipped(&self) -> &[SkippedNode] {
         &self.skipped
+    }
+
+    /// Child elements of the camera's nodes that the XML parser read past
+    /// without interpreting — [`viva_genapi_xml::XmlModel::ignored`], kept
+    /// for a consumer that holds only the nodemap.
+    ///
+    /// The nodes themselves loaded. Most of these elements are
+    /// documentation (`<Extension>`, a port's `<ToolTip>`); one that changes
+    /// a value is worth reporting, as a skipped node is. `viva-camctl
+    /// report` prints them.
+    pub fn ignored(&self) -> &[IgnoredElement] {
+        &self.ignored
     }
 
     /// Read an integer feature value using the provided transport.
@@ -785,6 +808,13 @@ impl NodeMap {
     }
 
     /// Write an enumeration entry.
+    ///
+    /// The entry must exist and be available now: an entry whose
+    /// `pIsImplemented` or `pIsAvailable` reads false is refused with
+    /// [`GenApiError::EnumEntryUnavailable`] and nothing is written, as
+    /// GenApi refuses it. The mvBlueFOX3-2004G accepted a write of
+    /// `TestPattern=GreyHorizontalRamp`, which it does not implement, read it
+    /// back, and streamed zeros.
     pub fn set_enum(
         &mut self,
         name: &str,
@@ -793,19 +823,25 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         let node = self.get_enum_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
+        let entry_decl = node
+            .entries
+            .iter()
+            .find(|candidate| candidate.name == entry)
+            .ok_or_else(|| GenApiError::EnumNoSuchEntry {
+                node: name.to_string(),
+                entry: entry.to_string(),
+            })?;
+        if !self.entry_available(name, entry_decl, io)? {
+            return Err(GenApiError::EnumEntryUnavailable {
+                node: name.to_string(),
+                entry: entry.to_string(),
+            });
+        }
+        let raw = self.resolve_enum_entry_value(node, entry_decl, io)?;
+        let self_clearing = entry_decl.is_self_clearing;
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
-            let entry_decl = node
-                .entries
-                .iter()
-                .find(|candidate| candidate.name == entry)
-                .ok_or_else(|| GenApiError::EnumNoSuchEntry {
-                    node: name.to_string(),
-                    entry: entry.to_string(),
-                })?;
-            let raw_value = self.resolve_enum_entry_value(node, entry_decl, io)?;
-            let self_clearing = entry_decl.is_self_clearing;
-            self.set_integer(&pv, raw_value, io)?;
+            self.set_integer(&pv, raw, io)?;
             // Re-borrow node after mutable self call.
             let node = self.get_enum_node(name)?;
             node.invalidate();
@@ -816,15 +852,6 @@ impl NodeMap {
         // A floating enumeration has no register: the entry lives here, as a
         // floating integer's value does (GenICam Standard v2.1.1 §2.8.5).
         if node.addressing.is_none() && node.value.is_some() {
-            let entry_decl = node
-                .entries
-                .iter()
-                .find(|candidate| candidate.name == entry)
-                .ok_or_else(|| GenApiError::EnumNoSuchEntry {
-                    node: name.to_string(),
-                    entry: entry.to_string(),
-                })?;
-            let raw = self.resolve_enum_entry_value(node, entry_decl, io)?;
             debug!(node = %name, raw, entry, "write floating enumeration");
             node.floating.replace(Some(raw));
             node.value_cache.replace(None);
@@ -836,16 +863,6 @@ impl NodeMap {
             .as_ref()
             .ok_or_else(|| GenApiError::no_value_source(name))?;
         let (address, len) = self.locate_for_write(name, addressing, io)?;
-        let entry_decl = node
-            .entries
-            .iter()
-            .find(|candidate| candidate.name == entry)
-            .ok_or_else(|| GenApiError::EnumNoSuchEntry {
-                node: name.to_string(),
-                entry: entry.to_string(),
-            })?;
-        let raw = self.resolve_enum_entry_value(node, entry_decl, io)?;
-        let self_clearing = entry_decl.is_self_clearing;
         let bytes = i64_to_bytes(name, raw, len, Sign::Signed, ByteOrder::Big)?;
         debug!(node = %name, raw, entry, "write enum feature");
         io.write(address, &bytes)?;
@@ -853,6 +870,28 @@ impl NodeMap {
         self.note_entry(name, self_clearing);
         self.invalidate_dependents(name);
         Ok(())
+    }
+
+    /// Whether `entry` of the enumeration `name` can be selected now: its
+    /// own `pIsImplemented` and `pIsAvailable`, when it declares them.
+    fn entry_available(
+        &self,
+        name: &str,
+        entry: &EnumEntryDecl,
+        io: &dyn RegisterIo,
+    ) -> Result<bool, GenApiError> {
+        for provider in [
+            &entry.predicates.p_is_implemented,
+            &entry.predicates.p_is_available,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !self.eval_predicate_ref(name, provider, io)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// List the available entry names for an enumeration feature.
@@ -1094,17 +1133,9 @@ impl NodeMap {
         }
         let mut out: Vec<&str> = Vec::new();
         for entry in &node.entries {
-            if let Some(provider) = &entry.predicates.p_is_implemented
-                && !self.eval_predicate_ref(name, provider, io)?
-            {
-                continue;
+            if self.entry_available(name, entry, io)? {
+                out.push(entry.name.as_str());
             }
-            if let Some(provider) = &entry.predicates.p_is_available
-                && !self.eval_predicate_ref(name, provider, io)?
-            {
-                continue;
-            }
-            out.push(entry.name.as_str());
         }
         Ok(unique_in_order(out))
     }
@@ -1549,24 +1580,87 @@ impl NodeMap {
         io: &dyn RegisterIo,
     ) -> Result<(u64, u32), GenApiError> {
         match addressing {
-            Addressing::Sum { terms, len, .. } => {
+            Addressing::Sum {
+                terms,
+                len,
+                p_length,
+                ..
+            } => {
+                // First: a bare `<pIndex>` strides by the length, whichever
+                // way the document gives it.
+                let len = match p_length {
+                    Some(provider) => self.length_from(node_name, provider, io)?,
+                    None => *len,
+                };
                 let mut address: u64 = 0;
                 for term in terms {
                     address =
-                        address.wrapping_add(self.resolve_address_term(node_name, term, *len, io)?);
+                        address.wrapping_add(self.resolve_address_term(node_name, term, len, io)?);
                 }
                 if terms.len() > 1 {
                     debug!(
                         node = %node_name,
                         terms = terms.len(),
                         address = format_args!("0x{address:X}"),
-                        len = *len,
+                        len,
                         "resolve summed address"
                     );
                 }
-                Ok((address, *len))
+                Ok((address, len))
             }
         }
+    }
+
+    /// The length `provider`, a `<pLength>` node, gives `node` now (GenICam
+    /// Standard v2.1.1 §2.8.3).
+    fn length_from(
+        &self,
+        node: &str,
+        provider: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<u32, GenApiError> {
+        let len = self.get_integer(provider, io)?;
+        u32::try_from(len).map_err(|_| GenApiError::BadLength {
+            name: node.to_string(),
+            length_node: provider.to_string(),
+            len,
+        })
+    }
+
+    /// A register's length now: its `<Length>`, or what its `<pLength>`
+    /// node reads.
+    pub(crate) fn register_length(
+        &self,
+        node: &str,
+        addressing: &Addressing,
+        io: &dyn RegisterIo,
+    ) -> Result<u32, GenApiError> {
+        match addressing.length_node() {
+            Some(provider) => self.length_from(node, provider, io),
+            None => Ok(addressing.byte_len()),
+        }
+    }
+
+    /// Resolve a device register's address and length, refusing a length a
+    /// `<pLength>` node gives beyond [`MAX_DEVICE_LENGTH`]: one read of the
+    /// device must not allocate whatever a register happens to hold.
+    pub(crate) fn resolve_device_address(
+        &self,
+        node: &str,
+        addressing: &Addressing,
+        io: &dyn RegisterIo,
+    ) -> Result<(u64, u32), GenApiError> {
+        let (address, len) = self.resolve_address(node, addressing, io)?;
+        if let Some(provider) = addressing.length_node()
+            && len > MAX_DEVICE_LENGTH
+        {
+            return Err(GenApiError::BadLength {
+                name: node.to_string(),
+                length_node: provider.to_string(),
+                len: i64::from(len),
+            });
+        }
+        Ok((address, len))
     }
 
     /// Resolve one address term to the offset it contributes.
@@ -2390,16 +2484,30 @@ impl NodeMap {
     }
 
     /// Read a String feature value using the provided transport.
+    ///
+    /// A `<StringReg>` reads its register up to the first NUL. A `<String>`
+    /// reads the node its `<pValue>` names, or holds its `<Value>` and
+    /// whatever was last written to it.
     pub fn get_string(&self, name: &str, io: &dyn RegisterIo) -> Result<String, GenApiError> {
         let node = self.get_string_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
+        if let Some(ref pv) = node.pvalue {
+            return self.get_string(pv, io);
+        }
+        let Some(ref addressing) = node.addressing else {
+            return match (node.floating.borrow().clone(), &node.value) {
+                (Some(written), _) => Ok(written),
+                (None, Some(start)) => Ok(start.clone()),
+                (None, None) => Err(GenApiError::no_value_source(name)),
+            };
+        };
         if self.may_serve(name)
             && let Some((ref value, generation)) = *node.cache.borrow()
             && generation == self.generation.get()
         {
             return Ok(value.clone());
         }
-        let location = self.locate(name, &node.addressing, io)?;
+        let location = self.locate(name, addressing, io)?;
         let raw = self.read_location(name, &location, io)?;
         // Convert bytes to string, stopping at first null byte
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
@@ -2422,7 +2530,24 @@ impl NodeMap {
     ) -> Result<(), GenApiError> {
         let node = self.get_string_node(name)?;
         self.ensure_writable_now(name, &node.access, io)?;
-        let (address, len) = self.locate_for_write(name, &node.addressing, io)?;
+        if let Some(ref pv) = node.pvalue {
+            let pv = pv.clone();
+            self.set_string(&pv, value, io)?;
+            self.invalidate_dependents(name);
+            return Ok(());
+        }
+        let Some(ref addressing) = node.addressing else {
+            if node.value.is_none() {
+                return Err(GenApiError::no_value_source(name));
+            }
+            // A floating `<String>`: "a floating node which can hold any
+            // string value" (GenICam Standard v2.1.1 §2.8.12).
+            debug!(node = %name, value = %value, "write floating string");
+            node.floating.replace(Some(value.to_string()));
+            self.invalidate_dependents(name);
+            return Ok(());
+        };
+        let (address, len) = self.locate_for_write(name, addressing, io)?;
         // Build byte buffer with null termination
         let mut buf = vec![0u8; len as usize];
         let bytes = value.as_bytes();
@@ -2930,13 +3055,24 @@ fn build_node(
         }
         NodeDecl::String(decl) => {
             let name = decl.name;
-            register_addressing_dependency(dependents, &name, &decl.addressing);
+            if let Some(ref addressing) = decl.addressing {
+                register_addressing_dependency(dependents, &name, addressing);
+            }
+            if let Some(ref provider) = decl.pvalue {
+                dependents
+                    .entry(provider.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
             register_predicate_dependencies(dependents, &name, &decl.predicates);
             register_invalidator_dependencies(dependents, &name, &decl.invalidators);
             let node = StringNode {
                 name: name.clone(),
                 meta: decl.meta,
                 addressing: decl.addressing,
+                pvalue: decl.pvalue,
+                value: decl.value,
+                floating: std::cell::RefCell::new(None),
                 access: decl.access,
                 predicates: decl.predicates,
                 cache: std::cell::RefCell::new(None),

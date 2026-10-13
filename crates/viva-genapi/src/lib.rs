@@ -56,8 +56,8 @@ pub use swissknife::{AstNode, EvalMode, Value, VarAttr};
 // `NodeMap::register_address` instead (ADR-0030).
 pub use viva_genapi_xml::{
     AccessMode, BitField, ByteOrder, CachingMode, CommandValueSrc, DocumentIdentity, EnumEntryDecl,
-    EnumValueSrc, FloatEncoding, NodeMeta, PortKind, PredicateRefs, Representation, Sign, SkOutput,
-    SkippedNode, Slope, Visibility,
+    EnumValueSrc, FloatEncoding, IgnoredElement, NodeMeta, PortKind, PredicateRefs, Representation,
+    Sign, SkOutput, SkippedNode, Slope, Visibility,
 };
 
 #[cfg(test)]
@@ -364,6 +364,12 @@ mod tests {
                 <Address>0x4000</Address>
                 <pLength>BlockLength</pLength>
             </Register>
+            <Integer Name="BlockLength">
+                <Address>0x4100</Address>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <Cachable>NoCache</Cachable>
+            </Integer>
             <StringReg Name="DeviceVendorName">
                 <Address>0x5000</Address>
                 <Length>4</Length>
@@ -508,28 +514,45 @@ mod tests {
         ));
     }
 
-    /// The deferred half of GA-09 must name itself in the skip reason.
-    ///
-    /// The corpus allowlist matches on this substring to tell a known gap from
-    /// a regression, so the wording is load-bearing, not cosmetic.
+    /// GA-09: a `<Register>` whose `<pLength>` names the node its length is
+    /// read from (GenICam Standard v2.1.1 §2.8.3) builds, and reads as many
+    /// bytes as that node says — each time, since the node can change.
     #[test]
-    fn a_register_with_p_length_is_skipped_and_says_why() {
+    fn a_register_with_p_length_reads_the_length_its_node_gives() {
         let nodemap = build_register_nodemap();
-        let skipped = nodemap.skipped();
-
-        let entry = skipped
-            .iter()
-            .find(|s| s.name.as_deref() == Some("DynamicBlock"))
-            .expect("a <pLength> register must be recorded, not silently dropped");
-        assert_eq!(entry.tag, "Register");
         assert!(
-            entry.error.contains("<pLength>"),
-            "the skip reason must name <pLength>: {}",
-            entry.error
+            nodemap.skipped().is_empty(),
+            "nothing is skipped: {:?}",
+            nodemap.skipped()
         );
+        let io = MockIo::with_registers(&[
+            (0x4100, 3u32.to_be_bytes().to_vec()),
+            (0x4000, vec![7, 8, 9]),
+        ]);
+        assert_eq!(
+            nodemap.get_register("DynamicBlock", &io).unwrap(),
+            vec![7, 8, 9]
+        );
+        assert_eq!(
+            nodemap.feature_state("DynamicBlock", &io).unwrap().value,
+            crate::FeatureValue::Register { len: 3 }
+        );
+    }
 
-        // The other five nodes still built.
-        assert_eq!(nodemap.node_names().count(), 5);
+    /// A length a device register holds is not trusted to allocate: past
+    /// 16 MiB, or negative, it is refused before anything is read.
+    #[test]
+    fn a_p_length_that_is_no_register_length_is_refused() {
+        let nodemap = build_register_nodemap();
+        let io = MockIo::with_registers(&[(0x4100, 0xFFFF_FFF0u32.to_be_bytes().to_vec())]);
+        let err = nodemap
+            .get_register("DynamicBlock", &io)
+            .expect_err("4 GiB is not read");
+        assert!(
+            matches!(&err, GenApiError::BadLength { length_node, .. } if length_node == "BlockLength"),
+            "{err:?}"
+        );
+        assert_eq!(io.read_count(0x4000), 0, "the register was not read");
     }
 
     /// Structural elements are not features and must not be reported as lost.

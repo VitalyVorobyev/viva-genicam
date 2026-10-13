@@ -35,7 +35,10 @@ pub async fn run(args: ReportArgs) -> Result<()> {
                 // A camera we cannot open is the one worth reporting: say why,
                 // and report the rest (backlog DX-06).
                 Err(err) => {
-                    notes.push(format!("usb camera [{usb}]: FAILED to open: {err:#}"));
+                    notes.push(format!(
+                        "usb camera [{usb}]: FAILED to open: {}",
+                        crate::common::error_line(&err)
+                    ));
                     ReportTarget::None
                 }
             }

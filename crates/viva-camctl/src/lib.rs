@@ -41,8 +41,8 @@ const FAILURE: u8 = 1;
 /// code the process should use.
 ///
 /// `args` is a complete argv, program name included. Diagnostics go to stderr in
-/// the same form the binary has always produced — `anyhow`'s `Debug` rendering,
-/// so an error's source chain survives. The code is clap's own for a usage error
+/// `anyhow`'s `Debug` layout, so an error's source chain survives, without
+/// repeating a cause the error's own message already prints. The code is clap's own for a usage error
 /// or for `--help`, and 1 for a command that ran and failed.
 ///
 /// A plain `u8` rather than [`ExitCode`](std::process::ExitCode) because
@@ -80,7 +80,7 @@ where
     match runtime.block_on(cli::dispatch(cli)) {
         Ok(()) => 0,
         Err(err) => {
-            eprintln!("Error: {err:?}");
+            eprintln!("Error: {}", common::error_report(&err));
             FAILURE
         }
     }

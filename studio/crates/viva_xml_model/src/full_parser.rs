@@ -577,6 +577,32 @@ mod tests {
         );
     }
 
+    /// A `<String>` that reads a read-only `<StringReg>` through `<pValue>`
+    /// is read-only, as the node it delegates to is (GenICam Standard v2.1.1
+    /// §2.8.12): the mvBlueFOX3-2004G's `DeviceFirmwareVersion`. A floating
+    /// one holds a value and is writable.
+    #[test]
+    fn a_string_is_as_writable_as_what_it_reads() {
+        let xml = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+                <StringReg Name="DBB"><Address>0x1000134</Address><Length>32</Length><AccessMode>RO</AccessMode></StringReg>
+                <String Name="DeviceFirmwareVersion"><pValue>DBB</pValue></String>
+                <String Name="Label"><Value>cam</Value></String>
+            </RegisterDescription>
+        "#;
+        let graph = parse_genicam_xml(xml).expect("parse");
+        assert_eq!(
+            graph.nodes_by_name["DeviceFirmwareVersion"]
+                .access_mode
+                .as_deref(),
+            Some("RO")
+        );
+        assert_eq!(
+            graph.nodes_by_name["Label"].access_mode.as_deref(),
+            Some("RW")
+        );
+    }
+
     /// A command imposed `RO` permits nothing — its own access is `WO` — and
     /// shows as `NA`, not as executable (Codex review of #187).
     #[test]

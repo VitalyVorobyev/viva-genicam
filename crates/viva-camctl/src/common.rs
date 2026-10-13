@@ -364,8 +364,80 @@ pub fn print_stream_counters(prefix: &str, stats: &viva_genicam::StreamStats) {
     );
 }
 
+/// The messages of `err` and its causes, outermost first, leaving out a
+/// cause whose message the one before it already ends with.
+///
+/// The library's errors print their cause's message in their own
+/// (`"{during}: {source}"`, ADR-0030), so walking the chain as `anyhow` does
+/// printed each cause twice: "read a frame: the device is disconnected: the
+/// device is disconnected".
+fn error_messages(err: &anyhow::Error) -> Vec<String> {
+    let mut messages: Vec<String> = Vec::new();
+    for cause in err.chain() {
+        let message = cause.to_string();
+        if messages.last().is_some_and(|last| last.ends_with(&message)) {
+            continue;
+        }
+        messages.push(message);
+    }
+    messages
+}
+
+/// An error and its causes, laid out as `anyhow`'s `Debug` lays them out —
+/// the error, then `Caused by:` and the causes — without a cause the error's
+/// own message already holds.
+pub(crate) fn error_report(err: &anyhow::Error) -> String {
+    let messages = error_messages(err);
+    let mut out = messages.first().cloned().unwrap_or_default();
+    match &messages[1.min(messages.len())..] {
+        [] => {}
+        [cause] => out.push_str(&format!("\n\nCaused by:\n    {cause}")),
+        causes => {
+            out.push_str("\n\nCaused by:");
+            for (i, cause) in causes.iter().enumerate() {
+                out.push_str(&format!("\n    {i}: {cause}"));
+            }
+        }
+    }
+    out
+}
+
+/// An error and its causes on one line, as `anyhow`'s `{:#}` prints them,
+/// without a cause the message before it already holds.
+pub(crate) fn error_line(err: &anyhow::Error) -> String {
+    error_messages(err).join(": ")
+}
+
 #[cfg(test)]
 mod tests {
+    /// ADR-0030: the facade's `Display` includes its source's message, so a
+    /// reporter that walks the chain must not print it again. An unplugged
+    /// camera printed "read a frame: the device is disconnected: the device
+    /// is disconnected" (the mvBlueFOX3-2004G, #205).
+    #[test]
+    fn an_error_chain_does_not_repeat_what_a_display_already_said() {
+        let err = anyhow::Error::from(viva_genicam::GenicamError::U3v {
+            during: "read a frame",
+            source: viva_genicam::u3v::U3vError::Disconnected,
+        });
+        assert_eq!(error_line(&err), "read a frame: the device is disconnected");
+        assert_eq!(
+            error_report(&err),
+            "read a frame: the device is disconnected"
+        );
+
+        // A context that adds something is kept, and its cause follows it.
+        let err = err.context("stream from the camera");
+        assert_eq!(
+            error_line(&err),
+            "stream from the camera: read a frame: the device is disconnected"
+        );
+        assert_eq!(
+            error_report(&err),
+            "stream from the camera\n\nCaused by:\n    read a frame: the device is disconnected"
+        );
+    }
+
     use super::*;
 
     #[test]

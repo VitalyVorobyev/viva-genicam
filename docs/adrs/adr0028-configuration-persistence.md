@@ -1,6 +1,6 @@
 # ADR-0028: Saving and restoring a configuration in GenApi's feature-file layout
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-10-13 (selectors that cannot be set)
 **Date:** 2026-10-11
 
 ## Context
@@ -134,3 +134,38 @@ and `load_features(&mut impl Read)` do the I/O.
 - Locked features are left out of a save. A camera that locks a feature for a
   reason that has nothing to do with its own configuration loses it from the
   file.
+
+## Amendment — 2026-10-13: a selector that cannot be set selects nothing
+
+**Found on hardware.** On a MATRIX VISION mvBlueFOX3-2004G, the first camera
+to run `save`, `ExposureTimeSelector` is not implemented (its
+`<pIsImplemented>` reads 0) and still names `ExposureTime` in `<pSelected>`.
+The walk tried to set it to each entry, every write failed with "node
+unavailable", and `ExposureTime` — the feature every configuration is for —
+was left out of every save, with nine other features behind the two other
+selectors that camera does not offer now (`mvAreaSelector`,
+`mvStepperMotorSelector`). Ten selectors that never moved were then "put
+back", which failed and warned 24 times.
+
+**Decision.** A selector selects only while it can be set: declared
+writable, implemented, available and not locked now. One that cannot leaves
+each feature it selects a single value, which the walk saves once, without
+that selector in its group, and a load writes back without moving it. A
+selector the walk could set is put back only if a write moved it; a load sets
+a selector only when it does not already hold the value's entry.
+
+**Evidence.** GenApi's reference implementation does this walk in
+`CSelectorSet` (`GenApi/SelectorSet.h`): its headers, which
+`rc_genicam_api` republishes, say only that it "recursively explores the
+selectors and sub selectors of a node" and that `Restore` "restores the
+selectors' values found at creation"; its source (`SelectorSet.cpp`) is not
+public, so whether it skips an unavailable selector is not known from it.
+This is the safer reading — a value that exists is saved rather than lost —
+and the camera settles it for this device: `ExposureTime` is saved
+(`ExposureTime<TAB>30`) and a load restores it from 20 000 µs to 30 µs.
+
+**Consequence.** A file saved while a selector was unavailable holds the
+plain value; loaded when that selector is available again, the value goes to
+whatever entry the selector holds then. A selector's availability depending on
+the configuration itself (one feature enabling another's selector) is not
+modelled beyond the restore order the dependency graph already gives.

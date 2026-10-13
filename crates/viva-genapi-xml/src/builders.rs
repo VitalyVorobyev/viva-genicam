@@ -12,6 +12,8 @@ pub(crate) struct AddressingBuilder {
     pub(crate) terms: Vec<AddressTerm>,
     pub(crate) length: Option<u32>,
     pub(crate) port: Option<String>,
+    /// `<pLength>`: the node the length is read from at runtime.
+    pub(crate) p_length: Option<String>,
 }
 
 impl AddressingBuilder {
@@ -30,7 +32,18 @@ impl AddressingBuilder {
             terms,
             len,
             port: self.port,
+            p_length: self.p_length,
         }
+    }
+
+    /// Whether any address term was declared.
+    pub(crate) fn has_terms(&self) -> bool {
+        !self.terms.is_empty()
+    }
+
+    /// Record the `<pLength>` node the length is read from.
+    pub(crate) fn set_p_length(&mut self, node: &str) {
+        self.p_length = Some(node.to_string());
     }
 
     /// Add a literal `<Address>` term.
@@ -67,6 +80,13 @@ impl AddressingBuilder {
         node: &str,
         default_len: Option<u32>,
     ) -> Result<Addressing, XmlError> {
+        // A length read through `<pLength>` is the device's to say; the
+        // static one stays `0` unless a `<Length>` is declared too.
+        let default_len = if self.p_length.is_some() {
+            Some(0)
+        } else {
+            default_len
+        };
         let len = self
             .length
             .or(default_len)
@@ -78,6 +98,7 @@ impl AddressingBuilder {
             terms: self.terms,
             len,
             port: self.port,
+            p_length: self.p_length,
         })
     }
 }

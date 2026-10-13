@@ -105,7 +105,7 @@ matched the wrong frames.
 
 `viva_zenoh_api::u3v_device_id` is `cam-u3v-<vendor><product>-<serial>`, so a
 camera keeps its id on another port. A camera without a serial falls back to
-`<bus>-<address>`. Characters a key expression cannot carry become `_`. The
+`<bus>-<address>`. Any byte other than a letter, a digit, `-` or `.` — `_` included — becomes `_` and two hex digits, a reversible escape: a bare `_` for each made `a/b` and `a*b` one id (Codex review of #205). The
 device GUID is not used: reading it needs device I/O, and discovery does none
 (§1). On the camera, the ABRM serial, the USB serial string and
 `DeviceSerialNumber` were the same text.

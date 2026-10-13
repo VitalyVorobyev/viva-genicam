@@ -12,7 +12,7 @@ use super::{
 use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
     attribute_value, attribute_value_required, parse_address, parse_f64, parse_i64, parse_scale,
-    parse_u64, read_text_start, skip_element,
+    parse_u64, read_text_start,
 };
 use crate::{AccessMode, ByteOrder, FloatEncoding, NodeDecl, PredicateRefs, Sign, XmlError};
 
@@ -190,8 +190,8 @@ pub(crate) fn parse_integer(
                         || handle_invalidator_start(reader, e, &mut invalidators)?
                     {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
@@ -242,7 +242,7 @@ pub(crate) fn parse_integer(
                         byte_order = Some(order);
                     }
                 }
-                _ => {}
+                _ => meta_builder.ignore_empty(e),
             },
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
             Ok(Event::Eof) => {
@@ -356,7 +356,7 @@ pub(crate) fn parse_float(
                 "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_INT_SWISS_KNIFE | TAG_P_PORT
                 | "Length" => {
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
-                        skip_element(reader, e.name().as_ref())?;
+                        meta_builder.ignore(reader, e, None)?;
                     }
                 }
                 "AccessMode" => {
@@ -407,14 +407,14 @@ pub(crate) fn parse_float(
                         || handle_invalidator_start(reader, e, &mut invalidators)?
                     {
                         // handled
-                    } else if !meta_builder.handle_start(reader, e)? {
-                        skip_element(reader, e.name().as_ref())?;
+                    } else {
+                        meta_builder.handle_or_ignore(reader, e)?;
                     }
                 }
             },
             Ok(Event::Empty(ref e)) => {
-                if e.name().as_ref() == TAG_P_ADDRESS {
-                    handle_addressing_empty(e, &mut addressing)?;
+                if !handle_addressing_empty(e, &mut addressing)? {
+                    meta_builder.ignore_empty(e);
                 }
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,

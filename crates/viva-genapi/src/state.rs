@@ -86,7 +86,8 @@ pub enum FeatureValue {
     /// copying the payload into every snapshot would be a poor trade for a
     /// value nothing renders. Read it with [`NodeMap::get_register`].
     Register {
-        /// Declared length in bytes.
+        /// Length in bytes: its `<Length>`, or what its `<pLength>` node
+        /// reads now.
         len: u32,
     },
 }
@@ -281,7 +282,7 @@ impl NodeMap {
             Node::Boolean(_) => FeatureValue::Boolean(self.get_bool(name, io)?),
             Node::String(_) => FeatureValue::String(self.get_string(name, io)?),
             Node::Register(reg) => FeatureValue::Register {
-                len: reg.declared_len(),
+                len: self.register_length(name, &reg.addressing, io)?,
             },
             Node::SwissKnife(sk) => match sk.output {
                 SkOutput::Float => FeatureValue::Float(self.get_float(name, io)?),

@@ -54,7 +54,7 @@ See "Version Bumps" in `CLAUDE.md`.
 
 ## 2. Verify locally
 
-- Refresh **all four** lockfiles — `cargo metadata --format-version 1 > /dev/null`
+- Refresh **all five** lockfiles — `cargo metadata --format-version 1 > /dev/null`
   run from each of:
 
   ```
@@ -62,6 +62,7 @@ See "Version Bumps" in `CLAUDE.md`.
   crates/viva-pygenicam                    # its own workspace, not a member
   studio                                   # second workspace (ADR-0017)
   studio/apps/viva-studio-tauri/src-tauri  # third workspace
+  fuzz                                     # the fuzz targets' own workspace
   ```
 
   Every crate version appears in each of them, so a stale one fails CI rather
@@ -94,6 +95,11 @@ Watch the three workflows: **Publish Rust crates**, **Release**,
 - PyPI JSON shows the version and license `MIT`:
   `curl -s https://pypi.org/pypi/viva-genicam/json | jq '.info.version, .info.license'`
 - GitHub release `vX.Y.Z` exists and has the binary assets attached: the CLI
-  archives, and the Viva Studio `.dmg`, `.AppImage`, `.deb` and `.msi`.
+  archives; the GenTL producer for each of the three targets,
+  `viva_gentl-x86_64-unknown-linux-gnu.cti`, `viva_gentl-aarch64-apple-darwin.cti`
+  and `viva_gentl-x86_64-pc-windows-msvc.cti` (ADR-0031); the Viva Studio
+  `.dmg`, `.AppImage`, `.deb` and `.msi`; and `SHA256SUMS.txt`, which covers
+  them all. The **Release** workflow builds each `.cti` beside its target's
+  archive (`scripts/build-cti.sh`) and uploads `dist/*.cti`.
 
 Report a checklist of what was verified and anything still pending.

@@ -86,18 +86,49 @@ cd crates/viva-pygenicam && cargo clippy --all-targets -- -D warnings && cargo f
 Run it on every toolchain update too: a new clippy lint can turn it red while
 every other local gate stays green.
 
-## The Python bindings are not covered by `cargo test` (run them when the pyo3
-## surface changes)
+## The Python package: pytest and stubtest (whenever `crates/viva-pygenicam` or a type it wraps changes)
 
 `cargo test --workspace` does not build a wheel or run `pytest`, so a change to
-a `#[pyo3]` signature is only checked by the `Python wheels` CI workflow. There
-is no compile-time link between the pyo3 function and the hand-written wrapper
-in `crates/viva-pygenicam/python/viva_genicam/`, which calls it **positionally**.
+a `#[pyo3]` signature is otherwise only checked by the `Python wheels` CI
+workflow. Build the module into a virtualenv and run both gates, the way
+CONTRIBUTING describes (uv shown):
 
-A renamed or reordered argument that is not updated in `camera.py`,
-`_native.pyi`, the tests and the examples is a silent misconfiguration, not a
-`TypeError` (Python's `bool` subclasses `int`). When touching the pyo3 surface,
-grep the whole crate plus `book/src/python/` for the old name before pushing.
+```bash
+uv venv .venv && uv pip install --python .venv/bin/python maturin numpy pytest mypy
+uv run --python .venv/bin/python maturin develop -m crates/viva-pygenicam/Cargo.toml
+.venv/bin/python -m pytest crates/viva-pygenicam/tests
+.venv/bin/python -m mypy.stubtest viva_genicam --allowlist crates/viva-pygenicam/stubtest-allowlist.txt
+```
+
+| Gate | On failure |
+|------|------------|
+| pytest | its suites start fake cameras on UDP 3956, so run it alone; `test_book_snippets.py` failing means a `<!-- pytest: … -->` snippet in `book/src/python/` drifted from the API |
+| stubtest | `_native.pyi` disagrees with the built module, or the package's own code with either: update the stub, or list a deliberate gap in `stubtest-allowlist.txt` with the reason. Run it from the repository root, not from inside `crates/viva-pygenicam`, so `viva_genicam` resolves to the installed package |
+
+There is no compile-time link between the pyo3 function and the hand-written
+wrapper in `crates/viva-pygenicam/python/viva_genicam/`, which calls it
+**positionally**. A renamed or reordered argument that is not updated in
+`camera.py`, `_native.pyi`, the tests and the examples is a silent
+misconfiguration, not a `TypeError` (Python's `bool` subclasses `int`). When
+touching the pyo3 surface, grep the whole crate plus `book/src/python/` for the
+old name before pushing.
+
+## The GenTL producer: the consumer harness (whenever `crates/viva-gentl` or `viva-fake-gige` changes)
+
+`cargo test -p viva-gentl` calls the producer's C functions in process; only
+`scripts/gentl-harness.sh` loads the built `.cti` the way a consumer does. It
+builds `viva_gentl.cti`, compiles a C program against the EMVA's `GenTL.h`,
+acquires frames from `viva-fake-gige`, validates every port's XML against the
+GenApi schema with `xmllint`, and, with `HARVESTERS_PYTHON` set, acquires again
+through Harvesters. CI's `GenTL producer` job runs all of it on Linux.
+
+```bash
+HARVESTERS_PYTHON=/path/to/venv/bin/python scripts/gentl-harness.sh   # harvesters==1.4.3, genicam==1.6.0, numpy
+```
+
+It binds UDP 3956, so run it alone. Locally a step whose tool is missing is
+skipped and says so; read the output rather than the exit code, and say in the
+report which steps ran.
 
 ## Notes
 
@@ -119,6 +150,8 @@ End with a compact table, one row per gate that ran:
 | wasm32 check                | PASS   |
 | cargo test (root)           | PASS   |
 | studio gates                | SKIP (no studio changes) |
+| pytest + stubtest           | SKIP (pyo3 surface unchanged) |
+| GenTL harness               | SKIP (viva-gentl and the fake unchanged) |
 ```
 
 If all pass: "All quality gates passed." Otherwise list actionable fixes.

@@ -29,9 +29,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ts-rs = { version = "12.0.1", optional = true, features = ["no-serde-warnings", "serde-json-impl"] }
-viva-genapi = { version = "0.8", path = "../viva-genapi", optional = true }
+viva-genapi = { version = "0.9", path = "../viva-genapi", optional = true }
 # The PFNC table the wire's `PixelFormat` is a projection of.
-viva-pfnc = { version = "0.8", path = "../viva-pfnc" }
+viva-pfnc = { version = "0.9", path = "../viva-pfnc" }
 
 [dev-dependencies]
 # Builds a node map for the `genapi` conversion test.

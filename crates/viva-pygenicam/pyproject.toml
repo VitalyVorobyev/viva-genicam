@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "viva-genicam"
-version = "0.8.0"
+version = "0.9.0"
 description = "Pure-Rust GenICam stack for Python: discover, control, and stream GigE Vision / USB3 Vision cameras"
 readme = "README.md"
 # USB3 Vision goes through nusb (pure Rust, MIT OR Apache-2.0), so the wheel

@@ -15,18 +15,18 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-viva-genapi = { version = "0.8", path = "../viva-genapi" }
-viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
+viva-genapi = { version = "0.9", path = "../viva-genapi" }
+viva-genapi-xml = { version = "0.9", path = "../viva-genapi-xml" }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing = { workspace = true }
-viva-gige = { version = "0.8", path = "../viva-gige" }
+viva-gige = { version = "0.9", path = "../viva-gige" }
 async-trait = { workspace = true }
-viva-sfnc = { version = "0.8", path = "../viva-sfnc" }
-viva-pfnc = { version = "0.8", path = "../viva-pfnc" }
-viva-gencp = { version = "0.8", path = "../viva-gencp" }
-viva-u3v = { version = "0.8", path = "../viva-u3v", optional = true }
+viva-sfnc = { version = "0.9", path = "../viva-sfnc" }
+viva-pfnc = { version = "0.9", path = "../viva-pfnc" }
+viva-gencp = { version = "0.9", path = "../viva-gencp" }
+viva-u3v = { version = "0.9", path = "../viva-u3v", optional = true }
 # `image-io`: frames saved as PNG and TIFF at the camera's bit depth.
 png = { version = "0.18.1", optional = true }
 tiff = { version = "0.11.3", default-features = false, optional = true }
@@ -41,10 +41,10 @@ u3v-usb = ["u3v", "viva-u3v/usb"]
 image-io = ["dep:png", "dep:tiff"]
 
 [dev-dependencies]
-viva-genapi-xml = { version = "0.8", path = "../viva-genapi-xml" }
+viva-genapi-xml = { version = "0.9", path = "../viva-genapi-xml" }
 viva-fake-gige = { path = "../viva-fake-gige" }
 viva-fake-u3v = { path = "../viva-fake-u3v" }
-viva-u3v = { version = "0.8", path = "../viva-u3v" }
+viva-u3v = { version = "0.9", path = "../viva-u3v" }
 fastrand = "2"
 socket2 = { workspace = true }
 tracing-subscriber = { workspace = true }

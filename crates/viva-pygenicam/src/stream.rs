@@ -6,18 +6,16 @@ use std::time::Duration;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use tokio::time::timeout as tokio_timeout;
 
 use viva_genicam::gige::Iface;
 use viva_genicam::{
     FrameStream, GenicamError, ResendPolicy, StreamOptions, StreamStats,
-    U3vFrameStream as U3vStream, U3vStreamBuilder,
+    U3vFrameStream as U3vStream, U3vStreamOptions,
 };
 
 use crate::camera::{lock_open, GigeCamera, U3vCamera};
-use crate::errors::{gige_only, parse_error, transport_error, IntoPyErr};
+use crate::errors::{parse_error, transport_error, IntoPyErr};
 use crate::frame::PyFrame;
-use crate::runtime::runtime;
 
 /// Boxed so the enum costs every `PyFrameStream` one pointer whichever
 /// transport it streams.
@@ -54,7 +52,7 @@ impl PyFrameStream {
 /// `StreamStats` as a dict of its fields; durations in seconds.
 fn stats_dict<'py>(py: Python<'py>, stats: &StreamStats) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
-    let counters: [(&str, u64); 21] = [
+    let counters: [(&str, u64); 22] = [
         ("frames_complete", stats.frames_complete),
         ("frames_incomplete", stats.frames_incomplete),
         ("frames_missed", stats.frames_missed),
@@ -82,6 +80,7 @@ fn stats_dict<'py>(py: Python<'py>, stats: &StreamStats) -> PyResult<Bound<'py, 
         ("resend_requested", stats.resend_requested),
         ("resend_recovered", stats.resend_recovered),
         ("resend_unavailable", stats.resend_unavailable),
+        ("transfer_errors", stats.transfer_errors),
         ("bytes", stats.bytes),
         ("frames_lost", stats.frames_lost()),
         ("packets_ignored", stats.packets_ignored()),
@@ -116,20 +115,23 @@ impl PyFrameStream {
                 Err(GenicamError::Timeout(_)) => Err(transport_error("timeout waiting for frame")),
                 other => other.into_py_err(),
             },
-            StreamInner::U3v(s) => runtime()
-                .block_on(async { tokio_timeout(to, s.next_frame()).await })
-                .map_err(|_| transport_error("timeout waiting for frame"))
-                .and_then(|res| res.into_py_err()),
+            // So is the USB3 Vision reader's.
+            StreamInner::U3v(s) => match s.next_frame_blocking(to) {
+                Err(GenicamError::Timeout(_)) => Err(transport_error("timeout waiting for frame")),
+                other => other.into_py_err(),
+            },
         })
         .map(|opt| opt.map(PyFrame::new))
     }
 
-    /// The stream's counters (GigE Vision): every block's fate, every
-    /// packet's, and the resends asked for.
+    /// The stream's counters: every block's fate, and on GigE Vision every
+    /// packet's and the resends asked for; on USB3 Vision `packets_received`
+    /// counts bulk transfers and `transfer_errors` the failed ones the
+    /// stream recovered from.
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         match self.inner.as_ref() {
             Some(StreamInner::Gige(s)) => stats_dict(py, &s.stats()),
-            Some(StreamInner::U3v(_)) => Err(gige_only("stream statistics")),
+            Some(StreamInner::U3v(s)) => stats_dict(py, &s.stats()),
             None => Err(parse_error("frame stream is closed")),
         }
     }
@@ -246,10 +248,8 @@ pub(crate) fn build_u3v_stream(
         let cam = guard
             .as_mut()
             .expect("lock_open checked the camera is open");
-        // The stream's reader is a runtime task; started outside the runtime
-        // it panicked ("no reactor running").
-        let _runtime = runtime().enter();
-        U3vStreamBuilder::new(cam).build().into_py_err()
+        // The reader is a thread of its own: no runtime needed.
+        cam.open_stream(U3vStreamOptions::default()).into_py_err()
     })?;
     Ok(PyFrameStream::u3v(stream))
 }

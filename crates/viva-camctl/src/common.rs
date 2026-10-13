@@ -20,7 +20,7 @@ use viva_gige::GigeDevice;
 use viva_gige::discover_on_interface;
 use viva_gige::{GVCP_PORT, discover};
 use viva_gige::{Iface, IfaceSelector};
-use viva_u3v::RusbTransfer;
+use viva_u3v::NusbTransfer;
 
 pub const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 500;
 
@@ -47,7 +47,7 @@ pub enum AnyCamera {
     /// GigE Vision.
     Gige(Camera<GigeRegisterIo>),
     /// USB3 Vision.
-    Usb(Camera<U3vRegisterIo<RusbTransfer>>),
+    Usb(Camera<U3vRegisterIo<NusbTransfer>>),
 }
 
 /// Run `$body` with `$camera` bound to the camera inside an

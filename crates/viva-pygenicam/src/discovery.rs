@@ -1,4 +1,4 @@
-//! Discovery bindings: GigE Vision (async UDP) and USB3 Vision (libusb).
+//! Discovery bindings: GigE Vision (async UDP) and USB3 Vision (nusb).
 
 use std::time::Duration;
 
@@ -66,7 +66,7 @@ impl PyGigeDeviceInfo {
 #[derive(Clone)]
 pub(crate) struct PyU3vDeviceInfo {
     #[pyo3(get)]
-    bus: u8,
+    bus: String,
     #[pyo3(get)]
     address: u8,
     #[pyo3(get)]
@@ -79,19 +79,23 @@ pub(crate) struct PyU3vDeviceInfo {
     manufacturer: Option<String>,
     #[pyo3(get)]
     model: Option<String>,
+    /// The link speed the OS reports, such as "high speed (480 Mbit/s, USB 2)".
+    #[pyo3(get)]
+    speed: Option<String>,
     pub(crate) inner: viva_u3v::U3vDeviceInfo,
 }
 
 impl From<viva_u3v::U3vDeviceInfo> for PyU3vDeviceInfo {
     fn from(info: viva_u3v::U3vDeviceInfo) -> Self {
         Self {
-            bus: info.bus,
+            bus: info.bus.clone(),
             address: info.address,
             vendor_id: info.vendor_id,
             product_id: info.product_id,
             serial: info.serial.clone(),
             manufacturer: info.manufacturer.clone(),
             model: info.model.clone(),
+            speed: info.speed.map(|s| s.to_string()),
             inner: info,
         }
     }
@@ -101,8 +105,8 @@ impl From<viva_u3v::U3vDeviceInfo> for PyU3vDeviceInfo {
 impl PyU3vDeviceInfo {
     fn __repr__(&self) -> String {
         format!(
-            "U3vDeviceInfo(bus={}, address={}, vendor_id=0x{:04x}, product_id=0x{:04x}, \
-             serial={:?}, manufacturer={:?}, model={:?})",
+            "U3vDeviceInfo(bus={:?}, address={}, vendor_id=0x{:04x}, product_id=0x{:04x}, \
+             serial={:?}, manufacturer={:?}, model={:?}, speed={:?})",
             self.bus,
             self.address,
             self.vendor_id,
@@ -110,6 +114,7 @@ impl PyU3vDeviceInfo {
             self.serial,
             self.manufacturer,
             self.model,
+            self.speed,
         )
     }
 }

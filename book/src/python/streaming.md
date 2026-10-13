@@ -177,8 +177,8 @@ a string.
 
 ## Events
 
-A GigE camera reports what happens — an exposure ending, a frame starting —
-on its message channel:
+A camera reports what happens — an exposure ending, a frame starting — on its
+message channel (GigE Vision) or its event interface (USB3 Vision):
 
 <!-- pytest: camera -->
 ```python
@@ -189,8 +189,8 @@ print(hex(event.id), event.block_id, cam.event_features(event))
 ```
 
 `event_features` reads the features the camera's XML derives from the event,
-such as `EventExposureEndTimestamp`. `events()` takes `iface=` and `port=` as
-`stream()` does.
+such as `EventExposureEndTimestamp`. On a GigE camera `events()` takes
+`iface=` and `port=` as `stream()` does; a USB3 Vision camera needs neither.
 
 ## Timeouts and ending a stream
 

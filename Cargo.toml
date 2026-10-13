@@ -49,7 +49,7 @@ quick-xml = "0.42"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusb = "0.9"
+nusb = "0.2.7"
 # For net utils:
 if-addrs = { version = "0.15", features = ["link-local"] }
 async-trait = "0.1"

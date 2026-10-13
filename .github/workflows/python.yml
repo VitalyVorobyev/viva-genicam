@@ -86,8 +86,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # libusb is statically linked into the extension via `rusb/vendored`,
-      # so no system libusb needs to be installed on any platform.
+      # USB3 Vision goes through nusb, pure Rust: no system USB library is
+      # needed on any platform.
       # For Linux we specify `manylinux` + `container` as action inputs so
       # the action spins up the matching manylinux docker image (the runner
       # itself has glibc ≥2.38 which would emit non-compliant symbols).

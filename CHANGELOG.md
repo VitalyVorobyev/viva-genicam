@@ -62,8 +62,25 @@ release opens with what to read before upgrading.
   any PFNC format by its PFNC name — `RGB8Packed` where it said `RGB8`,
   `Coord3D_ABC32f` where it said `Unknown`; the frame header's byte codes are
   unchanged. Studio's generated `ImageMeta.pixel_format` is a `string`. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
-- **A USB3 Vision camera's device id names its bus and address**:
-  `cam-u3v-1e10300a-2-7`, so two identical cameras are two devices. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+- **A USB3 Vision camera's device id names its serial**:
+  `cam-u3v-164c5533-FF003089`, so two identical cameras are two devices and a
+  camera keeps its id on another port; one without a serial is named by its bus
+  and address (`cam-u3v-1e10300a-2-7`). ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203), [#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **USB3 Vision goes through `nusb`, not `rusb`** (ADR-0032): no libusb is
+  built or linked, and the Python package's license is `MIT` (it was
+  `MIT AND LGPL-2.1-or-later`). `RusbTransfer` is `NusbTransfer`.
+  `U3vDeviceInfo`'s `bus` is text (the OS's bus identifier), it gains
+  `speed`, and it loses `interface_info`, which an opened device reports
+  (`NusbTransfer::interfaces`); Python's `U3vDeviceInfo.bus` is a `str` too.
+  `U3vError::NotFound`'s `bus` is text as well. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **The USB3 Vision stream is rebuilt** (ADR-0032): `viva_u3v::U3vStream` is
+  not generic (`U3vStream::open(&transport, endpoint, layout)`),
+  `RawFrame::trailer` is an `Option`, and `U3vDevice::open_stream_with` takes
+  `U3vStreamOptions`. In the facade, `Camera::open_stream(U3vStreamOptions)`
+  opens a stream, `U3vStreamBuilder::new` takes the camera's
+  `U3vRegisterIo` (`camera.transport()`) instead of the camera, and
+  `U3vFrameStream::dropped()` is gone: `stats()` counts what was lost.
+  `viva-camctl stream-usb` is `viva-camctl stream --usb N`. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
 - **`viva-service`'s library is the service, not its parts**: `Discovery`,
   `run_discovery`, `run_service`, `DeviceOps`, `StreamSource`, `serve_device`
   and the GigE implementation; its `config`, `acquisition`, `nodes` and other
@@ -206,6 +223,24 @@ release opens with what to read before upgrading.
   with `StreamOptions::payload_size` for a caller without a node map; and
   `viva-fake-gige` now serves schema-valid GenApi XML with a `PayloadSize`.
   ([#204](https://github.com/VitalyVorobyev/viva-genicam/pull/204))
+- **USB3 Vision streams that keep up and recover** (ADR-0032): eight USB
+  transfers in flight instead of one read at a time; a failed transfer costs
+  its frame, not the stream; an unplugged camera ends its stream with
+  `U3vError::Disconnected` — on macOS, whose transfers do not say so, once
+  the device is no longer listed — marks the camera lost
+  (`U3vRegisterIo::is_lost`), and `viva-service-u3v` stops serving it. On an
+  mvBlueFOX3-2004G over USB 2 at full resolution, 113.5 fps where one read at a
+  time reached 106.7. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **USB3 Vision chunks, events, counters and host time**, as on GigE Vision:
+  `Camera::with_chunks` and `chunk_features` read a USB frame's chunks,
+  `Camera::open_event_stream` its events, `stats()` the same `StreamStats`
+  (plus `transfer_errors`), and `time_calibrate` gives frames host time.
+  `U3vFrameStream::next_frame_blocking` needs no async runtime.
+  `viva-camctl stream`, `events` and `chunks` take `--usb`, and `bench --usb`
+  reports the stream's counters; Python's USB3 Vision stream has `stats()` and
+  `events()` works on a USB3 Vision camera. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **A USB3 Vision camera below SuperSpeed is warned about** when it is opened;
+  `viva-camctl list-usb` and the report show each camera's link speed. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
 - **`viva-service-u3v` follows cameras as `viva-service` does**: it rescans
   USB, serves every USB3 Vision camera it finds, and publishes one that
   disappears as disconnected; it took the first camera once and never let go.
@@ -383,9 +418,28 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **A USB3 Vision stream starts clean**: the stream endpoint is reset before
+  streaming is enabled, so a camera starts at block 0 with nothing left over;
+  the event endpoint likewise, so a new event stream does not first deliver an
+  earlier acquisition's events. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **USB3 Vision discovery opens no device**: a camera another program, or this
+  one, holds is listed with its serial, manufacturer and model. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **`time_calibrate` finds GenCP's timestamp registers by the names cameras
+  give them**, `Timestamp` and `TimestampIncrement`, besides the SFNC and
+  GigE Vision names it already knew. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **A register addressed through an embedded `<IntSwissKnife>` reads**: the
+  knife was dropped, and the register read as having no address (232 of the
+  235 refusals per vendor-corpus pass). ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **A camera lost mid-acquisition stops publishing**: `viva-service` waits for
+  the camera's frame loop to stop before it publishes the camera lost; the loop
+  was left running, publishing frames under the lost camera's id. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
+- **The GenTL producer reports buffers as GenTL 1.6 defines them**:
+  `BUFFER_INFO_PIXEL_ENDIANNESS` is unknown rather than little-endian,
+  `DELIVERED_IMAGEHEIGHT` is the lines the trailer says arrived, and
+  `DATA_SIZE` of an incomplete buffer is the size it was meant to have. ([#205](https://github.com/VitalyVorobyev/viva-genicam/pull/205))
 - **Python could not stream from a USB3 Vision camera**: opening the stream
   panicked (`there is no reactor running`). Found with the new fake camera;
-  no USB3 Vision camera has run it. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
+  it has since streamed from one camera (ADR-0032). ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))
 - **Python's `stream(monitor=True)` on a USB3 Vision camera raises**
   `GenicamError`; it returned a stream that waited for an acquisition nobody
   started. USB3 Vision has no read-only access to a camera. ([#203](https://github.com/VitalyVorobyev/viva-genicam/pull/203))

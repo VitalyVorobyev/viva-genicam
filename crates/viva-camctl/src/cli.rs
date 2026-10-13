@@ -218,12 +218,16 @@ pub enum Cmd {
         #[arg(long, conflicts_with = "wait_ms")]
         no_wait: bool,
     },
-    /// Start GVSP stream (uni-/multicast)
+    /// Stream frames: GVSP (uni-/multicast), or a USB3 Vision camera with
+    /// --usb
     Stream {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         ip: Option<Ipv4Addr>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         index: Option<usize>,
+        /// Stream from the Nth USB3 Vision camera (`list-usb` order) instead
+        #[arg(long)]
+        usb: Option<usize>,
         /// Host interface, by IPv4 address or by OS name
         #[arg(long)]
         iface: Option<IfaceSelector>,
@@ -269,12 +273,17 @@ pub enum Cmd {
         #[arg(long, default_value_t = 0)]
         duration_s: u64,
     },
-    /// Configure + read events (message channel)
+    /// Configure + read events: the GVCP message channel, or a USB3 Vision
+    /// camera's event interface with --usb (which streams while it listens)
     Events {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         ip: Option<Ipv4Addr>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         index: Option<usize>,
+        /// Read the Nth USB3 Vision camera's events (`list-usb` order)
+        /// instead
+        #[arg(long)]
+        usb: Option<usize>,
         /// Host interface, by IPv4 address or by OS name
         #[arg(long)]
         iface: Option<IfaceSelector>,
@@ -287,10 +296,13 @@ pub enum Cmd {
     },
     /// Toggle ChunkModeActive + selectors
     Chunks {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         ip: Option<Ipv4Addr>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "usb")]
         index: Option<usize>,
+        /// Configure the Nth USB3 Vision camera (`list-usb` order) instead
+        #[arg(long)]
+        usb: Option<usize>,
         #[arg(long)]
         enable: bool,
         #[arg(long, default_value = "Timestamp")]
@@ -350,24 +362,6 @@ pub enum Cmd {
     },
     /// Discover USB3 Vision cameras
     ListUsb,
-    /// Stream frames from a USB3 Vision camera
-    StreamUsb {
-        #[arg(long)]
-        index: Option<usize>,
-        /// Number of frames to save to disk
-        #[arg(long, default_value_t = 1)]
-        save: usize,
-        /// File format for --save: pnm (8-bit PGM/PPM), or png/tiff at the
-        /// camera's bit depth (16-bit above 8 bits)
-        #[arg(long, value_enum, default_value_t = SaveFormat::Pnm)]
-        save_format: SaveFormat,
-        /// Convert saved frames to RGB
-        #[arg(long)]
-        rgb: bool,
-        /// Stop after this many seconds (0 = unlimited)
-        #[arg(long, default_value_t = 0)]
-        duration_s: u64,
-    },
 }
 
 /// Install the tracing subscriber for a CLI run.
@@ -382,9 +376,10 @@ fn init_tracing(verbose: u8) {
         1 => "debug",
         _ => "trace",
     };
+    // nusb logs its own event-loop thread at info, for every USB command.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| level.into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| format!("{level},nusb=warn")),
         ))
         .with_target(false)
         .try_init();
@@ -503,8 +498,17 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             cmd_execute::run(target, name, wait, iface, json).await?
         }
         Cmd::Stream {
+            usb: Some(usb),
+            save,
+            save_format,
+            rgb,
+            duration_s,
+            ..
+        } => cmd_usb::run_stream(usb, save, save_format, rgb, duration_s)?,
+        Cmd::Stream {
             ip,
             index,
+            usb: None,
             iface: cmd_iface,
             mode,
             group,
@@ -539,16 +543,30 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             cmd_stream::run(args).await?
         }
         Cmd::Events {
+            usb: Some(usb),
+            enable,
+            count,
+            ..
+        } => cmd_usb::run_events(usb, &enable, count, json)?,
+        Cmd::Events {
             ip,
             index,
+            usb: None,
             iface: cmd_iface,
             port,
             enable,
             count,
         } => cmd_events::run(ip, index, cmd_iface.or(iface), port, enable, count, json).await?,
         Cmd::Chunks {
+            usb: Some(usb),
+            enable,
+            selectors,
+            ..
+        } => cmd_usb::run_chunks(usb, enable, &selectors)?,
+        Cmd::Chunks {
             ip,
             index,
+            usb: None,
             enable,
             selectors,
         } => cmd_chunks::run(ip, index, enable, selectors, iface, json).await?,
@@ -593,13 +611,6 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             force,
         } => cmd_set_ip::run(&mac, ip, subnet, gateway, force, iface).await?,
         Cmd::ListUsb => cmd_usb::run_list(json)?,
-        Cmd::StreamUsb {
-            index,
-            save,
-            save_format,
-            rgb,
-            duration_s,
-        } => cmd_usb::run_stream(index, save, save_format, rgb, duration_s)?,
     };
 
     Ok(())
@@ -676,9 +687,38 @@ mod tests {
     #[test]
     fn stream_accepts_a_save_format() {
         for args in [
-            ["viva-camctl", "stream", "--save-format", "png"],
-            ["viva-camctl", "stream", "--save-format", "tiff"],
-            ["viva-camctl", "stream-usb", "--save-format", "tiff"],
+            &["viva-camctl", "stream", "--save-format", "png"][..],
+            &["viva-camctl", "stream", "--save-format", "tiff"],
+            &[
+                "viva-camctl",
+                "stream",
+                "--usb",
+                "0",
+                "--save-format",
+                "tiff",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+        // A USB3 Vision camera is named by --usb alone.
+        assert!(
+            Cli::try_parse_from(["viva-camctl", "stream", "--usb", "0", "--index", "1"]).is_err()
+        );
+    }
+
+    /// API-11: events and chunks take --usb, as stream does.
+    #[test]
+    fn events_and_chunks_take_a_usb_camera() {
+        for args in [
+            &[
+                "viva-camctl",
+                "events",
+                "--usb",
+                "0",
+                "--enable",
+                "ExposureEnd",
+            ][..],
+            &["viva-camctl", "chunks", "--usb", "0", "--enable"],
         ] {
             assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }

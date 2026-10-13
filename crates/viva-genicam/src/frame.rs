@@ -24,6 +24,11 @@ pub enum FrameStatus {
     },
     /// The trailer reported this error status (bit 15 set).
     DeviceStatus(viva_gige::GigeStatus),
+    /// A USB3 Vision trailer reported this error status (bit 15 set), such
+    /// as `DATA_OVERRUN`: the device dropped data.
+    #[cfg(feature = "u3v")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+    U3vDeviceStatus(viva_u3v::U3vStatus),
     /// No trailer arrived before the block timed out or was displaced, so how
     /// many packets the block had is unknown.
     TrailerMissing,
@@ -87,6 +92,16 @@ pub struct Frame {
     /// What a consumer that parses the chunk layout itself needs — a GenTL
     /// consumer, which locates chunks in the buffer the producer fills.
     pub raw_payload: Bytes,
+    /// Lines the block delivered, from its trailer's Size Y: fewer than
+    /// [`height`](Self::height) when a variable-height frame (a line scan)
+    /// ended early. `None` when no trailer said — it was lost, or the
+    /// payload is not an image.
+    pub delivered_height: Option<u32>,
+    /// Bytes the block was meant to carry, lost ones included: for a complete
+    /// block, the length of [`raw_payload`](Self::raw_payload); for an
+    /// incomplete one, what its trailer's packet count, `PayloadSize` or the
+    /// leader's geometry say. `None` when none of them does.
+    pub expected_size: Option<usize>,
 }
 
 /// Payload type of an image block.
@@ -109,6 +124,8 @@ impl Frame {
             payload_type: PAYLOAD_TYPE_IMAGE,
             status: FrameStatus::Complete,
             padding_x: 0,
+            delivered_height: None,
+            expected_size: None,
         }
     }
 

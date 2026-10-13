@@ -159,8 +159,13 @@ pub(crate) struct AssembledBlock {
     /// Bytes up to the end of the furthest packet received; lost packets'
     /// bytes are zero.
     pub payload: Bytes,
-    /// Size Y from the trailer, 0 without one.
-    pub trailer_size_y: u32,
+    /// Size Y from the trailer; `None` without one.
+    pub trailer_size_y: Option<u32>,
+    /// Bytes the block was meant to carry, lost ones included: exact once the
+    /// trailer and the last data packet arrived, else `PayloadSize` or the
+    /// leader's geometry (bounded by the trailer's packet count); `None`
+    /// when nothing said.
+    pub expected_size: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -193,6 +198,9 @@ struct BlockInFlight {
     unsupported: bool,
     trailer: Option<TrailerInfo>,
     buffer: Vec<u8>,
+    /// The size the buffer was given before any packet arrived: `PayloadSize`
+    /// or the leader's geometry, whichever is larger; 0 when neither is known.
+    planned: usize,
     /// End of the furthest byte written.
     extent: usize,
     /// Data packets received, indexed by packet id − 1.
@@ -652,6 +660,7 @@ impl Assembler {
             leader_payload_type: None,
             unsupported: false,
             trailer: None,
+            planned: buffer.len(),
             buffer,
             extent: 0,
             bitmap,
@@ -709,6 +718,7 @@ impl Assembler {
         // a ROI or format change does not, and the leader wins.
         let estimate = geometry_size(&image).min(ESTIMATE_CAP);
         self.largest_estimate = self.largest_estimate.max(estimate);
+        block.planned = block.planned.max(estimate);
         if block.buffer.len() < estimate {
             if block.buffer.is_empty() {
                 block.buffer = self.buffers.acquire(estimate);
@@ -927,11 +937,12 @@ impl Assembler {
                 }
                 Resolution::Frame(status) => status,
             };
+            let expected_size = expected_size(&block, status, self.config.packet_size);
             let mut buffer = std::mem::take(&mut block.buffer);
             buffer.truncate(block.extent);
             let (trailer_size_y, trailer_type) = match block.trailer.take() {
-                Some(t) => (t.size_y, Some(t.payload_type)),
-                None => (0, None),
+                Some(t) => (Some(t.size_y), Some(t.payload_type)),
+                None => (None, None),
             };
             out.push(AssembledBlock {
                 block_id: block.block_id,
@@ -940,6 +951,7 @@ impl Assembler {
                 payload_type: block.leader_payload_type.or(trailer_type).unwrap_or(0),
                 payload: Bytes::from(buffer),
                 trailer_size_y,
+                expected_size,
             });
         }
     }
@@ -978,6 +990,41 @@ impl Assembler {
         }
         self.stats.record_size_mismatch();
     }
+}
+
+/// The size a block was meant to have (GenTL's `BUFFER_INFO_DATA_SIZE`): its
+/// length when complete; exact too when the trailer and the last data packet
+/// arrived, since the last packet ends the payload; otherwise the planned size,
+/// no larger than the trailer's packet count allows and no smaller than what
+/// arrived.
+fn expected_size(block: &BlockInFlight, status: FrameStatus, packet_size: u32) -> Option<usize> {
+    if status.is_complete() {
+        return Some(block.extent);
+    }
+    let header_len = if block.extended_ids {
+        GVSP_EXTENDED_HEADER_SIZE
+    } else {
+        GVSP_HEADER_SIZE
+    };
+    let stride = payload_stride(packet_size, header_len).max(1);
+    let trailer_bound = block.trailer.as_ref().map(|t| {
+        let last = t.last_payload_id as usize;
+        (last, last.saturating_mul(stride))
+    });
+    if let Some((last, _)) = trailer_bound
+        && last > 0
+        && block.bitmap.contains(last - 1)
+    {
+        return Some(block.extent);
+    }
+    if block.planned == 0 {
+        return None;
+    }
+    let planned = match trailer_bound {
+        Some((_, bound)) if bound > 0 => block.planned.min(bound),
+        _ => block.planned,
+    };
+    Some(planned.max(block.extent))
 }
 
 /// Packets missing from a block whose trailer arrived: data packets not
@@ -1067,7 +1114,7 @@ mod tests {
             (leader.width, leader.height, leader.timestamp),
             (64, 32, 0xABCD)
         );
-        assert_eq!(block.trailer_size_y, 32);
+        assert_eq!(block.trailer_size_y, Some(32));
         assert_eq!(asm.in_flight(), 0);
         let snap = stats.snapshot();
         assert_eq!(

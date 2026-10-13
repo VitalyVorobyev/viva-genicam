@@ -26,7 +26,7 @@ of the record.
 | [0012](adr0012-layered-crate-architecture.md) | Layered Crate Architecture with a Single Workspace Version | Accepted |
 | [0013](adr0013-fake-camera-first-testing.md) | Fake-Camera-First Testing and the Realism Policy | Accepted |
 | [0014](adr0014-sync-registerio-async-adapters.md) | Synchronous RegisterIo with Async Adapters | Accepted; adapter runtime amended by 0027 |
-| [0015](adr0015-vendored-libusb-lgpl-notices.md) | Vendored libusb in PyPI Wheels with LGPL Notices | Accepted |
+| [0015](adr0015-vendored-libusb-lgpl-notices.md) | Vendored libusb in PyPI Wheels with LGPL Notices | **Superseded** by 0032 |
 | [0016](adr0016-cargo-deny-single-gate.md) | cargo-deny as the Single Supply-Chain Gate | Accepted |
 | [0017](adr0017-studio-monorepo-two-workspaces.md) | Studio Monorepo with Two Cargo Workspaces | Accepted; CI trigger amended by 0024 |
 | [0018](adr0018-genapi-conformance-over-convenience.md) | GenApi Conformance over Convenient Approximations | Accepted |
@@ -38,11 +38,12 @@ of the record.
 | [0024](adr0024-studio-reference-viewer.md) | Viva Studio is the library's reference viewer | Accepted |
 | [0025](adr0025-gvsp-receive-engine.md) | One GVSP receive engine | Accepted |
 | [0026](adr0026-genapi-ports-chunks-events.md) | Chunk and event data through GenApi ports | Accepted |
-| [0027](adr0027-blocking-api-and-transport-runtimes.md) | The blocking API, and a GigE transport that can own its runtime | Accepted |
+| [0027](adr0027-blocking-api-and-transport-runtimes.md) | The blocking API, and a GigE transport that can own its runtime | Accepted; USB3 Vision completed by 0032 |
 | [0028](adr0028-configuration-persistence.md) | Saving and restoring a configuration in GenApi's feature-file layout | Accepted |
 | [0029](adr0029-caching-polling-and-refresh.md) | Caching modes, polling and a changed-since query | Accepted |
 | [0030](adr0030-errors-and-public-surface.md) | Errors carry their causes; the public surface is chosen | Accepted |
-| [0031](adr0031-gentl-producer.md) | A GenTL producer over the facade | Accepted |
+| [0031](adr0031-gentl-producer.md) | A GenTL producer over the facade | Accepted; buffer info amended in 0.9 |
+| [0032](adr0032-usb3-vision-transport.md) | The USB3 Vision transport: nusb, transfers in flight, recovery and identity | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

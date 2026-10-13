@@ -23,7 +23,7 @@ pub mod registers;
 mod transport;
 
 pub use registers::{REG_TRIGGER_SOFTWARE, WRITE_ONLY_REGISTERS};
-pub use transport::FakeU3vTransport;
+pub use transport::{FakeU3vTransport, FakeUsbEvent, MAX_PACKET};
 
 use std::sync::Arc;
 
@@ -35,6 +35,8 @@ pub const CONTROL_EP_IN: u8 = 0x81;
 pub const CONTROL_EP_OUT: u8 = 0x01;
 /// The streaming interface's bulk IN endpoint.
 pub const STREAM_EP_IN: u8 = 0x82;
+/// The event interface's bulk IN endpoint.
+pub const EVENT_EP_IN: u8 = 0x83;
 
 /// Open a [`U3vDevice`] on a fake's endpoints, over `transport`: a
 /// [`FakeU3vTransport`], or a caller's type that delegates to one (a binding
@@ -45,7 +47,7 @@ pub fn open<T: UsbTransfer + 'static>(transport: Arc<T>) -> Result<U3vDevice<T>,
         CONTROL_EP_IN,
         CONTROL_EP_OUT,
         Some(STREAM_EP_IN),
-        None,
+        Some(EVENT_EP_IN),
     )
 }
 

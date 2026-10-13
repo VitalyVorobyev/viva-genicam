@@ -14,7 +14,7 @@ Wheels ship for:
 | macOS | arm64 | 3.10+ (abi3) |
 | Windows | x86_64 | 3.10+ (abi3) |
 
-libusb is statically linked into the extension module — no need to `apt install libusb-1.0-0-dev` or `brew install libusb` on the install side.
+USB3 Vision support is pure Rust: there is no libusb or other system USB library to install.
 
 If you are on a platform without a pre-built wheel, `pip` falls back to the sdist; you will need a Rust toolchain (`rustup`) and a C compiler installed.
 

@@ -768,3 +768,89 @@ fn p_selected_edges_run_from_the_selector_to_the_selected() {
         nodemap.invalidated_by("GainRaw")
     );
 }
+
+/// GenICam Standard v2.1.1 §2.8.3: "a register can have multiple entries for
+/// the `<Address>`, `<pAddress>`, and/or `<IntSwissKnife>` types. The values
+/// of these entries are summed". The §2.8.4 LUT example addresses its entry
+/// through an embedded knife alone; Baumer's GigE cameras address 134
+/// registers the same way, a `<MaskedIntReg>` per selected interface
+/// (`Baumer_HXG20.xml`'s `funcRegGevMACAddressHigh`). Backlog GA-17: the
+/// knife was dropped, so the register had no address at all.
+const EMBEDDED_KNIFE_XML: &str = r#"
+<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+  <Integer Name="LUTIndex">
+    <Value>0</Value>
+    <Min>0</Min>
+    <Max>255</Max>
+    <pSelected>LUTEntry</pSelected>
+  </Integer>
+  <IntReg Name="LUTEntry">
+    <IntSwissKnife Name="LUTEntryAddress">
+      <pVariable Name="INDEX">LUTIndex</pVariable>
+      <Formula>0xff00 + INDEX * 4</Formula>
+    </IntSwissKnife>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="GevInterfaceSelector">
+    <Value>0</Value>
+    <Min>0</Min>
+    <Max>3</Max>
+  </Integer>
+  <MaskedIntReg Name="GevMACAddressHigh">
+    <Address>0x10</Address>
+    <IntSwissKnife Name="funcRegGevMACAddressHigh">
+      <pVariable Name="INTERFACE">GevInterfaceSelector</pVariable>
+      <Formula>(INTERFACE = 0)? 0x0008 : 0x0680 + (INTERFACE-1)*0x80</Formula>
+    </IntSwissKnife>
+    <Length>4</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
+    <LSB>31</LSB>
+    <MSB>16</MSB>
+    <Sign>Unsigned</Sign>
+    <Endianess>BigEndian</Endianess>
+  </MaskedIntReg>
+  <Port Name="Device"/>
+</RegisterDescription>
+"#;
+
+/// The embedded knife is an address term: the register reads at the sum of
+/// its terms, and follows the knife's variables when they change.
+#[test]
+fn an_embedded_intswissknife_is_an_address_term() {
+    let mut nodemap = nodemap(EMBEDDED_KNIFE_XML);
+    let io = MemIo::with(&[
+        (0xff00, 11u32.to_le_bytes().to_vec()),
+        (0xff0c, 33u32.to_le_bytes().to_vec()),
+        // 0x10 + 0x0008, then 0x10 + 0x0680 + 0x80 for interface 2. In a
+        // big-endian register's bit numbering bit 31 is the least
+        // significant, so LSB 31 / MSB 16 is the low half: GigE Vision's
+        // bootstrap 0x0008 keeps the MAC's top two bytes there.
+        (0x18, be32(0x0000_1234)),
+        (0x710, be32(0x0000_ABCD)),
+    ]);
+    assert_eq!(nodemap.get_integer("LUTEntry", &io).expect("entry 0"), 11);
+    nodemap.set_integer("LUTIndex", 3, &io).expect("index 3");
+    assert_eq!(nodemap.get_integer("LUTEntry", &io).expect("entry 3"), 33);
+
+    assert_eq!(
+        nodemap
+            .get_integer("GevMACAddressHigh", &io)
+            .expect("interface 0"),
+        0x1234
+    );
+    nodemap
+        .set_integer("GevInterfaceSelector", 2, &io)
+        .expect("interface 2");
+    assert_eq!(
+        nodemap
+            .get_integer("GevMACAddressHigh", &io)
+            .expect("interface 2"),
+        0xABCD
+    );
+    assert!(nodemap.skipped().is_empty(), "{:?}", nodemap.skipped());
+}

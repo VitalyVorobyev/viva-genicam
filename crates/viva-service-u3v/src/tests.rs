@@ -187,3 +187,92 @@ async fn cameras_come_and_go() {
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(10), service).await;
 }
+
+/// Codex review of #203: a camera a rescan no longer finds while it streams
+/// is let go of in order — its frame loop stopped and awaited, the stream
+/// closed and acquisition stopped on the device — before it is published
+/// disconnected. Aborting the acquisition task used to detach the frame loop,
+/// which kept the stream and published frames under the lost id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_camera_lost_mid_acquisition_is_stopped_before_it_is_published_lost() {
+    let session = session().await;
+    let id = format!("lost-mid-acq-{}", std::process::id());
+    let discovery = FakeDiscovery::default();
+    discovery.plug(fake(&id));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let service = tokio::spawn(run_discovery(
+        session.clone(),
+        discovery.clone(),
+        Duration::from_millis(200),
+        shutdown_rx,
+    ));
+    assert!(
+        serves(&session, &id, Duration::from_secs(10)).await,
+        "{id} not served"
+    );
+    // Drained as they come: a subscriber left to fill blocks the publisher,
+    // which would hide a frame loop that never stops.
+    let images = session.declare_subscriber(keys::image(&id)).await.unwrap();
+    let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = received.clone();
+    let drain = tokio::spawn(async move {
+        while images.recv_async().await.is_ok() {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let status = session.declare_subscriber(keys::status(&id)).await.unwrap();
+
+    let start =
+        serde_json::to_vec(&AcquisitionControlRequest::new(AcquisitionCommand::Start)).unwrap();
+    let reply = ask(
+        &session,
+        &keys::acquisition_control(&id),
+        start,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("no answer to Start");
+    let response: NodeOpResponse = serde_json::from_slice(&reply).unwrap();
+    assert!(response.ok, "{response:?}");
+    let count = || received.load(std::sync::atomic::Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no frame before the camera is lost"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let device = discovery.device(&id).expect("connected");
+    assert!(device.acquiring() && device.stream_enabled());
+
+    discovery.unplug(&id);
+    let disconnected = async {
+        loop {
+            let sample = status.recv_async().await.unwrap();
+            let status: DeviceStatus =
+                serde_json::from_slice(&sample.payload().to_bytes()).unwrap();
+            if !status.connected {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), disconnected)
+        .await
+        .expect("no disconnect published");
+    // Frames published before the disconnect may still be on their way.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let at_disconnect = count();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        count() - at_disconnect,
+        0,
+        "frames published after the camera was lost"
+    );
+    assert!(!device.stream_enabled(), "the stream was left enabled");
+    assert!(!device.acquiring(), "acquisition was left running");
+    drain.abort();
+
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(10), service).await;
+}

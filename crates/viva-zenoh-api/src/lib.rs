@@ -41,8 +41,8 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 /// - `5` — a pixel format is `viva-pfnc`'s: [`ImageMeta`] names any PFNC
 ///   format by its PFNC name (`RGB8Packed` where version 4 said `RGB8`,
 ///   `Coord3D_ABC32f` where it said `Unknown`), and a USB3 Vision camera's
-///   device id names its bus and address ([`u3v_device_id`]). The frame
-///   header's one-byte codes are unchanged.
+///   device id names its vendor, product and serial ([`u3v_device_id`]).
+///   The frame header's one-byte codes are unchanged.
 pub const API_VERSION: u32 = 5;
 
 /// Periodic announcement published by the camera service.
@@ -162,15 +162,35 @@ pub fn gige_device_id(mac: &[u8; 6]) -> String {
 }
 
 /// Device id for a USB3 Vision camera: `cam-u3v-`, its vendor and product
-/// ids as eight hex digits, then the bus and address it enumerates at.
+/// ids as eight hex digits, then its serial number.
 ///
-/// USB enumeration is the one identity a USB3 Vision camera has before it is
-/// opened, and the service rescans while it holds the cameras it serves: a
-/// serial number reads only from a device that opens, so an id built on one
-/// would change the moment the camera is in use. Two cameras of one model
-/// differ by bus and address; a camera plugged in again may get a new id.
-pub fn u3v_device_id(vendor_id: u16, product_id: u16, bus: u8, address: u8) -> String {
-    format!("cam-u3v-{vendor_id:04x}{product_id:04x}-{bus}-{address}")
+/// The serial is the USB serial string the operating system caches, which a
+/// rescan reads without opening the device — so it does not change while the
+/// camera is in use — and which stays the same when the camera is plugged in
+/// again, wherever (backlog UV-03). On the one camera this has met, a MATRIX
+/// VISION mvBlueFOX3-2004G, it is the serial its bootstrap registers report
+/// too. A camera without one is named by its `bus` and `address`, and may get
+/// a new id when plugged in again. Characters a Zenoh key cannot carry
+/// become `_`.
+pub fn u3v_device_id(
+    vendor_id: u16,
+    product_id: u16,
+    serial: Option<&str>,
+    bus: &str,
+    address: u8,
+) -> String {
+    let instance = match serial.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(serial) => serial.to_string(),
+        None => format!("{bus}-{address}"),
+    };
+    let instance: String = instance
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect();
+    format!("cam-u3v-{vendor_id:04x}{product_id:04x}-{instance}")
 }
 
 // ── Connection Lifecycle ─────────────────────────────────────────────────────
@@ -925,6 +945,35 @@ pub mod keys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A USB3 Vision camera is keyed by what it is — vendor, product,
+    /// serial — not where it is plugged in, so moving it to another port
+    /// keeps its id (UV-03); only a camera without a serial falls back to
+    /// its bus position. Whatever the serial holds, the id is one key
+    /// expression chunk.
+    #[test]
+    fn a_u3v_device_id_is_keyed_by_serial() {
+        assert_eq!(
+            u3v_device_id(0x164c, 0x5533, Some("FF003089"), "1", 3),
+            "cam-u3v-164c5533-FF003089"
+        );
+        assert_eq!(
+            u3v_device_id(0x164c, 0x5533, Some("FF003089"), "20", 9),
+            u3v_device_id(0x164c, 0x5533, Some("FF003089"), "1", 3),
+        );
+        assert_eq!(
+            u3v_device_id(0x2676, 0xba02, None, "2", 7),
+            "cam-u3v-2676ba02-2-7"
+        );
+        assert_eq!(
+            u3v_device_id(0x2676, 0xba02, Some("  "), "2", 7),
+            "cam-u3v-2676ba02-2-7"
+        );
+        assert_eq!(
+            u3v_device_id(0x2676, 0xba02, Some("a/b*c$#?"), "2", 7),
+            "cam-u3v-2676ba02-a_b_c___"
+        );
+    }
 
     #[test]
     fn test_device_announce_deserializes_without_api_version() {

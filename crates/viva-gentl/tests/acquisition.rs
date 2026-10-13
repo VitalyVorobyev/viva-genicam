@@ -80,6 +80,21 @@ fn check_frame(stream: Handle, buffer: Handle, memory: &[u8]) -> u64 {
         FRAME_BYTES
     );
     assert!(query_u64(buffer_info(stream, buffer, BUFFER_INFO_TIMESTAMP)) > 0);
+    // PFNC 2.4 §1.4 leaves the byte order of multi-byte pixels to the
+    // transport's standard, and GigE Vision's is not available to us: the
+    // producer does not know it (Codex review of #204).
+    assert_eq!(
+        query_i32(buffer_info(stream, buffer, BUFFER_INFO_PIXEL_ENDIANNESS)),
+        PIXELENDIANNESS_UNKNOWN
+    );
+    assert_eq!(
+        query_size(buffer_info(
+            stream,
+            buffer,
+            BUFFER_INFO_DELIVERED_IMAGEHEIGHT
+        )),
+        HEIGHT as usize
+    );
     for (index, &byte) in memory[..FRAME_BYTES].iter().enumerate() {
         assert_eq!(
             byte,
@@ -460,11 +475,65 @@ fn a_frame_with_a_lost_packet_is_delivered_incomplete() {
         ));
         assert_eq!(incomplete, frame_id == 2, "block {frame_id}");
         seen_incomplete |= incomplete;
+        // §6.4.4.4: the full size, lost parts included, whether or not the
+        // block is complete (Codex review of #204).
+        assert_eq!(
+            query_size(buffer_info(
+                stream,
+                delivered.buffer_handle,
+                BUFFER_INFO_DATA_SIZE
+            )),
+            FRAME_BYTES,
+            "block {frame_id}"
+        );
         // SAFETY: valid handles.
         check(unsafe { DSQueueBuffer(stream, delivered.buffer_handle) });
     }
     assert!(seen_incomplete, "block 2 arrived incomplete");
     acquisition(remote, false);
+    // SAFETY: valid handle.
+    check(unsafe { DSStopAcquisition(stream, ACQ_STOP_FLAGS_DEFAULT) });
+}
+
+/// A frame that ends early — a variable-height line scan — reports the lines
+/// the trailer says it delivered, not the leader's height (GenTL 1.6
+/// §6.4.4.4, `BUFFER_INFO_DELIVERED_IMAGEHEIGHT`; Codex review of #204).
+#[test]
+fn a_short_frame_reports_the_lines_it_delivered() {
+    const LINES: u32 = HEIGHT / 3;
+    let _serial = serial();
+    let _fake = Fake::start_with(|builder| builder.delivered_lines(LINES));
+    let _lib = Library::init();
+    let opened = open_fake(DEVICE_ACCESS_CONTROL);
+    let remote = remote_port(opened.device);
+    let stream = open_stream(opened.device);
+    let mut buffer = GENTL_INVALID_HANDLE;
+    // SAFETY: valid pointers.
+    unsafe {
+        check(DSAllocAndAnnounceBuffer(
+            stream,
+            FRAME_BYTES,
+            null_mut(),
+            &mut buffer,
+        ));
+        check(DSQueueBuffer(stream, buffer));
+    }
+    let event = new_buffer_event(stream);
+    // SAFETY: valid handle.
+    check(unsafe { DSStartAcquisition(stream, ACQ_START_FLAGS_DEFAULT, 1) });
+    acquisition(remote, true);
+    let delivered = next_buffer(event, 3000).expect("a buffer");
+    acquisition(remote, false);
+    let info = |cmd| buffer_info(stream, delivered.buffer_handle, cmd);
+    assert!(!query_bool(info(BUFFER_INFO_IS_INCOMPLETE)));
+    assert_eq!(query_size(info(BUFFER_INFO_HEIGHT)), HEIGHT as usize);
+    assert_eq!(
+        query_size(info(BUFFER_INFO_DELIVERED_IMAGEHEIGHT)),
+        LINES as usize
+    );
+    let delivered_bytes = (WIDTH * LINES * 2) as usize;
+    assert_eq!(query_size(info(BUFFER_INFO_SIZE_FILLED)), delivered_bytes);
+    assert_eq!(query_size(info(BUFFER_INFO_DATA_SIZE)), delivered_bytes);
     // SAFETY: valid handle.
     check(unsafe { DSStopAcquisition(stream, ACQ_STOP_FLAGS_DEFAULT) });
 }

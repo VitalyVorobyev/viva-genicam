@@ -165,9 +165,16 @@ GigE side is the GVSP receive engine
 the socket, accepting only the camera as a source, a socket-free assembler
 builds blocks in place and finds the gaps to ask the camera for again, and
 frames reach the application through a four-frame drop-oldest queue, async or
-blocking; opened by `Camera::open_stream`. The U3V side wraps blocking USB bulk reads via
-`spawn_blocking` + an mpsc channel, created through `U3vStreamBuilder` or
-`U3vFrameStream::start()`.
+blocking; opened by `Camera::open_stream`. The U3V side
+([ADR-0032](adrs/adr0032-usb3-vision-transport.md)) is the same shape: one
+thread per stream keeps several bulk transfers queued on the endpoint
+(`viva_u3v::U3vStream`, over the `BulkIn` queue a `UsbTransfer` hands out),
+plans each from where the block stands — leader, payload, trailer — and
+replans when the camera's transfers diverge from that plan; a failed transfer
+costs its block, not the stream, and a gone device ends it with
+`U3vError::Disconnected` and marks the camera lost. Frames, counters and the
+drop-oldest queue are the GigE side's own (`StreamStats`, `DeliveryQueue`);
+opened by `Camera::open_stream(U3vStreamOptions)` or `U3vStreamBuilder`.
 
 **`Discovery`, `DeviceOps`, `StreamSource`** (`viva-service`) — the one
 service implementation both transports run. A transport supplies a
@@ -181,7 +188,7 @@ reconnection with exponential backoff, which needs no keepalive coordination:
 the replacement camera brings its own, and the old one retires when the swap
 drops the camera that owned it. `viva-service-u3v` is a USB `Discovery` and a
 `U3vDeviceHandle<T: UsbTransfer>`, so the same code runs against
-`FakeU3vTransport` (`--fake`) and `RusbTransfer`.
+`FakeU3vTransport` (`--fake`) and `NusbTransfer`.
 
 ## Data flows
 
@@ -196,7 +203,8 @@ places it in its block's buffer → `Frame` with block id, status and
 pixel-format metadata from `viva-pfnc`, counted in `StreamStats` → application
 via `FrameStream`/`U3vFrameStream`. A block that carries chunks is split into
 the image and its chunks by ID (`viva_gige::parse_chunks`, read from the
-end); their values are read through the nodemap's chunk ports, never decoded
+end; `viva_u3v::parse_chunks`, the same layout with little-endian tags); their
+values are read through the nodemap's chunk ports, never decoded
 here.
 
 **Service path** — camera → `viva-service`/`viva-service-u3v` (one

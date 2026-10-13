@@ -21,11 +21,11 @@ pub(crate) use swissknife::parse_swissknife;
 pub(crate) use symbolic::{parse_boolean, parse_enum};
 
 use quick_xml::Reader;
-use quick_xml::events::BytesStart;
+use quick_xml::events::{BytesStart, Event};
 
 use crate::builders::AddressingBuilder;
 use crate::util::{attribute_value, parse_address, parse_u64, read_text_start};
-use crate::{IndexOffset, NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
+use crate::{IndexOffset, NodeDecl, NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
 
 /// XML element name referencing another node that provides an address.
 pub(crate) const TAG_P_ADDRESS: &str = "pAddress";
@@ -35,6 +35,68 @@ pub(crate) const TAG_P_PORT: &str = "pPort";
 
 /// `<pIndex>`: an index node whose value is scaled and added to the address.
 pub(crate) const TAG_P_INDEX: &str = "pIndex";
+
+/// `<IntSwissKnife>` inside a register: an address term computed by a formula
+/// (GenICam Standard v2.1.1 §2.8.3, and the schema's address group). The
+/// embedded knife is a node of the document — the schema's node-name key
+/// covers it — so the parser declares it as one ([`embedded_knives`]) and the
+/// register refers to it by name, as `<pAddress>` would.
+pub(crate) const TAG_INT_SWISS_KNIFE: &str = "IntSwissKnife";
+
+/// The name an embedded `<IntSwissKnife>` is declared under.
+pub(crate) fn embedded_knife_name(event: &BytesStart<'_>) -> Result<String, XmlError> {
+    let name = crate::util::attribute_value_required(event, "Name")?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(XmlError::invalid(
+            "<IntSwissKnife>",
+            "embedded in a register has an empty Name",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The `<IntSwissKnife>` elements a node element embeds as address terms —
+/// its direct children — each parsed as a node of its own.
+///
+/// The node's own parser records each one as an address term by name
+/// ([`handle_addressing_start`]); this declares the nodes those names refer
+/// to. Backlog GA-17: 143 such terms in nine corpus documents were dropped,
+/// so their registers had no address.
+pub(crate) fn embedded_knives(element: &str) -> Result<Vec<NodeDecl>, XmlError> {
+    let mut reader = Reader::from_str(element);
+    reader.config_mut().trim_text(true);
+    reader.config_mut().allow_dangling_amp = true;
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    let mut knives = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                if depth == 2 && e.name().as_ref() == TAG_INT_SWISS_KNIFE {
+                    let start = e.into_owned();
+                    knives.push(parse_swissknife(&mut reader, start)?);
+                    depth -= 1;
+                } else if depth >= 2 {
+                    crate::util::skip_element(&mut reader, e.name().as_ref())?;
+                    depth -= 1;
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(err) => return Err(XmlError::malformed(err)),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(knives)
+}
 /// XML element holding an inline literal value.
 pub(crate) const TAG_VALUE: &str = "Value";
 /// XML element referencing another node supplying the value at runtime.
@@ -225,6 +287,11 @@ pub(crate) fn handle_addressing_start(
             if !target.is_empty() {
                 addressing.push_index(target, offset);
             }
+            Ok(true)
+        }
+        TAG_INT_SWISS_KNIFE => {
+            addressing.push_p_address(&embedded_knife_name(event)?);
+            crate::util::skip_element(reader, event.name().as_ref())?;
             Ok(true)
         }
         "Length" => {

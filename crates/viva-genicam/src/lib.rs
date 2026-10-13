@@ -106,6 +106,9 @@ use tracing::{debug, info, warn};
 
 pub use chunks::{ChunkData, ChunkError, chunk_data};
 pub use error::{GenicamError, WriteRefused};
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub use events::U3vEventStream;
 pub use events::{Event, EventStream};
 pub use evs::{EvsBlock, EvsFormat};
 pub use frame::{Frame, FrameStatus};
@@ -121,6 +124,9 @@ pub use stream::{
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub use stream::{U3vFrameStream, U3vStreamBuilder};
 pub use viva_gige::TimeSync;
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub use viva_u3v::U3vStreamOptions;
 
 /// How often [`Camera::execute_and_wait`] asks a command whether it has
 /// finished, when the command declares no `<PollingTime>`.
@@ -406,6 +412,16 @@ impl<T: RegisterIo> Camera<T> {
                 Ok(_) => None,
                 Err(err) => {
                     debug!(node = name, error = %err, "failed to read timestamp frequency");
+                    None
+                }
+            }
+        } else if let Some(name) = self.find_alias(viva_sfnc::TS_INCREMENT_NODES) {
+            // Nanoseconds a tick (GenCP's Timestamp Increment).
+            match self.nodemap.get_integer(name, &self.transport) {
+                Ok(ns) if ns > 0 => Some(1e9 / ns as f64),
+                Ok(_) => None,
+                Err(err) => {
+                    debug!(node = name, error = %err, "failed to read timestamp increment");
                     None
                 }
             }
@@ -754,6 +770,42 @@ impl<T: RegisterIo> Camera<T> {
         })
     }
 
+    /// Turn on notification of each event named, through SFNC's
+    /// `EventSelector` and `EventNotification`.
+    ///
+    /// Which events a device emits is a GenApi decision with no bootstrap
+    /// equivalent: without those features, naming an event is
+    /// [`GenicamError::NoEventSelection`] rather than a write somewhere
+    /// hopeful.
+    pub(crate) fn enable_events(&mut self, enable_ids: &[&str]) -> Result<(), GenicamError> {
+        let sfnc = self.nodemap.node(viva_sfnc::EVENT_SELECTOR).is_some()
+            && self.nodemap.node(viva_sfnc::EVENT_NOTIFICATION).is_some();
+        let enabled = sfnc
+            && self.with_map(|nodemap, transport| {
+                for &name in enable_ids {
+                    if let Err(err) = nodemap.set_enum(viva_sfnc::EVENT_SELECTOR, name, transport) {
+                        warn!(event = name, error = %err, "failed to select event via SFNC");
+                        return false;
+                    }
+                    if let Err(err) = nodemap.set_enum(
+                        viva_sfnc::EVENT_NOTIFICATION,
+                        viva_sfnc::EVENT_NOTIF_ON,
+                        transport,
+                    ) {
+                        warn!(event = name, error = %err, "failed to enable event via SFNC");
+                        return false;
+                    }
+                }
+                true
+            });
+        if !enabled && !enable_ids.is_empty() {
+            return Err(GenicamError::NoEventSelection {
+                events: enable_ids.iter().map(ToString::to_string).collect(),
+            });
+        }
+        Ok(())
+    }
+
     /// The features fed by the ports `which` selects, sorted, without
     /// repeats.
     fn features_on_ports(&self, which: impl Fn(PortKind) -> bool) -> Vec<String> {
@@ -873,41 +925,7 @@ impl Camera<GigeRegisterIo> {
             configure_message_channel_fallback(&self.transport, local_ip, port)?;
         }
 
-        let mut used_sfnc = self.nodemap.node(viva_sfnc::EVENT_SELECTOR).is_some()
-            && self.nodemap.node(viva_sfnc::EVENT_NOTIFICATION).is_some();
-
-        used_sfnc = self.with_map(|nodemap, transport| {
-            if !used_sfnc {
-                return false;
-            }
-            for &name in enable_ids {
-                if let Err(err) = nodemap.set_enum(viva_sfnc::EVENT_SELECTOR, name, transport) {
-                    warn!(event = name, error = %err, "failed to select event via SFNC");
-                    return false;
-                }
-                if let Err(err) = nodemap.set_enum(
-                    viva_sfnc::EVENT_NOTIFICATION,
-                    viva_sfnc::EVENT_NOTIF_ON,
-                    transport,
-                ) {
-                    warn!(event = name, error = %err, "failed to enable event via SFNC");
-                    return false;
-                }
-            }
-            true
-        });
-
-        if !used_sfnc && !enable_ids.is_empty() {
-            // The message channel is addressable through bootstrap registers,
-            // but which events a device emits is a GenApi decision with no
-            // bootstrap equivalent. Say so rather than writing somewhere
-            // hopeful.
-            return Err(GenicamError::NoEventSelection {
-                events: enable_ids.iter().map(ToString::to_string).collect(),
-            });
-        }
-
-        Ok(())
+        self.enable_events(enable_ids)
     }
 
     /// Configure the stream channel for multicast delivery: point `GevSCDA`
@@ -1870,7 +1888,7 @@ pub async fn connect_gige_with_xml(
 
 /// Blocking [`RegisterIo`] adapter wrapping a [`U3vDevice`](u3v::U3vDevice).
 ///
-/// Generic over `T: UsbTransfer` so that real hardware (`RusbTransfer`) and
+/// Generic over `T: UsbTransfer` so that real hardware (`NusbTransfer`) and
 /// test doubles (`MockUsbTransfer`, `FakeU3vTransport`) all work through the
 /// same code path. USB operations are inherently synchronous, so this adapter
 /// simply forwards calls through a `Mutex` for thread safety.
@@ -1880,6 +1898,24 @@ pub struct U3vRegisterIo<T: u3v::UsbTransfer + 'static> {
     /// Shared with a [`U3vFrameStream`](crate::U3vFrameStream), which clears
     /// StreamEnable through it when it stops.
     device: Arc<Mutex<u3v::U3vDevice<T>>>,
+    /// Set once a transfer — a register access, a stream's, an event's —
+    /// found the device disconnected.
+    lost: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Whether a USB3 Vision camera is gone, readable apart from its
+/// transport ([`U3vRegisterIo::connection`]).
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+#[derive(Debug, Clone)]
+pub struct U3vConnection(Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(feature = "u3v")]
+impl U3vConnection {
+    /// [`U3vRegisterIo::is_lost`].
+    pub fn is_lost(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 #[cfg(feature = "u3v")]
@@ -1888,7 +1924,41 @@ impl<T: u3v::UsbTransfer + 'static> U3vRegisterIo<T> {
     pub fn new(device: u3v::U3vDevice<T>) -> Self {
         Self {
             device: Arc::new(Mutex::new(device)),
+            lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the camera is gone: a register access, a stream or an event
+    /// stream on it failed with
+    /// [`U3vError::Disconnected`](u3v::U3vError::Disconnected) — unplugged,
+    /// or reset (backlog UV-03). It does not come back; open the camera
+    /// again once it is.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A handle that answers [`is_lost`](Self::is_lost) without the
+    /// transport: for a service watching a camera another task uses.
+    pub fn connection(&self) -> U3vConnection {
+        U3vConnection(Arc::clone(&self.lost))
+    }
+
+    /// Record the camera as gone.
+    pub(crate) fn mark_lost(&self) {
+        self.lost.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The flag [`is_lost`](Self::is_lost) reads, for a stream to set.
+    pub(crate) fn lost_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.lost)
+    }
+
+    /// Note a disconnect in `error`, and hand it on.
+    fn noting_loss(&self, error: u3v::U3vError) -> u3v::U3vError {
+        if matches!(error, u3v::U3vError::Disconnected) {
+            self.mark_lost();
+        }
+        error
     }
 
     /// Lock the underlying device for direct access (e.g. stream configuration).
@@ -1916,12 +1986,40 @@ impl<T: u3v::UsbTransfer + 'static> U3vRegisterIo<T> {
 impl<T: u3v::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
         let mut device = self.lock()?;
-        device.read_mem(addr, len).map_err(GenApiError::io)
+        device
+            .read_mem(addr, len)
+            .map_err(|e| GenApiError::io(self.noting_loss(e)))
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
         let mut device = self.lock()?;
-        device.write_mem(addr, data).map_err(GenApiError::io)
+        device
+            .write_mem(addr, data)
+            .map_err(|e| GenApiError::io(self.noting_loss(e)))
+    }
+}
+
+/// What only a USB3 Vision camera has: an event interface, whose events
+/// arrive on a USB endpoint rather than a GVCP message channel (backlog
+/// TC-27 (4)). Its stream is
+/// [`Camera::open_stream`](crate::Camera::open_stream) too.
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+impl<T: u3v::UsbTransfer + 'static> Camera<U3vRegisterIo<T>> {
+    /// Turn on notification of the events named — `"ExposureEnd"`, say —
+    /// through SFNC's `EventSelector` and `EventNotification`. They arrive on
+    /// a stream from [`open_event_stream`](Self::open_event_stream).
+    pub fn configure_events(&mut self, enable_ids: &[&str]) -> Result<(), GenicamError> {
+        self.enable_events(enable_ids)
+    }
+
+    /// Set the event interface's EventEnable and read its endpoint on a
+    /// thread of its own. Events carry their device time in ns, mapped to
+    /// host time once [`time_calibrate`](Camera::time_calibrate) has fitted
+    /// a clock; dropping the stream clears EventEnable.
+    pub fn open_event_stream(&self) -> Result<U3vEventStream, GenicamError> {
+        let time_sync = (!self.time_sync.is_empty()).then(|| self.time_sync.clone());
+        events::open_u3v_event_stream(&self.transport, time_sync)
     }
 }
 
@@ -1947,7 +2045,7 @@ impl<T: u3v::UsbTransfer + 'static> RegisterIo for U3vRegisterIo<T> {
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v-usb")))]
 pub fn connect_u3v(
     device: &u3v::U3vDeviceInfo,
-) -> Result<Camera<U3vRegisterIo<u3v::RusbTransfer>>, GenicamError> {
+) -> Result<Camera<U3vRegisterIo<u3v::NusbTransfer>>, GenicamError> {
     let (camera, _xml) = connect_u3v_with_xml(device)?;
     Ok(camera)
 }
@@ -1958,7 +2056,7 @@ pub fn connect_u3v(
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v-usb")))]
 pub fn connect_u3v_with_xml(
     device_info: &u3v::U3vDeviceInfo,
-) -> Result<(Camera<U3vRegisterIo<u3v::RusbTransfer>>, String), GenicamError> {
+) -> Result<(Camera<U3vRegisterIo<u3v::NusbTransfer>>, String), GenicamError> {
     info!(
         vendor_id = device_info.vendor_id,
         product_id = device_info.product_id,

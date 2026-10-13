@@ -98,7 +98,8 @@ struct Fill {
     incomplete: bool,
     larger_than_buffer: bool,
     size_filled: usize,
-    /// The block's whole size; `None` when packets were lost from its end.
+    /// The block's whole size, lost parts included; `None` when nothing
+    /// says what it was.
     data_size: Option<usize>,
     frame: Option<FrameInfo>,
 }
@@ -109,6 +110,8 @@ struct FrameInfo {
     block_id: u64,
     width: u32,
     height: u32,
+    /// Lines the trailer says were delivered.
+    delivered_height: Option<u32>,
     padding_x: u16,
     pixel_format: u32,
     payload_type: u16,
@@ -520,11 +523,17 @@ impl Stream {
             incomplete: !complete || larger,
             larger_than_buffer: larger,
             size_filled: filled,
-            data_size: complete.then_some(data.len()),
+            // §6.4.4.4: the full size, the lost parts included.
+            data_size: if complete {
+                Some(data.len())
+            } else {
+                frame.expected_size
+            },
             frame: Some(FrameInfo {
                 block_id: frame.block_id,
                 width: frame.width,
                 height: frame.height,
+                delivered_height: frame.delivered_height,
                 padding_x: frame.padding_x,
                 pixel_format: frame.pixel_format.code(),
                 payload_type: frame.payload_type,
@@ -823,16 +832,20 @@ impl Stream {
                 frame()?;
                 Info::U64(PIXELFORMAT_NAMESPACE_PFNC_32BIT)
             }
+            // PFNC 2.4 §1.4 leaves the byte order of multi-byte pixels to the
+            // transport's standard; GigE Vision's is not available to us, and
+            // the payload is copied as it came (ADR-0031 §4).
             BUFFER_INFO_PIXEL_ENDIANNESS => {
                 frame()?;
-                Info::I32(PIXELENDIANNESS_LITTLE)
+                Info::I32(PIXELENDIANNESS_UNKNOWN)
             }
+            // The lines the transport delivered: the trailer's Size Y, which a
+            // variable-height frame keeps below the leader's height.
             BUFFER_INFO_DELIVERED_IMAGEHEIGHT => {
-                let frame = frame()?;
-                if fill.incomplete {
-                    return Err(not_available("the block is incomplete"));
-                }
-                Info::SizeT(frame.height as usize)
+                let lines = frame()?
+                    .delivered_height
+                    .ok_or_else(|| not_available("no trailer said how many lines arrived"))?;
+                Info::SizeT(lines as usize)
             }
             BUFFER_INFO_DELIVERED_CHUNKPAYLOADSIZE => {
                 if !chunked {
@@ -848,7 +861,7 @@ impl Stream {
                 (Some(_), Some(size)) => Info::SizeT(size),
                 (Some(_), None) => {
                     return Err(not_available(
-                        "packets were lost; the full size is not known",
+                        "packets were lost, and nothing said the block's full size",
                     ));
                 }
             },

@@ -195,8 +195,9 @@ fn failure_class(err: &GenApiError) -> &'static str {
         GenApiError::Type { .. } => "kind",
         GenApiError::NotAttached { .. } => "no chunk or event attached",
         GenApiError::Unavailable(_) => "unavailable",
-        // Backlog GA-17: Baumer's registers whose address is an inline
-        // `<IntSwissKnife>`, which the XML layer drops.
+        // Backlog GA-49: a `<Float>` whose value is a constant `<Value>`,
+        // which the XML layer does not read (GA-17's embedded address knives
+        // used to be most of these).
         GenApiError::NoValueSource { .. } => "no register, pValue or Value",
         _ => "other",
     }

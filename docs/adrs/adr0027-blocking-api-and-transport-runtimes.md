@@ -79,4 +79,6 @@ socket lives on.**
   lends the future `&mut GigeDevice`.
 - USB3 Vision is only half covered: opening a camera is synchronous, but
   `U3vFrameStream` still reads on a Tokio runtime's blocking pool
-  (backlog API-11).
+  (backlog API-11). *Completed by
+  [ADR-0032](adr0032-usb3-vision-transport.md):* the stream reads on a thread
+  of its own and `next_frame_blocking` needs no runtime.

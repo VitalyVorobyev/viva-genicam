@@ -1,6 +1,10 @@
 # ADR-0015: Vendored libusb in PyPI Wheels with LGPL Notices
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0032](adr0032-usb3-vision-transport.md)
+
+> **What changed (0.9):** USB3 Vision moved from `rusb` to `nusb`, which is
+> pure Rust. No libusb is built or linked, the Python package is MIT, and the
+> notices this ADR added are gone.
 **Date:** 2026-07-25
 
 ## Context

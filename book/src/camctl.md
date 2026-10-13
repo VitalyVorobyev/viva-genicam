@@ -18,9 +18,8 @@ Commands that act on one camera take one of:
 - `--usb <N>` — the Nth USB3 Vision camera `list-usb` finds.
 
 `get`, `set`, `execute`, `features`, `describe`, `dump`, `save`, `load`,
-`read-reg`, `write-reg`, `bench` and `report` take `--usb` too. `stream`,
-`events`, `chunks`, `xml`, `action` and `set-ip` are GigE Vision only;
-`stream-usb` streams from a USB3 Vision camera.
+`read-reg`, `write-reg`, `stream`, `events`, `chunks`, `bench` and `report`
+take `--usb` too. `xml`, `action` and `set-ip` are GigE Vision only.
 
 ## Global options
 
@@ -47,10 +46,9 @@ These go **before** the command name:
 | `save` / `load` | Save the camera's configuration to a file, and restore it ([how](tutorials/common-tasks.md#saving-and-restoring-a-configuration)) |
 | `read-reg` / `write-reg` | Read device registers, or write one 32-bit register, past the XML |
 | `action` | Send a GigE Vision action command and count the acknowledgements |
-| `stream` | Stream from a GigE Vision camera; save frames, or raw event-vision blocks |
-| `stream-usb` | Stream from a USB3 Vision camera |
+| `stream` | Stream frames and save some, or raw event-vision blocks; with `--usb`, from a USB3 Vision camera |
 | `bench` | Sustained streaming benchmark, with an optional JSON report |
-| `events` | Configure and read GigE Vision events |
+| `events` | Configure and read events: GigE Vision's message channel, or a USB3 Vision camera's event interface |
 | `chunks` | Switch chunk mode and chunk selectors |
 | `set-ip` | Give a GigE Vision camera an address by MAC (FORCEIP with `--force`, persistent otherwise) |
 | `xml` | The camera's GenApi XML, unparsed — so it works on a camera the library cannot open |
@@ -118,8 +116,14 @@ viva-camctl stream --ip 192.168.0.10 --auto --save 2               # size packet
 viva-camctl stream --ip 192.168.0.10 --save 2 --save-format png    # 16-bit above 8 bits
 viva-camctl bench  --ip 192.168.0.10 --duration-s 60 --json-out bench.json
 viva-camctl bench  --usb 0 --duration-s 60
-viva-camctl stream-usb --save 3
+viva-camctl stream --usb 0 --save 3
 ```
+
+`list-usb` shows each camera's link speed, and opening a camera below
+SuperSpeed logs a warning: behind a USB 2 port, hub or cable a camera works,
+but only as fast as 480 Mbit/s carries. A USB3 Vision stream's summary also
+counts USB transfers, transfers skipped, the transfer errors it recovered from,
+and frames the camera numbered but never delivered.
 
 Packet size, receive port and resend are covered in the
 [Networking Guide](networking.md).

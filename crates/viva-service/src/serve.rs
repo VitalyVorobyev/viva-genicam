@@ -13,7 +13,10 @@ use crate::{acquisition, nodes, report, status, xml};
 
 /// Start everything a service runs for one connected camera: publish its
 /// status and initial feature states, then answer its XML, feature, command,
-/// report and acquisition queries until `shutdown` turns true.
+/// report and acquisition queries until `shutdown` turns true, or its sender
+/// is dropped. Then each task lets go of what it holds — the acquisition task
+/// stops the frame loop, closes the stream and stops acquisition — and ends,
+/// so awaiting the handles is how a caller knows the camera is released.
 ///
 /// [`run_discovery`](crate::run_discovery) calls this for each camera it
 /// connects, GigE Vision and USB3 Vision alike, and the integration tests —
@@ -76,6 +79,17 @@ pub async fn serve_device<D: StreamSource>(
     ]
 }
 
+/// Resolves once `stop` turns true, or once its sender is gone.
+///
+/// A dropped sender stops a task as `true` would. Waiting on `changed()` and
+/// then checking the value did not: once the sender was gone, `changed()`
+/// failed at once on every poll while the value stayed `false`, so a frame
+/// loop whose owner had been aborted spun on, holding the stream (Codex
+/// review of #203).
+pub(crate) async fn stopped(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|stop| *stop).await;
+}
+
 /// The announces a service keeps repeating, by device id.
 pub(crate) type Announces = Arc<tokio::sync::Mutex<HashMap<String, DeviceAnnounce>>>;
 
@@ -100,11 +114,7 @@ pub(crate) async fn announce_loop(
         }
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    return;
-                }
-            }
+            _ = stopped(&mut shutdown) => return,
         }
     }
 }

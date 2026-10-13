@@ -401,6 +401,8 @@ async fn usb_devices(out: &mut String) {
                 let _ = writeln!(out, "     manufacturer: {}", opt(&dev.manufacturer));
                 let _ = writeln!(out, "     model:        {}", opt(&dev.model));
                 let _ = writeln!(out, "     serial:       {}", opt(&dev.serial));
+                let speed = dev.speed.map(|speed| speed.to_string());
+                let _ = writeln!(out, "     link speed:   {}", opt(&speed));
             }
         }
         Ok(Err(err)) => {

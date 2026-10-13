@@ -1,4 +1,4 @@
-"""Camera discovery: GigE Vision (network) and USB3 Vision (libusb)."""
+"""Camera discovery: GigE Vision (network) and USB3 Vision (USB)."""
 
 from __future__ import annotations
 
@@ -41,15 +41,22 @@ class GigeDeviceInfo:
 
 @dataclass(frozen=True)
 class U3vDeviceInfo:
-    """A discovered USB3 Vision camera."""
+    """A discovered USB3 Vision camera.
 
-    bus: int
+    ``bus`` is the OS's identifier for the USB bus, as text; its form
+    differs between operating systems. ``speed`` is the link speed the OS
+    reports, such as ``"high speed (480 Mbit/s, USB 2)"``, or ``None`` when
+    it reports none.
+    """
+
+    bus: str
     address: int
     vendor_id: int
     product_id: int
     serial: Optional[str]
     manufacturer: Optional[str]
     model: Optional[str]
+    speed: Optional[str] = None
     transport: Literal["u3v"] = "u3v"
     _handle: Any = field(default=None, repr=False, compare=False)
 
@@ -63,6 +70,7 @@ class U3vDeviceInfo:
             serial=native.serial,
             manufacturer=native.manufacturer,
             model=native.model,
+            speed=native.speed,
             _handle=native,
         )
 
@@ -75,6 +83,7 @@ class U3vDeviceInfo:
             "serial": self.serial,
             "manufacturer": self.manufacturer,
             "model": self.model,
+            "speed": self.speed,
             "transport": self.transport,
         }
 

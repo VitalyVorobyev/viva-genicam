@@ -129,8 +129,20 @@ pub const TS_LATCH_CMDS: &[&str] = &[
 /// Timestamp value nodes ordered by preference.
 ///
 /// Reading the node immediately after executing the latch command returns the
-/// device tick counter captured at the time of the latch.
-pub const TS_VALUE_NODES: &[&str] = &["GevTimestampValue", "TimestampValue", "TimestampLatchValue"];
+/// device tick counter captured at the time of the latch. `Timestamp` is the
+/// name USB3 Vision cameras give GenCP's latched timestamp register (0x1F0):
+/// a MATRIX VISION mvBlueFOX3-2004G and the corpus's Grasshopper3.
+pub const TS_VALUE_NODES: &[&str] = &[
+    "GevTimestampValue",
+    "TimestampValue",
+    "TimestampLatchValue",
+    "Timestamp",
+];
+
+/// Nanoseconds per timestamp tick: GenCP's Timestamp Increment register
+/// (0x1FC), under the name the same cameras give it. The tick frequency is
+/// 10⁹ over it.
+pub const TS_INCREMENT_NODES: &[&str] = &["TimestampIncrement"];
 
 /// Timestamp frequency nodes ordered by preference.
 ///

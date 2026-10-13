@@ -71,9 +71,9 @@ pub async fn run(args: ReportArgs) -> Result<()> {
 /// report cannot open it itself: a USB device admits one owner, so whoever
 /// holds it hands over its identity and XML (DX-06).
 ///
-/// The bootstrap registers go in raw as well as decoded: no USB3 Vision
-/// camera has been checked against this library (backlog TC-27), so the
-/// first report is what settles how its registers really read. A camera whose
+/// The bootstrap registers go in raw as well as decoded: one USB3 Vision
+/// camera has been checked against this library (backlog TC-27), so a
+/// report is what settles how another's registers really read. A camera whose
 /// XML cannot be read is still described.
 fn open_usb(index: usize) -> Result<OpenCamera> {
     let devices = viva_u3v::discover().context("USB3 Vision discovery")?;

@@ -1,11 +1,12 @@
-//! GigE Vision events: the GVCP message channel as a blocking iterator.
+//! Events as a blocking iterator: GigE Vision's GVCP message channel, or a
+//! USB3 Vision camera's event interface.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use viva_genicam::{Event, EventStream};
+use viva_genicam::{Event, EventStream, GenicamError, U3vEventStream};
 
 use crate::errors::{parse_error, transport_error, IntoPyErr};
 use crate::frame::posix_secs;
@@ -73,21 +74,36 @@ impl PyEvent {
 /// thread may close it meanwhile; the wait then ends at its timeout.
 #[pyclass(name = "EventStream", module = "viva_genicam._native")]
 pub(crate) struct PyEventStream {
-    inner: Mutex<Option<Arc<EventStream>>>,
+    inner: Mutex<Option<Arc<Events>>>,
     port: u16,
     default_timeout: Duration,
 }
 
+/// Either transport's events.
+pub(crate) enum Events {
+    Gige(EventStream),
+    U3v(U3vEventStream),
+}
+
 impl PyEventStream {
     pub(crate) fn new(stream: EventStream, port: u16) -> Self {
+        Self::of(Events::Gige(stream), port)
+    }
+
+    /// A USB3 Vision camera's events; they have no port.
+    pub(crate) fn u3v(stream: U3vEventStream) -> Self {
+        Self::of(Events::U3v(stream), 0)
+    }
+
+    fn of(events: Events, port: u16) -> Self {
         Self {
-            inner: Mutex::new(Some(Arc::new(stream))),
+            inner: Mutex::new(Some(Arc::new(events))),
             port,
             default_timeout: Duration::from_secs(5),
         }
     }
 
-    fn stream(&self) -> PyResult<Arc<EventStream>> {
+    fn stream(&self) -> PyResult<Arc<Events>> {
         self.inner
             .lock()
             .map_err(|_| parse_error("event stream mutex poisoned"))?
@@ -98,7 +114,7 @@ impl PyEventStream {
 
 #[pymethods]
 impl PyEventStream {
-    /// The UDP port the events arrive on.
+    /// The UDP port the events arrive on; 0 for a USB3 Vision camera.
     #[getter]
     fn port(&self) -> u16 {
         self.port
@@ -112,11 +128,19 @@ impl PyEventStream {
             .map(Duration::from_millis)
             .unwrap_or(self.default_timeout);
         let stream = self.stream()?;
-        let event = py.detach(|| {
-            runtime()
+        let event = py.detach(|| match stream.as_ref() {
+            Events::Gige(stream) => runtime()
                 .block_on(async { tokio::time::timeout(to, stream.next()).await })
                 .map_err(|_| transport_error("timeout waiting for an event"))
-                .and_then(|res| res.into_py_err())
+                .and_then(|res| res.into_py_err()),
+            Events::U3v(stream) => match stream.next_blocking(to) {
+                Ok(Some(event)) => Ok(event),
+                Ok(None) => Err(transport_error("the event stream has ended")),
+                Err(GenicamError::Timeout(_)) => {
+                    Err(transport_error("timeout waiting for an event"))
+                }
+                Err(err) => Err(err).into_py_err(),
+            },
         })?;
         Ok(PyEvent { inner: event })
     }

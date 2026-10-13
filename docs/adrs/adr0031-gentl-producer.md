@@ -108,9 +108,10 @@ mandatory event types"). A Buffer module has no port (§4.1.1.2).
   access (CCP `0x1`). The access status of a camera not opened here is
   `UNKNOWN`: discovery does not say whether another host controls it.
 - **Data stream:** one, `Stream0`, when the camera reports a stream channel.
-- **USB3 Vision is not offered.** The facade's U3V stream still needs a Tokio
-  blocking pool and USB enumeration of its own (backlog API-11); a row records
-  it.
+- **USB3 Vision is not offered.** It needs a USB System module and USB
+  enumeration on `IFUpdateDeviceList`; a row records it (GT-03). The facade's
+  U3V stream no longer needs a runtime
+  ([ADR-0032](adr0032-usb3-vision-transport.md)).
 
 ### 3. Ports and XML
 
@@ -142,6 +143,22 @@ zero. The buffer holds the block's whole payload — for an image with chunks,
 the image chunk first and the other chunks after it, which
 `DSGetBufferChunkData` locates. That needs the payload as the camera sent it,
 so `Frame` gains `raw_payload` (the facade otherwise hands out only the image).
+
+*Amended in 0.9 (Codex review of #204).* Three buffer values follow GenTL
+1.6 more closely:
+
+- `BUFFER_INFO_PIXEL_ENDIANNESS` is `PIXELENDIANNESS_UNKNOWN`, not `LITTLE`.
+  PFNC 2.4 §1.4 leaves the byte order of multi-byte pixels to the transport's
+  standard, GigE Vision's text is not available to us, and the payload is
+  copied as it came.
+- `BUFFER_INFO_DELIVERED_IMAGEHEIGHT` is the trailer's `Size Y`
+  (`Frame::delivered_height`): the lines that actually arrived, fewer than the
+  leader's height when a variable-height frame ends early. It is
+  `GC_ERR_NOT_AVAILABLE` when no trailer arrived.
+- `BUFFER_INFO_DATA_SIZE` of an incomplete block is the size the block was
+  meant to have, lost bytes included (`Frame::expected_size`): from the
+  trailer's packet count, `PayloadSize` or the leader's geometry. Before, it
+  was not available.
 
 `STREAM_INFO_DEFINES_PAYLOADSIZE` is false: the producer runs no GenApi, so
 `PayloadSize` is the consumer's to read from the remote device (§5.2.1), and

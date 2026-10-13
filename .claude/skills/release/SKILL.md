@@ -91,7 +91,7 @@ Watch the three workflows: **Publish Rust crates**, **Release**,
 
 - crates.io sparse index shows the new version:
   `curl -A viva-release-check https://index.crates.io/vi/va/viva-genicam | tail -1`
-- PyPI JSON shows the version and license `MIT AND LGPL-2.1-or-later`:
+- PyPI JSON shows the version and license `MIT`:
   `curl -s https://pypi.org/pypi/viva-genicam/json | jq '.info.version, .info.license'`
 - GitHub release `vX.Y.Z` exists and has the binary assets attached: the CLI
   archives, and the Viva Studio `.dmg`, `.AppImage`, `.deb` and `.msi`.

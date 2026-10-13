@@ -48,6 +48,10 @@ pub(crate) struct SenderOptions {
     /// Also send every block, first and with its image bytes inverted, from a
     /// socket bound to this address: datagrams a receiver must not accept.
     pub spoof_source: Option<Ipv4Addr>,
+    /// Send only this many lines of each image, and say so in the trailer's
+    /// Size Y, as a variable-height line-scan camera ends a frame early; the
+    /// leader keeps `Height`.
+    pub delivered_lines: Option<u32>,
 }
 
 /// State the GVSP sender shares with the rest of the fake.
@@ -362,7 +366,7 @@ fn build_block(
     } else {
         PAYLOAD_TYPE_IMAGE
     });
-    let spec = BlockSpec {
+    let mut spec = BlockSpec {
         block_id,
         packet_size: config.packet_size,
         extended_ids: options.extended_ids,
@@ -385,12 +389,21 @@ fn build_block(
         return None;
     }
     let size = image_size(config.pixel_format, config.width, config.height);
-    let image = generate_test_pattern(
+    let mut image = generate_test_pattern(
         config.width as usize,
         config.height as usize,
         size,
         block_id as u16,
     );
+    // A frame that ends early: its first lines, and a trailer that says how
+    // many (GigE Vision trailer Size Y).
+    if let Some(lines) = options
+        .delivered_lines
+        .filter(|&lines| lines < config.height && !config.chunk_active)
+    {
+        image.truncate(image_size(config.pixel_format, config.width, lines));
+        spec.size_y = lines;
+    }
     let data = if config.chunk_active {
         chunk_block(config, &spec, &image)
     } else {

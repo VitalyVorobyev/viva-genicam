@@ -142,8 +142,10 @@ impl EmbeddedBackend {
         known.retain(|position, _| present.contains(position));
         for info in usb {
             let position = UsbPosition::of(&info);
-            // A serial that cannot be read now — the camera may be busy, open
-            // in this app — keeps the id it had (Codex review of #179).
+            // A scan that finds no serial keeps the id the camera had (Codex
+            // review of #179). Discovery reads the OS's cached descriptors,
+            // so a busy camera no longer hides its serial; this stays for a
+            // host whose cache lacks it.
             let id = match (&info.serial, known.get(&position)) {
                 (None, Some(id)) => id.clone(),
                 _ => u3v_id(&info),
@@ -200,7 +202,7 @@ impl EmbeddedBackend {
         let (camera, xml, bootstrap) = tauri::async_runtime::spawn_blocking(move || {
             let (camera, xml) = viva_genicam::connect_u3v_with_xml(&info)?;
             // The bootstrap registers, decoded and raw, for the report:
-            // nothing about USB3 Vision has met a camera yet (backlog TC-27).
+            // USB3 Vision has met one camera so far (backlog TC-27).
             let bootstrap = camera
                 .transport()
                 .lock_device()
@@ -839,9 +841,9 @@ fn u3v_identity(info: &U3vDeviceInfo) -> Vec<(String, String)> {
 
 /// Where a USB3 Vision camera is plugged in, and what it is: the key under
 /// which its id is remembered between scans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct UsbPosition {
-    bus: u8,
+    bus: String,
     address: u8,
     vendor_id: u16,
     product_id: u16,
@@ -850,7 +852,7 @@ struct UsbPosition {
 impl UsbPosition {
     fn of(info: &U3vDeviceInfo) -> Self {
         Self {
-            bus: info.bus,
+            bus: info.bus.clone(),
             address: info.address,
             vendor_id: info.vendor_id,
             product_id: info.product_id,
@@ -1370,24 +1372,15 @@ mod tests {
     #[test]
     fn a_usb3_vision_camera_is_named_by_serial_or_bus_position() {
         use viva_genicam::u3v::U3vDeviceInfo;
-        use viva_genicam::u3v::U3vInterfaceInfo;
         let info = |serial: Option<&str>| U3vDeviceInfo {
-            bus: 2,
+            bus: "2".to_string(),
             address: 7,
             vendor_id: 0x2676,
             product_id: 0xba02,
             serial: serial.map(str::to_string),
             manufacturer: Some("Vendor".to_string()),
             model: Some("Model".to_string()),
-            interface_info: U3vInterfaceInfo {
-                control_iface: 0,
-                control_ep_in: 0x81,
-                control_ep_out: 0x01,
-                stream_iface: Some(1),
-                stream_ep_in: Some(0x82),
-                event_iface: None,
-                event_ep_in: None,
-            },
+            speed: None,
         };
         assert_eq!(super::u3v_id(&info(Some("A123"))), "u3v-2676ba02-A123");
         assert_eq!(super::u3v_id(&info(None)), "u3v-2676ba02-2.7");
@@ -1455,22 +1448,14 @@ mod tests {
 
     fn u3v_info(serial: Option<&str>) -> viva_genicam::u3v::U3vDeviceInfo {
         viva_genicam::u3v::U3vDeviceInfo {
-            bus: 2,
+            bus: "2".to_string(),
             address: 7,
             vendor_id: 0x2676,
             product_id: 0xba02,
             serial: serial.map(str::to_string),
             manufacturer: Some("Vendor".to_string()),
             model: Some("Model".to_string()),
-            interface_info: viva_genicam::u3v::U3vInterfaceInfo {
-                control_iface: 0,
-                control_ep_in: 0x81,
-                control_ep_out: 0x01,
-                stream_iface: Some(1),
-                stream_ep_in: Some(0x82),
-                event_iface: None,
-                event_ep_in: None,
-            },
+            speed: None,
         }
     }
 

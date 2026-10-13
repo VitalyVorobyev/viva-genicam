@@ -91,14 +91,13 @@ pub(crate) async fn run<D: StreamSource>(
                     Err(_) => break,
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    // Stop acquisition on shutdown.
-                    if frame_task.is_some() {
-                        handle_stop(&session, device.as_ref(), &stop_tx, &mut frame_task).await;
-                    }
-                    break;
+            _ = crate::serve::stopped(&mut shutdown) => {
+                // Stop acquisition on shutdown, and when the camera is let
+                // go of: the frame loop is awaited, never left running.
+                if frame_task.is_some() {
+                    handle_stop(&session, device.as_ref(), &stop_tx, &mut frame_task).await;
                 }
+                break;
             }
         }
     }
@@ -231,11 +230,9 @@ async fn frame_loop(
                     }
                 }
             }
-            _ = stop.changed() => {
-                if *stop.borrow() {
-                    debug!(device_id, "frame loop stop signal received");
-                    break;
-                }
+            _ = crate::serve::stopped(&mut stop) => {
+                debug!(device_id, "frame loop stop signal received");
+                break;
             }
         }
     }

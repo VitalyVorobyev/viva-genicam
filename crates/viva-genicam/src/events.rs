@@ -88,6 +88,165 @@ impl EventStream {
     }
 }
 
+/// Events from a USB3 Vision camera's event interface, read on a thread of
+/// its own (backlog TC-27 (4)).
+///
+/// Each is an [`Event`] whose `raw` is the event as GenCP lays it out — its
+/// ID at 0x2, its timestamp at 0x4, its data at 0xC — which is what the
+/// camera's event ports address ([`Camera::with_event`](crate::Camera::with_event)).
+/// USB3 Vision events have no stream channel or block id of their own: both
+/// are 0. Dropping the stream stops the reader and clears the device's
+/// EventEnable.
+#[cfg(feature = "u3v")]
+#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
+pub struct U3vEventStream {
+    shared: Arc<U3vEventShared>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    disable: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+#[cfg(feature = "u3v")]
+struct U3vEventShared {
+    queue: crate::stream::EventQueue,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+/// How long the event reader waits before checking whether to stop.
+#[cfg(feature = "u3v")]
+const U3V_EVENT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Events kept for the application before the oldest is dropped.
+#[cfg(feature = "u3v")]
+const U3V_EVENT_CAPACITY: usize = 256;
+
+#[cfg(feature = "u3v")]
+pub(crate) fn open_u3v_event_stream<T: viva_u3v::UsbTransfer + 'static>(
+    transport: &crate::U3vRegisterIo<T>,
+    time_sync: Option<TimeSync>,
+) -> Result<U3vEventStream, GenicamError> {
+    let device = transport.shared_device();
+    let mut events = device
+        .lock()
+        .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))?
+        .open_events()
+        .map_err(|source| {
+            if matches!(source, viva_u3v::U3vError::Disconnected) {
+                transport.mark_lost();
+            }
+            GenicamError::U3v {
+                during: "open the event stream",
+                source,
+            }
+        })?;
+    let shared = Arc::new(U3vEventShared {
+        queue: crate::stream::EventQueue::new(U3V_EVENT_CAPACITY),
+        stop: std::sync::atomic::AtomicBool::new(false),
+    });
+    let lost = transport.lost_flag();
+    let reader = {
+        let shared = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("viva-u3v-events".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                while !shared.stop.load(Ordering::Acquire) {
+                    match events.next_event_within(U3V_EVENT_POLL) {
+                        Ok(None) => {}
+                        Ok(Some(event)) => {
+                            let ts_host = time_sync
+                                .as_ref()
+                                .and_then(|sync| sync.to_host_time(event.timestamp));
+                            debug!(
+                                event_id = event.id,
+                                ts_dev = event.timestamp,
+                                "event received"
+                            );
+                            shared.queue.push(Event {
+                                id: event.id,
+                                stream_channel: 0,
+                                block_id: 0,
+                                ts_dev: event.timestamp,
+                                ts_host,
+                                data: event.data,
+                                raw: event.raw,
+                            });
+                        }
+                        Err(error) => {
+                            if matches!(error, viva_u3v::U3vError::Disconnected) {
+                                lost.store(true, Ordering::Release);
+                            }
+                            shared.queue.fail("read an event", error);
+                            break;
+                        }
+                    }
+                }
+                shared.queue.finish();
+            })
+            .map_err(crate::error::network("start the event reader thread"))?
+    };
+    let disable = Box::new(move || {
+        if let Ok(mut device) = device.lock()
+            && let Err(error) = device.stop_events()
+        {
+            debug!(%error, "clearing EventEnable");
+        }
+    });
+    Ok(U3vEventStream {
+        shared,
+        reader: Some(reader),
+        disable: Some(disable),
+    })
+}
+
+#[cfg(feature = "u3v")]
+impl U3vEventStream {
+    /// The next event; an error once the stream has ended, by failing —
+    /// with [`U3vError::Disconnected`](viva_u3v::U3vError::Disconnected) as
+    /// the source when the camera is gone — or by being closed.
+    pub async fn next(&self) -> Result<Event, GenicamError> {
+        let popped = self.shared.queue.pop().await;
+        Self::take(popped)?.ok_or(GenicamError::Panicked("the event stream has ended"))
+    }
+
+    /// Wait up to `timeout` for the next event on the calling thread:
+    /// `Ok(None)` when the stream has ended, [`GenicamError::Timeout`] when
+    /// nothing arrived.
+    pub fn next_blocking(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Event>, GenicamError> {
+        match self.shared.queue.pop_blocking(timeout) {
+            crate::stream::EventPopped::Empty => Err(GenicamError::Timeout(timeout)),
+            popped => Self::take(popped),
+        }
+    }
+
+    fn take(popped: crate::stream::EventPopped) -> Result<Option<Event>, GenicamError> {
+        match popped {
+            crate::stream::EventPopped::Item(event) => Ok(Some(event)),
+            crate::stream::EventPopped::Failed(during, source) => {
+                Err(GenicamError::U3v { during, source })
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+#[cfg(feature = "u3v")]
+impl Drop for U3vEventStream {
+    fn drop(&mut self) {
+        self.shared
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(disable) = self.disable.take() {
+            disable();
+        }
+    }
+}
+
 /// Attempt to configure the GVCP message channel directly when SFNC nodes are missing.
 pub(crate) fn configure_message_channel_raw<T: crate::genapi::RegisterIo>(
     transport: &T,

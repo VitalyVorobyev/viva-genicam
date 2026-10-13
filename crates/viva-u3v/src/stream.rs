@@ -18,14 +18,33 @@
 //! `ArvUvspTrailer`) and Wireshark (`dissect_u3v_stream_leader`,
 //! `dissect_u3v_stream_trailer`) agree on; the USB3 Vision standard itself is
 //! not freely available. Every field is little-endian.
+//!
+//! # Transfers in flight (ADR-0032)
+//!
+//! [`U3vStream`] keeps several transfers queued on the endpoint
+//! ([`DEFAULT_TRANSFERS_IN_FLIGHT`], as aravis keeps up to eight transfers'
+//! worth): a device streaming at full rate has somewhere to put the next
+//! transfer while the host is still handling the last one. It plans each
+//! transfer's size from where the device is in its block — the leader, the
+//! payload's transfers, the trailer — and checks every completion against
+//! that plan. When they part — a block that ended early, a transfer that
+//! failed — it cancels what is queued, reads what had already arrived, and
+//! plans again from where the device really is: resynchronising on the next
+//! leader.
+//!
+//! A transfer that fails — a stall, a fault — resets the endpoint and costs
+//! the block in progress, not the stream (backlog UV-02). A disconnect ends
+//! the stream with [`U3vError::Disconnected`]. Which errors a real camera
+//! recovers from is open (backlog UV-05).
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
 use crate::U3vError;
-use crate::usb::UsbTransfer;
+use crate::usb::{BulkIn, Completion, GONE_GRACE, UsbTransfer, unless_gone};
 
 /// U3V stream leader prefix: "U3VL" in little-endian.
 const LEADER_PREFIX: u32 = 0x4C56_3355;
@@ -47,12 +66,29 @@ pub const PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK: u16 = 0x4001;
 /// Payload type of chunk data alone.
 pub const PAYLOAD_TYPE_CHUNK: u16 = 0x4000;
 
-/// Default USB bulk read timeout for streaming.
+/// How long a block may go without a transfer before it is given up.
 const STREAM_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Largest single payload transfer the host asks for: aravis's default
 /// (`ARV_UV_STREAM_MAXIMUM_TRANSFER_SIZE_DEFAULT`, 1 MiB).
-pub(crate) const DEFAULT_MAX_TRANSFER_SIZE: u32 = 1 << 20;
+///
+/// The device imposes only an alignment (SIRM Info); the size is the host's
+/// to choose. The limit is the host's memory for transfers in flight: Linux
+/// gives a process 16 MiB of usbfs memory by default (`usbfs_memory_mb`), and
+/// [`DEFAULT_TRANSFERS_IN_FLIGHT`] of these fit in half of it.
+pub const DEFAULT_MAX_TRANSFER_SIZE: u32 = 1 << 20;
+
+/// Transfers a stream keeps queued: aravis's eight
+/// (`ARV_UV_STREAM_N_MAXIMUM_SUBMITS`).
+pub const DEFAULT_TRANSFERS_IN_FLIGHT: usize = 8;
+
+/// How long cancelled transfers get to come back.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Transfer errors in a row, with no block finished between them, after
+/// which the stream gives up: an endpoint that fails again at once after
+/// every reset is not coming back.
+const MAX_CONSECUTIVE_FAILURES: u32 = 8;
 
 /// How the host reads one block: the sizes it writes to the SIRM, and reads
 /// with.
@@ -163,7 +199,8 @@ pub struct Leader {
     pub block_id: u64,
     /// Payload type ([`PAYLOAD_TYPE_IMAGE`], [`PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK`], …).
     pub payload_type: u16,
-    /// Device timestamp in ticks.
+    /// Device timestamp, in ns: the GenCP timestamp (GenCP 1.3.1 §5.4.16),
+    /// which aravis also reads as nanoseconds.
     pub timestamp: u64,
     /// PFNC pixel format code; 0 for a payload that is not an image.
     pub pixel_format: u32,
@@ -188,32 +225,112 @@ pub struct Trailer {
     pub status: u16,
     /// Bytes of payload the device actually sent.
     pub valid_payload_size: u64,
+    /// Lines of the image the device sent, from an image trailer of 32 bytes
+    /// or more; fewer than the leader's height when a variable-height frame
+    /// ended early.
+    pub size_y: Option<u32>,
 }
 
-/// U3V stream receiver that reads blocks from a USB bulk endpoint.
-pub struct U3vStream<T: UsbTransfer> {
-    transport: Arc<T>,
-    ep_in: u8,
-    timeout: Duration,
+/// A block as received from the U3V stream, before conversion to the
+/// transport-agnostic `Frame` type.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RawFrame {
+    /// Leader containing image metadata.
+    pub leader: Leader,
+    /// The payload bytes that arrived: up to the trailer's valid payload
+    /// size when there is a trailer.
+    pub payload: Bytes,
+    /// The trailer, with status and block id; `None` for a block given up
+    /// before it — a transfer failed, the next leader came first, or the
+    /// device went quiet mid-block.
+    pub trailer: Option<Trailer>,
+}
+
+/// What a stream has counted since it was opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct U3vStreamCounters {
+    /// Transfers that completed, whatever they carried.
+    pub transfers: u64,
+    /// Transfers that were neither the leader, the payload nor the trailer
+    /// due: the tail of a block whose start was missed, or payload past the
+    /// layout's capacity.
+    pub transfers_skipped: u64,
+    /// Transfers that failed with a USB error the stream recovered from by
+    /// resetting the endpoint (backlog UV-02).
+    pub transfer_errors: u64,
+    /// Blocks given up before their trailer.
+    pub blocks_abandoned: u64,
+}
+
+/// Where the device is in its block: what the next transfer carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cursor {
+    /// A leader opens the next block.
+    Leader,
+    /// The payload, this many bytes in.
+    Payload(u64),
+    /// The payload is complete, or the device ended it early.
+    Trailer,
+}
+
+/// A block being received.
+#[derive(Debug)]
+struct Block {
+    leader: Leader,
+    payload: Vec<u8>,
+    /// The device ended the payload with a short transfer.
+    ended: bool,
+    /// When a transfer last added to the block.
+    last: Instant,
+}
+
+/// U3V stream receiver: reads blocks from a USB bulk endpoint, with
+/// several transfers queued on it.
+pub struct U3vStream {
+    queue: Box<dyn BulkIn>,
     layout: StreamLayout,
-    leader_buf: Vec<u8>,
-    trailer_buf: Vec<u8>,
-    payload_buf: Vec<u8>,
+    timeout: Duration,
+    in_flight: usize,
+    /// The role and size each queued transfer was planned with, oldest
+    /// first.
+    planned: VecDeque<(Cursor, usize)>,
+    /// What the next transfer submitted is for.
+    next: Cursor,
+    block: Option<Block>,
+    /// Blocks finished or given up, not yet handed out.
+    ready: VecDeque<RawFrame>,
+    counters: U3vStreamCounters,
+    /// Transfer errors since the last block finished.
+    failures: u32,
 }
 
-impl<T: UsbTransfer> U3vStream<T> {
-    /// A receiver reading with `layout`, the transfer sizes written to the
-    /// device's SIRM: it reads each transfer at exactly that size.
-    pub fn new(transport: Arc<T>, ep_in: u8, layout: StreamLayout) -> Self {
+impl U3vStream {
+    /// A receiver reading `queue` with `layout`, the transfer sizes written
+    /// to the device's SIRM.
+    pub fn new(queue: Box<dyn BulkIn>, layout: StreamLayout) -> Self {
         Self {
-            transport,
-            ep_in,
-            timeout: STREAM_TIMEOUT,
+            queue,
             layout,
-            leader_buf: vec![0u8; layout.leader_size as usize],
-            trailer_buf: vec![0u8; layout.trailer_size as usize],
-            payload_buf: vec![0u8; layout.payload_capacity() as usize],
+            timeout: STREAM_TIMEOUT,
+            in_flight: DEFAULT_TRANSFERS_IN_FLIGHT,
+            planned: VecDeque::new(),
+            next: Cursor::Leader,
+            block: None,
+            ready: VecDeque::new(),
+            counters: U3vStreamCounters::default(),
+            failures: 0,
         }
+    }
+
+    /// A receiver on `transport`'s bulk IN `endpoint`.
+    pub fn open<T: UsbTransfer + 'static>(
+        transport: &Arc<T>,
+        endpoint: u8,
+        layout: StreamLayout,
+    ) -> Result<Self, U3vError> {
+        Ok(Self::new(transport.bulk_in(endpoint)?, layout))
     }
 
     /// The transfer layout this stream reads with.
@@ -221,109 +338,378 @@ impl<T: UsbTransfer> U3vStream<T> {
         &self.layout
     }
 
-    /// Override the default bulk read timeout.
+    /// How long a block may go without a transfer before it is given up
+    /// (default 5 s).
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }
 
-    /// Receive the next complete block, waiting up to the stream timeout for
-    /// it to start.
-    pub fn next_frame(&mut self) -> Result<RawFrame, U3vError> {
-        self.next_frame_within(self.timeout)?
-            .ok_or(U3vError::Timeout)
+    /// How many transfers to keep queued (default
+    /// [`DEFAULT_TRANSFERS_IN_FLIGHT`], at least one).
+    pub fn set_transfers_in_flight(&mut self, transfers: usize) {
+        self.in_flight = transfers.max(1);
     }
 
-    /// Like [`next_frame`](Self::next_frame), but `Ok(None)` when no block
-    /// starts within `idle`: the stream is waiting — in trigger mode, say —
-    /// not broken. Once a leader arrives the rest of the block gets the full
-    /// timeout. A reader polling with this can stop between blocks.
-    ///
-    /// A transfer that is not a leader where a leader is due — the tail of
-    /// a block whose start was missed — is skipped.
-    pub fn next_frame_within(&mut self, idle: Duration) -> Result<Option<RawFrame>, U3vError> {
-        let leader = loop {
-            let n = match self
-                .transport
-                .bulk_read(self.ep_in, &mut self.leader_buf, idle)
-            {
-                Ok(n) => n,
-                Err(U3vError::Timeout) => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            let transfer = &self.leader_buf[..n];
-            if transfer.len() >= 4 && transfer[..4] == LEADER_PREFIX.to_le_bytes() {
-                break parse_leader(transfer)?;
+    /// Transfers kept queued.
+    pub fn transfers_in_flight(&self) -> usize {
+        self.in_flight
+    }
+
+    /// What the stream has counted.
+    pub fn counters(&self) -> U3vStreamCounters {
+        self.counters
+    }
+
+    /// Receive the next block, waiting up to the stream timeout for it.
+    pub fn next_frame(&mut self) -> Result<RawFrame, U3vError> {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Some(frame) = self.next_frame_within(left)? {
+                return Ok(frame);
             }
-            tracing::debug!(bytes = n, "skipping a transfer that is not a leader");
+            if left.is_zero() {
+                return Err(U3vError::Timeout);
+            }
+        }
+    }
+
+    /// The next block, finished or given up, or `Ok(None)` when no transfer
+    /// completed within `idle`: the stream is waiting — in trigger mode, say
+    /// — not broken, and a reader polling with this can stop between
+    /// blocks.
+    ///
+    /// A block missing its trailer comes back with
+    /// [`RawFrame::trailer`] `None`. A failed transfer resets the endpoint
+    /// and the stream goes on; [`U3vError::Disconnected`], or transfers that
+    /// keep failing after every reset, end it.
+    pub fn next_frame_within(&mut self, idle: Duration) -> Result<Option<RawFrame>, U3vError> {
+        loop {
+            if let Some(frame) = self.ready.pop_front() {
+                return Ok(Some(frame));
+            }
+            self.fill();
+            let Some(completion) = self.queue.wait_next(idle) else {
+                let stalled = self
+                    .block
+                    .as_ref()
+                    .is_some_and(|block| block.last.elapsed() >= self.timeout);
+                if stalled {
+                    tracing::debug!("a block went quiet before its trailer; giving it up");
+                    self.abandon();
+                    continue;
+                }
+                return Ok(None);
+            };
+            let (planned, requested) = self
+                .planned
+                .pop_front()
+                .unwrap_or((self.cursor(), completion.data.len()));
+            self.complete(completion, requested, false)?;
+            match self.planned.front() {
+                // The device is no longer where the queued transfers were
+                // planned for: plan them again from where it is.
+                Some(&(next, _)) if next != self.cursor() => {
+                    tracing::debug!(
+                        ?planned,
+                        expected = ?next,
+                        found = ?self.cursor(),
+                        "the stream left the planned transfers; resynchronising"
+                    );
+                    self.replan()?;
+                }
+                Some(_) => {}
+                None => self.next = self.cursor(),
+            }
+        }
+    }
+
+    /// Queue transfers until `in_flight` are, sized for where the device
+    /// will be.
+    fn fill(&mut self) {
+        while self.queue.pending() < self.in_flight {
+            let (len, next) = self.slot(self.next);
+            self.queue.submit(len);
+            self.planned.push_back((self.next, len));
+            self.next = next;
+        }
+    }
+
+    /// The transfer the device sends at `cursor`: its size, and where the
+    /// device is after it. Payload transfers end where the SIRM layout's do,
+    /// so a plan started mid-transfer joins the device's boundaries again.
+    fn slot(&self, cursor: Cursor) -> (usize, Cursor) {
+        let layout = &self.layout;
+        let capacity = layout.payload_capacity();
+        match cursor {
+            Cursor::Leader => (
+                layout.leader_size as usize,
+                if capacity == 0 {
+                    Cursor::Trailer
+                } else {
+                    Cursor::Payload(0)
+                },
+            ),
+            Cursor::Payload(offset) => {
+                let size = u64::from(layout.payload_transfer_size);
+                let full = size * u64::from(layout.payload_transfer_count);
+                let final1 = full + u64::from(layout.final_transfer1_size);
+                let end = if offset < full {
+                    (offset / size + 1) * size
+                } else if offset < final1 {
+                    final1
+                } else {
+                    capacity
+                };
+                let next = if end >= capacity {
+                    Cursor::Trailer
+                } else {
+                    Cursor::Payload(end)
+                };
+                ((end - offset) as usize, next)
+            }
+            Cursor::Trailer => (layout.trailer_size as usize, Cursor::Leader),
+        }
+    }
+
+    /// Where the device is, by what has arrived.
+    fn cursor(&self) -> Cursor {
+        match &self.block {
+            None => Cursor::Leader,
+            Some(block) => {
+                let received = block.payload.len() as u64;
+                if block.ended || received >= self.layout.payload_capacity() {
+                    Cursor::Trailer
+                } else {
+                    Cursor::Payload(received)
+                }
+            }
+        }
+    }
+
+    /// Take in one completed transfer of `requested` bytes; `cancelling`
+    /// while the stream itself is cancelling what it queued.
+    fn complete(
+        &mut self,
+        completion: Completion,
+        requested: usize,
+        cancelling: bool,
+    ) -> Result<(), U3vError> {
+        match completion.status {
+            // Cancelled by us before anything arrived: it never happened.
+            Err(U3vError::Cancelled) if cancelling && completion.data.is_empty() => Ok(()),
+            // A cancelled transfer still carries what arrived before.
+            Ok(()) => {
+                self.counters.transfers += 1;
+                self.absorb(completion.data, requested);
+                Ok(())
+            }
+            Err(U3vError::Cancelled) if cancelling => {
+                self.counters.transfers += 1;
+                self.absorb(completion.data, requested);
+                Ok(())
+            }
+            // Ended by the host's USB stack, not by us: how macOS reports a
+            // transfer it aborted (`kIOReturnAborted`) — a device reset or
+            // removal, as the reset that follows will show.
+            Err(U3vError::Cancelled) => {
+                self.counters.transfers += 1;
+                self.absorb(completion.data, requested);
+                self.recover(U3vError::Cancelled)
+            }
+            Err(U3vError::Disconnected) => Err(U3vError::Disconnected),
+            Err(error) => {
+                self.counters.transfers += 1;
+                self.recover(error)
+            }
+        }
+    }
+
+    /// Place one transfer's bytes: a leader opens a block, a trailer closes
+    /// it, anything else is payload where payload is due.
+    fn absorb(&mut self, data: Vec<u8>, requested: usize) {
+        let leader = self.as_leader(&data);
+        let trailer = self.as_trailer(&data);
+        let capacity = self.layout.payload_capacity() as usize;
+        match (&mut self.block, leader, trailer) {
+            (_, Some(leader), _) => {
+                if self.block.is_some() {
+                    tracing::debug!("a leader came before the block's trailer");
+                    self.abandon();
+                }
+                self.block = Some(Block {
+                    leader,
+                    payload: Vec::new(),
+                    ended: capacity == 0,
+                    last: Instant::now(),
+                });
+            }
+            (Some(_), None, Some(trailer)) => self.finish(trailer),
+            (Some(block), None, None) if !block.ended && block.payload.len() < capacity => {
+                let room = capacity - block.payload.len();
+                let ended = data.len() < requested || data.len() >= room;
+                if data.len() > room {
+                    self.counters.transfers_skipped += 1;
+                }
+                if block.payload.is_empty() && ended && data.len() <= room {
+                    // The whole payload in one transfer: it is the frame,
+                    // with no copy.
+                    let mut data = data;
+                    if data.capacity() > 2 * data.len() {
+                        data.shrink_to_fit();
+                    }
+                    block.payload = data;
+                } else {
+                    if block.payload.capacity() == 0 {
+                        block.payload.reserve_exact(capacity);
+                    }
+                    block
+                        .payload
+                        .extend_from_slice(&data[..data.len().min(room)]);
+                }
+                block.ended = ended;
+                block.last = Instant::now();
+            }
+            _ => {
+                tracing::debug!(
+                    bytes = data.len(),
+                    "skipping a transfer that is not what the stream expects"
+                );
+                self.counters.transfers_skipped += 1;
+            }
+        }
+    }
+
+    /// `data` as a leader: the prefix, a size field no longer than the
+    /// transfer, and a transfer no longer than a leader's.
+    fn as_leader(&self, data: &[u8]) -> Option<Leader> {
+        let declared = framing_size(data, LEADER_PREFIX)?;
+        (declared >= GENERIC_LEADER_SIZE && data.len() <= self.layout.leader_size as usize)
+            .then(|| parse_leader(data).ok())
+            .flatten()
+    }
+
+    /// `data` as a trailer, by the same rules.
+    fn as_trailer(&self, data: &[u8]) -> Option<Trailer> {
+        let declared = framing_size(data, TRAILER_PREFIX)?;
+        (declared >= MIN_TRAILER_SIZE && data.len() <= self.layout.trailer_size as usize)
+            .then(|| parse_trailer(data).ok())
+            .flatten()
+    }
+
+    /// Close the block in progress with `trailer`.
+    fn finish(&mut self, trailer: Trailer) {
+        let Some(block) = self.block.take() else {
+            return;
         };
-        let received = self.read_payload()?;
-        let trailer = self.read_trailer()?;
-        if trailer.block_id != leader.block_id {
+        if trailer.block_id != block.leader.block_id {
             tracing::debug!(
-                leader = leader.block_id,
+                leader = block.leader.block_id,
                 trailer = trailer.block_id,
-                "a trailer closes another block"
+                "a trailer closes another block than its leader opened"
             );
-            return Err(U3vError::Malformed {
-                packet: "trailer",
-                problem: "closes another block than its leader opened",
+            self.block = Some(block);
+            self.abandon();
+            return;
+        }
+        let mut payload = block.payload;
+        let valid = usize::try_from(trailer.valid_payload_size).unwrap_or(usize::MAX);
+        payload.truncate(valid);
+        self.failures = 0;
+        self.ready.push_back(RawFrame {
+            leader: block.leader,
+            payload: Bytes::from(payload),
+            trailer: Some(trailer),
+        });
+    }
+
+    /// Give up the block in progress, handing out what arrived of it.
+    fn abandon(&mut self) {
+        if let Some(block) = self.block.take() {
+            self.counters.blocks_abandoned += 1;
+            self.ready.push_back(RawFrame {
+                leader: block.leader,
+                payload: Bytes::from(block.payload),
+                trailer: None,
             });
         }
-        let valid = (trailer.valid_payload_size as usize).min(received);
-        Ok(Some(RawFrame {
-            payload: Bytes::copy_from_slice(&self.payload_buf[..valid]),
-            leader,
-            trailer,
-        }))
     }
 
-    /// Read the payload's transfers at the sizes in the layout. A short
-    /// transfer is the device ending the payload early; the trailer follows
-    /// and says how much of it is valid.
-    fn read_payload(&mut self) -> Result<usize, U3vError> {
-        let layout = self.layout;
-        let transfers = std::iter::repeat_n(
-            layout.payload_transfer_size,
-            layout.payload_transfer_count as usize,
-        )
-        .chain([layout.final_transfer1_size, layout.final_transfer2_size])
-        .filter(|&size| size > 0);
-
-        let mut offset = 0usize;
-        for size in transfers {
-            let end = offset + size as usize;
-            let n = self.transport.bulk_read(
-                self.ep_in,
-                &mut self.payload_buf[offset..end],
-                self.timeout,
-            )?;
-            offset += n;
-            if n < size as usize {
+    /// Cancel what is queued, take in what had already arrived, and plan
+    /// again from where the device is.
+    fn replan(&mut self) -> Result<(), U3vError> {
+        self.queue.cancel_all();
+        while self.queue.pending() > 0 {
+            let Some(completion) = self.queue.wait_next(DRAIN_TIMEOUT) else {
                 break;
+            };
+            let requested = self
+                .planned
+                .pop_front()
+                .map_or(completion.data.len(), |(_, len)| len);
+            let failed = matches!(
+                completion.status,
+                Err(ref e) if !matches!(e, U3vError::Cancelled)
+            );
+            self.complete(completion, requested, true)?;
+            if failed {
+                // `complete` recovered: the queue is empty and reset.
+                return Ok(());
             }
         }
-        Ok(offset)
+        self.planned.clear();
+        self.next = self.cursor();
+        Ok(())
     }
 
-    fn read_trailer(&mut self) -> Result<Trailer, U3vError> {
-        let n = self
-            .transport
-            .bulk_read(self.ep_in, &mut self.trailer_buf, self.timeout)?;
-        parse_trailer(&self.trailer_buf[..n])
+    /// A transfer failed: give up the block in progress, empty the queue,
+    /// reset the endpoint and wait for the next leader — unless transfers
+    /// keep failing.
+    fn recover(&mut self, error: U3vError) -> Result<(), U3vError> {
+        // An error that does not say whether the device is gone: one look at
+        // whether it is still listed first (UV-03). It may still be, for a
+        // moment, after an unplug; the reset below then fails, and that
+        // failure waits for the device to leave.
+        let error = unless_gone(error, || self.queue.is_present(), Duration::ZERO);
+        if matches!(error, U3vError::Disconnected) {
+            return Err(error);
+        }
+        self.counters.transfer_errors += 1;
+        self.failures += 1;
+        tracing::warn!(%error, "a stream transfer failed; resetting the endpoint");
+        self.abandon();
+        if self.failures > MAX_CONSECUTIVE_FAILURES {
+            return Err(unless_gone(error, || self.queue.is_present(), GONE_GRACE));
+        }
+        self.queue.cancel_all();
+        while self.queue.pending() > 0 {
+            match self.queue.wait_next(DRAIN_TIMEOUT) {
+                Some(Completion {
+                    status: Err(U3vError::Disconnected),
+                    ..
+                }) => return Err(U3vError::Disconnected),
+                Some(_) => {}
+                None => break,
+            }
+        }
+        self.planned.clear();
+        self.queue
+            .reset()
+            .map_err(|error| unless_gone(error, || self.queue.is_present(), GONE_GRACE))?;
+        self.next = Cursor::Leader;
+        Ok(())
     }
 }
 
-/// A raw frame as received from the U3V stream, before conversion to
-/// the transport-agnostic `Frame` type.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct RawFrame {
-    /// Leader containing image metadata.
-    pub leader: Leader,
-    /// The valid payload bytes.
-    pub payload: Bytes,
-    /// Trailer with status and block ID.
-    pub trailer: Trailer,
+/// The size field of a leader or trailer opening `data` with `prefix`, if
+/// it is one: no more than the transfer holds.
+fn framing_size(data: &[u8], prefix: u32) -> Option<usize> {
+    let head = data.get(..8)?;
+    if u32::from_le_bytes(head[..4].try_into().unwrap()) != prefix {
+        return None;
+    }
+    let declared = usize::from(u16::from_le_bytes([head[6], head[7]]));
+    (declared <= data.len()).then_some(declared)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +826,47 @@ pub fn parse_trailer(buf: &[u8]) -> Result<Trailer, U3vError> {
         block_id: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
         status: u16::from_le_bytes([buf[16], buf[17]]),
         valid_payload_size: u64::from_le_bytes(buf[20..28].try_into().unwrap()),
+        size_y: buf
+            .get(28..32)
+            .map(|y| u32::from_le_bytes(y.try_into().unwrap())),
     })
+}
+
+/// A chunk's tag: its ID, then the length of the data before it.
+const CHUNK_TAG_LEN: usize = 8;
+
+/// The chunks of a USB3 Vision chunk payload, as `(chunk ID, offset,
+/// length)` in payload order.
+///
+/// The layout is GigE Vision's — each chunk its data followed by an 8-byte
+/// tag, so the payload is read from its end — with the tag's ID and length
+/// little-endian, as aravis reads a USB3 Vision buffer's chunks
+/// (`arvuvstream.c` sets `chunk_endianness` to little-endian; corroboration
+/// only, the USB3 Vision standard is not available to us). With an image
+/// payload the image is the first chunk.
+///
+/// Remote input: a tag that claims more than precedes it, or a front too
+/// short for a tag, is an error.
+pub fn parse_chunks(payload: &[u8]) -> Result<Vec<(u32, usize, usize)>, U3vError> {
+    let mut chunks = Vec::new();
+    let mut end = payload.len();
+    while end > 0 {
+        let tag_offset = end.checked_sub(CHUNK_TAG_LEN).ok_or(U3vError::Malformed {
+            packet: "chunk layout",
+            problem: "ends in a tag shorter than eight bytes",
+        })?;
+        let tag = &payload[tag_offset..end];
+        let id = u32::from_le_bytes(tag[..4].try_into().unwrap());
+        let length = u32::from_le_bytes(tag[4..].try_into().unwrap()) as usize;
+        let start = tag_offset.checked_sub(length).ok_or(U3vError::Malformed {
+            packet: "chunk layout",
+            problem: "has a tag claiming more data than precedes it",
+        })?;
+        chunks.push((id, start, length));
+        end = start;
+    }
+    chunks.reverse();
+    Ok(chunks)
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +877,8 @@ pub fn parse_trailer(buf: &[u8]) -> Result<Trailer, U3vError> {
 mod tests {
     use super::*;
     use crate::usb::MockUsbTransfer;
+
+    const EP: u8 = 0x82;
 
     /// A camera with no frame to send — trigger mode, waiting for a trigger —
     /// times out on every read.
@@ -469,11 +897,15 @@ mod tests {
         StreamLayout::new(payload_size, 52, 32, 4, transfer).unwrap()
     }
 
+    fn stream(mock: &Arc<MockUsbTransfer>, layout: StreamLayout) -> U3vStream {
+        U3vStream::open(mock, EP, layout).unwrap()
+    }
+
     /// An idle stream is waiting, not broken, so a reader can poll it and
     /// stop between frames (Codex review of #179).
     #[test]
     fn an_idle_stream_is_waiting_not_broken() {
-        let mut stream = U3vStream::new(Arc::new(Idle), 0x82, layout(4096, 4096));
+        let mut stream = U3vStream::open(&Arc::new(Idle), EP, layout(4096, 4096)).unwrap();
         let idle = stream.next_frame_within(Duration::from_millis(10));
         assert!(matches!(idle, Ok(None)), "{idle:?}");
     }
@@ -498,6 +930,7 @@ mod tests {
         buf[8..16].copy_from_slice(&block_id.to_le_bytes());
         buf[16..18].copy_from_slice(&status.to_le_bytes());
         buf[20..28].copy_from_slice(&valid_payload_size.to_le_bytes());
+        buf[28..32].copy_from_slice(&7u32.to_le_bytes());
         buf
     }
 
@@ -525,6 +958,33 @@ mod tests {
     #[test]
     fn parse_trailer_too_short() {
         assert!(parse_trailer(&[0u8; 8]).is_err());
+    }
+
+    /// An image trailer of 32 bytes carries Size Y; a 28-byte one does not.
+    #[test]
+    fn a_trailer_carries_size_y_when_long_enough() {
+        let trailer = build_trailer(3, 0, 64);
+        assert_eq!(parse_trailer(&trailer).unwrap().size_y, Some(7));
+        assert_eq!(parse_trailer(&trailer[..28]).unwrap().size_y, None);
+    }
+
+    /// Chunk tags are little-endian, read from the end; the image chunk is
+    /// first.
+    #[test]
+    fn chunks_are_read_back_from_little_endian_tags() {
+        #[rustfmt::skip]
+        let payload = [
+            0xA0, 0xA1, 0xA2, 0xA3,
+            0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+            0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x0F, 0x00, 0x08, 0x05, 0x08, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            parse_chunks(&payload).unwrap(),
+            [(1, 0, 4), (0x0508_000F, 12, 8)]
+        );
+        assert!(parse_chunks(&payload[1..]).is_err());
+        assert!(parse_chunks(&payload[..5]).is_err());
     }
 
     #[test]
@@ -565,44 +1025,38 @@ mod tests {
     #[test]
     fn stream_next_frame() {
         let mock = Arc::new(MockUsbTransfer::new());
-        let ep_in = 0x82;
         let payload_size = 320 * 240;
 
-        mock.enqueue_read(ep_in, build_leader(7, 320, 240, 0x0108_0001));
-        mock.enqueue_read(ep_in, vec![0x80; payload_size]);
-        mock.enqueue_read(ep_in, build_trailer(7, 0, payload_size as u64));
+        mock.enqueue_read(EP, build_leader(7, 320, 240, 0x0108_0001));
+        mock.enqueue_read(EP, vec![0x80; payload_size]);
+        mock.enqueue_read(EP, build_trailer(7, 0, payload_size as u64));
 
-        let mut stream = U3vStream::new(
-            Arc::clone(&mock),
-            ep_in,
-            layout(payload_size as u64, 1 << 20),
-        );
+        let mut stream = stream(&mock, layout(payload_size as u64, 1 << 20));
         let frame = stream.next_frame().unwrap();
 
         assert_eq!(frame.leader.block_id, 7);
         assert_eq!((frame.leader.width, frame.leader.height), (320, 240));
         assert_eq!(frame.leader.timestamp, 7000);
         assert_eq!(frame.payload.len(), payload_size);
-        assert_eq!(frame.trailer.status, 0);
+        assert_eq!(frame.trailer.expect("a trailer").status, 0);
     }
 
     /// Each transfer is read at the size the layout gives it.
     #[test]
     fn the_payload_is_read_in_the_layouts_transfers() {
         let mock = Arc::new(MockUsbTransfer::new());
-        let ep_in = 0x82;
         let stream_layout = layout(1000, 256); // 3 × 256, final 232
         assert_eq!(stream_layout.payload_transfer_count, 3);
         assert_eq!(stream_layout.final_transfer1_size, 232);
 
-        mock.enqueue_read(ep_in, build_leader(1, 25, 40, 0x0108_0001));
+        mock.enqueue_read(EP, build_leader(1, 25, 40, 0x0108_0001));
         for fill in 0..3u8 {
-            mock.enqueue_read(ep_in, vec![fill; 256]);
+            mock.enqueue_read(EP, vec![fill; 256]);
         }
-        mock.enqueue_read(ep_in, vec![3; 232]);
-        mock.enqueue_read(ep_in, build_trailer(1, 0, 1000));
+        mock.enqueue_read(EP, vec![3; 232]);
+        mock.enqueue_read(EP, build_trailer(1, 0, 1000));
 
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, stream_layout);
+        let mut stream = stream(&mock, stream_layout);
         let frame = stream.next_frame().unwrap();
         assert_eq!(frame.payload.len(), 1000);
         assert!(frame.payload[..256].iter().all(|&b| b == 0));
@@ -613,45 +1067,156 @@ mod tests {
     #[test]
     fn a_short_payload_ends_at_the_trailer() {
         let mock = Arc::new(MockUsbTransfer::new());
-        let ep_in = 0x82;
-        mock.enqueue_read(ep_in, build_leader(2, 25, 40, 0x0108_0001));
-        mock.enqueue_read(ep_in, vec![9; 100]);
-        mock.enqueue_read(ep_in, build_trailer(2, 0xA100, 100));
+        mock.enqueue_read(EP, build_leader(2, 25, 40, 0x0108_0001));
+        mock.enqueue_read(EP, vec![9; 100]);
+        mock.enqueue_read(EP, build_trailer(2, 0xA100, 100));
 
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(1000, 256));
+        let mut stream = stream(&mock, layout(1000, 256));
         let frame = stream.next_frame().unwrap();
         assert_eq!(frame.payload.len(), 100);
-        assert_eq!(frame.trailer.status, 0xA100);
+        assert_eq!(frame.trailer.expect("a trailer").status, 0xA100);
     }
 
     #[test]
     fn a_stray_transfer_before_the_leader_is_skipped() {
         let mock = Arc::new(MockUsbTransfer::new());
-        let ep_in = 0x82;
-        mock.enqueue_read(ep_in, vec![0xEE; 64]);
-        mock.enqueue_read(ep_in, build_leader(3, 8, 8, 0x0108_0001));
-        mock.enqueue_read(ep_in, vec![1; 64]);
-        mock.enqueue_read(ep_in, build_trailer(3, 0, 64));
+        mock.enqueue_read(EP, vec![0xEE; 64]);
+        mock.enqueue_read(EP, build_leader(3, 8, 8, 0x0108_0001));
+        mock.enqueue_read(EP, vec![1; 64]);
+        mock.enqueue_read(EP, build_trailer(3, 0, 64));
 
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(64, 256));
+        let mut stream = stream(&mock, layout(64, 256));
         assert_eq!(stream.next_frame().unwrap().leader.block_id, 3);
+        assert_eq!(stream.counters().transfers_skipped, 1);
     }
 
+    /// A trailer for another block closes nothing: the block comes back
+    /// without one, and the stream goes on.
     #[test]
-    fn a_trailer_for_another_block_is_an_error() {
+    fn a_trailer_for_another_block_gives_the_block_up() {
         let mock = Arc::new(MockUsbTransfer::new());
-        let ep_in = 0x82;
-        mock.enqueue_read(ep_in, build_leader(4, 8, 8, 0x0108_0001));
-        mock.enqueue_read(ep_in, vec![1; 64]);
-        mock.enqueue_read(ep_in, build_trailer(5, 0, 64));
+        mock.enqueue_read(EP, build_leader(4, 8, 8, 0x0108_0001));
+        mock.enqueue_read(EP, vec![1; 64]);
+        mock.enqueue_read(EP, build_trailer(5, 0, 64));
+        mock.enqueue_read(EP, build_leader(6, 8, 8, 0x0108_0001));
+        mock.enqueue_read(EP, vec![2; 64]);
+        mock.enqueue_read(EP, build_trailer(6, 0, 64));
 
-        let mut stream = U3vStream::new(Arc::clone(&mock), ep_in, layout(64, 256));
-        assert!(matches!(
-            stream.next_frame(),
-            Err(U3vError::Malformed {
-                packet: "trailer",
-                ..
-            })
-        ));
+        let mut stream = stream(&mock, layout(64, 256));
+        let given_up = stream.next_frame().unwrap();
+        assert_eq!(given_up.leader.block_id, 4);
+        assert!(given_up.trailer.is_none());
+        let next = stream.next_frame().unwrap();
+        assert_eq!(next.leader.block_id, 6);
+        assert!(next.trailer.is_some());
+    }
+
+    /// UV-02: a stall costs the block in progress and resets the endpoint;
+    /// the stream goes on with the next leader. A disconnect ends it.
+    #[test]
+    fn a_stall_costs_a_block_and_a_disconnect_ends_the_stream() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        mock.enqueue_read(EP, build_leader(1, 8, 8, 0x0108_0001));
+        mock.enqueue_error(EP, U3vError::Stalled { endpoint: EP });
+        mock.enqueue_read(EP, build_leader(2, 8, 8, 0x0108_0001));
+        mock.enqueue_read(EP, vec![2; 64]);
+        mock.enqueue_read(EP, build_trailer(2, 0, 64));
+        mock.enqueue_error(EP, U3vError::Disconnected);
+
+        let mut stream = stream(&mock, layout(64, 256));
+        let lost = stream.next_frame().unwrap();
+        assert_eq!(lost.leader.block_id, 1);
+        assert!(lost.trailer.is_none());
+        let next = stream.next_frame().unwrap();
+        assert_eq!(next.leader.block_id, 2);
+        assert_eq!(next.payload.len(), 64);
+        let counters = stream.counters();
+        assert_eq!(
+            (counters.transfer_errors, counters.blocks_abandoned),
+            (1, 1)
+        );
+        assert!(matches!(stream.next_frame(), Err(U3vError::Disconnected)));
+    }
+
+    /// A transfer the host's stack ended — not the stream — is a failure to
+    /// recover from, not a transfer that never happened: on macOS an unplug
+    /// or a device reset ends transfers so, and retrying them at once would
+    /// spin.
+    #[test]
+    fn a_transfer_the_host_aborted_is_recovered_from() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        mock.enqueue_read(EP, build_leader(1, 8, 8, 0x0108_0001));
+        mock.enqueue_error(EP, U3vError::Cancelled);
+        mock.enqueue_read(EP, build_leader(2, 8, 8, 0x0108_0001));
+        mock.enqueue_read(EP, vec![2; 64]);
+        mock.enqueue_read(EP, build_trailer(2, 0, 64));
+
+        let mut stream = stream(&mock, layout(64, 256));
+        assert!(stream.next_frame().unwrap().trailer.is_none());
+        assert_eq!(stream.next_frame().unwrap().leader.block_id, 2);
+        assert_eq!(stream.counters().transfer_errors, 1);
+    }
+
+    /// What macOS reported when an mvBlueFOX3-2004G's cable was pulled
+    /// mid-stream: `kIOReturnNotResponding`, which `nusb` passes on as an
+    /// unknown error, not as a disconnect.
+    fn not_responding() -> U3vError {
+        U3vError::usb("unknown (error 0xe00002ed)")
+    }
+
+    /// UV-03 on macOS: a transfer fails with an error that does not say the
+    /// device is gone, and the operating system no longer lists the device:
+    /// the stream ends with a disconnect, not that error.
+    #[test]
+    fn an_unknown_failure_on_a_device_no_longer_listed_is_a_disconnect() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        mock.enqueue_read(EP, build_leader(1, 8, 8, 0x0108_0001));
+        mock.enqueue_error(EP, not_responding());
+        mock.set_present(Some(false));
+
+        let mut stream = stream(&mock, layout(64, 256));
+        let result = stream.next_frame();
+        assert!(matches!(result, Err(U3vError::Disconnected)), "{result:?}");
+    }
+
+    /// The same error on a device still listed is a failure like any
+    /// other: it costs the block, and the stream goes on.
+    #[test]
+    fn an_unknown_failure_on_a_device_still_listed_is_recovered_from() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        mock.enqueue_read(EP, build_leader(1, 8, 8, 0x0108_0001));
+        mock.enqueue_error(EP, not_responding());
+        mock.enqueue_read(EP, build_leader(2, 8, 8, 0x0108_0001));
+        mock.enqueue_read(EP, vec![2; 64]);
+        mock.enqueue_read(EP, build_trailer(2, 0, 64));
+        mock.set_present(Some(true));
+
+        let mut stream = stream(&mock, layout(64, 256));
+        assert!(stream.next_frame().unwrap().trailer.is_none());
+        let next = stream.next_frame().unwrap();
+        assert_eq!(next.leader.block_id, 2);
+        assert!(next.trailer.is_some());
+        assert_eq!(stream.counters().transfer_errors, 1);
+    }
+
+    /// An endpoint that fails after every reset ends the stream.
+    #[test]
+    fn transfers_that_keep_failing_end_the_stream() {
+        let mock = Arc::new(MockUsbTransfer::new());
+        for _ in 0..=MAX_CONSECUTIVE_FAILURES {
+            mock.enqueue_error(EP, U3vError::Stalled { endpoint: EP });
+        }
+        let mut stream = stream(&mock, layout(64, 256));
+        let mut result = stream.next_frame_within(Duration::from_millis(1));
+        for _ in 0..MAX_CONSECUTIVE_FAILURES {
+            if result.is_err() {
+                break;
+            }
+            result = stream.next_frame_within(Duration::from_millis(1));
+        }
+        assert!(
+            matches!(result, Err(U3vError::Stalled { endpoint: EP })),
+            "{result:?}"
+        );
     }
 }

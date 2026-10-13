@@ -27,6 +27,11 @@
 //!   and Wireshark (`packet-u3v.c`) agree on those and add the SIRM and EIRM
 //!   addresses.
 //! - **SIRM**: aravis and Wireshark, which agree with each other.
+//! - **EIRM**: Wireshark (`packet-u3v.c` names its three registers); aravis
+//!   reads only its address.
+//! - **Current speed** (SBRM +0x40): the Grasshopper3's XML maps it, and its
+//!   formula reads the bits (8 SuperSpeed, 4 HighSpeed, 2 FullSpeed);
+//!   Wireshark names the register.
 //!
 //! Until backlog TC-27 this module read every register big-endian at offsets
 //! of its own; no USB3 Vision camera had been reported against it.
@@ -72,6 +77,16 @@ pub mod abrm {
     pub const HEARTBEAT_TIMEOUT: u64 = 0x01E8;
     /// `u32`: the id of the device's message channel (GenCP 1.2 Table 15).
     pub const MESSAGE_CHANNEL_ID: u64 = 0x01EC;
+    /// `u64`, read-only: the device time, in ns, as last latched; present
+    /// when [`capability::TIMESTAMP`](super::capability::TIMESTAMP) is set
+    /// (GenCP 1.3.1 §5.4.16).
+    pub const TIMESTAMP: u64 = 0x01F0;
+    /// `u32`, write-only: writing bit 0 latches the device time into
+    /// [`TIMESTAMP`] (GenCP 1.3.1 §5.4.17).
+    pub const TIMESTAMP_LATCH: u64 = 0x01F8;
+    /// `u64`, read-only: nanoseconds per tick of the device clock (GenCP
+    /// 1.3.1 §5.4.18).
+    pub const TIMESTAMP_INCREMENT: u64 = 0x01FC;
     /// `u32`.
     pub const ACCESS_PRIVILEGE: u64 = 0x0204;
     /// `u32`: 0 big-endian, `0xFFFF_FFFF` little-endian, for the device's own
@@ -266,6 +281,60 @@ pub mod u3vcp_capability {
     pub const IIDC2_AVAILABLE: u64 = 1 << 2;
 }
 
+/// The bus speed a device runs at: the SBRM's current speed register, as
+/// the Grasshopper3's XML decodes it, or the speed the host reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum UsbSpeed {
+    /// USB 1 low speed, 1.5 Mbit/s.
+    Low,
+    /// USB 1 full speed, 12 Mbit/s.
+    Full,
+    /// USB 2 high speed, 480 Mbit/s.
+    High,
+    /// USB 3 SuperSpeed, 5 Gbit/s.
+    Super,
+    /// USB 3 SuperSpeed+, 10 Gbit/s or more.
+    SuperPlus,
+}
+
+impl UsbSpeed {
+    /// The speed the SBRM's current speed register reports: one bit set,
+    /// bit 3 SuperSpeed, bit 2 high, bit 1 full, bit 0 low — the bits the
+    /// Grasshopper3's XML tests (`CurrentSpeed_Int`). Bit 4 is read as
+    /// SuperSpeed+, by analogy; no document in the corpus shows it. `None`
+    /// for 0, a device that does not say.
+    pub fn from_register(bits: u32) -> Option<Self> {
+        match bits {
+            0 => None,
+            b if b & (1 << 4) != 0 => Some(Self::SuperPlus),
+            b if b & (1 << 3) != 0 => Some(Self::Super),
+            b if b & (1 << 2) != 0 => Some(Self::High),
+            b if b & (1 << 1) != 0 => Some(Self::Full),
+            _ => Some(Self::Low),
+        }
+    }
+
+    /// Whether this is a USB 2 speed or slower: a USB3 Vision camera on such
+    /// a link runs at a fraction of its bandwidth, if at all — a USB 2 port
+    /// or cable, or a hub between.
+    pub fn is_below_superspeed(self) -> bool {
+        self < Self::Super
+    }
+}
+
+impl std::fmt::Display for UsbSpeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Low => "low speed (1.5 Mbit/s)",
+            Self::Full => "full speed (12 Mbit/s)",
+            Self::High => "high speed (480 Mbit/s, USB 2)",
+            Self::Super => "SuperSpeed (5 Gbit/s)",
+            Self::SuperPlus => "SuperSpeed+ (10 Gbit/s)",
+        })
+    }
+}
+
 /// USB3 Vision's technology-specific Bootstrap Register Map.
 #[derive(Debug, Clone)]
 pub struct Sbrm {
@@ -289,6 +358,9 @@ pub struct Sbrm {
     pub eirm_address: u64,
     /// Length of the EIRM in bytes.
     pub eirm_length: u32,
+    /// The bus speed the device says it runs at; `None` when it does not
+    /// say, or refuses the register.
+    pub current_speed: Option<UsbSpeed>,
 }
 
 impl Sbrm {
@@ -319,6 +391,7 @@ impl Sbrm {
             sirm_length: optional_u32(control, sbrm::SIRM_LENGTH)?,
             eirm_address: optional_u64(control, sbrm::EIRM_ADDRESS)?,
             eirm_length: optional_u32(control, sbrm::EIRM_LENGTH)?,
+            current_speed: UsbSpeed::from_register(optional_u32(control, sbrm::CURRENT_SPEED)?),
         })
     }
 }
@@ -448,6 +521,60 @@ impl Sirm {
     /// Clear StreamEnable.
     pub fn disable<T: UsbTransfer>(&self, control: &mut ControlChannel<T>) -> Result<(), U3vError> {
         control.write_mem(self.base + sirm::CONTROL, &0u32.to_le_bytes())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EIRM — Event Interface Register Map
+// ---------------------------------------------------------------------------
+
+/// EIRM register offsets from the EIRM base address, as Wireshark names them
+/// (`packet-u3v.c`: `EI_Control`, `Maximum_Event_Transfer_Length`,
+/// `Event_Test_Control`); the USB3 Vision standard is not freely available.
+pub mod eirm {
+    /// `u32`: bit 0 is EventEnable.
+    pub const CONTROL: u64 = 0x0000;
+    /// `u32`, read-only: the longest event transfer the device sends.
+    pub const MAXIMUM_EVENT_TRANSFER_LENGTH: u64 = 0x0004;
+    /// `u32`: event test control.
+    pub const EVENT_TEST_CONTROL: u64 = 0x0008;
+    /// Control's EventEnable bit.
+    pub const EVENT_ENABLE: u32 = 1 << 0;
+}
+
+/// What the device says about its event interface.
+#[derive(Debug, Clone)]
+pub struct Eirm {
+    /// Where the EIRM is.
+    pub base: u64,
+    /// The longest event transfer the device sends, in bytes.
+    pub maximum_event_transfer_length: u32,
+}
+
+impl Eirm {
+    /// Read the EIRM at the given base address (from SBRM).
+    pub fn read_from<T: UsbTransfer>(
+        control: &mut ControlChannel<T>,
+        base: u64,
+    ) -> Result<Self, U3vError> {
+        Ok(Self {
+            base,
+            maximum_event_transfer_length: read_u32(
+                control,
+                base + eirm::MAXIMUM_EVENT_TRANSFER_LENGTH,
+            )?,
+        })
+    }
+
+    /// Set or clear EventEnable: whether the device sends events on its
+    /// event endpoint.
+    pub fn set_enabled<T: UsbTransfer>(
+        &self,
+        control: &mut ControlChannel<T>,
+        enabled: bool,
+    ) -> Result<(), U3vError> {
+        let value = if enabled { eirm::EVENT_ENABLE } else { 0 };
+        control.write_mem(self.base + eirm::CONTROL, &value.to_le_bytes())
     }
 }
 

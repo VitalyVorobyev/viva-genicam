@@ -55,14 +55,9 @@ exceptions = [
     { crate = "option-ext", allow = ["MPL-2.0"] },
 ]
 
-# NOTE on libusb1-sys (via rusb, `usb` feature): its Cargo.toml declares MIT,
-# which covers only the Rust FFI shim. The crate also vendors the libusb C
-# library (LGPL-2.1-or-later), which is compiled in ONLY when the `vendored`
-# feature is enabled. This workspace does not enable it (system libusb is
-# linked dynamically -- LGPL's shared-library route). The Python wheel build
-# in crates/viva-pygenicam DOES enable it and must ship LGPL notices with the
-# wheel. cargo-deny cannot see any of this because it only reads the declared
-# license field.
+# USB3 Vision's `usb` feature uses nusb, pure Rust (MIT OR Apache-2.0); no C
+# library is vendored or linked (ADR-0032, which supersedes ADR-0015's libusb
+# notices).
 
 [bans]
 multiple-versions = "allow"

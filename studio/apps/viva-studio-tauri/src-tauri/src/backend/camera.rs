@@ -11,7 +11,7 @@ use viva_genicam::genapi::RegisterIo;
 use viva_genicam::u3v::UsbTransfer;
 use viva_genicam::{
     COMMAND_TIMEOUT, Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
-    U3vFrameStream, U3vRegisterIo, U3vStreamBuilder,
+    U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -179,8 +179,7 @@ impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
 
     fn start(&mut self, _options: &StartOptions) -> Result<Frames, String> {
         // USB3 Vision has no packet size to set: it streams in bulk transfers.
-        let frames = U3vStreamBuilder::new(self)
-            .build()
+        let frames = Camera::<U3vRegisterIo<T>>::open_stream(self, U3vStreamOptions::default())
             .map_err(|e| format!("Failed to open the USB stream: {e}"))?;
         self.acquisition_start()
             .map_err(|e| format!("Failed to start acquisition: {e}"))?;
@@ -224,13 +223,13 @@ impl Frames {
         }
     }
 
-    /// Frames lost since the stream started: GVSP's closed incomplete, never
-    /// seen (block-id gaps) or discarded under backpressure; USB3 Vision's
-    /// dropped because their trailer reported an error.
+    /// Frames lost since the stream started: closed incomplete, never seen
+    /// (block-id gaps) or discarded under backpressure — one count for both
+    /// transports.
     pub(crate) fn dropped(&self) -> u64 {
         match self {
             Frames::Gige(stream) => stream.stats().frames_lost(),
-            Frames::U3v(stream) => stream.dropped(),
+            Frames::U3v(stream) => stream.stats().frames_lost(),
         }
     }
 }

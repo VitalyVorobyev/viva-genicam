@@ -2,16 +2,19 @@
 
 use viva_genicam::report::{OpenCamera, ReportTarget};
 use viva_genicam::{
-    Camera, GenicamError, StreamBlock, U3vFrameStream, U3vRegisterIo, U3vStreamBuilder,
+    Camera, GenicamError, StreamBlock, U3vConnection, U3vFrameStream, U3vRegisterIo,
+    U3vStreamOptions,
 };
 use viva_service::{BlockStream, DeviceOps, SharedCamera, StreamSource};
 use viva_u3v::UsbTransfer;
 use viva_zenoh_api::DeviceAnnounce;
 
 /// A USB3 Vision camera, generic over the USB transport so the same service
-/// code runs against `FakeU3vTransport` and `RusbTransfer`.
+/// code runs against `FakeU3vTransport` and `NusbTransfer`.
 pub(crate) struct U3vDeviceHandle<T: UsbTransfer + 'static> {
     camera: SharedCamera<U3vRegisterIo<T>>,
+    /// Whether the camera is gone, readable without its lock.
+    connection: U3vConnection,
     raw_xml: String,
     announce: DeviceAnnounce,
 }
@@ -24,6 +27,7 @@ impl<T: UsbTransfer + Send + 'static> U3vDeviceHandle<T> {
         announce: DeviceAnnounce,
     ) -> Self {
         Self {
+            connection: camera.transport().connection(),
             camera: SharedCamera::new(camera),
             raw_xml: xml,
             announce,
@@ -31,7 +35,7 @@ impl<T: UsbTransfer + Send + 'static> U3vDeviceHandle<T> {
     }
 
     /// The camera's bootstrap registers, decoded and raw, for the report:
-    /// nothing about USB3 Vision has met a camera yet (backlog TC-27).
+    /// USB3 Vision has met one camera so far (backlog TC-27).
     pub(crate) async fn bootstrap(&self) -> Vec<(String, String)> {
         self.camera
             .with(|camera| {
@@ -58,6 +62,13 @@ impl<T: UsbTransfer + Send + 'static> DeviceOps for U3vDeviceHandle<T> {
     fn camera(&self) -> &SharedCamera<U3vRegisterIo<T>> {
         &self.camera
     }
+
+    /// A register access or a stream on the camera found it disconnected:
+    /// it is let go of even if a rescan finds a camera with its id — the
+    /// same camera plugged in again, which must be opened afresh (UV-03).
+    fn is_lost(&self) -> bool {
+        self.connection.is_lost()
+    }
 }
 
 #[async_trait::async_trait]
@@ -72,7 +83,7 @@ impl<T: UsbTransfer + Send + 'static> StreamSource for U3vDeviceHandle<T> {
     ) -> Result<Box<dyn BlockStream>, GenicamError> {
         let frames = self
             .camera
-            .with(|camera| U3vStreamBuilder::new(camera).build())
+            .with(|camera| camera.open_stream(U3vStreamOptions::default()))
             .await?;
         Ok(Box::new(U3vBlocks(frames)))
     }
@@ -121,6 +132,10 @@ impl BlockStream for U3vBlocks {
         Ok(self.0.next_frame().await?.map(StreamBlock::Image))
     }
 
+    fn frames_lost(&self) -> u64 {
+        self.0.stats().frames_lost()
+    }
+
     async fn close(self: Box<Self>) {
         // The reader thread lets go of the endpoint before this returns.
         let U3vBlocks(frames) = *self;
@@ -149,7 +164,8 @@ mod tests {
     }
 
     /// The report describes the camera's bootstrap registers, decoded and as
-    /// the raw bytes a USB3 Vision reporter's report would settle TC-27 with.
+    /// the raw bytes a USB3 Vision reporter's report would settle a
+    /// disagreement with (TC-27).
     #[tokio::test(flavor = "multi_thread")]
     async fn the_report_carries_the_bootstrap_registers() {
         let (handle, _transport) = open_fake();

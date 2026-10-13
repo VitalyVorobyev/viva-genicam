@@ -261,6 +261,14 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Send only the first `lines` lines of every image, with `lines` in the
+    /// trailer's Size Y, as a variable-height line-scan camera ends a frame
+    /// early; the leader keeps `Height`. Ignored in chunk mode.
+    pub fn delivered_lines(mut self, lines: u32) -> Self {
+        self.sender.delivered_lines = Some(lines);
+        self
+    }
+
     /// Damage the stream deterministically: drop, repeat or reorder packets
     /// by block and packet id. Block ids count from 1 at each acquisition
     /// start.

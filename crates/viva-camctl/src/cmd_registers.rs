@@ -154,7 +154,7 @@ async fn open_gige(target: &Target, iface: Option<&IfaceSelector>) -> Result<Gig
     common::open_control(&device).await
 }
 
-fn open_usb(index: usize) -> Result<U3vDevice<viva_u3v::RusbTransfer>> {
+fn open_usb(index: usize) -> Result<U3vDevice<viva_u3v::NusbTransfer>> {
     let info = viva_u3v::discover()
         .map_err(|err| anyhow!("USB discovery failed: {err}"))?
         .into_iter()

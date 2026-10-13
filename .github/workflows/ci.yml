@@ -167,8 +167,7 @@ jobs:
   # resolution. `-D warnings` because clippy sees only the unified build, so an
   # import used under one feature alone would otherwise go unnoticed.
   #
-  # No system libusb is installed: without one, libusb1-sys builds its bundled
-  # source (netlink hotplug on Linux), as it already does for the matrix above.
+  # USB is nusb, pure Rust: no system USB library is needed.
   features:
     name: feature matrix
     runs-on: ubuntu-latest

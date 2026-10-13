@@ -93,9 +93,7 @@ pub(crate) async fn run_set_queryable<D: DeviceOps>(
                     Err(_) => break,
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() { break; }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }
@@ -147,9 +145,7 @@ pub(crate) async fn run_execute_queryable<D: DeviceOps>(
                     Err(_) => break,
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() { break; }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }
@@ -208,9 +204,7 @@ pub(crate) async fn run_introspect_queryable<D: DeviceOps>(
                     Err(_) => break,
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() { break; }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }
@@ -273,9 +267,7 @@ pub(crate) async fn run_bulk_state_queryable<D: DeviceOps>(
                     Err(_) => break,
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() { break; }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }
@@ -343,9 +335,7 @@ pub(crate) async fn run_bulk_read_queryable<D: DeviceOps>(
                     Err(_) => break,
                 }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() { break; }
-            }
+            _ = crate::serve::stopped(&mut shutdown) => break,
         }
     }
 }

@@ -20,12 +20,23 @@ mod fuzzing;
 mod receiver;
 mod resend;
 mod stats;
+#[cfg(feature = "u3v")]
+mod u3v;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use fuzzing::fuzz_assemble;
 
 pub use stats::{StreamStats, StreamStatsAccumulator};
+#[cfg(feature = "u3v")]
+pub use u3v::{U3vFrameStream, U3vStreamBuilder};
+
+/// The queue a USB3 Vision event reader hands events through.
+#[cfg(feature = "u3v")]
+pub(crate) type EventQueue = receiver::DeliveryQueue<crate::events::Event, viva_u3v::U3vError>;
+/// What a pop from an [`EventQueue`] found.
+#[cfg(feature = "u3v")]
+pub(crate) type EventPopped = receiver::Popped<crate::events::Event, viva_u3v::U3vError>;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -208,7 +219,7 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
             ts_dev,
             leader_size_x: width,
             leader_size_y: height,
-            trailer_size_y: block.trailer_size_y,
+            trailer_size_y: block.trailer_size_y.unwrap_or(0),
             chunks,
             ts_host: None,
             block_id: block.block_id,
@@ -223,6 +234,11 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
             frame.block_id = block.block_id;
             frame.payload_type = block.payload_type;
             frame.status = block.status;
+            // A chunk-data trailer's Size Y is the payload length, not lines.
+            frame.delivered_height = block
+                .trailer_size_y
+                .filter(|_| viva_gige::is_image_payload(block.payload_type));
+            frame.expected_size = block.expected_size;
             StreamBlock::Image(frame)
         }
     };
@@ -1701,341 +1717,6 @@ impl Drop for FrameStream {
     }
 }
 
-// ============================================================================
-// USB3 Vision Frame Stream
-// ============================================================================
-
-/// Async frame iterator wrapping blocking USB3 Vision bulk reads.
-///
-/// Internally spawns a blocking reader thread that reads blocks from a
-/// [`U3vStream`] in a loop and sends converted [`Frame`] values through an
-/// mpsc channel. The async consumer reads from the channel via
-/// [`next_frame()`](U3vFrameStream::next_frame).
-///
-/// A stream from [`U3vStreamBuilder`] also clears the device's StreamEnable
-/// when it ends: [`shutdown`](Self::shutdown) once the reader has stopped, or
-/// a drop.
-///
-/// [`U3vStream`]: crate::u3v::U3vStream
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let mut frames = U3vStreamBuilder::new(&mut camera).build()?;
-/// camera.acquisition_start()?;
-/// while let Some(frame) = frames.next_frame().await? {
-///     println!("{}x{} frame", frame.width, frame.height);
-/// }
-/// frames.shutdown().await;
-/// ```
-#[cfg(feature = "u3v")]
-#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
-pub struct U3vFrameStream {
-    rx: tokio::sync::mpsc::Receiver<Result<Frame, GenicamError>>,
-    stop_tx: tokio::sync::watch::Sender<bool>,
-    reader: Option<tokio::task::JoinHandle<()>>,
-    /// Clears StreamEnable; see [`DisableStream`].
-    disable: Option<DisableStream>,
-    /// Blocks dropped because their trailer reported an error.
-    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
-}
-
-/// Clears a device's StreamEnable. Called with `true` it waits for the
-/// device lock; with `false` it gives up if someone holds the lock, and
-/// returns whether it ran.
-#[cfg(feature = "u3v")]
-type DisableStream = std::sync::Arc<dyn Fn(bool) -> bool + Send + Sync>;
-
-/// Whether a USB3 Vision trailer status is an error: the severity bit (15)
-/// of a GenCP-style status code (GenCP 1.2 §4.3.2.1). A warning or info
-/// status leaves the block valid.
-#[cfg(feature = "u3v")]
-fn trailer_reports_an_error(status: u16) -> bool {
-    status & 0x8000 != 0
-}
-
-/// How long the U3V reader waits for a frame to start before checking whether
-/// it was told to stop.
-#[cfg(feature = "u3v")]
-const U3V_READ_POLL: Duration = Duration::from_millis(250);
-
-#[cfg(feature = "u3v")]
-impl U3vFrameStream {
-    /// Start the frame stream from a configured [`U3vStream`].
-    ///
-    /// The reader thread runs until [`stop()`](Self::stop) is called,
-    /// the [`U3vStream`] errors, or the `U3vFrameStream` is dropped. Nothing
-    /// clears the device's StreamEnable; [`U3vStreamBuilder`] starts streams
-    /// that do.
-    ///
-    /// [`U3vStream`]: crate::u3v::U3vStream
-    pub fn start<T: crate::u3v::UsbTransfer + 'static>(stream: crate::u3v::U3vStream<T>) -> Self {
-        Self::start_inner(stream, None)
-    }
-
-    fn start_inner<T: crate::u3v::UsbTransfer + 'static>(
-        mut stream: crate::u3v::U3vStream<T>,
-        disable: Option<DisableStream>,
-    ) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let reader_dropped = std::sync::Arc::clone(&dropped);
-
-        let reader = tokio::task::spawn_blocking(move || {
-            loop {
-                // Told to stop, or dropped without being told: nobody is
-                // listening, and an idle reader would otherwise poll forever.
-                if *stop_rx.borrow() || tx.is_closed() {
-                    break;
-                }
-                // No frame within the poll is a stream waiting, as in trigger
-                // mode, not a failure; it is also when the reader can stop.
-                match stream.next_frame_within(U3V_READ_POLL) {
-                    Ok(None) => continue,
-                    // A block the device marks failed is not an image to
-                    // hand on, short or not (Codex review of #184).
-                    Ok(Some(raw)) if trailer_reports_an_error(raw.trailer.status) => {
-                        reader_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::debug!(
-                            block_id = raw.trailer.block_id,
-                            status = format_args!("{:#06x}", raw.trailer.status),
-                            "dropping a block the device marked failed"
-                        );
-                    }
-                    Ok(Some(raw)) => {
-                        let pixel_format = PixelFormat::from_code(raw.leader.pixel_format);
-                        let mut frame = Frame::new(
-                            raw.payload,
-                            raw.leader.width,
-                            raw.leader.height,
-                            pixel_format,
-                        );
-                        frame.ts_dev = Some(raw.leader.timestamp);
-                        frame.padding_x = raw.leader.x_padding;
-                        frame.block_id = raw.leader.block_id;
-                        frame.payload_type = raw.leader.payload_type;
-                        if tx.blocking_send(Ok(frame)).is_err() {
-                            break; // Receiver dropped.
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.blocking_send(Err(GenicamError::U3v {
-                            during: "read a frame",
-                            source: e,
-                        }));
-                        break;
-                    }
-                }
-            }
-        });
-
-        Self {
-            rx,
-            stop_tx,
-            reader: Some(reader),
-            disable,
-            dropped,
-        }
-    }
-
-    /// Blocks dropped since the stream started because their trailer
-    /// reported an error.
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Receive the next complete frame.
-    ///
-    /// Returns `Ok(None)` when the stream ends (reader stopped or errored).
-    pub async fn next_frame(&mut self) -> Result<Option<Frame>, GenicamError> {
-        match self.rx.recv().await {
-            Some(Ok(frame)) => Ok(Some(frame)),
-            Some(Err(e)) => Err(e),
-            None => Ok(None),
-        }
-    }
-
-    /// Signal the reader thread to stop. It stops within one read poll, but
-    /// this does not wait for it; [`shutdown`](Self::shutdown) does.
-    pub fn stop(&self) {
-        let _ = self.stop_tx.send(true);
-    }
-
-    /// Stop the reader thread, wait for it to finish, then clear the device's
-    /// StreamEnable: the endpoint and device are free once this returns, for
-    /// another stream or for closing the camera (Codex reviews of #179 and
-    /// #181).
-    pub async fn shutdown(mut self) {
-        // A reader blocked handing over a frame nobody takes wakes up here.
-        self.rx.close();
-        let _ = self.stop_tx.send(true);
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.await;
-        }
-        if let Some(disable) = self.disable.take() {
-            let _ = tokio::task::spawn_blocking(move || disable(true)).await;
-        }
-    }
-}
-
-#[cfg(feature = "u3v")]
-impl Drop for U3vFrameStream {
-    /// A stream dropped without [`shutdown`](Self::shutdown) still stops the
-    /// device's stream. If the device is busy, a thread of its own waits for
-    /// it: the dropping thread must not block on a lock it may hold, and
-    /// giving up left StreamEnable set (Codex review of #184).
-    fn drop(&mut self) {
-        let _ = self.stop_tx.send(true);
-        if let Some(disable) = self.disable.take()
-            && !disable(false)
-        {
-            std::thread::spawn(move || {
-                disable(true);
-            });
-        }
-    }
-}
-
-// ============================================================================
-// USB3 Vision Stream Builder
-// ============================================================================
-
-/// Builder for configuring and starting a U3V frame stream.
-///
-/// Mirrors the GigE [`StreamBuilder`] pattern but for USB3 Vision.
-/// Reads image dimensions from the camera features (or accepts explicit
-/// overrides) and opens the underlying USB bulk stream.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let mut camera = open_u3v_device(device)?;
-/// let frames = U3vStreamBuilder::new(&mut camera)
-///     .build()?;
-/// ```
-/// The bytes a `width × height` frame in the `pixel_format` named occupies,
-/// for a camera without `PayloadSize`.
-#[cfg(feature = "u3v")]
-fn computed_frame_size(pixel_format: &str, width: u32, height: u32) -> Result<u64, GenicamError> {
-    PixelFormat::from_name(pixel_format)
-        .image_bytes(width, height)
-        .map(|bytes| bytes as u64)
-        .ok_or_else(|| GenicamError::UnsizedFrame {
-            pixel_format: pixel_format.to_string(),
-        })
-}
-
-/// Whether reading `PayloadSize` failed because the camera has no such
-/// feature, the one failure a computed size may stand in for.
-#[cfg(feature = "u3v")]
-fn payload_size_is_absent(error: &GenicamError) -> bool {
-    matches!(
-        error,
-        GenicamError::GenApi(viva_genapi::GenApiError::NodeNotFound(_))
-    )
-}
-
-/// Builder for a USB3 Vision [`U3vFrameStream`]: the payload size, or the
-/// camera's own; [`U3vStreamBuilder::build`] configures the SIRM and enables
-/// streaming.
-#[cfg(feature = "u3v")]
-#[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
-pub struct U3vStreamBuilder<'a, T: crate::u3v::UsbTransfer + 'static> {
-    camera: &'a mut crate::Camera<crate::U3vRegisterIo<T>>,
-    payload_size: Option<u64>,
-}
-
-#[cfg(feature = "u3v")]
-impl<'a, T: crate::u3v::UsbTransfer + 'static> U3vStreamBuilder<'a, T> {
-    /// Create a new builder bound to a camera.
-    pub fn new(camera: &'a mut crate::Camera<crate::U3vRegisterIo<T>>) -> Self {
-        Self {
-            camera,
-            payload_size: None,
-        }
-    }
-
-    /// Override the payload size (bytes per frame).
-    ///
-    /// When not set, the builder reads the camera's `PayloadSize`, or
-    /// computes it from Width, Height and PixelFormat.
-    pub fn payload_size(mut self, size: u64) -> Self {
-        self.payload_size = Some(size);
-        self
-    }
-
-    /// Bytes in one frame. The camera's `PayloadSize` is the authority: it
-    /// knows its own packing and padding. Without it, the format's
-    /// `image_bytes` for width × height, exact for a packed format such as
-    /// `Mono12Packed`; guessing one byte a pixel made the reader take the rest
-    /// of the image for the trailer and fail (Codex review of #179).
-    fn frame_size(&self) -> Result<u64, GenicamError> {
-        match self.camera.get("PayloadSize") {
-            Ok(text) => {
-                if let Some(size) = text.parse::<u64>().ok().filter(|&size| size > 0) {
-                    return Ok(size);
-                }
-            }
-            // Only a camera without the feature falls back. One that has it
-            // but cannot answer — I/O, access, availability — must not get a
-            // computed size that misses its padding or chunk data (Codex
-            // review of #180).
-            Err(error) if payload_size_is_absent(&error) => {}
-            Err(error) => return Err(error),
-        }
-        let dimension = |name: &str| -> Result<u32, GenicamError> {
-            let value = self.camera.get_integer(name)?;
-            u32::try_from(value).map_err(|_| {
-                viva_genapi::GenApiError::Range {
-                    name: name.to_string(),
-                    value: viva_genapi::swissknife::Value::Int(value),
-                    violation: viva_genapi::RangeViolation::Unrepresentable,
-                }
-                .into()
-            })
-        };
-        let pixel_format = self.camera.get("PixelFormat")?;
-        computed_frame_size(&pixel_format, dimension("Width")?, dimension("Height")?)
-    }
-
-    /// Finalise the builder: configure the SIRM, set StreamEnable, and return
-    /// an async [`U3vFrameStream`] that clears it again when it ends.
-    ///
-    /// The device's SIRM Required Payload Size sizes the frames; the
-    /// builder's payload size — set, or read from the camera — is used only
-    /// when the device leaves that register at 0.
-    pub fn build(self) -> Result<U3vFrameStream, GenicamError> {
-        let payload_hint = match self.payload_size {
-            Some(s) => s,
-            None => self.frame_size()?,
-        };
-
-        let device = self.camera.transport().shared_device();
-        let stream = device
-            .lock()
-            .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))?
-            .open_stream(payload_hint)
-            .map_err(crate::error::u3v("open the stream"))?;
-
-        let disable: DisableStream = std::sync::Arc::new(move |wait: bool| {
-            let guard = if wait {
-                device.lock().ok()
-            } else {
-                device.try_lock().ok()
-            };
-            let Some(mut device) = guard else {
-                return false;
-            };
-            if let Err(error) = device.stop_stream() {
-                tracing::debug!(%error, "clearing StreamEnable");
-            }
-            true
-        });
-        Ok(U3vFrameStream::start_inner(stream, Some(disable)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2083,29 +1764,10 @@ mod tests {
                 height,
             }),
             payload_type: 0x0001,
+            expected_size: Some(payload.len()),
             payload,
-            trailer_size_y,
+            trailer_size_y: Some(trailer_size_y),
         }
-    }
-
-    /// Only a missing `PayloadSize` may be replaced by a computed size (Codex
-    /// review of #180).
-    #[cfg(feature = "u3v")]
-    #[test]
-    fn only_a_missing_payload_size_falls_back() {
-        use viva_genapi::GenApiError;
-        let missing = GenicamError::GenApi(GenApiError::NodeNotFound("PayloadSize".into()));
-        let refused = GenicamError::GenApi(GenApiError::Access {
-            name: "PayloadSize".into(),
-            refused: viva_genapi::AccessDirection::Read,
-        });
-        let failed = GenicamError::U3v {
-            during: "read PayloadSize",
-            source: viva_u3v::U3vError::Timeout,
-        };
-        assert!(payload_size_is_absent(&missing));
-        assert!(!payload_size_is_absent(&refused));
-        assert!(!payload_size_is_absent(&failed));
     }
 
     /// SR-19: a delay in time becomes `GevSCPD` ticks at the camera's
@@ -2126,21 +1788,6 @@ mod tests {
         );
         assert!(delay_in_ticks(us(10), 0).is_err());
         assert!(delay_in_ticks(Duration::from_secs(10), 1_000_000_000).is_err());
-    }
-
-    /// Without `PayloadSize`, a frame is sized from its PFNC code: a packed
-    /// format at its packed size (`Mono12Packed`: 64 × 48 × 1.5, as the fake
-    /// U3V camera's own `PayloadSize` says), not refused.
-    #[cfg(feature = "u3v")]
-    #[test]
-    fn a_camera_without_payload_size_is_sized_from_its_format() {
-        assert_eq!(computed_frame_size("Mono8", 64, 48).unwrap(), 3072);
-        assert_eq!(computed_frame_size("Mono16", 64, 48).unwrap(), 6144);
-        assert_eq!(computed_frame_size("Mono12Packed", 64, 48).unwrap(), 4608);
-        assert_eq!(computed_frame_size("Mono10p", 64, 48).unwrap(), 3840);
-        assert_eq!(computed_frame_size("YUV422Packed", 64, 48).unwrap(), 6144);
-        // A name nobody knows has no size to compute.
-        assert!(computed_frame_size("Fancy42", 64, 48).is_err());
     }
 
     #[test]

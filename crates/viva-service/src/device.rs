@@ -83,6 +83,15 @@ pub trait DeviceOps: Send + Sync + 'static {
     /// The camera.
     fn camera(&self) -> &SharedCamera<Self::Transport>;
 
+    /// Whether the transport has reported the camera gone, such as a USB3
+    /// Vision camera unplugged: [`run_discovery`](crate::run_discovery) then
+    /// lets go of it even if the next pass finds a camera with its id. A
+    /// transport that cannot tell says `false`, and the camera is lost when a
+    /// discovery pass no longer finds it.
+    fn is_lost(&self) -> bool {
+        false
+    }
+
     /// Read a feature as text.
     async fn get_feature(&self, name: &str) -> Result<String, GenicamError> {
         let name = name.to_string();

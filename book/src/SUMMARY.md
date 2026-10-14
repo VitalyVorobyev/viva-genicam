@@ -18,6 +18,7 @@
   - [Streaming (GVSP) – first steps](tutorials/streaming.md)
   - [Testing without hardware](tutorials/fake-camera.md)
 - [Networking Guide (GigE Vision)](networking.md)
+- [USB3 Vision setup](usb.md)
 - [The command line (viva-camctl)](camctl.md)
 - [Use viva from other tools (GenTL)](gentl.md)
 

@@ -1,8 +1,9 @@
 //! The `usb` feature's transport: [`nusb`], a pure-Rust USB library
 //! (ADR-0032).
 //!
-//! One camera has run it, on macOS over USB 2 (ADR-0032 §8); Linux,
-//! Windows and SuperSpeed have not (backlog TC-27). What the code relies on
+//! One camera has run it: on macOS over USB 2 (ADR-0032 §8), and on Windows
+//! once WinUSB was installed on its interface 0; Linux and SuperSpeed have
+//! not (backlog TC-27). What the code relies on
 //! is `nusb`'s documented behaviour: transfers on one endpoint
 //! complete in the order they were submitted, a cancelled transfer still
 //! comes back, an IN transfer ends at a short packet, and its length must
@@ -111,11 +112,8 @@ impl NusbTransfer {
         };
 
         let claim = |number: u8| device.claim_interface(number).wait();
-        let control = claim(interfaces.control_iface).map_err(|source| U3vError::Claim {
-            interface: "control",
-            number: interfaces.control_iface,
-            source: Box::new(source),
-        })?;
+        let control = claim(interfaces.control_iface)
+            .map_err(|source| claim_error("control", interfaces.control_iface, source))?;
         let control_in = control
             .endpoint::<Bulk, In>(interfaces.control_ep_in)
             .map_err(nusb_error)?;
@@ -126,9 +124,8 @@ impl NusbTransfer {
             number.map(|number| {
                 let interface = claim(number);
                 if let Err(error) = &interface {
+                    let error = claim_error(which, number, error.clone());
                     tracing::warn!(
-                        interface = which,
-                        number,
                         %error,
                         "cannot claim the camera's {which} interface; its features work, \
                          but opening its {which} will fail"
@@ -173,11 +170,7 @@ impl NusbTransfer {
         claimed
             .interface
             .as_ref()
-            .map_err(|source| U3vError::Claim {
-                interface: which,
-                number: claimed.number,
-                source: Box::new(source.clone()),
-            })
+            .map_err(|source| claim_error(which, claimed.number, source.clone()))
     }
 
     fn packet_size(&self, endpoint: u8) -> usize {
@@ -384,6 +377,30 @@ fn nusb_error(error: nusb::Error) -> U3vError {
     }
 }
 
+/// An interface `nusb` could not claim, with what to do about it when that
+/// is known.
+fn claim_error(interface: &'static str, number: u8, source: nusb::Error) -> U3vError {
+    U3vError::Claim {
+        interface,
+        number,
+        hint: claim_hint(source.kind(), cfg!(windows)),
+        source: Box::new(source),
+    }
+}
+
+/// What the user can do about a failed claim. On Windows, `nusb` claims only
+/// through WinUSB, and Windows binds no driver to a USB3 Vision interface on
+/// its own: every driver problem — none, another one, WinUSB without its
+/// device interface GUID — comes back as `Unsupported`. An mvBlueFOX3 on
+/// Windows failed with "could not determine driver for interface" until
+/// WinUSB was installed on its interface 0 (backlog TC-27).
+fn claim_hint(kind: nusb::ErrorKind, windows: bool) -> Option<&'static str> {
+    (windows && kind == nusb::ErrorKind::Unsupported).then_some(
+        "on Windows the camera needs the WinUSB driver, which Zadig installs: \
+         see https://vitalyvorobyev.github.io/viva-genicam/usb.html#windows",
+    )
+}
+
 /// The speed `nusb` reports.
 pub(crate) fn speed(speed: nusb::Speed) -> UsbSpeed {
     match speed {
@@ -444,6 +461,29 @@ mod tests {
         assert!(error.may_mean_gone());
         let other = transfer_error(0x83, TransferError::Unknown(0x47));
         assert_eq!(other.to_string(), "usb: unknown (error 0x00000047)");
+    }
+
+    /// TC-27: a driver problem on Windows says to install WinUSB; anything
+    /// else, or the same kind elsewhere, has no hint.
+    #[test]
+    fn a_windows_driver_problem_points_at_winusb() {
+        let hint = claim_hint(nusb::ErrorKind::Unsupported, true).expect("a hint");
+        assert!(hint.contains("WinUSB"), "{hint}");
+        assert_eq!(claim_hint(nusb::ErrorKind::Busy, true), None);
+        assert_eq!(claim_hint(nusb::ErrorKind::Unsupported, false), None);
+
+        let error = U3vError::Claim {
+            interface: "control",
+            number: 0,
+            source: "could not determine driver for interface".into(),
+            hint: Some(hint),
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "claim the control interface (0): could not determine driver for interface; {hint}"
+            )
+        );
     }
 
     #[test]

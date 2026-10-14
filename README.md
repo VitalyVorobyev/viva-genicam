@@ -154,7 +154,7 @@ and the wire contract in [docs/studio/zenoh-api.md](docs/studio/zenoh-api.md).
 
 - **No devices found** -- check NIC/interface selection and host firewall (UDP broadcast on port 3956)
 - **Frame drops at high FPS** -- enable jumbo frames, raise `SO_RCVBUF`, enable inter-packet delay
-- **Windows** -- allow the program through the firewall and check NIC power settings; see the book's [Networking guide](https://vitalyvorobyev.github.io/viva-genicam/networking.html#22-windows)
+- **Windows** -- allow the program through the firewall and check NIC power settings; see the book's [Networking guide](https://vitalyvorobyev.github.io/viva-genicam/networking.html#22-windows); a USB3 Vision camera needs the WinUSB driver, see [USB3 Vision setup](https://vitalyvorobyev.github.io/viva-genicam/usb.html#windows)
 
 ## License
 

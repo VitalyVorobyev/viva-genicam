@@ -12,12 +12,26 @@ release opens with what to read before upgrading.
 
 ### Changed
 
+- **USB3 Vision on Windows.** A camera without the WinUSB driver fails to open
+  with an error that names WinUSB and links the new book page
+  [USB3 Vision setup](https://vitalyvorobyev.github.io/viva-genicam/usb.html#windows),
+  which shows how to install it with Zadig. The mvBlueFOX3-2004G runs on
+  Windows as well as macOS
+  ([#208](https://github.com/VitalyVorobyev/viva-genicam/pull/208)).
 - **Zenoh API version 6.** `AcquisitionStatus` carries the stream's counters,
   `StreamCounters`, in `stats`, in place of the one `dropped` count; the
   `genicam` feature converts them from `viva_genicam::StreamStats`. The
   service sends a status every second while acquiring, whether or not frames
   arrive, and a final one with the stopped stream's counters
   ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+
+### Fixed
+
+- **rustls 0.23.45 → 0.23.46** in `Cargo.lock` and `studio/Cargo.lock`, which
+  clears RUSTSEC-2026-0346, -0347, -0348 and -0349. rustls arrives only
+  through zenoh's QUIC link, so it reaches `viva-service`, the release
+  archives that carry it, and Viva Studio
+  ([#208](https://github.com/VitalyVorobyev/viva-genicam/pull/208)).
 
 ### Viva Studio — not part of any published crate
 

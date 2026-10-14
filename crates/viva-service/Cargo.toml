@@ -24,7 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 viva-genicam = { version = "0.9", path = "../viva-genicam" }
-viva-zenoh-api = { version = "0.9", path = "../viva-zenoh-api", features = ["genapi"] }
+viva-zenoh-api = { version = "0.9", path = "../viva-zenoh-api", features = ["genapi", "genicam"] }
 zenoh = "1"
 tokio = { workspace = true, features = ["macros", "signal"] }
 clap = { workspace = true }

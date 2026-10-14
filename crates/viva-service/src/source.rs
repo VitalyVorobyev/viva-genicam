@@ -1,7 +1,7 @@
 //! What the acquisition queryable needs of a camera: a stream of blocks.
 
 use viva_genicam::report::ReportTarget;
-use viva_genicam::{FrameStream, GenicamError, StreamBlock};
+use viva_genicam::{FrameStream, GenicamError, StreamBlock, StreamStats};
 
 use crate::device::DeviceOps;
 
@@ -12,10 +12,10 @@ pub trait BlockStream: Send {
     /// the stream has ended.
     async fn next_block(&mut self) -> Result<Option<StreamBlock>, GenicamError>;
 
-    /// Frames lost so far, for the acquisition status. A transport that
-    /// counts none reports 0.
-    fn frames_lost(&self) -> u64 {
-        0
+    /// The stream's counters so far, for the acquisition status. A stream
+    /// that keeps none reports `None`.
+    fn stats(&self) -> Option<StreamStats> {
+        None
     }
 
     /// Stop the stream and let go of what it holds.
@@ -29,8 +29,8 @@ impl BlockStream for FrameStream {
         Ok(FrameStream::next_block(self).await?.map(StreamBlock::from))
     }
 
-    fn frames_lost(&self) -> u64 {
-        self.stats().frames_lost()
+    fn stats(&self) -> Option<StreamStats> {
+        Some(FrameStream::stats(self))
     }
 }
 

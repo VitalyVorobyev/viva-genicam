@@ -43,7 +43,11 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 ///   `Coord3D_ABC32f` where it said `Unknown`), and a USB3 Vision camera's
 ///   device id names its vendor, product and serial ([`u3v_device_id`]).
 ///   The frame header's one-byte codes are unchanged.
-pub const API_VERSION: u32 = 5;
+/// - `6` — [`AcquisitionStatus`] carries the stream's counters,
+///   [`StreamCounters`], in `stats`, where version 5 had one `dropped` count;
+///   it is sent every second while acquiring, frames or not, and a final
+///   [`AcquisitionStatus::stopped`] snapshot follows the stream's end.
+pub const API_VERSION: u32 = 6;
 
 /// Periodic announcement published by the camera service.
 ///
@@ -717,38 +721,146 @@ pub enum AcquisitionCommand {
     Stop,
 }
 
-/// Acquisition status pushed by the service on change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Acquisition status pushed by the service: once when acquisition starts,
+/// once a second while it runs, whether or not frames arrive, a final
+/// [`stopped`](Self::stopped) snapshot when the stream ends, and
+/// [`inactive`](Self::inactive) once the camera has stopped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct AcquisitionStatus {
     /// Whether the camera is acquiring.
     pub active: bool,
-    /// Frames per second, when known.
+    /// Frames a second delivered by the stream over the last status
+    /// interval, when known. It counts every frame the stream hands over,
+    /// not the ones a viewer draws.
     pub fps: Option<f32>,
-    /// Frames the stream did not deliver complete since it started: closed
-    /// with packets missing, never seen at all (block-id gaps), or discarded
-    /// because the receiver fell behind. USB3 Vision: blocks the device marked
-    /// failed.
-    pub dropped: u64,
+    /// The stream's counters since it started; `null` on the wire when
+    /// there are none: in the status sent on start, before the first count,
+    /// and in the one that says acquisition is off.
+    pub stats: Option<StreamCounters>,
 }
 
 impl AcquisitionStatus {
-    /// Acquiring at `fps`, with `dropped` frames lost so far.
-    pub fn active(fps: Option<f32>, dropped: u64) -> Self {
+    /// Acquiring at `fps`, with the stream's counters so far.
+    pub fn active(fps: Option<f32>, stats: Option<StreamCounters>) -> Self {
         Self {
             active: true,
             fps,
-            dropped,
+            stats,
         }
     }
 
-    /// Not acquiring.
+    /// Not acquiring, and nothing to count.
     pub fn inactive() -> Self {
         Self {
             active: false,
             fps: None,
-            dropped: 0,
+            stats: None,
+        }
+    }
+
+    /// The stream has ended; `stats` are its final counters.
+    pub fn stopped(stats: StreamCounters) -> Self {
+        Self {
+            active: false,
+            fps: None,
+            stats: Some(stats),
+        }
+    }
+}
+
+/// One stream's counters on the wire: `viva_genicam::StreamStats`, with the
+/// six reasons a packet was ignored summed into one.
+///
+/// **USB3 Vision** streams fill the frame counters the same way. Of the packet
+/// counters, `packets_received` counts bulk transfers and `packets_ignored`
+/// the transfers that were not the leader, payload or trailer due;
+/// `transfer_errors` counts failed transfers the stream recovered from. The
+/// other packet and resend counters stay 0.
+///
+/// Every block the camera sends is counted once, when its fate is decided:
+/// complete, incomplete, missed, dropped to backpressure or unsupported. A
+/// frame still waiting in the delivery queue is in none of them yet.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[non_exhaustive]
+pub struct StreamCounters {
+    /// Frames handed to the application with every packet present.
+    pub frames_complete: u64,
+    /// Frames closed without that: packets missing, no trailer, or an error
+    /// status from the device. Counted whether or not the stream delivers
+    /// incomplete frames.
+    pub frames_incomplete: u64,
+    /// Blocks never seen at all: gaps in the block-id sequence.
+    pub frames_missed: u64,
+    /// Frames assembled and then discarded because the application did not
+    /// take them before the delivery queue filled.
+    pub frames_backpressure: u64,
+    /// Blocks whose payload type the engine does not assemble.
+    pub frames_unsupported: u64,
+    /// Datagrams read from the socket. USB3 Vision: bulk transfers.
+    pub packets_received: u64,
+    /// Packets never received, of frames closed incomplete. A lower bound when
+    /// a trailer is missing, since the trailer is what says how many there were.
+    pub packets_missing: u64,
+    /// Packets received more than once.
+    pub packets_duplicate: u64,
+    /// Packets received and not used, for any reason: not GVSP, a format the
+    /// engine does not assemble, beyond the end of the frame, late, an error
+    /// status, or from an address other than the camera's.
+    pub packets_ignored: u64,
+    /// Packets asked for again, each counted once however often it was asked.
+    pub resend_requested: u64,
+    /// Packets asked for again that then arrived.
+    pub resend_recovered: u64,
+    /// Packets asked for again that the camera answered it no longer has.
+    pub resend_unavailable: u64,
+    /// USB3 Vision: transfers that failed — a stall, a fault — and that the
+    /// stream recovered from by resetting its endpoint, at the cost of the
+    /// block in progress. 0 on GigE Vision.
+    pub transfer_errors: u64,
+    /// Payload bytes of complete frames handed to the application.
+    pub bytes: u64,
+    /// Smoothed payload throughput of complete frames, in megabits a second.
+    pub avg_mbps: f64,
+    /// Smoothed delay from the device timestamp to delivery, in milliseconds,
+    /// when the stream can map device time to host time.
+    pub avg_latency_ms: Option<f64>,
+    /// Time since the stream started, in milliseconds.
+    pub elapsed_ms: u64,
+}
+
+impl StreamCounters {
+    /// Frames the application did not receive complete: incomplete, missed
+    /// and dropped to backpressure.
+    pub fn frames_lost(&self) -> u64 {
+        self.frames_incomplete + self.frames_missed + self.frames_backpressure
+    }
+}
+
+#[cfg(feature = "genicam")]
+#[cfg_attr(docsrs, doc(cfg(feature = "genicam")))]
+impl From<&viva_genicam::StreamStats> for StreamCounters {
+    fn from(stats: &viva_genicam::StreamStats) -> Self {
+        Self {
+            frames_complete: stats.frames_complete,
+            frames_incomplete: stats.frames_incomplete,
+            frames_missed: stats.frames_missed,
+            frames_backpressure: stats.frames_backpressure,
+            frames_unsupported: stats.frames_unsupported,
+            packets_received: stats.packets_received,
+            packets_missing: stats.packets_missing,
+            packets_duplicate: stats.packets_duplicate,
+            packets_ignored: stats.packets_ignored(),
+            resend_requested: stats.resend_requested,
+            resend_recovered: stats.resend_recovered,
+            resend_unavailable: stats.resend_unavailable,
+            transfer_errors: stats.transfer_errors,
+            bytes: stats.bytes,
+            avg_mbps: stats.avg_mbps,
+            avg_latency_ms: stats.avg_latency_ms,
+            elapsed_ms: u64::try_from(stats.elapsed.as_millis()).unwrap_or(u64::MAX),
         }
     }
 }
@@ -1214,6 +1326,111 @@ mod tests {
         let wire = FeatureState::from(map.feature_state("Width", &io).unwrap());
         assert_eq!(wire.polling_ms, None);
         assert_eq!(wire.caching.as_deref(), Some("WriteThrough"));
+    }
+
+    // ── AcquisitionStatus ───────────────────────────────────────────────────
+
+    /// The status carries the stream's counters, and a stopped stream's final
+    /// ones, so a client can show more than one lost-frame count.
+    #[test]
+    fn an_acquisition_status_round_trips_its_counters() {
+        let stats = StreamCounters {
+            frames_complete: 2_410,
+            frames_incomplete: 2,
+            frames_missed: 1,
+            packets_received: 1_000_000,
+            transfer_errors: 3,
+            avg_mbps: 812.5,
+            avg_latency_ms: Some(1.25),
+            elapsed_ms: 10_000,
+            ..Default::default()
+        };
+
+        for status in [
+            AcquisitionStatus::active(Some(241.0), Some(stats)),
+            AcquisitionStatus::stopped(stats),
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: AcquisitionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status, "{json}");
+        }
+        assert_eq!(stats.frames_lost(), 3);
+        let stopped = AcquisitionStatus::stopped(stats);
+        assert!(!stopped.active);
+        assert_eq!(stopped.fps, None);
+
+        // Nothing to count says so, rather than a row of zeros.
+        let json = serde_json::to_value(AcquisitionStatus::inactive()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "active": false, "fps": null, "stats": null })
+        );
+    }
+
+    /// The six reasons a packet goes unused are one count on the wire, and
+    /// the elapsed time is whole milliseconds.
+    #[cfg(feature = "genicam")]
+    #[test]
+    fn stream_counters_carry_the_librarys_stream_stats() {
+        let mut stats = viva_genicam::StreamStats::default();
+        stats.frames_complete = 10;
+        stats.frames_incomplete = 1;
+        stats.frames_missed = 2;
+        stats.frames_backpressure = 3;
+        stats.frames_unsupported = 4;
+        stats.packets_received = 500;
+        stats.packets_missing = 5;
+        stats.packets_duplicate = 6;
+        stats.packets_ignored_malformed = 1;
+        stats.packets_ignored_unsupported = 2;
+        stats.packets_ignored_out_of_range = 3;
+        stats.packets_ignored_late = 4;
+        stats.packets_ignored_error_status = 5;
+        stats.packets_ignored_foreign = 6;
+        stats.resend_requested = 7;
+        stats.resend_recovered = 8;
+        stats.resend_unavailable = 9;
+        stats.transfer_errors = 11;
+        stats.bytes = 12_345;
+        stats.avg_mbps = 98.5;
+        stats.avg_latency_ms = Some(0.5);
+        stats.elapsed = std::time::Duration::from_micros(2_500_900);
+
+        let wire = StreamCounters::from(&stats);
+        assert_eq!(wire.packets_ignored, 21);
+        assert_eq!(wire.packets_ignored, stats.packets_ignored());
+        assert_eq!(wire.elapsed_ms, 2_500);
+        assert_eq!(wire.frames_lost(), stats.frames_lost());
+        assert_eq!(
+            (
+                wire.frames_complete,
+                wire.frames_incomplete,
+                wire.frames_missed,
+                wire.frames_backpressure,
+                wire.frames_unsupported,
+            ),
+            (10, 1, 2, 3, 4)
+        );
+        assert_eq!(
+            (
+                wire.packets_received,
+                wire.packets_missing,
+                wire.packets_duplicate,
+            ),
+            (500, 5, 6)
+        );
+        assert_eq!(
+            (
+                wire.resend_requested,
+                wire.resend_recovered,
+                wire.resend_unavailable,
+                wire.transfer_errors,
+            ),
+            (7, 8, 9, 11)
+        );
+        assert_eq!(wire.bytes, 12_345);
+        assert_eq!(wire.avg_mbps, 98.5);
+        assert_eq!(wire.avg_latency_ms, Some(0.5));
     }
 
     #[test]

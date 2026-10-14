@@ -26,7 +26,7 @@ opaque string without `/`).
     "name": "Left",
     "model": "SPC-3000",
     "serial": "SN12345678",
-    "api_version": 5,
+    "api_version": 6,
     "ip": "192.168.1.10",
     "mac": "00:0C:DF:06:5B:2F",
     "user_name": "Left",
@@ -49,7 +49,7 @@ opaque string without `/`).
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional (`null`/absent means the service is pre-versioning). The app
-  compares this against `viva_zenoh_api::API_VERSION` (currently `5`). On mismatch or
+  compares this against `viva_zenoh_api::API_VERSION` (currently `6`). On mismatch or
   absence, the app emits an `api-version-mismatch` Tauri event (see below) and still
   discovers the device — no hard rejection.
 
@@ -255,24 +255,39 @@ opaque string without `/`).
   ```
 - **Rust type:** request: `AcquisitionControlRequest { command: AcquisitionCommand, packet_size: Option<u32> }`; response: `NodeOpResponse` — both in `viva-zenoh-api`. `packet_size`, for `start`, is the GVSP packet size to use as a ceiling the service's path probe stays under; absent, the service negotiates one from its NIC's MTU. `AcquisitionCommand` serializes as `"start"` or `"stop"` (`#[serde(rename_all = "lowercase")]`).
 - **Semantics:** Start/stop hardware acquisition. On success the service begins/stops
-  publishing to `image` — or to `evs`, for an event-vision camera.
+  publishing to `image` — or to `evs`, for an event-vision camera. A `start` while
+  acquiring is refused, unless the stream has ended by itself (its final status says
+  `active: false`): then the service stops the old acquisition first.
 
 ### `genicam/devices/{device_id}/acquisition/status`
 
 - **Direction:** Service → App
-- **Mechanism:** `put` on change
+- **Mechanism:** `put` on start, every second while acquiring, and on stop
 - **Payload (JSON):**
   ```json
-  { "active": true, "fps": 29.97, "dropped": 0 }
-  { "active": false, "fps": null, "dropped": 0 }
+  { "active": true, "fps": null, "stats": null }
+  { "active": true, "fps": 241.0, "stats": { "frames_complete": 2410, "frames_incomplete": 0, "frames_missed": 3, "frames_backpressure": 0, "frames_unsupported": 0, "packets_received": 1205000, "packets_missing": 0, "packets_duplicate": 0, "packets_ignored": 0, "resend_requested": 0, "resend_recovered": 0, "resend_unavailable": 0, "transfer_errors": 0, "bytes": 740352000, "avg_mbps": 592.3, "avg_latency_ms": null, "elapsed_ms": 10004 } }
+  { "active": false, "fps": null, "stats": { "frames_complete": 4820, "...": "..." } }
+  { "active": false, "fps": null, "stats": null }
   ```
-- **Rust type:** `AcquisitionStatus` in `viva-zenoh-api`
-- **Semantics:** Published on start and stop, and once a second while frames
-  arrive. `fps` is the rate frames reach the service; `dropped` counts the
-  frames lost since the stream started — abandoned incomplete or discarded
-  because the service fell behind (`StreamStats::drops`). Viva
-  Studio's embedded mode sends the same status as its `acquisition-status`
-  event.
+- **Rust type:** `AcquisitionStatus` and `StreamCounters` in `viva-zenoh-api`
+- **Semantics:** The status sent on start has no counters. While acquiring, the
+  frame loop sends one every second whether or not frames arrive, so the
+  counters keep moving when the stream stalls: `fps` is the frames it
+  delivered over that second, and `stats` the stream's counters since it
+  started. When the stream ends, a final status with `active: false` carries
+  its last counters (`AcquisitionStatus::stopped`); the status that follows,
+  once the camera has stopped, carries none, and a client keeps the last
+  counters it had.
+- **Counters:** `StreamCounters` is `viva_genicam::StreamStats` on the wire,
+  with the six reasons a packet goes unused summed into `packets_ignored`
+  (`StreamStats::packets_ignored`) and the elapsed time in milliseconds.
+  `frames_incomplete + frames_missed + frames_backpressure` is
+  `StreamStats::frames_lost`. On USB3 Vision `packets_received` counts bulk
+  transfers and `transfer_errors` the failed ones the stream recovered from;
+  the other packet and resend counters stay 0.
+- **Viva Studio:** embedded mode sends the same statuses as its
+  `acquisition-status` event.
 
 ### `genicam/devices/{device_id}/image`
 

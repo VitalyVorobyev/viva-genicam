@@ -77,7 +77,7 @@ For the debug checkpoints below, give the service
 - [ ] Export State -> the JSON holds every feature with a value, registers
       left out
 
-### 6c. Camera panel, user sets and dropped frames
+### 6c. Camera panel, user sets and stream statistics
 - [ ] Diagnostics tab while connected -> "Camera" lists the model, serial and
       firmware, the MAC and the IP address
 - [ ] Persistent IP: enter 192.168.1.100 / 255.255.255.0 / 192.168.1.1, Save to
@@ -87,7 +87,15 @@ For the debug checkpoints below, give the service
 - [ ] Image tab -> User Sets: choose a set, Execute Load -> the features it
       holds change
 - [ ] While streaming, the header shows the camera's fps in both modes; on a
-      real camera over a lossy link it adds "· N dropped" in amber
+      real camera over a lossy link it adds "· N lost" in amber, and its
+      tooltip says how many were incomplete, missed and dropped by the host
+- [ ] Image tab -> Statistics: at a high frame rate Received climbs at the
+      camera's rate while Displayed and the status bar's "display" rate stay
+      near 30 (15 remote); switch tabs and back -> Received kept counting
+- [ ] Statistics shows Packets and Resend for a GigE camera, USB with
+      Transfers and Transfer errors for a USB3 Vision one
+- [ ] Stop -> Statistics keeps its values under "Stopped"; Start -> they
+      count from zero
 
 ### 6d. Feature Browser on a large camera
 - [ ] Open a category with many features and scroll -> values fill in as

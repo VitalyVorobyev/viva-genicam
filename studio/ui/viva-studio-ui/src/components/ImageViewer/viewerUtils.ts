@@ -93,6 +93,22 @@ export function formatResolution(w: number, h: number): string {
 }
 
 /**
+ * What limits the viewer's own rate: frames are drawn at most this often, and
+ * only while the Image tab is shown (`DISPLAY_FPS` in the embedded backend,
+ * `fps_limit` in the remote one).
+ */
+export const PREVIEW_LIMIT = "Preview is limited to 30 fps (15 remote)";
+
+/** Elapsed time as `m:ss`, or `h:mm:ss` from an hour on. */
+export function formatElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const s = String(total % 60).padStart(2, "0");
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
+
+/**
  * Format a frame count as a human-readable string with thousands separators.
  * Uses en-US locale for deterministic output across environments.
  * Examples: 0 → "0 frames", 1 → "1 frame", 1234 → "1,234 frames"

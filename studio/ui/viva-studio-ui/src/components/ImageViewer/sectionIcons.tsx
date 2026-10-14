@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import {
+  Activity,
   Bookmark,
   Crop,
   Network,
@@ -25,6 +26,8 @@ const SECTION_ICONS: Record<string, LucideIcon> = {
   bookmark: Bookmark,
   network: Network,
   palette: Palette,
+  // The Statistics section, which the UI adds itself.
+  activity: Activity,
 };
 
 /** The icon a section names, drawn decoratively. */

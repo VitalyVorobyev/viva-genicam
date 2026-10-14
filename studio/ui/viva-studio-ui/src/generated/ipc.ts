@@ -92,16 +92,96 @@ export type AcquisitionStatus = {
  */
 active: boolean,
 /**
- * Frames per second, when known.
+ * Frames a second delivered by the stream over the last status
+ * interval, when known. It counts every frame the stream hands over,
+ * not the ones a viewer draws.
  */
 fps: number | null,
 /**
- * Frames the stream did not deliver complete since it started: closed
- * with packets missing, never seen at all (block-id gaps), or discarded
- * because the receiver fell behind. USB3 Vision: blocks the device marked
- * failed.
+ * The stream's counters since it started; `null` on the wire when
+ * there are none: in the status sent on start, before the first count,
+ * and in the one that says acquisition is off.
  */
-dropped: number, };
+stats: StreamCounters | null, };
+
+export type StreamCounters = {
+/**
+ * Frames handed to the application with every packet present.
+ */
+frames_complete: number,
+/**
+ * Frames closed without that: packets missing, no trailer, or an error
+ * status from the device. Counted whether or not the stream delivers
+ * incomplete frames.
+ */
+frames_incomplete: number,
+/**
+ * Blocks never seen at all: gaps in the block-id sequence.
+ */
+frames_missed: number,
+/**
+ * Frames assembled and then discarded because the application did not
+ * take them before the delivery queue filled.
+ */
+frames_backpressure: number,
+/**
+ * Blocks whose payload type the engine does not assemble.
+ */
+frames_unsupported: number,
+/**
+ * Datagrams read from the socket. USB3 Vision: bulk transfers.
+ */
+packets_received: number,
+/**
+ * Packets never received, of frames closed incomplete. A lower bound when
+ * a trailer is missing, since the trailer is what says how many there were.
+ */
+packets_missing: number,
+/**
+ * Packets received more than once.
+ */
+packets_duplicate: number,
+/**
+ * Packets received and not used, for any reason: not GVSP, a format the
+ * engine does not assemble, beyond the end of the frame, late, an error
+ * status, or from an address other than the camera's.
+ */
+packets_ignored: number,
+/**
+ * Packets asked for again, each counted once however often it was asked.
+ */
+resend_requested: number,
+/**
+ * Packets asked for again that then arrived.
+ */
+resend_recovered: number,
+/**
+ * Packets asked for again that the camera answered it no longer has.
+ */
+resend_unavailable: number,
+/**
+ * USB3 Vision: transfers that failed — a stall, a fault — and that the
+ * stream recovered from by resetting its endpoint, at the cost of the
+ * block in progress. 0 on GigE Vision.
+ */
+transfer_errors: number,
+/**
+ * Payload bytes of complete frames handed to the application.
+ */
+bytes: number,
+/**
+ * Smoothed payload throughput of complete frames, in megabits a second.
+ */
+avg_mbps: number,
+/**
+ * Smoothed delay from the device timestamp to delivery, in milliseconds,
+ * when the stream can map device time to host time.
+ */
+avg_latency_ms: number | null,
+/**
+ * Time since the stream started, in milliseconds.
+ */
+elapsed_ms: number, };
 
 export type ImageMeta = {
 /**

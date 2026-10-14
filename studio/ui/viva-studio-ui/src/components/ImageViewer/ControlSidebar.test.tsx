@@ -38,6 +38,13 @@ function Sidebar({ initiallyCollapsed }: { initiallyCollapsed: boolean }) {
           externalModel={null}
           cameraModel="test-camera"
           deviceId={null}
+          statistics={{
+            active: false,
+            fps: null,
+            stats: null,
+            transport: "gige",
+            displayed: { frames: 0, fps: 0 },
+          }}
         />
       </FeatureStoreProvider>
     </ToastProvider>
@@ -60,6 +67,16 @@ describe("ControlSidebar", () => {
     expect(screen.getByRole("button", { name: "Acquisition Control" }).getAttribute("aria-expanded")).toBe(
       "true",
     );
+  });
+
+  // The stream's counters sit right after the acquisition settings, and the
+  // rail reaches them like any section.
+  it("places Statistics after Acquisition Control", async () => {
+    render(<Sidebar initiallyCollapsed={false} />);
+    await screen.findByRole("button", { name: "Image Format" });
+    const order = Array.from(document.querySelectorAll(".sidebar-section__label")).map((l) => l.textContent);
+    expect(order).toEqual(["Acquisition Control", "Statistics", "Image Format"]);
+    expect(screen.getByRole("button", { name: "Statistics" }).getAttribute("aria-expanded")).toBe("true");
   });
 
   it("collapses to the rail and back with one button", async () => {

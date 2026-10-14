@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import type { StreamerInfo, ImageMeta } from "../../device/types";
+import type { StreamerInfo, ImageMeta, StreamCounters } from "../../device/types";
+import type { StreamTransport } from "../../device/acquisitionStatus";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { ZoomPanState } from "./useZoomPan";
 import { ViewerToolbar } from "./ViewerToolbar";
@@ -24,6 +25,12 @@ interface ImageViewerProps {
   deviceName?: string;
   cameraModel?: string;
   imageMeta: ImageMeta | null;
+  /** Frames a second arriving from the camera, from the last status. */
+  receivedFps: number | null;
+  /** The stream's counters: this acquisition's, or the last one's. */
+  stats: StreamCounters | null;
+  /** Which counters the stream fills. */
+  transport: StreamTransport;
   /** False while another tab is shown; the viewer stays mounted. */
   isActive?: boolean;
 }
@@ -37,6 +44,9 @@ export function ImageViewer({
   deviceName,
   cameraModel,
   imageMeta,
+  receivedFps,
+  stats,
+  transport,
   isActive = true,
 }: ImageViewerProps) {
   const writeNode = useFeatureWriter();
@@ -119,6 +129,15 @@ export function ImageViewer({
 
   const pixelFormat = imageMeta?.pixel_format ?? wsStreamInfo?.pixel_format ?? "Mono8";
 
+  // What arrived from the camera, and apart from it what the viewer drew.
+  const statistics = {
+    active: isAcquiring,
+    fps: receivedFps,
+    stats,
+    transport,
+    displayed: { frames: frameCount, fps },
+  };
+
   const handleSnapshot = useCallback(async () => {
     if (isSnapshotBusy) return;
     const bytes = snapshotRef.current;
@@ -178,6 +197,7 @@ export function ImageViewer({
           externalModel={externalModel}
           cameraModel={cameraModel ?? null}
           deviceId={deviceId}
+          statistics={statistics}
         />
       </div>
     );
@@ -233,7 +253,6 @@ export function ImageViewer({
         />
         <ViewerStatusBar
           fps={fps}
-          frameCount={frameCount}
           width={imageMeta?.width ?? wsStreamInfo?.width ?? streamerInfo.width}
           height={imageMeta?.height ?? wsStreamInfo?.height ?? streamerInfo.height}
           pixelFormat={pixelFormat}
@@ -252,6 +271,7 @@ export function ImageViewer({
         externalModel={externalModel}
         cameraModel={cameraModel ?? null}
         deviceId={deviceId}
+        statistics={statistics}
       />
     </div>
   );

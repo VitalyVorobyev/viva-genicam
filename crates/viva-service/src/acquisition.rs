@@ -2,15 +2,17 @@
 //! [`StreamSource`]: GigE Vision and USB3 Vision publish the same way.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::watch;
+use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 use viva_genicam::pfnc;
 use viva_genicam::{EvsBlock, EvsFormat, Frame, StreamBlock};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
     AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, EvsFormat as ZenohEvsFormat,
-    EvsHeader, ImageMeta, NodeOpResponse, keys,
+    EvsHeader, ImageMeta, NodeOpResponse, StreamCounters, keys,
 };
 use zenoh::Session;
 
@@ -50,7 +52,24 @@ pub(crate) async fn run<D: StreamSource>(
                                     &payload.to_bytes(),
                                 ) {
                                     Ok(req) => match req.command {
-                                        AcquisitionCommand::Start if frame_task.is_none() => {
+                                        // A stream that ended by itself has
+                                        // published its final, inactive
+                                        // status; a client that then starts
+                                        // again gets the old one stopped first.
+                                        AcquisitionCommand::Start
+                                            if frame_task
+                                                .as_ref()
+                                                .is_none_or(|task| task.is_finished()) =>
+                                        {
+                                            if frame_task.is_some() {
+                                                handle_stop(
+                                                    &session,
+                                                    device.as_ref(),
+                                                    &stop_tx,
+                                                    &mut frame_task,
+                                                )
+                                                .await;
+                                            }
                                             handle_start(
                                                 &session,
                                                 device.as_ref(),
@@ -177,10 +196,15 @@ async fn handle_stop<D: StreamSource>(
     NodeOpResponse::ok()
 }
 
+/// How often the frame loop reports the stream's rate and counters.
+const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Main frame reading loop: reads blocks from the stream and publishes them
 /// to Zenoh — images on [`keys::image`], event-vision blocks on
-/// [`keys::evs`] — with the frame rate on [`keys::acquisition_status`] each
-/// second. Closes the stream when it stops.
+/// [`keys::evs`]. Every [`STATUS_INTERVAL`] it publishes the frame rate and
+/// the stream's counters on [`keys::acquisition_status`], whether or not
+/// frames arrive, and when it stops, the final counters as
+/// [`AcquisitionStatus::stopped`]. Closes the stream when it stops.
 async fn frame_loop(
     session: Arc<Session>,
     device_id: String,
@@ -190,9 +214,10 @@ async fn frame_loop(
     let status_key = keys::acquisition_status(&device_id);
     let mut publisher = BlockPublisher::new(&device_id);
     let mut frames_acquired: u64 = 0;
-    let mut fps_start = tokio::time::Instant::now();
-    let mut fps_frame_count: u64 = 0;
-    let fps_interval = std::time::Duration::from_secs(1);
+    let mut frames_since_status: u64 = 0;
+    let mut last_status = Instant::now();
+    let mut status_tick = tokio::time::interval_at(last_status + STATUS_INTERVAL, STATUS_INTERVAL);
+    status_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -203,22 +228,8 @@ async fn frame_loop(
                             continue;
                         };
                         publisher.put(&session, &key, payload).await;
-
                         frames_acquired += 1;
-                        fps_frame_count += 1;
-
-                        // Publish FPS periodically.
-                        let elapsed = fps_start.elapsed();
-                        if elapsed >= fps_interval {
-                            let fps = fps_frame_count as f32 / elapsed.as_secs_f32();
-                            let status = AcquisitionStatus::active(Some(fps), blocks.frames_lost());
-                            if let Ok(payload) = serde_json::to_vec(&status) {
-                                let _ = session.put(&status_key, payload).await;
-                            }
-                            fps_start = tokio::time::Instant::now();
-                            fps_frame_count = 0;
-                            debug!(device_id, fps, frames_acquired, "streaming");
-                        }
+                        frames_since_status += 1;
                     }
                     Ok(None) => {
                         info!(device_id, "frame stream ended");
@@ -230,6 +241,16 @@ async fn frame_loop(
                     }
                 }
             }
+            _ = status_tick.tick() => {
+                let now = Instant::now();
+                let fps = frames_since_status as f32 / (now - last_status).as_secs_f32();
+                let stats = blocks.stats().map(|stats| StreamCounters::from(&stats));
+                put_status(&session, &status_key, &AcquisitionStatus::active(Some(fps), stats))
+                    .await;
+                last_status = now;
+                frames_since_status = 0;
+                debug!(device_id, fps, frames_acquired, "streaming");
+            }
             _ = crate::serve::stopped(&mut stop) => {
                 debug!(device_id, "frame loop stop signal received");
                 break;
@@ -237,7 +258,17 @@ async fn frame_loop(
         }
     }
 
+    // The final counters stay readable after the stream is gone.
+    let stats = blocks.stats();
     blocks.close().await;
+    if let Some(stats) = stats {
+        put_status(
+            &session,
+            &status_key,
+            &AcquisitionStatus::stopped(StreamCounters::from(&stats)),
+        )
+        .await;
+    }
     info!(device_id, frames_acquired, "frame loop exited");
 }
 
@@ -429,16 +460,20 @@ fn evs_format_to_zenoh(format: EvsFormat) -> ZenohEvsFormat {
     }
 }
 
-/// Publish acquisition status to Zenoh.
+/// Publish that acquisition has started or stopped. Neither carries
+/// counters: the frame loop sends those.
 pub(crate) async fn publish_status(session: &Session, device_id: &str, active: bool) {
     let status = if active {
-        AcquisitionStatus::active(None, 0)
+        AcquisitionStatus::active(None, None)
     } else {
         AcquisitionStatus::inactive()
     };
-    let key = keys::acquisition_status(device_id);
-    if let Ok(payload) = serde_json::to_vec(&status) {
-        let _ = session.put(&key, payload).await;
+    put_status(session, &keys::acquisition_status(device_id), &status).await;
+}
+
+async fn put_status(session: &Session, key: &str, status: &AcquisitionStatus) {
+    if let Ok(payload) = serde_json::to_vec(status) {
+        let _ = session.put(key, payload).await;
     }
 }
 
@@ -532,6 +567,69 @@ mod tests {
         assert_eq!(
             image_meta(2, 2, "Fancy42", None).pixel_format,
             P::Unknown(0)
+        );
+    }
+
+    /// A stream with nothing to deliver still reports every interval: its
+    /// counters matter most when frames stop arriving. Stopping sends the
+    /// final ones.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_is_published_while_no_frames_arrive_and_on_stop() {
+        struct Stalled(viva_genicam::StreamStats);
+
+        #[async_trait::async_trait]
+        impl BlockStream for Stalled {
+            async fn next_block(
+                &mut self,
+            ) -> Result<Option<StreamBlock>, viva_genicam::GenicamError> {
+                std::future::pending().await
+            }
+
+            fn stats(&self) -> Option<viva_genicam::StreamStats> {
+                Some(self.0)
+            }
+        }
+
+        let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+        let id = format!("status-test-{}", std::process::id());
+        let subscriber = session
+            .declare_subscriber(keys::acquisition_status(&id))
+            .await
+            .unwrap();
+        let next = || async {
+            let sample = tokio::time::timeout(Duration::from_secs(3), subscriber.recv_async())
+                .await
+                .expect("no status within 3 s")
+                .expect("subscriber closed");
+            serde_json::from_slice::<AcquisitionStatus>(&sample.payload().to_bytes()).unwrap()
+        };
+
+        let mut stats = viva_genicam::StreamStats::default();
+        stats.frames_complete = 7;
+        stats.frames_missed = 4;
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(frame_loop(
+            session.clone(),
+            id.clone(),
+            Box::new(Stalled(stats)),
+            stop_rx,
+        ));
+
+        let status = next().await;
+        assert!(status.active);
+        assert_eq!(status.fps, Some(0.0));
+        assert_eq!(status.stats, Some(StreamCounters::from(&stats)));
+
+        let _ = stop_tx.send(true);
+        task.await.unwrap();
+        let mut status = next().await;
+        // A tick may have gone out just before the stop.
+        while status.active {
+            status = next().await;
+        }
+        assert_eq!(
+            status,
+            AcquisitionStatus::stopped(StreamCounters::from(&stats))
         );
     }
 

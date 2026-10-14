@@ -10,6 +10,7 @@ import { SectionIcon } from "./sectionIcons";
 import { useSectionPersistence } from "./useSectionPersistence";
 import { AcquisitionSection } from "./AcquisitionSection";
 import { FeatureGroupSection } from "./FeatureGroupSection";
+import { StatisticsSection, type StatisticsSectionProps } from "./StatisticsSection";
 
 interface ControlSidebarProps {
   collapsed: boolean;
@@ -19,14 +20,23 @@ interface ControlSidebarProps {
   externalModel: ParseXmlResponse | null;
   cameraModel: string | null;
   deviceId: string | null;
+  /** The stream's counters, for the Statistics section. */
+  statistics: Omit<StatisticsSectionProps, "isConnected">;
 }
 
 const NO_NODES = {};
 
 /**
+ * The Statistics section, which the UI adds after Acquisition Control (or
+ * first, for a camera without one): it shows the stream, not features.
+ */
+const STATISTICS = { id: "statistics", title: "Statistics", icon: "activity", defaultOpen: true };
+
+/**
  * The image viewer's control panel: the `sfnc-groups.json` sections this
- * camera has, in a panel the user can resize, or collapse to a rail of
- * section icons. A rail icon opens the panel at its section.
+ * camera has, and the stream's statistics, in a panel the user can resize,
+ * or collapse to a rail of section icons. A rail icon opens the panel at its
+ * section.
  */
 export function ControlSidebar({
   collapsed,
@@ -36,6 +46,7 @@ export function ControlSidebar({
   externalModel,
   cameraModel,
   deviceId,
+  statistics,
 }: ControlSidebarProps) {
   const groups = useSfncGroups();
   const sectionPersistence = useSectionPersistence(cameraModel);
@@ -83,6 +94,43 @@ export function ControlSidebar({
     return <FeatureGroupSection group={group} nodes={nodesById} isConnected={isConnected} />;
   }
 
+  // Statistics goes after Acquisition Control, or first.
+  const statsAfter = visibleGroups.findIndex((g) => g.id === "acquisition_control") + 1;
+  const sections: Array<{ id: string; title: string; icon: string }> = [...visibleGroups];
+  sections.splice(statsAfter, 0, STATISTICS);
+  const groupsById = new Map(visibleGroups.map((g) => [g.id, g]));
+
+  function renderSection(id: string): ReactNode {
+    if (id === STATISTICS.id) {
+      return (
+        <SidebarSection
+          key={id}
+          id={id}
+          title={STATISTICS.title}
+          icon={STATISTICS.icon}
+          open={sectionPersistence.isOpen(id, STATISTICS.defaultOpen)}
+          onToggle={(open) => sectionPersistence.setOpen(id, open)}
+        >
+          <StatisticsSection isConnected={isConnected} {...statistics} />
+        </SidebarSection>
+      );
+    }
+    const group = groupsById.get(id);
+    if (!group) return null;
+    return (
+      <SidebarSection
+        key={group.id}
+        id={group.id}
+        title={group.title}
+        icon={group.icon}
+        open={sectionPersistence.isOpen(group.id, group.default_open)}
+        onToggle={(open) => sectionPersistence.setOpen(group.id, open)}
+      >
+        {renderSectionContent(group)}
+      </SidebarSection>
+    );
+  }
+
   const toggleLabel = collapsed ? "Show controls" : "Hide controls";
   const style = collapsed ? undefined : ({ "--iv-sidebar-width": `${width}px` } as CSSProperties);
 
@@ -113,38 +161,28 @@ export function ControlSidebar({
 
         {collapsed ? (
           <div className="iv-sidebar__rail">
-            {visibleGroups.map((group) => (
+            {sections.map((section) => (
               <button
-                key={group.id}
+                key={section.id}
                 type="button"
                 className="iv-sidebar__rail-icon"
-                aria-label={group.title}
-                title={group.title}
-                onClick={() => openAt(group.id)}
+                aria-label={section.title}
+                title={section.title}
+                onClick={() => openAt(section.id)}
               >
-                <SectionIcon name={group.icon} size={16} />
+                <SectionIcon name={section.icon} size={16} />
               </button>
             ))}
           </div>
         ) : (
           <div className="iv-sidebar__body" ref={bodyRef}>
+            {sections.map((section) => renderSection(section.id))}
             {groups.length === 0 ? (
               <p className="sidebar-placeholder">Loading controls…</p>
-            ) : visibleGroups.length === 0 ? (
-              <p className="sidebar-placeholder">No applicable sections for this device.</p>
             ) : (
-              visibleGroups.map((group) => (
-                <SidebarSection
-                  key={group.id}
-                  id={group.id}
-                  title={group.title}
-                  icon={group.icon}
-                  open={sectionPersistence.isOpen(group.id, group.default_open)}
-                  onToggle={(open) => sectionPersistence.setOpen(group.id, open)}
-                >
-                  {renderSectionContent(group)}
-                </SidebarSection>
-              ))
+              visibleGroups.length === 0 && (
+                <p className="sidebar-placeholder">No applicable sections for this device.</p>
+              )
             )}
           </div>
         )}

@@ -14,7 +14,7 @@ This crate defines the data contract between a camera service (`viva-service`) a
 - **Discovery** -- `DeviceAnnounce`, `DeviceStatus`, `DeviceXmlResponse`
 - **Node values** -- `NodeValueUpdate`, `NodeSetRequest`, `NodeOpResponse`, `BulkReadRequest` / `BulkReadResponse`
 - **Live feature state** -- `FeatureState` (value, effective access mode, availability, numeric range, available enum entries), `NumericRange`, `CommandResult`
-- **Acquisition** -- `AcquisitionControlRequest`, `AcquisitionCommand`, `AcquisitionStatus`
+- **Acquisition** -- `AcquisitionControlRequest`, `AcquisitionCommand`, `AcquisitionStatus` with the stream's `StreamCounters`
 - **Image framing** -- `PixelFormat`, `ImageMeta`, `FrameHeader` (16-byte binary header on `image`)
 - **Event-vision framing** -- `EvsHeader` (24-byte binary header) and `EvsFormat`, for blocks published on `keys::evs`
 - **Key expressions** -- the `keys` module builds every topic path, e.g. `keys::node_value`, `keys::image`, `keys::evs`

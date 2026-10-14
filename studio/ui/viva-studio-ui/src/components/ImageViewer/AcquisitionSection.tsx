@@ -20,7 +20,7 @@ interface AcquisitionSectionProps {
  * The acquisition settings. The camera's own `AcquisitionStart`/
  * `AcquisitionStop` commands are left out: the header's Start and Stop also
  * run the stream that carries the frames to the viewer. The frames received
- * are counted in the viewer's status bar.
+ * are counted in the Statistics section.
  */
 export function AcquisitionSection({
   isConnected,

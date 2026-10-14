@@ -2,7 +2,7 @@
 
 use viva_genicam::report::{OpenCamera, ReportTarget};
 use viva_genicam::{
-    Camera, GenicamError, StreamBlock, U3vConnection, U3vFrameStream, U3vRegisterIo,
+    Camera, GenicamError, StreamBlock, StreamStats, U3vConnection, U3vFrameStream, U3vRegisterIo,
     U3vStreamOptions,
 };
 use viva_service::{BlockStream, DeviceOps, SharedCamera, StreamSource};
@@ -132,8 +132,8 @@ impl BlockStream for U3vBlocks {
         Ok(self.0.next_frame().await?.map(StreamBlock::Image))
     }
 
-    fn frames_lost(&self) -> u64 {
-        self.0.stats().frames_lost()
+    fn stats(&self) -> Option<StreamStats> {
+        Some(self.0.stats())
     }
 
     async fn close(self: Box<Self>) {

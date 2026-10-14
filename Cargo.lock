@@ -3630,6 +3630,7 @@ dependencies = [
  "ts-rs",
  "viva-genapi",
  "viva-genapi-xml",
+ "viva-genicam",
  "viva-pfnc",
 ]
 

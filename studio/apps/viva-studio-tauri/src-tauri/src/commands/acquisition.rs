@@ -12,7 +12,7 @@ use crate::state::events::Events;
 
 fn status(active: bool) -> AcquisitionStatus {
     if active {
-        AcquisitionStatus::active(None, 0)
+        AcquisitionStatus::active(None, None)
     } else {
         AcquisitionStatus::inactive()
     }

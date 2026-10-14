@@ -17,7 +17,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use viva_fake_gige::{FakeCamera, FakeCameraBuilder, GvcpCommand};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
-    AcquisitionCommand, AcquisitionControlRequest, EvsFormat, EvsHeader, NodeOpResponse, keys,
+    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, EvsFormat, EvsHeader,
+    NodeOpResponse, keys,
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,79 @@ async fn e2e_acquisition_roundtrip() {
     }
 
     // 10. Clean shutdown.
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+}
+
+/// The acquisition status carries the stream's counters while it runs, and
+/// on stop the final counters arrive before the status that says acquisition
+/// is off — so a client keeps the numbers after Stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_acquisition_status_carries_the_stream_counters() {
+    let _cam = TestCamera::start().await;
+
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .expect("discovery failed");
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let status_sub = session
+        .declare_subscriber(keys::acquisition_status(&device_id))
+        .await
+        .unwrap();
+    let next_status = || async {
+        let sample = tokio::time::timeout(Duration::from_secs(5), status_sub.recv_async())
+            .await
+            .expect("no acquisition status within 5 s")
+            .expect("subscriber closed");
+        serde_json::from_slice::<AcquisitionStatus>(&sample.payload().to_bytes())
+            .expect("failed to parse AcquisitionStatus")
+    };
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Start).await;
+    assert!(resp.ok, "AcquisitionStart failed: {:?}", resp.error);
+
+    // The start status has no counters yet; the frame loop's do.
+    let counted = loop {
+        let status = next_status().await;
+        assert!(status.active, "acquisition stopped by itself: {status:?}");
+        if let Some(stats) = status.stats.filter(|s| s.frames_complete > 0) {
+            assert!(status.fps.is_some(), "a counted status has a rate");
+            break stats;
+        }
+    };
+    assert!(counted.packets_received > 0, "{counted:?}");
+    assert!(counted.bytes > 0, "{counted:?}");
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Stop).await;
+    assert!(resp.ok, "AcquisitionStop failed: {:?}", resp.error);
+
+    let mut status = next_status().await;
+    while status.active {
+        status = next_status().await;
+    }
+    let last = status
+        .stats
+        .expect("the first inactive status is the final count");
+    assert!(last.frames_complete >= counted.frames_complete, "{last:?}");
+    let off = next_status().await;
+    assert!(!off.active && off.stats.is_none(), "{off:?}");
+
     let _ = shutdown_tx.send(true);
     for task in tasks {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;

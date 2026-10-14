@@ -14,6 +14,7 @@ import { useFeature, useFeatureStore } from "../../device/FeatureStoreContext";
 import { TauriProvider, type XmlModelProvider } from "../../xml_model/provider";
 import { isUnknownKind, nodeDisplayName, nodeKindCssKey, nodeKindIcon } from "../../xml_model/helpers";
 import { useDraftValues } from "../../state/useDraftValues";
+import { Search, X } from "lucide-react";
 import { useSplitter } from "../Layout/useSplitter";
 import { CategoryList } from "./CategoryList";
 import { FeatureList } from "./FeatureList";
@@ -106,6 +107,12 @@ export function FeatureBrowserPage({
   const { drafts, errors, setDraft, resetDraft, clearAllDrafts } = useDraftValues();
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
 
+  const { size: categoryWidth, handleProps: categorySplitterProps } = useSplitter({
+    storageKey: "viva-studio:category-width",
+    defaultSize: 160,
+    minSize: 120,
+    maxSize: 360,
+  });
   const { size: featureListWidth, handleProps: featureListSplitterProps } = useSplitter({
     storageKey: "viva-studio:feature-list-width",
     defaultSize: 240,
@@ -542,18 +549,16 @@ export function FeatureBrowserPage({
               type="button"
               className="browser-toolbar__search-clear"
               aria-label="Clear search"
+              title="Clear search"
               onClick={() => {
                 handleSearchChange("");
                 searchInputRef.current?.focus();
               }}
             >
-              {"\u00D7"}
+              <X size={14} aria-hidden="true" />
             </button>
           ) : (
-            <svg className="browser-toolbar__search-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" />
-              <line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
+            <Search className="browser-toolbar__search-icon" size={14} aria-hidden="true" />
           )}
         </div>
 
@@ -665,7 +670,7 @@ export function FeatureBrowserPage({
         className="feature-browser__body"
         style={{ gridTemplateColumns: searchText.trim()
           ? `1fr 8px 1fr`
-          : `160px ${featureListWidth}px 8px 1fr`
+          : `${categoryWidth}px 8px ${featureListWidth}px 8px 1fr`
         }}
       >
         {searchText.trim() ? (
@@ -695,6 +700,7 @@ export function FeatureBrowserPage({
                 onSelectCategory={setSelectedCategory}
               />
             </aside>
+            <div {...categorySplitterProps} aria-label="Resize categories" />
             <aside className="pane pane--features">
               <FeatureList
                 graph={graph}
@@ -705,7 +711,7 @@ export function FeatureBrowserPage({
                 onSelectCategory={setSelectedCategory}
               />
             </aside>
-            <div {...featureListSplitterProps} />
+            <div {...featureListSplitterProps} aria-label="Resize feature list" />
           </>
         )}
 

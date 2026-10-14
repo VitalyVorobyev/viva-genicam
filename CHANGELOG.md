@@ -10,6 +10,24 @@ release opens with what to read before upgrading.
 
 ## [Unreleased]
 
+### Viva Studio — not part of any published crate
+
+- A profile line or ROI drawn on the image stays on the same image pixels when
+  the view is zoomed or panned; it used to stay on the same screen pixels
+  (#TBD).
+- The Image tab's control panel is an inspector: a label on the left and one
+  aligned control column, number fields with the unit inside and no sliders.
+  Arrow keys step a value by the camera's increment, and a typed integer
+  snaps to it (#TBD).
+- A control that cannot be changed shows a lock, and says why in its tooltip,
+  the same way for every kind (#TBD).
+- The control panel can be resized; its section headers have larger chevrons
+  and icons that look the same on every OS; a rail icon opens the panel at
+  its section. The frame counter moves to the status bar (#TBD).
+- The Feature Browser's categories column can be resized, and the search box
+  shows one clear button instead of two (#TBD).
+- Studio's app icon is the viva-genicam mark (#TBD).
+
 ## Releases
 
 | Series | Releases | File |

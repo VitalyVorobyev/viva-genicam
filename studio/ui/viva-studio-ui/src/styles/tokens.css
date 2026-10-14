@@ -150,6 +150,7 @@
   /* Image Viewer v2 layout */
   --iv-sidebar-width:      280px;
   --iv-sidebar-rail-width:  40px;
+  --iv-control-width:      136px;
   --iv-toolbar-h:           36px;
   --iv-statusbar-h:         28px;
   --iv-statusbar-bg:        #0f1318;

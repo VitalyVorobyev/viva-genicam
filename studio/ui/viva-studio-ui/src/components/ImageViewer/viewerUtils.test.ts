@@ -8,7 +8,9 @@ import {
   formatResolution,
   formatFrameCount,
   mouseToImageCoords,
-  mouseToImageCoordsClamped,
+  clampedPixel,
+  imageToWrap,
+  wrapToImage,
 } from "./viewerUtils";
 
 describe("fitContain", () => {
@@ -193,8 +195,8 @@ describe("mouseToImageCoords", () => {
   });
 });
 
-describe("mouseToImageCoordsClamped", () => {
-  const base = {
+describe("clampedPixel", () => {
+  const view = {
     boxW: 640,
     boxH: 480,
     imgW: 640,
@@ -204,35 +206,16 @@ describe("mouseToImageCoordsClamped", () => {
     panX: 0,
     panY: 0,
   };
+  const at = (x: number, y: number) => clampedPixel(wrapToImage(view, { x, y })!, 640, 480);
 
-  it("test_mouseToImageCoordsClamped_in_bounds", () => {
-    // Centre of canvas → centre of image (same as mouseToImageCoords).
-    const result = mouseToImageCoordsClamped({ ...base, mouseX: 320, mouseY: 240 });
-    expect(result).not.toBeNull();
-    expect(result!.x).toBe(320);
-    expect(result!.y).toBe(240);
+  it("takes the pixel under an in-bounds point", () => {
+    expect(at(320, 240)).toEqual({ x: 320, y: 240 });
+    expect(at(0, 0)).toEqual({ x: 0, y: 0 });
   });
 
-  it("test_mouseToImageCoordsClamped_out_of_bounds_clamps", () => {
-    // Mouse far to the right (off-image) → clamped to imgW-1.
-    const result = mouseToImageCoordsClamped({ ...base, mouseX: 9999, mouseY: 240 });
-    expect(result).not.toBeNull();
-    expect(result!.x).toBe(639); // imgW - 1
-    expect(result!.y).toBe(240);
-  });
-
-  it("test_mouseToImageCoordsClamped_top_left_corner", () => {
-    // Mouse at top-left of wrap → pixel (0,0) (no pan, no zoom, wrap == image).
-    const result = mouseToImageCoordsClamped({ ...base, mouseX: 0, mouseY: 0 });
-    expect(result).not.toBeNull();
-    expect(result!.x).toBe(0);
-    expect(result!.y).toBe(0);
-  });
-
-  it("test_mouseToImageCoordsClamped_invalid_fitscale", () => {
-    // Invalid fitScale → null (same guard as mouseToImageCoords).
-    const result = mouseToImageCoordsClamped({ ...base, fitScale: 0, mouseX: 320, mouseY: 240 });
-    expect(result).toBeNull();
+  it("clamps a point past the edge to the last pixel", () => {
+    expect(at(9999, 240)).toEqual({ x: 639, y: 240 });
+    expect(at(-5, -5)).toEqual({ x: 0, y: 0 });
   });
 });
 
@@ -282,5 +265,62 @@ describe("observedBoxSize", () => {
   it("keeps the last size while the viewer is hidden", () => {
     const shown = { w: 800, h: 600 };
     expect(observedBoxSize(shown, 0, 0)).toBe(shown);
+  });
+});
+
+// The overlays keep their geometry in image pixels and draw it through the
+// view of the moment; a line kept in wrap pixels stayed on the screen while
+// the image zoomed under it.
+describe("imageToWrap / wrapToImage", () => {
+  // 1000×500 image in a 500×500 box: the fit scale is 0.5 and the image is
+  // drawn 500×250, centred.
+  const fit = {
+    boxW: 500,
+    boxH: 500,
+    imgW: 1000,
+    imgH: 500,
+    scale: 0.5,
+    fitScale: 0.5,
+    panX: 0,
+    panY: 0,
+  };
+  // Zoomed to 200% and panned.
+  const zoomed = { ...fit, scale: 2, panX: 10, panY: -20 };
+
+  it("puts the image's corners and centre where the fit view draws them", () => {
+    expect(imageToWrap(fit, { x: 0, y: 0 })).toEqual({ x: 0, y: 125 });
+    expect(imageToWrap(fit, { x: 1000, y: 500 })).toEqual({ x: 500, y: 375 });
+    expect(imageToWrap(fit, { x: 500, y: 250 })).toEqual({ x: 250, y: 250 });
+  });
+
+  it("moves an image point with the zoom and the pan", () => {
+    // The image centre sits at the box centre plus the pan.
+    expect(imageToWrap(zoomed, { x: 500, y: 250 })).toEqual({ x: 260, y: 230 });
+    // Two CSS pixels per camera pixel from there.
+    expect(imageToWrap(zoomed, { x: 0, y: 0 })).toEqual({ x: -740, y: -270 });
+    expect(imageToWrap(zoomed, { x: 510, y: 240 })).toEqual({ x: 280, y: 210 });
+  });
+
+  it("inverts the projection at both zoom levels", () => {
+    for (const view of [fit, zoomed]) {
+      for (const p of [{ x: 0, y: 0 }, { x: 123.5, y: 456.25 }, { x: 1000, y: 500 }]) {
+        const wrap = imageToWrap(view, p)!;
+        expect(wrapToImage(view, wrap)).toEqual(p);
+      }
+    }
+  });
+
+  it("agrees with the hovered pixel", () => {
+    const wrap = imageToWrap(zoomed, { x: 321.5, y: 87.5 })!;
+    expect(mouseToImageCoords({ ...zoomed, mouseX: wrap.x, mouseY: wrap.y })).toEqual({
+      x: 321,
+      y: 87,
+    });
+  });
+
+  it("has no answer before the first frame", () => {
+    const empty = { ...fit, imgW: 0, imgH: 0 };
+    expect(imageToWrap(empty, { x: 0, y: 0 })).toBeNull();
+    expect(wrapToImage(empty, { x: 0, y: 0 })).toBeNull();
   });
 });

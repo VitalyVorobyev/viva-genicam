@@ -223,7 +223,11 @@ export type BackendMode = "Embedded" | "Remote";
 
 export type NetworkConfig = { current_ip: string, persistent_ip: string, persistent_subnet: string, persistent_gateway: string, mac: string, };
 
-export type SfncGroup = { id: string, title: string, icon: string, default_open: boolean, features: Array<SfncFeature>, };
+export type SfncGroup = { id: string, title: string,
+/**
+ * A lucide icon the UI maps by name (`sectionIcons.ts`), such as `"sun"`.
+ */
+icon: string, default_open: boolean, features: Array<SfncFeature>, };
 
 export type SfncFeature = { node: string, widget: string, };
 

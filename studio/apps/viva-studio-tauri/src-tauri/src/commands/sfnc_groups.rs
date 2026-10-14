@@ -14,6 +14,7 @@ pub struct SfncFeature {
 pub struct SfncGroup {
     pub id: String,
     pub title: String,
+    /// A lucide icon the UI maps by name (`sectionIcons.ts`), such as `"sun"`.
     pub icon: String,
     pub default_open: bool,
     pub features: Vec<SfncFeature>,
@@ -79,7 +80,7 @@ mod tests {
                 {
                     "id": "acquisition_control",
                     "title": "Acquisition Control",
-                    "icon": "▶",
+                    "icon": "play",
                     "default_open": true,
                     "features": [
                         { "node": "AcquisitionMode", "widget": "enum_select" },
@@ -93,7 +94,7 @@ mod tests {
         let group = &result[0];
         assert_eq!(group.id, "acquisition_control");
         assert_eq!(group.title, "Acquisition Control");
-        assert_eq!(group.icon, "▶");
+        assert_eq!(group.icon, "play");
         assert!(group.default_open);
         assert_eq!(group.features.len(), 2);
         assert_eq!(group.features[0].node, "AcquisitionMode");
@@ -159,8 +160,8 @@ mod tests {
     #[test]
     fn bundled_groups_name_only_widgets_the_ui_draws() {
         const DRAWN: &[&str] = &[
-            "float_slider",
-            "int_slider",
+            "float_input",
+            "int_input",
             "int_select",
             "enum_select",
             "bool_toggle",
@@ -178,6 +179,24 @@ mod tests {
                     feature.widget
                 );
             }
+        }
+    }
+
+    /// The UI maps only the icons `sectionIcons.ts` lists; a group naming
+    /// any other gets a neutral icon.
+    #[test]
+    fn bundled_groups_name_only_icons_the_ui_maps() {
+        const MAPPED: &[&str] = &[
+            "play", "sun", "crop", "zap", "bookmark", "network", "palette",
+        ];
+        let bytes = include_bytes!("../../resources/sfnc-groups.json");
+        for group in parse_sfnc_groups(bytes).expect("bundled groups parse") {
+            assert!(
+                MAPPED.contains(&group.icon.as_str()),
+                "{} names icon {:?}",
+                group.id,
+                group.icon
+            );
         }
     }
 

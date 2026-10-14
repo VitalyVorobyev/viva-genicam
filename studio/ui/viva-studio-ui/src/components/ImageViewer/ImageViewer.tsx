@@ -175,7 +175,6 @@ export function ImageViewer({
           onToggle={toggleSidebar}
           isConnected={isConnected}
           isAcquiring={isAcquiring}
-          frameCount={frameCount}
           externalModel={externalModel}
           cameraModel={cameraModel ?? null}
           deviceId={deviceId}
@@ -234,6 +233,7 @@ export function ImageViewer({
         />
         <ViewerStatusBar
           fps={fps}
+          frameCount={frameCount}
           width={imageMeta?.width ?? wsStreamInfo?.width ?? streamerInfo.width}
           height={imageMeta?.height ?? wsStreamInfo?.height ?? streamerInfo.height}
           pixelFormat={pixelFormat}
@@ -249,7 +249,6 @@ export function ImageViewer({
         onToggle={toggleSidebar}
         isConnected={isConnected}
         isAcquiring={isAcquiring}
-        frameCount={frameCount}
         externalModel={externalModel}
         cameraModel={cameraModel ?? null}
         deviceId={deviceId}

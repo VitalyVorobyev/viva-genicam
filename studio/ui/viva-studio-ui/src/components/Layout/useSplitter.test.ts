@@ -49,6 +49,11 @@ describe("splitterKeySize", () => {
     expect(splitterKeySize("ArrowRight", 395, "horizontal", bounds)).toBe(400);
   });
 
+  it("grows a pane right of its handle with ArrowLeft", () => {
+    expect(splitterKeySize("ArrowLeft", 200, "horizontal", bounds, true)).toBe(216);
+    expect(splitterKeySize("ArrowRight", 200, "horizontal", bounds, true)).toBe(184);
+  });
+
   it("ignores other keys", () => {
     expect(splitterKeySize("a", 200, "horizontal", bounds)).toBeNull();
   });

@@ -1,29 +1,32 @@
-/** Wrap-relative screen-space rectangle for ROI overlay rendering. */
-export interface ScreenRect {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
+import { imageToWrap } from "./viewerUtils";
+import type { ImageSpan, ViewTransform } from "./viewerUtils";
 
 interface RoiOverlayProps {
-  rect: ScreenRect | null;
+  /** Two opposite corners of the selection, in image pixels. */
+  rect: ImageSpan | null;
+  /** The current zoom and pan, through which the selection is drawn. */
+  view: ViewTransform;
 }
 
 /**
  * Absolutely-positioned SVG overlay that renders the current ROI selection
  * rectangle on top of the image canvas.
  *
- * Coordinates are in wrap-relative screen pixels.
+ * The selection is kept in image pixels and projected through the view on
+ * every render, so it stays on the same pixels as the image is zoomed and
+ * panned.
  * pointer-events: none — does not interfere with zoom/pan or ROI drag handlers.
  */
-export function RoiOverlay({ rect }: RoiOverlayProps) {
+export function RoiOverlay({ rect, view }: RoiOverlayProps) {
   if (!rect) return null;
+  const a = imageToWrap(view, rect.from);
+  const b = imageToWrap(view, rect.to);
+  if (!a || !b) return null;
 
-  const x = Math.min(rect.x1, rect.x2);
-  const y = Math.min(rect.y1, rect.y2);
-  const w = Math.abs(rect.x2 - rect.x1);
-  const h = Math.abs(rect.y2 - rect.y1);
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const w = Math.abs(b.x - a.x);
+  const h = Math.abs(b.y - a.y);
 
   return (
     <svg

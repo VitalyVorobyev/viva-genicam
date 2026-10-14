@@ -3,38 +3,38 @@
     {
       "id": "acquisition_control",
       "title": "Acquisition Control",
-      "icon": "▶",
+      "icon": "play",
       "default_open": true,
       "features": [
         { "node": "AcquisitionMode", "widget": "enum_select" },
         { "node": "AcquisitionStart", "widget": "command_button" },
         { "node": "AcquisitionStop", "widget": "command_button" },
-        { "node": "AcquisitionFrameRate", "widget": "float_slider" },
+        { "node": "AcquisitionFrameRate", "widget": "float_input" },
         { "node": "AcquisitionFrameRateEnable", "widget": "bool_toggle" }
       ]
     },
     {
       "id": "exposure_gain",
       "title": "Exposure & Gain",
-      "icon": "☀",
+      "icon": "sun",
       "default_open": true,
       "features": [
-        { "node": "ExposureTime", "widget": "float_slider" },
         { "node": "ExposureAuto", "widget": "enum_select" },
-        { "node": "Gain", "widget": "float_slider" },
-        { "node": "GainAuto", "widget": "enum_select" }
+        { "node": "ExposureTime", "widget": "float_input" },
+        { "node": "GainAuto", "widget": "enum_select" },
+        { "node": "Gain", "widget": "float_input" }
       ]
     },
     {
       "id": "image_format",
       "title": "Image Format",
-      "icon": "⊞",
+      "icon": "crop",
       "default_open": false,
       "features": [
-        { "node": "Width", "widget": "int_slider" },
-        { "node": "Height", "widget": "int_slider" },
-        { "node": "OffsetX", "widget": "int_slider" },
-        { "node": "OffsetY", "widget": "int_slider" },
+        { "node": "Width", "widget": "int_input" },
+        { "node": "Height", "widget": "int_input" },
+        { "node": "OffsetX", "widget": "int_input" },
+        { "node": "OffsetY", "widget": "int_input" },
         { "node": "PixelFormat", "widget": "enum_select" },
         { "node": "BinningHorizontal", "widget": "int_select" },
         { "node": "BinningVertical", "widget": "int_select" }
@@ -43,21 +43,21 @@
     {
       "id": "trigger",
       "title": "Trigger",
-      "icon": "⚡",
+      "icon": "zap",
       "default_open": false,
       "features": [
         { "node": "TriggerSelector", "widget": "enum_select" },
         { "node": "TriggerMode", "widget": "enum_select" },
         { "node": "TriggerSource", "widget": "enum_select" },
         { "node": "TriggerActivation", "widget": "enum_select" },
-        { "node": "TriggerDelay", "widget": "float_slider" },
+        { "node": "TriggerDelay", "widget": "float_input" },
         { "node": "TriggerSoftware", "widget": "command_button" }
       ]
     },
     {
       "id": "user_sets",
       "title": "User Sets",
-      "icon": "▤",
+      "icon": "bookmark",
       "default_open": false,
       "features": [
         { "node": "UserSetSelector", "widget": "enum_select" },
@@ -70,33 +70,23 @@
     {
       "id": "transport_layer",
       "title": "Transport Layer",
-      "icon": "⇌",
+      "icon": "network",
       "default_open": false,
       "features": [
-        { "node": "GevSCPSPacketSize", "widget": "int_slider" },
-        { "node": "GevSCPD", "widget": "int_slider" }
-      ]
-    },
-    {
-      "id": "auto_functions",
-      "title": "Auto Functions",
-      "icon": "⚙",
-      "default_open": false,
-      "features": [
-        { "node": "ExposureAuto", "widget": "enum_select" },
-        { "node": "GainAuto", "widget": "enum_select" },
-        { "node": "BalanceWhiteAuto", "widget": "enum_select" }
+        { "node": "GevSCPSPacketSize", "widget": "int_input" },
+        { "node": "GevSCPD", "widget": "int_input" }
       ]
     },
     {
       "id": "color_processing",
       "title": "Color Processing",
-      "icon": "◈",
+      "icon": "palette",
       "default_open": false,
       "features": [
+        { "node": "BalanceWhiteAuto", "widget": "enum_select" },
         { "node": "BalanceRatioSelector", "widget": "enum_select" },
-        { "node": "BalanceRatio", "widget": "float_slider" },
-        { "node": "Gamma", "widget": "float_slider" },
+        { "node": "BalanceRatio", "widget": "float_input" },
+        { "node": "Gamma", "widget": "float_input" },
         { "node": "LUTEnable", "widget": "bool_toggle" },
         { "node": "LUTSelector", "widget": "enum_select" }
       ]

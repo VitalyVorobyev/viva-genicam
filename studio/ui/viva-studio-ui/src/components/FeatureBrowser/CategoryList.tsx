@@ -59,7 +59,7 @@ export function CategoryList({
             aria-selected={isActive}
             className={`cat-list__item${isActive ? " cat-list__item--active" : ""}`}
             onClick={() => onSelectCategory(cat.name)}
-            title={cat.name}
+            title={cat.displayName}
           >
             <span className="cat-list__icon">{"\u25A6"}</span>
             <span className="cat-list__name">{cat.displayName}</span>

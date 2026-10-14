@@ -25,6 +25,14 @@ release opens with what to read before upgrading.
   arrive, and a final one with the stopped stream's counters
   ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
 
+### Fixed
+
+- **rustls 0.23.45 → 0.23.46** in `Cargo.lock` and `studio/Cargo.lock`, which
+  clears RUSTSEC-2026-0346, -0347, -0348 and -0349. rustls arrives only
+  through zenoh's QUIC link, so it reaches `viva-service`, the release
+  archives that carry it, and Viva Studio
+  ([#208](https://github.com/VitalyVorobyev/viva-genicam/pull/208)).
+
 ### Viva Studio — not part of any published crate
 
 - A profile line or ROI drawn on the image stays on the same image pixels when

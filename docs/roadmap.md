@@ -11,7 +11,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 - **GA-44**: whether cameras clear a command register once the command is done, which `IsDone` relies on.
 - **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, now possible: `PENDING_ACK` is enabled where the camera offers it.
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
-- **TC-27**: USB3 Vision on Linux, Windows, a SuperSpeed link, another vendor's camera, and through an unplug mid-stream; one camera on macOS over USB 2 has run it.
+- **TC-27**: USB3 Vision on Linux, a SuperSpeed link, another vendor's camera, and through an unplug mid-stream; one camera has run it, on macOS over USB 2 and on Windows.
 - **UV-05**: which transfer errors a camera recovers from; a `-vv` log of a stream that hit one settles it.
 - **UV-06**: an event that asks for an acknowledgement the USB3 Vision event interface cannot send.
 - **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.

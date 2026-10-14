@@ -93,7 +93,8 @@ See [Streaming → Packet size and MTU](tutorials/streaming.md#41-packet-size-an
 ## Windows specifics
 
 The firewall prompt, NIC power saving and jumbo frames are the usual obstacles;
-see [Networking → Windows](networking.md#22-windows).
+see [Networking → Windows](networking.md#22-windows). A USB3 Vision camera needs
+the WinUSB driver; see [USB3 Vision setup → Windows](usb.md#windows).
 
 ## Next steps
 

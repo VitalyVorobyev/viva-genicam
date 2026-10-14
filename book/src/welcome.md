@@ -26,8 +26,10 @@ viva-genicam is pre-1.0: the API still changes between releases.
   cameras from several vendors, on Linux, Windows and macOS.
 - **USB3 Vision has run on one camera**: a MATRIX VISION mvBlueFOX3-2004G, on
   macOS (Apple silicon), over a USB 2 (High Speed) link. Discovery, control,
-  streaming, chunks, events and the host clock were checked against it. Not
-  yet tried: Linux, Windows, a SuperSpeed link, any other vendor's camera,
+  streaming, chunks, events and the host clock were checked against it. It
+  streams on Windows too, once the WinUSB driver is installed
+  ([USB3 Vision setup](usb.md#windows)). Not yet tried: Linux, a SuperSpeed
+  link, any other vendor's camera,
   and a transfer that fails in the middle of a stream. Pulling the cable while
   it streams ends the stream as an unplug, checked on macOS. If you have a USB3 Vision
   camera, a report from `viva-camctl report --usb 0` is the most useful thing

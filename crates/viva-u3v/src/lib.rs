@@ -96,8 +96,12 @@ pub enum U3vError {
     Cancelled,
 
     /// An interface could not be claimed. The source is the USB library's
-    /// error: another application, or a kernel driver, may hold it.
-    #[error("claim the {interface} interface ({number}): {source}")]
+    /// error: another application, or a kernel driver, may hold it, or — on
+    /// Windows — the interface has no WinUSB driver, which the hint says.
+    #[error(
+        "claim the {interface} interface ({number}): {source}{}",
+        .hint.map_or(String::new(), |hint| format!("; {hint}"))
+    )]
     Claim {
         /// Which USB3 Vision interface: `"control"`, `"stream"` or `"event"`.
         interface: &'static str,
@@ -106,6 +110,8 @@ pub enum U3vError {
         /// The USB library's error.
         #[source]
         source: BoxError,
+        /// What the user can do about it, when the cause is known.
+        hint: Option<&'static str>,
     },
 
     /// GenCP-level decode error.

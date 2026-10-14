@@ -39,7 +39,8 @@ for what to compare.
 
 Yes — Windows, Linux and macOS are all supported. On Windows the usual
 obstacles are the firewall prompt and NIC power-saving settings; see
-[Networking → Windows](./networking.md#22-windows).
+[Networking → Windows](./networking.md#22-windows). A USB3 Vision camera needs
+the WinUSB driver once; see [USB3 Vision setup → Windows](./usb.md#windows).
 
 ---
 

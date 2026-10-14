@@ -1,7 +1,8 @@
-import { formatFps, formatResolution } from "./viewerUtils";
+import { PREVIEW_LIMIT, formatFps, formatResolution } from "./viewerUtils";
 import type { ImageCoords } from "./viewerUtils";
 
 interface ViewerStatusBarProps {
+  /** Frames a second the viewer draws, not the camera's rate. */
   fps: number;
   width: number;
   height: number;
@@ -32,7 +33,12 @@ export function ViewerStatusBar({
         </>
       )}
       <span className="iv-statusbar__sep">·</span>
-      <span className={fpsWarn ? "iv-statusbar__fps--warn" : undefined}>{fpsText}</span>
+      <span
+        className={fpsWarn ? "iv-statusbar__fps--warn" : undefined}
+        title={`Frames a second the viewer draws. ${PREVIEW_LIMIT}; every received frame is counted in Statistics`}
+      >
+        display {fpsText}
+      </span>
       {pixelInfo && (
         <>
           <span className="iv-statusbar__sep">·</span>

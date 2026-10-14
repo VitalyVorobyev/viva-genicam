@@ -19,6 +19,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 # that read features through `viva-genapi`. Off by default: a client needs only
 # the payload types.
 genapi = ["dep:viva-genapi"]
+# `From<&viva_genicam::StreamStats>` for the wire `StreamCounters`, for
+# services that stream through `viva-genicam`. Off by default, for the same
+# reason.
+genicam = ["dep:viva-genicam"]
 # `ts_rs::TS` on the payloads a UI receives, so Viva Studio generates its
 # TypeScript types from these definitions instead of keeping a copy (backlog
 # ST-28). Off by default.
@@ -30,6 +34,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 ts-rs = { version = "12.0.1", optional = true, features = ["no-serde-warnings", "serde-json-impl"] }
 viva-genapi = { version = "0.9", path = "../viva-genapi", optional = true }
+viva-genicam = { version = "0.9", path = "../viva-genicam", optional = true }
 # The PFNC table the wire's `PixelFormat` is a projection of.
 viva-pfnc = { version = "0.9", path = "../viva-pfnc" }
 

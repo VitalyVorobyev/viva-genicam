@@ -29,6 +29,7 @@ export type {
   NumericRange,
   SfncFeature,
   SfncGroup,
+  StreamCounters,
   StreamerInfo,
   StudioEvents,
 } from "../generated/ipc";

@@ -10,6 +10,41 @@ release opens with what to read before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Zenoh API version 6.** `AcquisitionStatus` carries the stream's counters,
+  `StreamCounters`, in `stats`, in place of the one `dropped` count; the
+  `genicam` feature converts them from `viva_genicam::StreamStats`. The
+  service sends a status every second while acquiring, whether or not frames
+  arrive, and a final one with the stopped stream's counters
+  ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+
+### Viva Studio — not part of any published crate
+
+- A profile line or ROI drawn on the image stays on the same image pixels when
+  the view is zoomed or panned; it used to stay on the same screen pixels
+  ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+- The Image tab's control panel is an inspector: a label on the left and one
+  aligned control column, number fields with the unit inside and no sliders.
+  Arrow keys step a value by the camera's increment, and a typed integer
+  snaps to it ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+- A control that cannot be changed shows a lock, and says why in its tooltip,
+  the same way for every kind ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+- The control panel can be resized; its section headers have larger chevrons
+  and icons that look the same on every OS; a rail icon opens the panel at
+  its section ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+- A **Statistics** section shows the stream's counters: frames received,
+  incomplete, missed and dropped by the host, packets and resends for GigE
+  Vision, transfers and transfer errors for USB3 Vision, throughput, latency.
+  The frame counter that counted only frames the viewer drew — at most 30 a
+  second — is replaced by a **Displayed** count beside the received one, and
+  the status bar labels its rate "display". The header says how many frames
+  were lost and why; the counters keep updating when frames stop and stay
+  after Stop ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+- The Feature Browser's categories column can be resized, and the search box
+  shows one clear button instead of two ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+- Studio's app icon is the viva-genicam mark ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
+
 ## Releases
 
 | Series | Releases | File |

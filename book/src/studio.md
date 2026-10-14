@@ -86,8 +86,16 @@ The **Image** tab shows the live stream once you press **Start Acq**. The
 toolbar zooms to fit or to exactly one screen pixel per camera pixel, and
 opens a histogram, a line profile and an ROI tool. **Save snapshot** saves the
 image as shown, as an 8-bit PNG. The header shows the frame rate and, once any
-are lost, how many frames were dropped — the first sign of a network that
+are lost, how many frames were lost — the first sign of a network that
 cannot keep up.
+
+The **Statistics** section of the Image tab counts every frame the camera
+sent: received complete, incomplete, missed, dropped by the host, and for GigE
+Vision the packets and resends behind them, or for USB3 Vision the transfers.
+These are frames *received*. The viewer *displays* at most 30 a second (15 in
+remote mode), and none while another tab is shown, so the status bar's
+"display" rate and the **Displayed** count stay low at a high camera rate; that
+is the preview, not a loss. The counters keep their last values after **Stop**.
 
 ## Diagnostics and reports
 

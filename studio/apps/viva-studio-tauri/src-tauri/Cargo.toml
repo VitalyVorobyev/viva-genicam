@@ -17,7 +17,7 @@ dirs = "7"
 viva-genicam = { path = "../../../../crates/viva-genicam", features = ["u3v-usb"] }
 viva_streamer = { path = "../../../crates/viva_streamer" }
 viva_xml_model = { path = "../../../crates/viva_xml_model" }
-viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api", features = ["genapi"] }
+viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api", features = ["genapi", "genicam"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time", "net", "rt-multi-thread"] }
@@ -31,7 +31,7 @@ futures-util = "0.3"
 # The UI's TypeScript types are generated from the Rust ones (`src/bindings.rs`,
 # backlog ST-28); test builds turn on the `ts` derives below.
 ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-json-impl"] }
-viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api", features = ["genapi", "ts"] }
+viva-zenoh-api = { path = "../../../../crates/viva-zenoh-api", features = ["genapi", "genicam", "ts"] }
 viva_xml_model = { path = "../../../crates/viva_xml_model", features = ["ts"] }
 # Reads `permissions/*.toml` in the ACL test, and sends IPC calls through
 # Tauri's ACL on its mock runtime.

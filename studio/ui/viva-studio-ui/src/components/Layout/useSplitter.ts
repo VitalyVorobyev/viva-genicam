@@ -16,17 +16,21 @@ const KEY_STEP = 16;
 /**
  * The size a key press asks a focused splitter for, or `null` for a key it
  * does not handle. Left/right splitters follow the horizontal arrows; a
- * vertical one sizes the pane below it, which ArrowUp grows. Home and End jump
- * to the bounds.
+ * vertical one sizes the pane below it, which ArrowUp grows. The arrow
+ * that moves the handle away from the sized pane grows it, so a pane right
+ * of its handle (`paneAfter`) grows with ArrowLeft. Home and End jump to the
+ * bounds.
  */
 export function splitterKeySize(
   key: string,
   size: number,
   orientation: "horizontal" | "vertical",
   { minSize, maxSize }: { minSize: number; maxSize: number },
+  paneAfter: boolean = orientation === "vertical",
 ): number | null {
-  const [grow, shrink] =
-    orientation === "vertical" ? ["ArrowUp", "ArrowDown"] : ["ArrowRight", "ArrowLeft"];
+  const [toStart, toEnd] =
+    orientation === "vertical" ? ["ArrowUp", "ArrowDown"] : ["ArrowLeft", "ArrowRight"];
+  const [grow, shrink] = paneAfter ? [toStart, toEnd] : [toEnd, toStart];
   switch (key) {
     case grow:
       return clampSplitter(size + KEY_STEP, minSize, maxSize);
@@ -67,6 +71,12 @@ interface SplitterOptions {
   maxSize: number;
   /** "horizontal" = left/right split (default), "vertical" = top/bottom split */
   orientation?: "horizontal" | "vertical";
+  /**
+   * Whether the sized pane lies after the handle (right of it, or below it),
+   * so that moving the handle toward the start grows the pane. Defaults to
+   * a bottom pane for a vertical split and a left pane for a horizontal one.
+   */
+  paneAfter?: boolean;
 }
 
 interface HandleProps {
@@ -105,6 +115,7 @@ export function useSplitter({
   minSize,
   maxSize,
   orientation = "horizontal",
+  paneAfter = orientation === "vertical",
 }: SplitterOptions): SplitterResult {
   const [size, setSize] = useState<number>(() => {
     const loaded = loadSize(storageKey, defaultSize);
@@ -131,8 +142,9 @@ export function useSplitter({
       const handleMove = (ev: PointerEvent) => {
         const currentPos = orientation === "vertical" ? ev.clientY : ev.clientX;
         const delta = currentPos - dragRef.current.startPos;
-        // For vertical (bottom pane): dragging up = larger, so subtract delta
-        const next = orientation === "vertical"
+        // A pane after the handle (bottom, or right) grows as the handle
+        // moves toward the start, so subtract delta.
+        const next = paneAfter
           ? clampSplitter(dragRef.current.startSize - delta, minSize, maxSize)
           : clampSplitter(dragRef.current.startSize + delta, minSize, maxSize);
         setSize(next);
@@ -149,18 +161,24 @@ export function useSplitter({
       document.addEventListener("pointermove", handleMove);
       document.addEventListener("pointerup", handleUp);
     },
-    [minSize, maxSize, storageKey, orientation],
+    [minSize, maxSize, storageKey, orientation, paneAfter],
   );
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      const next = splitterKeySize(e.key, sizeRef.current, orientation, { minSize, maxSize });
+      const next = splitterKeySize(
+        e.key,
+        sizeRef.current,
+        orientation,
+        { minSize, maxSize },
+        paneAfter,
+      );
       if (next === null) return;
       e.preventDefault();
       setSize(next);
       saveSize(storageKey, next);
     },
-    [minSize, maxSize, storageKey, orientation],
+    [minSize, maxSize, storageKey, orientation, paneAfter],
   );
 
   const isVertical = orientation === "vertical";

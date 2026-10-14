@@ -6,7 +6,7 @@ import { formatBackendChip } from "../../device/backendStatus";
 import { FeatureStoreProvider } from "../../device/FeatureStoreContext";
 import { loadPacketSize } from "../../device/packetSize";
 import { useAcquisition } from "../../device/useAcquisition";
-import { describeAcquisition } from "../../device/acquisitionStatus";
+import { describeAcquisition, streamTransport } from "../../device/acquisitionStatus";
 import { useImageMeta } from "../../device/useImageMeta";
 import { AppLogProvider, useAppLog } from "../../context/AppLogContext";
 import { ToastProvider, useToast } from "../../context/ToastContext";
@@ -45,7 +45,13 @@ function AppLayoutInner() {
   );
   // Offered at most once per session; read only by the effect that offers it.
   const autoReconnectOffered = useRef(false);
-  const { status: acqStatus, streamerInfo, start: startAcq, stop: stopAcq } = useAcquisition();
+  const {
+    status: acqStatus,
+    stats: acqStats,
+    streamerInfo,
+    start: startAcq,
+    stop: stopAcq,
+  } = useAcquisition();
   const acquisition = describeAcquisition(acqStatus);
   const { imageMeta } = useImageMeta();
   const backendStatus = useBackendStatus();
@@ -57,6 +63,11 @@ function AppLayoutInner() {
     connectionState.kind === "connected" ? connectionState.device_name : null;
   const connectedModel =
     connectionState.kind === "connected" ? connectionState.model : null;
+  const connectedId = connectionState.kind === "connected" ? connectionState.device_id : null;
+  const transport = streamTransport(
+    devices.find((d) => d.id === connectedId),
+    connectedId ?? "",
+  );
 
   // T7.7 — keep document.title in sync with connection state
   useEffect(() => {
@@ -235,11 +246,7 @@ function AppLayoutInner() {
               <span className="app-header__acq-dot" />
               <span
                 className={acquisition.dropping ? "app-header__acq-text--dropping" : undefined}
-                title={
-                  acquisition.dropping
-                    ? "Frames the camera sent that never arrived complete, or that Studio could not keep up with"
-                    : undefined
-                }
+                title={acquisition.title}
               >
                 {acquisition.text}
               </span>
@@ -286,10 +293,13 @@ function AppLayoutInner() {
                 isConnected={isConnected}
                 isAcquiring={acqStatus.active}
                 externalModel={externalModel}
-                deviceId={connectionState.kind === "connected" ? connectionState.device_id : null}
+                deviceId={connectedId}
                 deviceName={connectedDeviceName ?? undefined}
                 cameraModel={connectedModel ?? undefined}
                 imageMeta={imageMeta}
+                receivedFps={acqStatus.fps}
+                stats={acqStats}
+                transport={transport}
                 isActive={activeTab === "image"}
               />
             </div>

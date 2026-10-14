@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 
 export function buildStorageKey(cameraModel: string | null): string {
   return `iv-sections-${cameraModel ?? "__default__"}`;
@@ -42,14 +42,14 @@ export function useSectionPersistence(
   const [sections, setSections] = useState<Record<string, boolean>>(() =>
     readStoredSections(cameraModel),
   );
-  const prevModelRef = useRef<string | null>(cameraModel);
 
-  useEffect(() => {
-    if (prevModelRef.current !== cameraModel) {
-      prevModelRef.current = cameraModel;
-      setSections(readStoredSections(cameraModel));
-    }
-  }, [cameraModel]);
+  // A new camera brings its own sections, in the same render rather than
+  // one effect later, so no section shows the previous camera's state.
+  const [prevModel, setPrevModel] = useState(cameraModel);
+  if (cameraModel !== prevModel) {
+    setPrevModel(cameraModel);
+    setSections(readStoredSections(cameraModel));
+  }
 
   function isOpen(id: string, defaultOpen: boolean): boolean {
     return id in sections ? sections[id] : defaultOpen;

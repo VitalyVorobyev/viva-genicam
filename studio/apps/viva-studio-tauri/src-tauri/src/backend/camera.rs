@@ -11,7 +11,7 @@ use viva_genicam::genapi::RegisterIo;
 use viva_genicam::u3v::UsbTransfer;
 use viva_genicam::{
     COMMAND_TIMEOUT, Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
-    U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
+    StreamStats, U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -223,13 +223,12 @@ impl Frames {
         }
     }
 
-    /// Frames lost since the stream started: closed incomplete, never seen
-    /// (block-id gaps) or discarded under backpressure — one count for both
+    /// The stream's counters since it started, one shape for both
     /// transports.
-    pub(crate) fn dropped(&self) -> u64 {
+    pub(crate) fn stats(&self) -> StreamStats {
         match self {
-            Frames::Gige(stream) => stream.stats().frames_lost(),
-            Frames::U3v(stream) => stream.stats().frames_lost(),
+            Frames::Gige(stream) => stream.stats(),
+            Frames::U3v(stream) => stream.stats(),
         }
     }
 }

@@ -3,9 +3,11 @@ import {
   canvasLayout,
   imageRendering,
   observedBoxSize,
+  clampedPixel,
   mouseToImageCoords,
-  mouseToImageCoordsClamped,
+  wrapToImage,
 } from "./viewerUtils";
+import type { ImageSpan, Point, ViewTransform } from "./viewerUtils";
 import { useZoomPan } from "./useZoomPan";
 import type { ZoomPanState } from "./useZoomPan";
 import { buildTransform } from "./zoomPanUtils";
@@ -13,11 +15,9 @@ import { samplePixel, formatPixelSample } from "./pixelInspectorUtils";
 import type { PixelHoverInfo } from "./pixelInspectorUtils";
 import { CrosshairOverlay } from "./CrosshairOverlay";
 import { RoiOverlay } from "./RoiOverlay";
-import type { ScreenRect } from "./RoiOverlay";
 import { buildImageRect, clampRoiToImage } from "./roiUtils";
 import type { ImageRect } from "./roiUtils";
 import { LineOverlay } from "./LineOverlay";
-import type { ScreenLine } from "./LineOverlay";
 import type { LineSegment } from "./lineProfileUtils";
 
 export type { PixelHoverInfo };
@@ -82,9 +82,15 @@ export function ViewerCanvas({
     null,
   );
 
+  // The ROI and line overlays are kept in image pixels, not wrap pixels, and
+  // drawn through the current view: a zoom or a pan moves them with the image.
+
   // ── ROI drag state ───────────────────────────────────────────────────────────
-  const roiDragRef = useRef({ active: false, startX: 0, startY: 0 });
-  const [roiOverlayRect, setRoiOverlayRect] = useState<ScreenRect | null>(null);
+  const roiDragRef = useRef<{ active: boolean; start: Point }>({
+    active: false,
+    start: { x: 0, y: 0 },
+  });
+  const [roiOverlayRect, setRoiOverlayRect] = useState<ImageSpan | null>(null);
 
   // Clear the overlay when ROI mode is turned off, while rendering rather
   // than in an effect that would render twice.
@@ -95,8 +101,11 @@ export function ViewerCanvas({
   }
 
   // ── Line drag state ──────────────────────────────────────────────────────────
-  const lineDragRef = useRef({ active: false, startX: 0, startY: 0 });
-  const [lineOverlay, setLineOverlay] = useState<ScreenLine | null>(null);
+  const lineDragRef = useRef<{ active: boolean; start: Point }>({
+    active: false,
+    start: { x: 0, y: 0 },
+  });
+  const [lineOverlay, setLineOverlay] = useState<ImageSpan | null>(null);
 
   // Clear the overlay when line mode is turned off.
   const [prevLineMode, setPrevLineMode] = useState(lineMode);
@@ -377,137 +386,91 @@ export function ViewerCanvas({
     onPixelHover?.(null);
   };
 
+  // The view the overlays and pointer positions are mapped through.
+  const view: ViewTransform = {
+    boxW: boxSize.w,
+    boxH: boxSize.h,
+    imgW: imgSize.w,
+    imgH: imgSize.h,
+    scale: zoomPan.state.scale,
+    fitScale: zoomPan.state.fitScale,
+    panX: zoomPan.state.panX,
+    panY: zoomPan.state.panY,
+  };
+
+  /** The image point under a pointer event, or `null` before the first frame. */
+  const imagePointOf = (e: React.PointerEvent<HTMLDivElement>): Point | null => {
+    const bRect = e.currentTarget.getBoundingClientRect();
+    return wrapToImage(view, { x: e.clientX - bRect.left, y: e.clientY - bRect.top });
+  };
+
+  const pixelOf = (p: Point) => clampedPixel(p, imgSize.w, imgSize.h);
+
   // ── ROI pointer handlers ─────────────────────────────────────────────────────
 
   const handleRoiPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
+    const at = imagePointOf(e);
+    if (!at) return;
     e.currentTarget.setPointerCapture(e.pointerId);
-    const bRect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - bRect.left;
-    const y = e.clientY - bRect.top;
-    roiDragRef.current = { active: true, startX: x, startY: y };
-    setRoiOverlayRect({ x1: x, y1: y, x2: x, y2: y });
+    roiDragRef.current = { active: true, start: at };
+    setRoiOverlayRect({ from: at, to: at });
     onRoiSelect?.(null);
   };
 
   const handleRoiPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!roiDragRef.current.active) return;
-    const bRect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - bRect.left;
-    const y = e.clientY - bRect.top;
-    setRoiOverlayRect({
-      x1: roiDragRef.current.startX,
-      y1: roiDragRef.current.startY,
-      x2: x,
-      y2: y,
-    });
+    const at = imagePointOf(e);
+    if (!at) return;
+    setRoiOverlayRect({ from: roiDragRef.current.start, to: at });
   };
 
   const handleRoiPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!roiDragRef.current.active) return;
     roiDragRef.current.active = false;
+    const at = imagePointOf(e);
+    if (!at) return;
 
-    const bRect = e.currentTarget.getBoundingClientRect();
-    const endX = e.clientX - bRect.left;
-    const endY = e.clientY - bRect.top;
-
-    setRoiOverlayRect({
-      x1: roiDragRef.current.startX,
-      y1: roiDragRef.current.startY,
-      x2: endX,
-      y2: endY,
-    });
-
-    const { scale, panX, panY, fitScale } = zoomPan.state;
-    const params = {
-      boxW: boxSize.w,
-      boxH: boxSize.h,
-      imgW: imgSize.w,
-      imgH: imgSize.h,
-      scale,
-      fitScale,
-      panX,
-      panY,
-    };
-
-    const startPt = mouseToImageCoordsClamped({
-      ...params,
-      mouseX: roiDragRef.current.startX,
-      mouseY: roiDragRef.current.startY,
-    });
-    const endPt = mouseToImageCoordsClamped({ ...params, mouseX: endX, mouseY: endY });
-
-    if (startPt && endPt) {
-      const raw = buildImageRect(startPt, endPt);
-      const clamped = clampRoiToImage(raw, imgSize.w, imgSize.h);
-      onRoiSelect?.(clamped);
-    }
+    const raw = buildImageRect(pixelOf(roiDragRef.current.start), pixelOf(at));
+    const roi = clampRoiToImage(raw, imgSize.w, imgSize.h);
+    // What stays drawn is what Apply writes.
+    setRoiOverlayRect({ from: { x: roi.x, y: roi.y }, to: { x: roi.x + roi.w, y: roi.y + roi.h } });
+    onRoiSelect?.(roi);
   };
 
   // ── Line pointer handlers ────────────────────────────────────────────────────
 
   const handleLinePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
+    const at = imagePointOf(e);
+    if (!at) return;
     e.currentTarget.setPointerCapture(e.pointerId);
-    const bRect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - bRect.left;
-    const y = e.clientY - bRect.top;
-    lineDragRef.current = { active: true, startX: x, startY: y };
-    setLineOverlay({ x1: x, y1: y, x2: x, y2: y });
+    lineDragRef.current = { active: true, start: at };
+    setLineOverlay({ from: at, to: at });
     onLineSelect?.(null);
   };
 
   const handleLinePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!lineDragRef.current.active) return;
-    const bRect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - bRect.left;
-    const y = e.clientY - bRect.top;
-    setLineOverlay({
-      x1: lineDragRef.current.startX,
-      y1: lineDragRef.current.startY,
-      x2: x,
-      y2: y,
-    });
+    const at = imagePointOf(e);
+    if (!at) return;
+    setLineOverlay({ from: lineDragRef.current.start, to: at });
   };
 
   const handleLinePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!lineDragRef.current.active) return;
     lineDragRef.current.active = false;
+    const at = imagePointOf(e);
+    if (!at) return;
 
-    const bRect = e.currentTarget.getBoundingClientRect();
-    const endX = e.clientX - bRect.left;
-    const endY = e.clientY - bRect.top;
-
-    // Keep overlay line visible after release
+    const start = pixelOf(lineDragRef.current.start);
+    const end = pixelOf(at);
+    // What stays drawn joins the centres of the pixels the profile samples.
     setLineOverlay({
-      x1: lineDragRef.current.startX,
-      y1: lineDragRef.current.startY,
-      x2: endX,
-      y2: endY,
+      from: { x: start.x + 0.5, y: start.y + 0.5 },
+      to: { x: end.x + 0.5, y: end.y + 0.5 },
     });
-
-    const { scale, panX, panY, fitScale } = zoomPan.state;
-    const params = {
-      boxW: boxSize.w,
-      boxH: boxSize.h,
-      imgW: imgSize.w,
-      imgH: imgSize.h,
-      scale,
-      fitScale,
-      panX,
-      panY,
-    };
-
-    const startPt = mouseToImageCoordsClamped({
-      ...params,
-      mouseX: lineDragRef.current.startX,
-      mouseY: lineDragRef.current.startY,
-    });
-    const endPt = mouseToImageCoordsClamped({ ...params, mouseX: endX, mouseY: endY });
-
-    if (startPt && endPt) {
-      onLineSelect?.({ x0: startPt.x, y0: startPt.y, x1: endPt.x, y1: endPt.y });
-    }
+    onLineSelect?.({ x0: start.x, y0: start.y, x1: end.x, y1: end.y });
   };
 
   // ── Cursor and class derivation ─────────────────────────────────────────────
@@ -559,8 +522,8 @@ export function ViewerCanvas({
         mouseX={suppressCrosshair ? null : (wrapMouse?.x ?? null)}
         mouseY={suppressCrosshair ? null : (wrapMouse?.y ?? null)}
       />
-      <RoiOverlay rect={roiMode ? roiOverlayRect : null} />
-      <LineOverlay line={lineMode ? lineOverlay : null} />
+      <RoiOverlay rect={roiMode ? roiOverlayRect : null} view={view} />
+      <LineOverlay line={lineMode ? lineOverlay : null} view={view} />
       {!isStreaming && hasRenderedFrame && (
         <div className="iv-canvas-overlay">Acquisition stopped</div>
       )}

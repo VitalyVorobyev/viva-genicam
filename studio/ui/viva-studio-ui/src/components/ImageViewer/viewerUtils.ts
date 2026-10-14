@@ -93,6 +93,22 @@ export function formatResolution(w: number, h: number): string {
 }
 
 /**
+ * What limits the viewer's own rate: frames are drawn at most this often, and
+ * only while the Image tab is shown (`DISPLAY_FPS` in the embedded backend,
+ * `fps_limit` in the remote one).
+ */
+export const PREVIEW_LIMIT = "Preview is limited to 30 fps (15 remote)";
+
+/** Elapsed time as `m:ss`, or `h:mm:ss` from an hour on. */
+export function formatElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const s = String(total % 60).padStart(2, "0");
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
+
+/**
  * Format a frame count as a human-readable string with thousands separators.
  * Uses en-US locale for deterministic output across environments.
  * Examples: 0 → "0 frames", 1 → "1 frame", 1234 → "1,234 frames"
@@ -102,10 +118,13 @@ export function formatFrameCount(n: number): string {
   return n === 1 ? `${formatted} frame` : `${formatted} frames`;
 }
 
-/** Parameters for converting a wrap-relative mouse position to image-space pixel coordinates. */
-export interface MouseToImageCoordsParams {
-  mouseX: number;
-  mouseY: number; // wrap-relative
+/**
+ * How the image is shown in the viewer box: its size, the box's, and the
+ * zoom and pan. `scale` is CSS pixels per camera pixel; the canvas is drawn
+ * at `fitScale` and enlarged by `scale / fitScale` about its centre, which
+ * sits at the box centre plus the pan.
+ */
+export interface ViewTransform {
   boxW: number;
   boxH: number;
   imgW: number;
@@ -116,6 +135,55 @@ export interface MouseToImageCoordsParams {
   panY: number;
 }
 
+/** A point, in wrap-relative CSS pixels or in (fractional) image pixels. */
+export interface Point {
+  x: number;
+  y: number;
+}
+
+/** Two image points: a line's ends, or a rectangle's opposite corners. */
+export interface ImageSpan {
+  from: Point;
+  to: Point;
+}
+
+function isDrawable(v: ViewTransform): boolean {
+  return v.fitScale > 0 && v.scale > 0 && v.imgW > 0 && v.imgH > 0;
+}
+
+/**
+ * Where an image point is drawn in the wrap, under the current view. The
+ * overlays keep their geometry in image pixels and draw it through this, so
+ * a zoom or a pan moves them with the image. `null` before the first frame.
+ */
+export function imageToWrap(v: ViewTransform, p: Point): Point | null {
+  if (!isDrawable(v)) return null;
+  const s = v.scale / v.fitScale;
+  return {
+    x: v.boxW / 2 + v.panX + (p.x - v.imgW / 2) * v.fitScale * s,
+    y: v.boxH / 2 + v.panY + (p.y - v.imgH / 2) * v.fitScale * s,
+  };
+}
+
+/**
+ * The image point under a wrap position: the inverse of {@link imageToWrap},
+ * unrounded and unclamped. `null` before the first frame.
+ */
+export function wrapToImage(v: ViewTransform, p: Point): Point | null {
+  if (!isDrawable(v)) return null;
+  const s = v.scale / v.fitScale;
+  return {
+    x: (p.x - v.boxW / 2 - v.panX) / s / v.fitScale + v.imgW / 2,
+    y: (p.y - v.boxH / 2 - v.panY) / s / v.fitScale + v.imgH / 2,
+  };
+}
+
+/** Parameters for converting a wrap-relative mouse position to image-space pixel coordinates. */
+export interface MouseToImageCoordsParams extends ViewTransform {
+  mouseX: number;
+  mouseY: number; // wrap-relative
+}
+
 /** Image-space pixel coordinates (integer, zero-based). */
 export interface ImageCoords {
   x: number;
@@ -123,53 +191,31 @@ export interface ImageCoords {
 }
 
 /**
- * Convert a wrap-relative mouse position to image-space pixel coordinates.
- *
- * The canvas is center-anchored (CSS left:50%; top:50%) and scaled by scale/fitScale
- * relative to the fit-to-contain size. The canvas itself is drawn at fitScale of the
- * original image dimensions. Inversion:
- *   imageX = (mouseX - boxW/2 - panX) / (scale/fitScale) / fitScale + imgW/2
+ * Convert a wrap-relative mouse position to the image pixel under it, by
+ * {@link wrapToImage}.
  *
  * Returns null when the coordinates fall outside the image bounds or inputs are invalid.
  */
 export function mouseToImageCoords(
   p: MouseToImageCoordsParams,
 ): ImageCoords | null {
-  if (p.fitScale <= 0 || p.imgW <= 0 || p.imgH <= 0) return null;
-  const s = p.scale / p.fitScale;
-  const pixX = Math.floor(
-    ((p.mouseX - p.boxW / 2 - p.panX) / s / p.fitScale) + p.imgW / 2,
-  );
-  const pixY = Math.floor(
-    ((p.mouseY - p.boxH / 2 - p.panY) / s / p.fitScale) + p.imgH / 2,
-  );
+  const at = wrapToImage(p, { x: p.mouseX, y: p.mouseY });
+  if (!at) return null;
+  const pixX = Math.floor(at.x);
+  const pixY = Math.floor(at.y);
   if (pixX < 0 || pixX >= p.imgW || pixY < 0 || pixY >= p.imgH) return null;
   return { x: pixX, y: pixY };
 }
 
 /**
- * Variant of `mouseToImageCoords` that clamps out-of-bounds coordinates to the
- * image edges instead of returning null.
+ * The pixel holding an image point, clamped to the image's edges.
  *
- * Useful for ROI selection where the user may drag beyond the image boundary —
- * the selection is clamped to the nearest valid pixel rather than being discarded.
- *
- * Returns null only when the transform parameters are invalid (fitScale ≤ 0 or
- * zero image dimensions).
+ * A drag that leaves the image (an ROI, a profile line) ends on the nearest
+ * pixel rather than being discarded.
  */
-export function mouseToImageCoordsClamped(
-  p: MouseToImageCoordsParams,
-): ImageCoords | null {
-  if (p.fitScale <= 0 || p.imgW <= 0 || p.imgH <= 0) return null;
-  const s = p.scale / p.fitScale;
-  const pixX = Math.floor(
-    ((p.mouseX - p.boxW / 2 - p.panX) / s / p.fitScale) + p.imgW / 2,
-  );
-  const pixY = Math.floor(
-    ((p.mouseY - p.boxH / 2 - p.panY) / s / p.fitScale) + p.imgH / 2,
-  );
+export function clampedPixel(p: Point, imgW: number, imgH: number): ImageCoords {
   return {
-    x: Math.max(0, Math.min(p.imgW - 1, pixX)),
-    y: Math.max(0, Math.min(p.imgH - 1, pixY)),
+    x: Math.max(0, Math.min(imgW - 1, Math.floor(p.x))),
+    y: Math.max(0, Math.min(imgH - 1, Math.floor(p.y))),
   };
 }

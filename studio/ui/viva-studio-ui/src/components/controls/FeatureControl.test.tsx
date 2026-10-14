@@ -13,6 +13,7 @@ import { FeatureControl } from "./FeatureControl";
 
 const model = makeModel({
   ExposureTime: { kind: "Float", display_name: "Exposure Time" },
+  Width: { kind: "Integer" },
   PixelFormat: {
     kind: "Enumeration",
     enum_entries: [
@@ -34,6 +35,17 @@ function exposure(value: number, extra: Partial<FeatureState> = {}): FeatureStat
     numeric: { min: 10, max: 100_000 },
     unit: "us",
     ...extra,
+  };
+}
+
+function width(value: number): FeatureState {
+  return {
+    value,
+    access_mode: "RW",
+    kind: "Integer",
+    is_implemented: true,
+    is_available: true,
+    numeric: { min: 16, max: 1920, inc: 8 },
   };
 }
 
@@ -80,15 +92,29 @@ function show(name: keyof typeof nodes) {
 }
 
 const field = () => screen.getByRole("spinbutton", { name: "Exposure Time" }) as HTMLInputElement;
+const widthField = () => screen.getByRole("spinbutton", { name: "Width" }) as HTMLInputElement;
+
+/** The control's accessible description: what `aria-describedby` points at. */
+function description(el: HTMLElement): string {
+  return (el.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
+}
 
 describe("FeatureControl", () => {
-  it("draws the camera's value and range", async () => {
+  it("draws the camera's value, range and unit in one field, with no slider", async () => {
     camera({ ExposureTime: exposure(1000) });
-    show("ExposureTime");
+    const { container } = show("ExposureTime");
     await waitFor(() => expect(field().value).toBe("1000"));
-    const slider = screen.getByRole("slider") as HTMLInputElement;
-    expect(slider.min).toBe("10");
-    expect(slider.max).toBe("100000");
+    expect(field().min).toBe("10");
+    expect(field().max).toBe("100000");
+    expect(field().title).toBe("10 – 100000 µs");
+    expect(container.querySelector(".iv-number__unit")?.textContent).toBe("µs");
+    expect(screen.queryByRole("slider")).toBeNull();
+    // The value is shown once, in the field.
+    expect(screen.queryByText("1000 us")).toBeNull();
   });
 
   it("tells the user when the camera refuses a write", async () => {
@@ -124,17 +150,100 @@ describe("FeatureControl", () => {
 
   it("greys out a locked feature and says why", async () => {
     camera({ ExposureTime: exposure(1000, { access_mode: "RO" }) });
-    show("ExposureTime");
+    const { container } = show("ExposureTime");
     await waitFor(() => expect(field().disabled).toBe(true));
-    expect((screen.getByRole("slider") as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText("Read-only now")).toBeTruthy();
+    expect(description(field())).toBe("Read-only now");
+    const row = container.querySelector(".iv-row")!;
+    expect(row.classList.contains("iv-row--blocked")).toBe(true);
+    expect(row.getAttribute("title")).toBe("Read-only now");
+    expect(row.querySelector(".iv-row__lock")).not.toBeNull();
   });
 
   it("greys out a feature the camera's state makes unavailable", async () => {
     camera({ ExposureTime: exposure(1000, { is_available: false, access_mode: "RO" }) });
     show("ExposureTime");
-    expect(await screen.findByText(/Not available/)).toBeTruthy();
-    expect(field().disabled).toBe(true);
+    await waitFor(() => expect(field().disabled).toBe(true));
+    expect(description(field())).toMatch(/Not available/);
+  });
+
+  it("says why every kind of control is blocked, the same way", async () => {
+    camera({
+      PixelFormat: {
+        value: "Mono8",
+        access_mode: "RO",
+        kind: "Enumeration",
+        is_implemented: true,
+        is_available: true,
+        enum_available: ["Mono8"],
+      },
+    });
+    const { container } = show("PixelFormat");
+    const select = (await screen.findByRole("combobox", { name: "PixelFormat" })) as HTMLSelectElement;
+    await waitFor(() => expect(select.disabled).toBe(true));
+    expect(description(select)).toBe("Read-only now");
+    expect(container.querySelector(".iv-row--blocked .iv-row__lock")).not.toBeNull();
+  });
+
+  it("is not blocked, and has no lock, when the camera allows a write", async () => {
+    camera({ ExposureTime: exposure(1000) });
+    const { container } = show("ExposureTime");
+    await waitFor(() => expect(field().value).toBe("1000"));
+    expect(field().disabled).toBe(false);
+    expect(description(field())).toBe("");
+    expect(container.querySelector(".iv-row__lock")).toBeNull();
+  });
+
+  it("steps an integer by its increment with the arrow keys, and writes it", async () => {
+    const writes = camera({ Width: width(640) });
+    show("Width");
+    await waitFor(() => expect(widthField().value).toBe("640"));
+    act(() => widthField().focus());
+    await userEvent.keyboard("{ArrowUp}");
+    expect(writes).toEqual([{ nodeName: "Width", value: 648 }]);
+    act(() => store.set("Width", width(648)));
+    await userEvent.keyboard("{ArrowDown}");
+    expect(writes[1]).toEqual({ nodeName: "Width", value: 640 });
+  });
+
+  it("snaps a typed integer to the camera's increment", async () => {
+    const writes = camera({ Width: width(640) });
+    show("Width");
+    await waitFor(() => expect(widthField().value).toBe("640"));
+    await userEvent.clear(widthField());
+    await userEvent.type(widthField(), "101{Enter}");
+    // 16 + 8k nearest 101.
+    expect(writes).toEqual([{ nodeName: "Width", value: 104 }]);
+  });
+
+  it("does not step a float the camera gives no increment for", async () => {
+    const writes = camera({ ExposureTime: exposure(1000) });
+    show("ExposureTime");
+    await waitFor(() => expect(field().value).toBe("1000"));
+    act(() => field().focus());
+    await userEvent.keyboard("{ArrowUp}");
+    expect(writes).toEqual([]);
+    expect(field().value).toBe("1000");
+  });
+
+  it("steps a float by the increment the camera declares", async () => {
+    const writes = camera({
+      ExposureTime: exposure(1000, { numeric: { min: 10, max: 100_000, inc: 10 } }),
+    });
+    show("ExposureTime");
+    await waitFor(() => expect(field().value).toBe("1000"));
+    act(() => field().focus());
+    await userEvent.keyboard("{ArrowUp}");
+    expect(writes).toEqual([{ nodeName: "ExposureTime", value: 1010 }]);
+  });
+
+  it("reverts what was typed on Escape", async () => {
+    const writes = camera({ ExposureTime: exposure(1000) });
+    show("ExposureTime");
+    await waitFor(() => expect(field().value).toBe("1000"));
+    await userEvent.clear(field());
+    await userEvent.type(field(), "5{Escape}");
+    expect(field().value).toBe("1000");
+    expect(writes).toEqual([]);
   });
 
   it("draws nothing for a feature the camera does not implement", async () => {

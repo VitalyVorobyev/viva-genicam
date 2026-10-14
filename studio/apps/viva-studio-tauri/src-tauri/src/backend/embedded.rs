@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use viva_genicam::Camera;
 use viva_genicam::u3v::U3vDeviceInfo;
 use viva_streamer::frame::{FrameEncoder, FramePacer};
-use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState};
+use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState, StreamCounters};
 
 use crate::state::device_state::{DeviceInfo, StreamerInfo};
 use crate::state::events::Events;
@@ -74,7 +74,7 @@ const DISPLAY_FPS: u32 = 30;
 /// How long stopping waits for the WebSocket server to finish on its own.
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How often a stream reports its frame rate and dropped frames.
+/// How often a stream reports its frame rate and counters.
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Backend that communicates directly with cameras via GigE Vision / USB3 Vision.
@@ -662,8 +662,9 @@ fn gige_of(
 /// Read frames until shutdown, sending the viewer a BMP of each as often as
 /// [`FramePacer`] allows: at most [`DISPLAY_FPS`] a second, and once a second
 /// while no viewer is connected, so one that connects later has a frame.
-/// Once a second it also reports the stream's frame rate and dropped frames,
-/// as `viva-service` does (ST-36).
+/// Every [`STATUS_INTERVAL`] it also reports the stream's frame rate and
+/// counters, whether or not frames arrive, and on the way out the final
+/// counters as [`AcquisitionStatus::stopped`], as `viva-service` does (ST-36).
 async fn run_frame_reader(
     mut frame_stream: Frames,
     frame_tx: watch::Sender<Bytes>,
@@ -673,7 +674,9 @@ async fn run_frame_reader(
     events: Arc<Events>,
 ) {
     let mut pacer = FramePacer::new(Duration::from_secs(1) / DISPLAY_FPS);
-    let mut last_status = Instant::now();
+    let mut last_status = tokio::time::Instant::now();
+    let mut status_tick = tokio::time::interval_at(last_status + STATUS_INTERVAL, STATUS_INTERVAL);
+    status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut frames_since_status = 0u32;
     let mut encoder = FrameEncoder::new();
     let mut unsupported = None;
@@ -687,6 +690,17 @@ async fn run_frame_reader(
                 }
                 continue;
             }
+            _ = status_tick.tick() => {
+                let now = tokio::time::Instant::now();
+                events.send(&AcquisitionStatus::active(
+                    Some(frames_since_status as f32 / (now - last_status).as_secs_f32()),
+                    Some(StreamCounters::from(&frame_stream.stats())),
+                ));
+                last_status = now;
+                frames_since_status = 0;
+                continue;
+            }
+            // Cancel-safe for both transports: a tick loses no frame.
             result = frame_stream.next_frame() => match result {
                 Ok(Some(frame)) => frame,
                 Ok(None) => {
@@ -714,15 +728,6 @@ async fn run_frame_reader(
             let _ = info_tx.send(changed);
         }
         frames_since_status += 1;
-        let elapsed = last_status.elapsed();
-        if elapsed >= STATUS_INTERVAL {
-            events.send(&AcquisitionStatus::active(
-                Some(frames_since_status as f32 / elapsed.as_secs_f32()),
-                frame_stream.dropped(),
-            ));
-            last_status = Instant::now();
-            frames_since_status = 0;
-        }
         if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
             continue;
         }
@@ -748,6 +753,11 @@ async fn run_frame_reader(
             Err(e) => warn!("Frame not drawn: {e}"),
         }
     }
+    // The final counters, sent before the stop command's `inactive`: the
+    // backend awaits this task first.
+    events.send(&AcquisitionStatus::stopped(StreamCounters::from(
+        &frame_stream.stats(),
+    )));
     // Wait for the stream to let go of the camera before this task ends: the
     // backend awaits this task before it starts another stream or releases
     // the camera.
@@ -1178,11 +1188,11 @@ mod tests {
     }
 
     /// While streaming, the backend reports the camera's frame rate and the
-    /// frames lost on the way, from the library's stream statistics, once a
-    /// second. Embedded mode reported neither, and the header showed only
-    /// "Acquiring" (ST-36).
+    /// library's stream counters once a second. Embedded mode reported
+    /// neither, and the header showed only "Acquiring" (ST-36). When the
+    /// stream stops, the final counters follow, so the UI keeps them.
     #[test]
-    fn streaming_reports_the_frame_rate_and_the_dropped_frames() {
+    fn streaming_reports_the_frame_rate_and_the_stream_counters() {
         let _port = fake_camera::lock();
         tauri::async_runtime::block_on(async {
             let _fake = fake_camera::start().await;
@@ -1197,7 +1207,11 @@ mod tests {
             let reported = async {
                 loop {
                     let streaming = recorder.of("acquisition-status").into_iter().find(|s| {
-                        s["active"] == true && s["fps"].as_f64().is_some_and(|fps| fps > 0.0)
+                        s["active"] == true
+                            && s["fps"].as_f64().is_some_and(|fps| fps > 0.0)
+                            && s["stats"]["frames_complete"]
+                                .as_u64()
+                                .is_some_and(|n| n > 0)
                     });
                     if let Some(status) = streaming {
                         return status;
@@ -1208,9 +1222,22 @@ mod tests {
             let status = tokio::time::timeout(std::time::Duration::from_secs(5), reported)
                 .await
                 .expect("no acquisition-status with a frame rate within 5 s");
-            assert_eq!(status["dropped"], 0, "{status}");
+            let stats = &status["stats"];
+            for lost in ["frames_incomplete", "frames_missed", "frames_backpressure"] {
+                assert_eq!(stats[lost], 0, "{status}");
+            }
+            assert!(stats["packets_received"].as_u64() > Some(0), "{status}");
 
             backend.stop_acquisition().await.expect("stop");
+            let last = recorder
+                .of("acquisition-status")
+                .pop()
+                .expect("a status after stop");
+            assert_eq!(last["active"], false, "{last}");
+            assert!(
+                last["stats"]["frames_complete"].as_u64() >= stats["frames_complete"].as_u64(),
+                "the stopped status carries the final counters: {last}"
+            );
             backend.disconnect().await.expect("disconnect");
         });
     }

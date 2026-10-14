@@ -1,51 +1,44 @@
-import { useState } from "react";
 import type { ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { SectionIcon } from "./sectionIcons";
 
 interface SidebarSectionProps {
+  /** The group's id; the section's element is `iv-section-<id>`. */
+  id: string;
   title: string;
+  /** A name from `sectionIcons.ts`. */
   icon: string;
   children: ReactNode;
-  defaultOpen?: boolean;
-  onToggle?: (open: boolean) => void;
+  open: boolean;
+  onToggle: (open: boolean) => void;
 }
 
-export function SidebarSection({
-  title,
-  icon,
-  children,
-  defaultOpen = false,
-  onToggle,
-}: SidebarSectionProps) {
-  const [open, setOpen] = useState(defaultOpen);
-
+/**
+ * One collapsible section of the control sidebar. Its open state is the
+ * caller's, so the rail can open a section and a new camera brings its own.
+ */
+export function SidebarSection({ id, title, icon, children, open, onToggle }: SidebarSectionProps) {
+  const bodyId = `iv-section-${id}-body`;
   return (
-    <div className="sidebar-section">
+    <section className="sidebar-section" id={`iv-section-${id}`}>
       <button
         type="button"
         className="sidebar-section__header"
         aria-expanded={open}
-        onClick={() => {
-          const next = !open;
-          onToggle?.(next);
-          setOpen(next);
-        }}
+        aria-controls={bodyId}
+        onClick={() => onToggle(!open)}
       >
-        <span className="sidebar-section__icon" aria-hidden="true">
-          {icon}
-        </span>
+        <SectionIcon name={icon} className="sidebar-section__icon" size={14} />
         <span className="sidebar-section__label">{title}</span>
-        <span
-          className={`sidebar-section__chevron${open ? " sidebar-section__chevron--open" : ""}`}
+        <ChevronDown
+          className={`sidebar-section__chevron${open ? "" : " sidebar-section__chevron--closed"}`}
+          size={16}
           aria-hidden="true"
-        >
-          ›
-        </span>
+        />
       </button>
-      <div
-        className={`sidebar-section__body${open ? "" : " sidebar-section__body--hidden"}`}
-      >
+      <div className="sidebar-section__body" id={bodyId} hidden={!open}>
         {children}
       </div>
-    </div>
+    </section>
   );
 }

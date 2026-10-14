@@ -6,9 +6,9 @@ function makeGroup(features: { node: string }[]): SfncGroup {
   return {
     id: "test_group",
     title: "Test Group",
-    icon: "T",
+    icon: "sun",
     default_open: false,
-    features: features.map((f) => ({ node: f.node, widget: "float_slider" })),
+    features: features.map((f) => ({ node: f.node, widget: "float_input" })),
   };
 }
 

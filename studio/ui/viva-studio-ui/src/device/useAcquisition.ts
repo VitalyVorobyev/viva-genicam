@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "../tauri";
+import { NO_ACQUISITION, followAcquisition } from "./acquisitionStatus";
 import { listenTo } from "./events";
-import type { AcquisitionStatus, StreamerInfo } from "./types";
+import type { StreamerInfo } from "./types";
 
+/**
+ * The acquisition: its last status, the stream's counters — kept after Stop,
+ * cleared by the next start — and the stream the viewer reads.
+ */
 export function useAcquisition() {
-  const [status, setStatus] = useState<AcquisitionStatus>({
-    active: false,
-    fps: null,
-    dropped: 0,
-  });
+  const [acquisition, setAcquisition] = useState(NO_ACQUISITION);
   const [streamerInfo, setStreamerInfo] = useState<StreamerInfo | null>(null);
 
   useEffect(() => {
@@ -19,7 +20,7 @@ export function useAcquisition() {
     let cancelled = false;
 
     listenTo("acquisition-status", (next) => {
-      setStatus(next);
+      setAcquisition((prev) => followAcquisition(prev, next));
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenStatus = fn;
@@ -28,6 +29,7 @@ export function useAcquisition() {
     listenTo("connection-state-changed", (state) => {
       if (state.kind === "disconnected" || state.kind === "error") {
         setStreamerInfo(null);
+        setAcquisition(NO_ACQUISITION);
       }
     }).then((fn) => {
       if (cancelled) fn();
@@ -54,5 +56,5 @@ export function useAcquisition() {
     await invoke("stop_acquisition");
   }, []);
 
-  return { status, streamerInfo, start, stop };
+  return { status: acquisition.status, stats: acquisition.stats, streamerInfo, start, stop };
 }

@@ -10,88 +10,11 @@ release opens with what to read before upgrading.
 
 ## [Unreleased]
 
-### Changed
-
-- **USB3 Vision on Windows.** A camera without the WinUSB driver fails to open
-  with an error that names WinUSB and links the new book page
-  [USB3 Vision setup](https://vitalyvorobyev.github.io/viva-genicam/usb.html#windows),
-  which shows how to install it with Zadig. The mvBlueFOX3-2004G runs on
-  Windows as well as macOS
-  ([#208](https://github.com/VitalyVorobyev/viva-genicam/pull/208)).
-- **Zenoh API version 6.** `AcquisitionStatus` carries the stream's counters,
-  `StreamCounters`, in `stats`, in place of the one `dropped` count; the
-  `genicam` feature converts them from `viva_genicam::StreamStats`. The
-  service sends a status every second while acquiring, whether or not frames
-  arrive, and a final one with the stopped stream's counters
-  ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-
-### Fixed
-
-- **Indexed values.** An `<Integer>` or `<Float>` that picks its value from a
-  table by an index node — `<pIndex>` with `<ValueIndexed>`/`<pValueIndexed>`
-  and `<ValueDefault>`/`<pValueDefault>` (GenICam Standard §2.8.5) — reads and
-  writes the entry its index selects, and takes its bounds, access and lock
-  from that entry. An `<Integer>`'s `<pIndex>` was read as an address term,
-  so with `TriggerSelector` at `FrameStart` (3) a Basler a2A4096-44g5m's
-  `TriggerMode` read bootstrap register 0x000C (3 × 4 bytes) and reported
-  1396185518. An index no entry names, on a node with no default, is
-  `GenApiError::NoIndexedValue`
-  ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
-  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
-- **A `<Float>`'s `<Value>`** is its value, and a write is kept, as an
-  `<Integer>`'s is; such a `<Float>` had no value, and the converters reading
-  it failed ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
-  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
-- **A `<StructEntry>`'s own `<pInvalidator>`s** make its cached value stale,
-  as its `<StructReg>`'s do
-  ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
-  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
-- **A command over an indexed value**, such as the Basler a2A4096-44g5m's
-  `TriggerSoftware`, follows the entry its index selects to completion:
-  `is_done` reads that entry's register past its cache, and is done at once
-  when that entry is write-only. Every entry it can select is a command
-  target, so a feature snapshot does not read one. An indexed `<Integer>` or
-  `<Float>` whose selected entry is write-only is reported by `feature_state`
-  without a value; the read was refused and the feature dropped from the
-  snapshot (Codex review of
-  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211);
-  [#212](https://github.com/VitalyVorobyev/viva-genicam/pull/212)).
-- **rustls 0.23.45 → 0.23.46** in `Cargo.lock` and `studio/Cargo.lock`, which
-  clears RUSTSEC-2026-0346, -0347, -0348 and -0349. rustls arrives only
-  through zenoh's QUIC link, so it reaches `viva-service`, the release
-  archives that carry it, and Viva Studio
-  ([#208](https://github.com/VitalyVorobyev/viva-genicam/pull/208)).
-
-### Viva Studio — not part of any published crate
-
-- A profile line or ROI drawn on the image stays on the same image pixels when
-  the view is zoomed or panned; it used to stay on the same screen pixels
-  ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-- The Image tab's control panel is an inspector: a label on the left and one
-  aligned control column, number fields with the unit inside and no sliders.
-  Arrow keys step a value by the camera's increment, and a typed integer
-  snaps to it ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-- A control that cannot be changed shows a lock, and says why in its tooltip,
-  the same way for every kind ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-- The control panel can be resized; its section headers have larger chevrons
-  and icons that look the same on every OS; a rail icon opens the panel at
-  its section ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-- A **Statistics** section shows the stream's counters: frames received,
-  incomplete, missed and dropped by the host, packets and resends for GigE
-  Vision, transfers and transfer errors for USB3 Vision, throughput, latency.
-  The frame counter that counted only frames the viewer drew — at most 30 a
-  second — is replaced by a **Displayed** count beside the received one, and
-  the status bar labels its rate "display". The header says how many frames
-  were lost and why; the counters keep updating when frames stop and stay
-  after Stop ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-- The Feature Browser's categories column can be resized, and the search box
-  shows one clear button instead of two ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-- Studio's app icon is the viva-genicam mark ([#209](https://github.com/VitalyVorobyev/viva-genicam/pull/209)).
-
 ## Releases
 
 | Series | Releases | File |
 |--------|----------|------|
+| 0.10 | 0.10.0 (2026-10-17) | [changelog/0.10.md](changelog/0.10.md) |
 | 0.9 | 0.9.0 (2026-10-13) | [changelog/0.9.md](changelog/0.9.md) |
 | 0.8 | 0.8.0 (2026-10-10) | [changelog/0.8.md](changelog/0.8.md) |
 | 0.7 | 0.7.0 (2026-09-30) | [changelog/0.7.md](changelog/0.7.md) |
@@ -102,4 +25,4 @@ release opens with what to read before upgrading.
 | 0.2 | 0.2.8 (2026-07-28), 0.2.7 (2026-07-28), 0.2.6 (2026-07-25), 0.2.5 (2026-04-15), 0.2.4 (2026-04-13), 0.2.3 (2026-04-12), 0.2.2 (2026-04-12), 0.2.1 (2026-04-12), 0.2.0 (2026-04-11) | [changelog/0.2.md](changelog/0.2.md) |
 | 0.1 | 0.1.0 (2026-04-10) | [changelog/0.1.md](changelog/0.1.md) |
 
-[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/VitalyVorobyev/viva-genicam/compare/v0.10.0...HEAD

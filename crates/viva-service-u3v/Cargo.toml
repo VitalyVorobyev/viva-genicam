@@ -13,11 +13,11 @@ name = "viva-service-u3v"
 path = "src/main.rs"
 
 [dependencies]
-viva-service = { version = "0.9", path = "../viva-service" }
-viva-genicam = { version = "0.9", path = "../viva-genicam", features = ["u3v-usb"] }
-viva-u3v = { version = "0.9", path = "../viva-u3v", features = ["usb"] }
+viva-service = { version = "0.10", path = "../viva-service" }
+viva-genicam = { version = "0.10", path = "../viva-genicam", features = ["u3v-usb"] }
+viva-u3v = { version = "0.10", path = "../viva-u3v", features = ["usb"] }
 viva-fake-u3v = { path = "../viva-fake-u3v" }
-viva-zenoh-api = { version = "0.9", path = "../viva-zenoh-api", features = ["genapi", "genicam"] }
+viva-zenoh-api = { version = "0.10", path = "../viva-zenoh-api", features = ["genapi", "genicam"] }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 clap = { workspace = true }

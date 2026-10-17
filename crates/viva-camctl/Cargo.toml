@@ -21,12 +21,12 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 
-viva-genicam = { version = "0.9", path = "../viva-genicam", features = ["u3v-usb", "image-io"] }
-viva-gige = { version = "0.9", path = "../viva-gige" }
-viva-sfnc = { version = "0.9", path = "../viva-sfnc" }
-viva-pfnc = { version = "0.9", path = "../viva-pfnc" }
-viva-genapi-xml = { version = "0.9", path = "../viva-genapi-xml" }
-viva-u3v = { version = "0.9", path = "../viva-u3v", features = ["usb"] }
+viva-genicam = { version = "0.10", path = "../viva-genicam", features = ["u3v-usb", "image-io"] }
+viva-gige = { version = "0.10", path = "../viva-gige" }
+viva-sfnc = { version = "0.10", path = "../viva-sfnc" }
+viva-pfnc = { version = "0.10", path = "../viva-pfnc" }
+viva-genapi-xml = { version = "0.10", path = "../viva-genapi-xml" }
+viva-u3v = { version = "0.10", path = "../viva-u3v", features = ["usb"] }
 
 [dev-dependencies]
 viva-fake-gige = { path = "../viva-fake-gige" }

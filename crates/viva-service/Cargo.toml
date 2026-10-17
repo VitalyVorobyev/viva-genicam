@@ -23,8 +23,8 @@ name = "viva-service"
 path = "src/main.rs"
 
 [dependencies]
-viva-genicam = { version = "0.9", path = "../viva-genicam" }
-viva-zenoh-api = { version = "0.9", path = "../viva-zenoh-api", features = ["genapi", "genicam"] }
+viva-genicam = { version = "0.10", path = "../viva-genicam" }
+viva-zenoh-api = { version = "0.10", path = "../viva-zenoh-api", features = ["genapi", "genicam"] }
 zenoh = "1"
 tokio = { workspace = true, features = ["macros", "signal"] }
 clap = { workspace = true }

@@ -140,7 +140,7 @@ camera other than the first:
 cargo test -p viva-genicam --features u3v-usb --test u3v_hardware -- --ignored --test-threads=1
 ```
 
-It was written against one camera (ADR-0032 §8). Run it with any other, and
+One camera has run it (ADR-0032 §8). Run it with any other, and
 attach the output to the pull request or issue.
 
 GVSP parsing and block assembly also have fuzz targets, in `fuzz/` (outside

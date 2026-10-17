@@ -448,10 +448,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// Register memory for one expectation: the reads the camera answers with,
-/// and a log of every write in order. A register nothing set reads as zeros.
+/// and a log of every read and write in order. A register nothing set reads
+/// as zeros.
 #[derive(Default)]
 struct DeviceIo {
     regs: RefCell<HashMap<u64, Vec<u8>>>,
+    reads: RefCell<Vec<u64>>,
     writes: RefCell<Vec<(u64, Vec<u8>)>>,
 }
 
@@ -467,6 +469,7 @@ impl DeviceIo {
 
 impl RegisterIo for DeviceIo {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GenApiError> {
+        self.reads.borrow_mut().push(addr);
         Ok(self
             .regs
             .borrow()
@@ -1030,6 +1033,49 @@ fn corpus_writes_reach_the_register_their_document_names() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Basler_a2A4096_44g5m.xml (#210): `TriggerSoftware` (1479-1487) writes
+/// through `d_138` (1124-1135), whose `<pIndex>d_88</pIndex>` (1046-1048, 3:
+/// `FrameStart`) selects `d_1261` at 0x100023D8 (14891, `WO`). Every node
+/// `d_138` can select is written by the command and holds no value: the
+/// `WO` registers `d_1349` (16001), `d_1261`, `d_1350` (16008), `d_999`
+/// (9544), `d_1254` (14783) and `d_1260` (14884), and the constants `d_131`,
+/// `d_134`, `d_137` (1108-1116). The command imposes `WO` (1484), so it is
+/// done at once and nothing is read back.
+#[test]
+fn corpus_indexed_command_targets_are_command_targets() {
+    let Some(mut nodemap) = corpus_nodemap("Basler_a2A4096_44g5m.xml") else {
+        return;
+    };
+    let mut missing: Vec<&str> = [
+        "d_138", "d_1349", "d_131", "d_1261", "d_1350", "d_134", "d_999", "d_1254", "d_137",
+        "d_1260",
+    ]
+    .into_iter()
+    .filter(|name| !nodemap.command_targets().contains(*name))
+    .collect();
+    missing.sort();
+    assert!(missing.is_empty(), "not command targets: {missing:?}");
+    assert!(
+        !nodemap.command_targets().contains("d_88"),
+        "the index is the trigger selector, not a target"
+    );
+
+    let io = DeviceIo::default();
+    nodemap
+        .exec_command("TriggerSoftware", &io)
+        .expect("execute");
+    assert_eq!(
+        io.writes.borrow().clone(),
+        owned(&[(0x1000_23D8, &[0x00, 0x00, 0x00, 0x01])])
+    );
+    assert!(nodemap.is_done("TriggerSoftware", &io).expect("done"));
+    assert!(
+        !io.reads.borrow().contains(&0x1000_23D8),
+        "{:X?}",
+        io.reads.borrow()
+    );
 }
 
 /// Whether `name` takes its length from a `<pLength>` node.

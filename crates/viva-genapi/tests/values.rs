@@ -386,6 +386,102 @@ fn is_done_on_a_feature_that_is_not_a_command_is_a_type_error() {
     assert!(matches!(err, GenApiError::Type { .. }), "{err:?}");
 }
 
+/// The Basler a2A4096-44g5m's `TriggerSoftware` (`Basler_a2A4096_44g5m.xml`,
+/// 1479-1487) writes through `d_138` (1124-1135), an `<Integer>` whose
+/// `<pIndex>` — the floating `TriggerSelector` value — selects a register per
+/// trigger, and whose default is another. The `<ImposedAccessMode>WO</...>`
+/// the camera puts on the command is dropped here, so completion is polled as
+/// for `UserSetLoad`; entry 3's register is `RW`, the default's `WO`. The
+/// unselected entry 1 holds the command value: reading it instead of the
+/// selected one would never finish.
+const INDEXED_COMMAND_XML: &str = r#"
+    <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+        <Integer Name="TriggerSelectorValue"><Value>3</Value></Integer>
+        <Command Name="TriggerSoftware">
+            <pValue>TriggerSoftwareMux</pValue>
+            <CommandValue>1</CommandValue>
+        </Command>
+        <Integer Name="TriggerSoftwareMux">
+            <pIndex>TriggerSelectorValue</pIndex>
+            <pValueIndexed Index="1">TriggerSoftwareReg1</pValueIndexed>
+            <pValueIndexed Index="3">TriggerSoftwareReg3</pValueIndexed>
+            <pValueDefault>TriggerSoftwareRegDefault</pValueDefault>
+        </Integer>
+        <IntReg Name="TriggerSoftwareReg1">
+            <Address>0x5000</Address><Length>4</Length><AccessMode>RW</AccessMode>
+            <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+        </IntReg>
+        <IntReg Name="TriggerSoftwareReg3">
+            <Address>0x5004</Address><Length>4</Length><AccessMode>RW</AccessMode>
+            <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+        </IntReg>
+        <IntReg Name="TriggerSoftwareRegDefault">
+            <Address>0x5008</Address><Length>4</Length><AccessMode>WO</AccessMode>
+            <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+        </IntReg>
+    </RegisterDescription>
+"#;
+
+/// GA-36 through an indexed value: §2.8.8's IsDone "always read[s] the device
+/// register regardless of the state of the caches" — the register the index
+/// selects now, which executing just cached at the command value.
+#[test]
+fn is_done_reads_the_register_an_indexed_target_selects() {
+    let mut nodemap = nodemap(INDEXED_COMMAND_XML);
+    let io = MemIo::with(&[(0x5000, be32(1))]);
+    nodemap
+        .exec_command("TriggerSoftware", &io)
+        .expect("execute");
+    assert_eq!(io.writes(), [(0x5004, be32(1))]);
+    assert!(!nodemap.is_done("TriggerSoftware", &io).expect("running"));
+    io.device_sets(0x5004, &be32(0));
+    assert!(nodemap.is_done("TriggerSoftware", &io).expect("finished"));
+    assert_eq!(io.reads_of(0x5004), 2, "every IsDone reads the device");
+    assert_eq!(io.reads_of(0x5000), 0, "entry 1 is not selected");
+}
+
+/// GA-36 through an indexed value: "If the node is WriteOnly IsDone always
+/// returns true" — when the register the index selects now is. Nothing is
+/// read: the device refuses to read a write-only register.
+#[test]
+fn a_command_over_a_write_only_indexed_entry_is_done_at_once() {
+    let mut nodemap = nodemap(INDEXED_COMMAND_XML);
+    let io = MemIo::default();
+    nodemap
+        .set_integer("TriggerSelectorValue", 7, &io)
+        .expect("select the default");
+    nodemap
+        .exec_command("TriggerSoftware", &io)
+        .expect("execute");
+    assert_eq!(io.writes(), [(0x5008, be32(1))]);
+    assert!(nodemap.is_done("TriggerSoftware", &io).expect("done"));
+    assert!(io.reads.borrow().is_empty(), "{:?}", io.reads.borrow());
+}
+
+/// ST-21 through an indexed value: every node a command can write through is
+/// a command target — each entry its index can select and the default, not
+/// only the one selected when the map was built. The index is a selector the
+/// user sets, not one of them.
+#[test]
+fn every_entry_of_an_indexed_command_target_is_a_command_target() {
+    let nodemap = nodemap(INDEXED_COMMAND_XML);
+    let mut targets: Vec<&str> = nodemap
+        .command_targets()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        [
+            "TriggerSoftwareMux",
+            "TriggerSoftwareReg1",
+            "TriggerSoftwareReg3",
+            "TriggerSoftwareRegDefault",
+        ]
+    );
+}
+
 // ── Limits ──────────────────────────────────────────────────────────────────
 
 /// GA-37. §2.8.5: an `<Integer>` merges the value of its `<pValue>` with its
@@ -911,6 +1007,93 @@ fn an_indexed_value_takes_bounds_and_access_from_the_node_it_selects() {
         .expect_err("ModeB is read-only");
     assert!(matches!(err, GenApiError::Access { .. }), "{err:?}");
     assert_eq!(io.writes_to(0x104), Vec::<Vec<u8>>::new());
+}
+
+/// An indexed value whose selected node is write-only, by its own access mode
+/// or by one it imposes, has no value to read, as a plain write-only feature
+/// has none: its state says so and nothing is read. The Basler
+/// a2A4096-44g5m's command multiplexers select `WO` registers this way
+/// (`Basler_a2A4096_44g5m.xml`, `d_138`'s `d_1261`).
+#[test]
+fn the_state_of_an_indexed_value_selecting_a_write_only_node_has_no_value() {
+    const XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Selector"><Value>1</Value></Integer>
+            <Integer Name="Key">
+                <pIndex>Selector</pIndex>
+                <pValueIndexed Index="0">KeyReg0</pValueIndexed>
+                <pValueIndexed Index="1">KeyReg1</pValueIndexed>
+                <pValueDefault>KeyImposed</pValueDefault>
+            </Integer>
+            <IntReg Name="KeyReg0">
+                <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntReg Name="KeyReg1">
+                <Address>0x104</Address><Length>4</Length><AccessMode>WO</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Integer Name="KeyImposed">
+                <ImposedAccessMode>WO</ImposedAccessMode>
+                <pValue>KeyReg2</pValue>
+            </Integer>
+            <IntReg Name="KeyReg2">
+                <Address>0x108</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <Float Name="Level">
+                <pIndex>Selector</pIndex>
+                <pValueIndexed Index="0">LevelReg0</pValueIndexed>
+                <pValueIndexed Index="1">LevelReg1</pValueIndexed>
+                <pValueDefault>LevelImposed</pValueDefault>
+            </Float>
+            <FloatReg Name="LevelReg0">
+                <Address>0x200</Address><Length>8</Length><AccessMode>RW</AccessMode>
+                <Endianess>BigEndian</Endianess>
+            </FloatReg>
+            <FloatReg Name="LevelReg1">
+                <Address>0x208</Address><Length>8</Length><AccessMode>WO</AccessMode>
+                <Endianess>BigEndian</Endianess>
+            </FloatReg>
+            <Float Name="LevelImposed">
+                <ImposedAccessMode>WO</ImposedAccessMode>
+                <pValue>LevelReg2</pValue>
+            </Float>
+            <FloatReg Name="LevelReg2">
+                <Address>0x210</Address><Length>8</Length><AccessMode>RW</AccessMode>
+                <Endianess>BigEndian</Endianess>
+            </FloatReg>
+        </RegisterDescription>
+    "#;
+    let mut nodemap = nodemap(XML);
+    let io = MemIo::with(&[
+        (0x100, be32(5)),
+        (0x104, be32(6)),
+        (0x108, be32(7)),
+        (0x200, 2.5f64.to_be_bytes().to_vec()),
+        (0x208, 3.5f64.to_be_bytes().to_vec()),
+        (0x210, 4.5f64.to_be_bytes().to_vec()),
+    ]);
+    for index in [1, 7] {
+        nodemap.set_integer("Selector", index, &io).expect("select");
+        for name in ["Key", "Level"] {
+            let state = nodemap
+                .feature_state(name, &io)
+                .unwrap_or_else(|e| panic!("{name} at {index}: {e}"));
+            assert_eq!(state.value, FeatureValue::None, "{name} at {index}");
+            assert_eq!(
+                state.access,
+                Some(viva_genapi::AccessMode::WO),
+                "{name} at {index}"
+            );
+        }
+    }
+    assert!(io.reads.borrow().is_empty(), "{:?}", io.reads.borrow());
+
+    nodemap.set_integer("Selector", 0, &io).expect("select 0");
+    let state = |name: &str| nodemap.feature_state(name, &io).expect(name).value;
+    assert_eq!(state("Key"), FeatureValue::Integer(5));
+    assert_eq!(state("Level"), FeatureValue::Float(2.5));
 }
 
 /// An index no entry names, on a node with no default, has no value: a typed

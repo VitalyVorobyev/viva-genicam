@@ -10,7 +10,7 @@ pull requests.
 | [`design.md`](design.md) | Crate map, key abstractions, data flows and the design tenets |
 | [`standards.md`](standards.md) | The EMVA standards implemented here — GenApi, GenCP, GVCP/GVSP, USB3 Vision, SFNC, PFNC — and which crate implements which |
 | [`adrs/`](adrs/README.md) | Architecture decision records: why the big choices were made |
-| [`roadmap.md`](roadmap.md) | Mid-term direction: the milestones, in order, each with its backlog IDs |
+| [`roadmap.md`](roadmap.md) | The order of the open work, by backlog ID |
 | [`backlog.md`](backlog.md) | Actionable tasks, each with its evidence |
 | [`studio/zenoh-api.md`](studio/zenoh-api.md) | The Zenoh contract between the services and Viva Studio, and any other client |
 | [`studio/testing-cookbook.md`](studio/testing-cookbook.md) | Running and testing Viva Studio without a camera |
@@ -18,5 +18,4 @@ pull requests.
 
 Viva Studio's own layout, data model and checks are in
 [`../studio/README.md`](../studio/README.md). What shipped, and why, is in the
-[changelog](../CHANGELOG.md): an index, with one file per release series in
-[`../changelog/`](../changelog/).
+[changelog](../CHANGELOG.md).

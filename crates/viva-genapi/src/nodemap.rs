@@ -288,9 +288,10 @@ impl NodeMap {
     ///
     /// A command reaches its register through `<pValue>`, and the target may
     /// delegate again through its own `<pValue>` — an integer's, or an
-    /// `<IntConverter>`'s. The whole chain that [`NodeMap::exec_command`]
-    /// writes along is returned, found from the declarations rather than from
-    /// node names.
+    /// `<IntConverter>`'s — or select one by index: every entry and the
+    /// default of an indexed `<Integer>` on the way. Every node that
+    /// [`NodeMap::exec_command`] can write along is returned, found from the
+    /// declarations rather than from node names.
     ///
     /// None of these nodes holds a value worth displaying. Writing one
     /// triggers an action; reading it is at best meaningless and on some
@@ -310,7 +311,7 @@ impl NodeMap {
                 continue;
             };
             if let Some(first) = cmd.pvalue.as_deref() {
-                targets.extend(self.value_chain(first).into_iter().map(str::to_string));
+                targets.extend(self.value_reach(first).into_iter().map(str::to_string));
             }
         }
         targets
@@ -356,13 +357,56 @@ impl NodeMap {
     /// GigE Vision's `ActionDeviceKey` does exactly that on a Vieworks camera
     /// in issue #112, and its read failed one hop down. Returns `false` for an
     /// unknown name.
+    ///
+    /// This is the static part of the answer. The node an indexed value
+    /// selects depends on its index, so whether it is write-only is a
+    /// question for the device: [`NodeMap::effective_access_mode`] answers
+    /// it, and [`NodeMap::feature_state`] and [`NodeMap::is_done`] follow it.
     pub fn is_write_only(&self, name: &str) -> bool {
-        self.value_chain(name).into_iter().any(|link| {
-            self.nodes.get(link).is_some_and(|node| {
-                matches!(node.access_mode(), Some(AccessMode::WO))
-                    || node.meta().imposed_access == Some(AccessMode::WO)
-            })
+        self.value_chain(name)
+            .into_iter()
+            .any(|link| self.declares_write_only(link))
+    }
+
+    /// Whether `name` declares `WO`, as its access mode or as one it imposes.
+    fn declares_write_only(&self, name: &str) -> bool {
+        self.nodes.get(name).is_some_and(|node| {
+            matches!(node.access_mode(), Some(AccessMode::WO))
+                || node.meta().imposed_access == Some(AccessMode::WO)
         })
+    }
+
+    /// [`NodeMap::is_write_only`] along the path `name` reads through now.
+    fn write_only_now(&self, name: &str, io: &dyn RegisterIo) -> Result<bool, GenApiError> {
+        Ok(self
+            .value_path_now(name, io)?
+            .into_iter()
+            .any(|link| self.declares_write_only(link)))
+    }
+
+    /// `name`'s [`NodeMap::value_chain`], continued through the node an
+    /// indexed node at its end selects now, and that node's chain, and so on:
+    /// the nodes a read or write of `name` passes through now, each once.
+    fn value_path_now<'a>(
+        &'a self,
+        name: &'a str,
+        io: &dyn RegisterIo,
+    ) -> Result<Vec<&'a str>, GenApiError> {
+        let mut path: Vec<&'a str> = Vec::new();
+        let mut current = name;
+        loop {
+            for link in self.value_chain(current) {
+                if path.contains(&link) {
+                    return Ok(path);
+                }
+                path.push(link);
+            }
+            let last = path.last().copied().unwrap_or(current);
+            match self.indexed_target(last, io)? {
+                Some(next) if !path.contains(&next) => current = next,
+                _ => return Ok(path),
+            }
+        }
     }
 
     /// `start` followed by each node it takes its value from through
@@ -1505,11 +1549,12 @@ impl NodeMap {
         let value = self.command_value(node, io)?;
 
         if let Some(pv) = node.pvalue.clone() {
+            // "If the command is write only no polling takes place" (§2.8.8):
+            // decided on the register this execution writes.
+            let polls = self.imposed_access(name) != Some(AccessMode::WO)
+                && !self.write_only_now(&pv, io)?;
             debug!(node = %name, value, "execute command via pValue");
             self.set_integer(&pv, value, io)?;
-            // "If the command is write only no polling takes place" (§2.8.8).
-            let polls =
-                self.imposed_access(name) != Some(AccessMode::WO) && !self.is_write_only(&pv);
             self.note_command(name, polls);
             self.invalidate_dependents(name);
             return Ok(());
@@ -1542,9 +1587,10 @@ impl NodeMap {
     /// depend on the completion of the Command".
     ///
     /// So a command whose register path is write-only — a `WO` node along its
-    /// `<pValue>` chain, or an `<ImposedAccessMode>WO` on the command itself
-    /// — is done at once, and nothing is read. Otherwise the register is read
-    /// from the device, past every cache, and compared with the command value.
+    /// `<pValue>` chain or on the entry an indexed node on it selects now, or
+    /// an `<ImposedAccessMode>WO` on the command itself — is done at once, and
+    /// nothing is read. Otherwise the register is read from the device, past
+    /// every cache on that path, and compared with the command value.
     /// When it differs, the command has finished and everything depending on
     /// it is invalidated, so values read while it ran are read again.
     ///
@@ -1556,11 +1602,14 @@ impl NodeMap {
         let Some(target) = node.pvalue.as_deref() else {
             return Ok(true);
         };
-        if self.imposed_access(name) == Some(AccessMode::WO) || self.is_write_only(target) {
+        if self.imposed_access(name) == Some(AccessMode::WO) {
+            return Ok(true);
+        }
+        let chain = self.value_path_now(target, io)?;
+        if chain.iter().any(|link| self.declares_write_only(link)) {
             return Ok(true);
         }
         let expected = self.command_value(node, io)?;
-        let chain = self.value_chain(target);
         for link in &chain {
             if let Some(node) = self.nodes.get(*link) {
                 node.invalidate_cache();

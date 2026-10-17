@@ -41,9 +41,8 @@ cargo tauri dev
 
 `zenoh-studio.json5` connects to the service endpoint configured by
 `zenoh-local.json5`. Studio does not load it on its own — there is no default
-path and no dev-mode auto-detection. Without `ZENOH_CONFIG` it starts in
-embedded mode, whose discovery skips loopback, so the fake camera never appears
-(#132). The header chip shows which mode is active.
+path and no dev-mode auto-detection
+([#132](https://github.com/VitalyVorobyev/viva-genicam/issues/132)).
 
 ## What to Expect
 
@@ -78,7 +77,7 @@ The keys the service publishes and answers, and their payloads, are in
 
 ## Automated tests
 
-What runs today, and where:
+What runs, and where:
 
 | Suite | Where | Runs in CI |
 |-------|-------|------------|
@@ -88,9 +87,9 @@ What runs today, and where:
 | Tauri backend tests, both modes end to end against `viva-fake-gige`: embedded in-process, and remote through `viva-service` run in-process on a shared Zenoh session (`backend/embedded.rs`, `backend/remote.rs`, `main.rs`) | `studio/apps/viva-studio-tauri/src-tauri`: `cargo test` | yes, on macOS, Ubuntu and Windows (`studio-ci.yml`) |
 | UI tests (vitest): pure functions in node, components on jsdom | `studio/ui/viva-studio-ui`: `bun run test -- --run` | yes (`studio-ci.yml`) |
 
-Every fake-camera suite binds UDP 3956, so two of them running at once — for
-example in two worktrees — cross-talk and fail spuriously. Within the Tauri
-crate the tests take `backend::embedded::fake_camera::lock()` first.
+Fake-camera suites share UDP 3956 ([`CONTRIBUTING.md`](../../CONTRIBUTING.md#tests));
+within the Tauri crate the tests take `backend::embedded::fake_camera::lock()`
+first.
 
 ### Backend tests
 

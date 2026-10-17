@@ -43,15 +43,14 @@ opaque string without `/`).
   so a camera keeps its id on another port and identical cameras still differ; a
   camera without a serial falls back to its bus and address (`cam-u3v-1e10300a-2-7`),
   which a replug can change. Any byte other than a letter, a digit, `-` or `.` — `_` included — becomes `_` and two hex digits (`a/b` is `a_2fb`), so two serials never share an id. `name` is the user-defined name, else the model, else the address. `serial` is
-  the device's own serial, empty when it reports none (services before version 3 put the
-  device id there). `ip`, `mac`, `user_name` and `manufacturer` are optional and absent
+  the device's own serial, empty when it reports none. `ip`, `mac`, `user_name` and `manufacturer` are optional and absent
   when unknown; USB3 Vision has no `ip` or `mac`. The app labels a device by its
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
-- **`api_version`:** Optional (`null`/absent means the service is pre-versioning). The app
-  compares this against `viva_zenoh_api::API_VERSION` (currently `6`). On mismatch or
-  absence, the app emits an `api-version-mismatch` Tauri event (see below) and still
-  discovers the device — no hard rejection.
+- **`api_version`:** Optional. The app compares this against
+  `viva_zenoh_api::API_VERSION` (currently `6`). On mismatch or absence, the app emits
+  an `api-version-mismatch` Tauri event (see below) and still discovers the device — no
+  hard rejection.
 
 ---
 
@@ -121,7 +120,7 @@ opaque string without `/`).
 - **Rust type:** `NodeValueUpdate` in `viva-zenoh-api`
 - **Semantics:** The app maintains a local `NodeValueCache` updated by these messages.
   `access_mode` is one of `RO`, `WO`, `RW`, `NA`.
-  `min`, `max`, `inc` are **optional** runtime constraint hints (ZA-06). When present,
+  `min`, `max`, `inc` are **optional** runtime constraint hints When present,
   the UI can tighten slider ranges without re-parsing XML. Services that do not implement
   constraint propagation may omit them; the UI falls back to XML-parsed static constraints.
 
@@ -175,7 +174,7 @@ opaque string without `/`).
 - **Rust type:** request: `BulkReadRequest`; response: `BulkReadResponse` — both in `viva_zenoh_api`
 - **Semantics:** Batch read of multiple node values in a single round-trip. Unknown node names are silently omitted. An empty `names` list returns an empty `values` map. The per-entry shape is identical to `nodes/{name}/value`.
 
-### `genicam/devices/{device_id}/nodes/{node_name}/state` *(API v2)*
+### `genicam/devices/{device_id}/nodes/{node_name}/state`
 
 - **Direction:** Service → App (subscribe) + App → Service (queryable GET)
 - **Mechanism:** `put` on change **and** queryable reply
@@ -205,9 +204,9 @@ opaque string without `/`).
   { "value": null, "access_mode": "WO", "kind": "Command", "is_implemented": true, "is_available": true }
   ```
 - **Rust type:** `FeatureState` in `viva_zenoh_api`
-- **Semantics:** Authoritative live state of a feature, computed by `viva_genapi::NodeMap::feature_state` and converted with the `genapi` feature of `viva_zenoh_api` — the same computation Viva Studio's embedded mode uses. `access_mode` is what the feature permits now: the declared modes along its `<pValue>` chain combined (an `RW` integer over an `RO` register is `RO`), then `RO` while the feature is locked or unavailable, and `NA` when nothing is permitted. `min/max/inc` apply to the current selector context; `enum_available` is the set of entries the device reports as currently implemented/available. The legacy `nodes/{name}/value` key continues to be published in parallel for backward compatibility and is populated from the same `FeatureState` via `FeatureState::to_node_value_update`. Clients that speak API v2 should prefer this key.
+- **Semantics:** Authoritative live state of a feature, computed by `viva_genapi::NodeMap::feature_state` and converted with the `genapi` feature of `viva_zenoh_api` — the same computation Viva Studio's embedded mode uses. `access_mode` is what the feature permits now: the declared modes along its `<pValue>` chain combined (an `RW` integer over an `RO` register is `RO`), then `RO` while the feature is locked or unavailable, and `NA` when nothing is permitted. `min/max/inc` apply to the current selector context; `enum_available` is the set of entries the device reports as currently implemented/available. The service also publishes `nodes/{name}/value`, from the same `FeatureState` via `FeatureState::to_node_value_update`; prefer this key.
 
-### `genicam/devices/{device_id}/nodes/bulk/state` *(API v2)*
+### `genicam/devices/{device_id}/nodes/bulk/state`
 
 - **Direction:** App → Service (queryable GET)
 - **Request (JSON):** `{ "names": ["ExposureTime", "PixelFormat", "Width"] }` (same shape as `BulkReadRequest`)
@@ -415,8 +414,7 @@ travels as `0`, which decodes as `viva_pfnc::PixelFormat::Unknown(0)`.
 - **Semantics:** An event-vision camera (a LUCID Triton2 EVS streaming Prophesee EVT 3.0 or
   EVT 2.1, [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)) sends events,
   not pixels. Its blocks go here and **never** on `image`: they have no image geometry, and
-  the GVSP leader's Size X / Size Y do not describe one. Services before API version 4
-  published them on `image` as a `1 × N` frame in a format that decodes as `Unknown`.
+  the GVSP leader's Size X / Size Y do not describe one.
   Named `evs` rather than `events` so it cannot be confused with GenICam device events.
 
 #### Binary event-block header layout (24 bytes, all fields little-endian)

@@ -153,8 +153,12 @@ impl NodeMap {
         };
 
         let usable = is_implemented && is_available;
-        let has_value =
-            usable && !self.is_write_only(name) && !self.command_targets().contains(name);
+        // `access` covers the node an indexed value selects now, which the
+        // static `is_write_only` cannot see.
+        let has_value = usable
+            && access != Some(AccessMode::WO)
+            && !self.is_write_only(name)
+            && !self.command_targets().contains(name);
         // A chunk or event feature with nothing attached has no value now and
         // cannot be used: the port it reads is "not present" (GenICam
         // Standard v2.1.1 §2.8.16), as it is between frames.

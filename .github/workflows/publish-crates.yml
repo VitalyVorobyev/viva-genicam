@@ -131,12 +131,14 @@ jobs:
           publish viva-genapi
           publish viva-gige
           publish viva-u3v
-          # Its optional `genapi` feature names viva-genapi, and cargo resolves
-          # optional dependencies at publish time too.
-          publish viva-zenoh-api
 
           # Level 2: facade (depends on all above)
           publish viva-genicam
+
+          # Its optional `genapi` and `genicam` features name viva-genapi and
+          # viva-genicam, and cargo resolves optional dependencies at publish
+          # time too.
+          publish viva-zenoh-api
 
           # Level 3: service layer
           publish viva-service

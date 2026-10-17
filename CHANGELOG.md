@@ -46,6 +46,15 @@ release opens with what to read before upgrading.
   as its `<StructReg>`'s do
   ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
   [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
+- **A command over an indexed value**, such as the Basler a2A4096-44g5m's
+  `TriggerSoftware`, follows the entry its index selects to completion:
+  `is_done` reads that entry's register past its cache, and is done at once
+  when that entry is write-only. Every entry it can select is a command
+  target, so a feature snapshot does not read one. An indexed `<Integer>` or
+  `<Float>` whose selected entry is write-only is reported by `feature_state`
+  without a value; the read was refused and the feature dropped from the
+  snapshot (Codex review of
+  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
 - **rustls 0.23.45 → 0.23.46** in `Cargo.lock` and `studio/Cargo.lock`, which
   clears RUSTSEC-2026-0346, -0347, -0348 and -0349. rustls arrives only
   through zenoh's QUIC link, so it reaches `viva-service`, the release

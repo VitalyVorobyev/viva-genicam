@@ -1,15 +1,13 @@
 # Roadmap
 
-The order of the work ahead. **This file only looks forward**: shipped work lives in the [changelog](../CHANGELOG.md), tasks and their evidence in [backlog.md](backlog.md). The public, user-facing list of gaps is [issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191); this file orders the work that closes them. Delete a milestone when it merges.
+The order of the work ahead. **This file only looks forward**: shipped work lives in the [changelog](../CHANGELOG.md), tasks and their evidence in [backlog.md](backlog.md). The public, user-facing list of gaps is [issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191); this file orders the work that closes them. Remove an ID here when its row ships.
 
-**Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
-
-**Next release.** 0.9.0 has shipped; 0.10.0 ships what is on `main`, and a hardware report promotes the rows it bears on.
+**Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row this file does not name stays there unscheduled.
 
 ## Waiting on hardware
 
 - **GA-44**: whether cameras clear a command register once the command is done, which `IsDone` relies on.
-- **TC-12**: the width of `PENDING_ACK`'s timeout field; needs a capture, now possible: `PENDING_ACK` is enabled where the camera offers it.
+- **TC-12**: the width of `PENDING_ACK`'s timeout field; a capture of a camera that sends one settles it.
 - **TC-24**: how a device answers a heartbeat during a `PENDING_ACK`ed command; the same capture settles it.
 - **TC-27**: USB3 Vision on Linux, a SuperSpeed link, another vendor's camera, and through an unplug mid-stream; one camera has run it, on macOS over USB 2 and on Windows.
 - **UV-05**: which transfer errors a camera recovers from; a `-vv` log of a stream that hit one settles it.
@@ -34,7 +32,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 ## Studio
 
-Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); each milestone updates it when a type it consumes changes.
+Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); a change to a type it consumes updates it in the same PR.
 
 - **Foundations**: ST-45, ST-46, ST-47.
 - **Viewer parity**: ST-39.

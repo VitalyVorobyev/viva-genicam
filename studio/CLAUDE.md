@@ -27,10 +27,8 @@ cd studio/ui/viva-studio-ui && bun install && bun run dev
 cd studio/apps/viva-studio-tauri && cargo tauri dev
 ```
 
-Against the in-repo fake camera, follow `docs/studio/testing-cookbook.md`.
-`ZENOH_CONFIG` is required there and must be absolute; without it the app
-starts in embedded mode, whose discovery skips loopback — so the fake camera
-never appears (#132).
+Against the in-repo fake camera, follow `docs/studio/testing-cookbook.md`:
+`ZENOH_CONFIG` is required there and must be absolute.
 
 ## Key Invariants
 
@@ -41,12 +39,12 @@ never appears (#132).
 - UiGraph contract fields `nodes_by_name` / `categories` / `root_category`
   are frozen.
 - No declaration is dropped silently: one the library cannot build is listed
-  in `UiGraph.skipped` with its tag, name and reason (DX-05), and a
+  in `UiGraph.skipped` with its tag, name and reason, and a
   `NodeDecl` kind the mapper does not know becomes `UiNodeKind::Unknown`.
 - In the Tauri backend use `tauri::async_runtime::spawn`, never bare
   `tokio::spawn`. Reach the embedded camera only through
   `EmbeddedBackend::with_camera`, which runs the operation on the blocking
-  pool: the camera's register I/O blocks its thread (ST-31).
+  pool: the camera's register I/O blocks its thread.
 - The UI's IPC types — payloads, the UiGraph contract and the `StudioEvents`
   map — are generated from the Rust types into
   `ui/viva-studio-ui/src/generated/ipc.ts`; never edit that file. After

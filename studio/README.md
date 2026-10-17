@@ -42,14 +42,7 @@ workspace — it is built with `cargo tauri`, not `cargo build --workspace`. It
 has its own CI job (`tauri-lint` in `.github/workflows/studio-ci.yml`); a
 `cargo clippy --workspace` in `studio/` will not touch it.
 
-Key invariants:
-
-- **Parsing lives in Rust.** The UI renders a contract, it does not read
-  GenICam tags.
-- **The UI depends on `UiGraph`**, not on the XML.
-- **Nothing is dropped silently**: a declaration the library cannot build is
-  listed in `UiGraph.skipped`, and a node kind the mapper does not know is
-  kept as `Unknown`.
+The key invariants are in [`CLAUDE.md`](CLAUDE.md#key-invariants).
 
 ## Data model: `UiGraph`
 
@@ -62,7 +55,7 @@ The minimal model the UI needs, from `crates/viva_xml_model`:
   each one's tag, name and reason (omitted when empty)
 
 The TypeScript types are generated from `crates/viva_xml_model/src/model.rs`
-into `ui/viva-studio-ui/src/generated/ipc.ts` (backlog ST-28); a test fails
+into `ui/viva-studio-ui/src/generated/ipc.ts`; a test fails
 while that file is stale.
 
 ---
@@ -98,10 +91,8 @@ bun run dev      # bun run test / bun run build
 The recipes — GigE through `viva-service`, USB3 Vision through
 `viva-service-u3v --fake` — are in
 [`../docs/studio/testing-cookbook.md`](../docs/studio/testing-cookbook.md).
-**`ZENOH_CONFIG`, as an absolute path, is what puts the app in remote mode.**
-Without it the app runs embedded, which does not scan loopback, so a fake
-camera never appears; a `ZENOH_CONFIG` that fails to load is reported as an
-error rather than silently ignored.
+A `ZENOH_CONFIG` that fails to load is reported as an error rather than
+silently ignored.
 
 ## Building
 

@@ -13,9 +13,7 @@ User-facing documentation lives in the mdBook (`book/`); decision history in
   control, sustained streaming, and defensive handling of untrusted network
   input.
 - **Pre-1.0**: no backward-compatibility guarantees. Clear design and structure
-  take priority over API stability, and breaking releases are expected — in
-  practice every minor so far has become breaking because a user's camera needed
-  it rather than because we planned the window.
+  take priority over API stability, and breaking releases are expected.
 
 ## Layered architecture
 
@@ -140,7 +138,7 @@ Values are cached as the XML's `<Cachable>` allows
 (every other register's) what was written too; a node is cached only as far
 as every register its value is read through allows. A `<PollingTime>`
 expires a cached value, measured against an injected `Clock` so the crate
-still runs on `wasm32-unknown-unknown`. Every write and invalidation
+runs on `wasm32-unknown-unknown`. Every write and invalidation
 advances a generation: `changed_since(generation)` names what changed, and
 `poll()` invalidates the values whose polling time has passed — a query in
 place of callbacks, because the node map is not `Sync`.
@@ -269,7 +267,7 @@ the cases). Consequences:
   `Test*` nodes in fake-camera XML.
 - An independent consumer reads the fakes too: the GenTL job drives
   `viva-fake-gige` through Harvesters and EMVA's reference GenApi
-  (ADR-0031), which rejected the fake's XML that our own parser accepted.
+  (ADR-0031).
 
 ## Design tenets
 
@@ -279,9 +277,7 @@ the cases). Consequences:
    `UsbTransfer`) as seams; open for extension via traits, not boolean flags.
 3. **DRY** — one implementation per concern: a single frame-reassembly path,
    pixel formats and their conversion owned by `viva-pfnc`.
-4. **YAGNI** — no speculative scaffolding; dead code gets deleted or wired up
-   (the GVSP resend request that sat unused, in the wrong layout, until 0.9 is
-   the cautionary tale).
+4. **YAGNI** — no speculative scaffolding; dead code gets deleted or wired up.
 5. **Spec-conformance over self-consistency** — tests validate against the
    standard, not against our own second implementation of the same mistake.
 6. **Errors carry sources; panics never cross a public API on remote input.**

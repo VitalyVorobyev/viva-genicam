@@ -192,6 +192,12 @@ pub(crate) fn parse_struct_reg(
             let mut meta = meta.build();
             meta.cachable = meta.cachable.or(cachable);
             meta.polling_time_ms = meta.polling_time_ms.or(polling_time_ms);
+            let mut entry_invalidators = invalidators.clone();
+            for provider in entry.invalidators {
+                if !entry_invalidators.contains(&provider) {
+                    entry_invalidators.push(provider);
+                }
+            }
             NodeDecl::Integer {
                 name: entry.name,
                 meta,
@@ -211,10 +217,13 @@ pub(crate) fn parse_struct_reg(
                 p_min: None,
                 p_inc: None,
                 value: None,
+                indexed: None,
                 predicates: PredicateRefs::default(),
                 // Declared once on the `<StructReg>`, so every entry — each a
-                // view of the same register — goes stale together.
-                invalidators: invalidators.clone(),
+                // view of the same register — goes stale together; and on an
+                // entry, for that entry alone (Basler's a2A4096-44g5m names
+                // its sibling bits this way).
+                invalidators: entry_invalidators,
             }
         })
         .collect();
@@ -253,6 +262,8 @@ struct StructEntryData {
     /// The entry's own metadata: a `<StructEntry>` is a node of its own, with
     /// a tooltip, a visibility and `<Streamable>` (GenICam Standard v2.1.1 §3.2).
     meta: NodeMetaBuilder,
+    /// `<pInvalidator>`s declared on the entry, after the `<StructReg>`'s.
+    invalidators: Vec<String>,
 }
 
 fn parse_struct_entry(
@@ -268,6 +279,7 @@ fn parse_struct_entry(
     let mut sign: Option<Sign> = None;
     let mut byte_order = default_byte_order;
     let mut meta = NodeMetaBuilder::default();
+    let mut invalidators = Vec::new();
     let node_name = start.name().as_ref().to_string();
     let mut buf = Vec::new();
 
@@ -300,7 +312,11 @@ fn parse_struct_entry(
                         byte_order = order;
                     }
                 }
-                _ => meta.handle_or_ignore(reader, e)?,
+                _ => {
+                    if !handle_invalidator_start(reader, e, &mut invalidators)? {
+                        meta.handle_or_ignore(reader, e)?;
+                    }
+                }
             },
             Ok(Event::Empty(ref e)) => meta.ignore_empty(e),
             Ok(Event::End(ref e)) if e.name().as_ref() == node_name.as_str() => break,
@@ -336,5 +352,6 @@ fn parse_struct_entry(
         access,
         sign,
         meta,
+        invalidators,
     })
 }

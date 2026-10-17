@@ -358,7 +358,7 @@ impl NodeMap {
         let mut successors: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); names.len()];
         for (p, name) in names.iter().enumerate() {
             let mut seen: HashSet<&str> = HashSet::new();
-            let mut pending: Vec<&str> = self.value_chain(name);
+            let mut pending: Vec<&str> = self.value_reach(name);
             while let Some(current) = pending.pop() {
                 if !seen.insert(current) {
                     continue;

@@ -133,5 +133,34 @@ while IFS=$'\t' read -r name url member issue; do
   fi
 done <<<"$USER_CONTRIBUTED_ZIP"
 
+# Same, but the attachment is a `viva-camctl report`. Every report embeds the
+# camera's XML between its `## GenApi XML` and `## End of report` headings, so
+# a report is enough: nobody has to send the document separately.
+#
+# The a2A4096-44g5m read `TriggerMode` from bootstrap register 0x000C because
+# an `<Integer>`'s `<pIndex>` was taken as an address term (#210).
+#   name<TAB>url<TAB>issue
+USER_CONTRIBUTED_REPORT=$(
+  cat <<'EOF'
+Basler_a2A4096_44g5m.xml	https://github.com/user-attachments/files/33539563/viva-report.txt	210
+EOF
+)
+
+echo "  user-contributed (viva-camctl reports)"
+while IFS=$'\t' read -r name url issue; do
+  [ -z "$name" ] && continue
+  # Between the headings, without the blank lines around the document.
+  if curl -fsSL -o "$tmp/report.txt" "$url" &&
+    awk '/^## End of report/ { exit } found { print } /^## GenApi XML/ { found = 1 }' \
+      "$tmp/report.txt" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' \
+      >"$tmp/$name" &&
+    [ -s "$tmp/$name" ] &&
+    mv "$tmp/$name" "$TARGET/$name"; then
+    echo "    $name (#$issue)"
+  else
+    echo "    warning: could not fetch $name (#$issue)" >&2
+  fi
+done <<<"$USER_CONTRIBUTED_REPORT"
+
 count=$(find "$TARGET" -name '*.xml' | wc -l | tr -d ' ')
 echo "Done: $count XML documents in $TARGET"

@@ -52,6 +52,90 @@ pub enum CommandValueSrc {
     FromNode(String),
 }
 
+/// One value of an indexed `<Integer>` or `<Float>`: a constant, or the
+/// value of another node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IndexedSrc<T> {
+    /// `<ValueIndexed>` or `<ValueDefault>`: a constant.
+    Literal(T),
+    /// `<pValueIndexed>` or `<pValueDefault>`: the node whose value it is.
+    FromNode(String),
+}
+
+/// A `<ValueIndexed Index="…">` or `<pValueIndexed Index="…">`: the value an
+/// indexed node holds while its index reads `index`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct IndexedEntry<T> {
+    /// The `Index` attribute.
+    pub index: i64,
+    /// The value for that index.
+    pub value: IndexedSrc<T>,
+}
+
+/// An `<Integer>` or `<Float>` that picks its value from a table by the value
+/// of an index node (GenICam Standard v2.1.1 §2.8.5, §2.8.9):
+///
+/// ```xml
+/// <Integer Name="d_90">
+///     <pIndex>d_88</pIndex>
+///     <pValueIndexed Index="3">d_257</pValueIndexed>
+///     <pValueDefault>d_1049</pValueDefault>
+/// </Integer>
+/// ```
+///
+/// The entry whose index the `<pIndex>` node reads is the value; an index no
+/// entry names takes the default. On such a node `<pIndex>` is not an address
+/// term: reading it as one is how a Basler a2A4096-44g5m's `TriggerMode`
+/// read the GigE Vision bootstrap register at 3 × 4 (issue #210).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct IndexedValue<T> {
+    /// `<pIndex>`: the node whose value selects the entry.
+    pub index: String,
+    /// The entries, in document order.
+    pub entries: Vec<IndexedEntry<T>>,
+    /// `<ValueDefault>` or `<pValueDefault>`: the value for an index no entry
+    /// names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<IndexedSrc<T>>,
+}
+
+impl<T> IndexedSrc<T> {
+    /// The node a `<pValueIndexed>` or `<pValueDefault>` names; `None` for a
+    /// constant.
+    pub fn node(&self) -> Option<&str> {
+        match self {
+            IndexedSrc::Literal(_) => None,
+            IndexedSrc::FromNode(node) => Some(node),
+        }
+    }
+}
+
+impl<T> IndexedValue<T> {
+    /// The nodes an entry or the default reads, each once, in document order.
+    pub fn value_nodes(&self) -> Vec<&str> {
+        let mut nodes: Vec<&str> = Vec::new();
+        let values = self.entries.iter().map(|entry| &entry.value);
+        for value in values.chain(self.default.as_ref()) {
+            if let IndexedSrc::FromNode(node) = value
+                && !nodes.contains(&node.as_str())
+            {
+                nodes.push(node);
+            }
+        }
+        nodes
+    }
+
+    /// Every node the value depends on: the index node, then
+    /// [`IndexedValue::value_nodes`].
+    pub fn referenced_nodes(&self) -> Vec<&str> {
+        let mut nodes = vec![self.index.as_str()];
+        nodes.extend(self.value_nodes());
+        nodes
+    }
+}
+
 /// References to predicate provider nodes used for runtime gating.
 ///
 /// GenICam's `pIsImplemented`, `pIsAvailable` and `pIsLocked` each point at
@@ -980,6 +1064,10 @@ pub enum NodeDecl {
         p_inc: Option<String>,
         /// Static value (for constant integer nodes with `<Value>`).
         value: Option<i64>,
+        /// `<pIndex>` with `<ValueIndexed>`/`<pValueIndexed>` and
+        /// `<ValueDefault>`/`<pValueDefault>`: a value picked from a table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        indexed: Option<IndexedValue<i64>>,
         /// Predicate refs gating implementation / availability / lock state.
         #[serde(default, skip_serializing_if = "PredicateRefs::is_empty")]
         predicates: PredicateRefs,
@@ -1017,6 +1105,14 @@ pub enum NodeDecl {
         /// Node providing the dynamic maximum.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         p_max: Option<String>,
+        /// `<Value>`: the start value of a floating `<Float>`, one with no
+        /// register and no `<pValue>` (GenICam Standard v2.1.1 §2.8.9).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<f64>,
+        /// `<pIndex>` with `<ValueIndexed>`/`<pValueIndexed>` and
+        /// `<ValueDefault>`/`<pValueDefault>`: a value picked from a table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        indexed: Option<IndexedValue<f64>>,
         /// How the register payload should be interpreted — native IEEE 754
         /// or scaled integer. Defaults to [`FloatEncoding::ScaledInteger`] to
         /// preserve existing behaviour for XML that relied on it.
@@ -3608,6 +3704,152 @@ mod tests {
         assert!(reasons[0].0 == "Indirect" && reasons[0].1.contains("<pChunkID>"));
         assert!(reasons[1].0 == "Both" && reasons[1].1.contains("both"));
         assert!(reasons[2].0 == "NotHex" && reasons[2].1.contains("hexadecimal"));
+    }
+
+    /// GenICam Standard v2.1.1 §2.8.5, issue #210: on an `<Integer>`,
+    /// `<pIndex>` selects a `<pValueIndexed>` or `<ValueIndexed>` entry, else
+    /// the default. It is no address term: read as one, Basler's `d_90`
+    /// addressed bootstrap register 0x000C.
+    #[test]
+    fn an_integer_p_index_selects_an_indexed_value() {
+        let model = parse_fragment(
+            r#"<Integer Name="d_90">
+                 <pIndex>d_88</pIndex>
+                 <pValueIndexed Index="3">d_257</pValueIndexed>
+                 <ValueIndexed Index="0x4">7</ValueIndexed>
+                 <pValueDefault>d_1049</pValueDefault>
+               </Integer>"#,
+        );
+        assert!(model.skipped.is_empty(), "{:?}", model.skipped);
+        assert!(model.ignored().is_empty(), "{:?}", model.ignored());
+        let NodeDecl::Integer {
+            addressing,
+            indexed: Some(indexed),
+            ..
+        } = &model.nodes[0]
+        else {
+            panic!("not an indexed integer: {:?}", model.nodes[0]);
+        };
+        assert!(addressing.is_none(), "{addressing:?}");
+        assert_eq!(indexed.index, "d_88");
+        assert_eq!(
+            indexed.entries,
+            [
+                IndexedEntry {
+                    index: 3,
+                    value: IndexedSrc::FromNode("d_257".into())
+                },
+                IndexedEntry {
+                    index: 4,
+                    value: IndexedSrc::Literal(7)
+                },
+            ]
+        );
+        assert_eq!(indexed.default, Some(IndexedSrc::FromNode("d_1049".into())));
+        assert_eq!(indexed.referenced_nodes(), ["d_88", "d_257", "d_1049"]);
+    }
+
+    /// The same on a `<Float>`, as `aravis_genicam.xml`'s `FloatTable`; and
+    /// a `<Float>`'s own `<Value>` (backlog GA-49).
+    #[test]
+    fn a_float_reads_indexed_values_and_a_constant_value() {
+        let model = parse_fragment(
+            r#"<Float Name="FloatTable">
+                 <pIndex>FloatTableSelector</pIndex>
+                 <ValueIndexed Index="10">100.1</ValueIndexed>
+                 <ValueDefault>600.6</ValueDefault>
+               </Float>
+               <Float Name="GainDbPerRawStep"><Value>1e-1</Value></Float>"#,
+        );
+        assert!(model.ignored().is_empty(), "{:?}", model.ignored());
+        let NodeDecl::Float {
+            indexed: Some(indexed),
+            addressing: None,
+            ..
+        } = &model.nodes[0]
+        else {
+            panic!("not an indexed float: {:?}", model.nodes[0]);
+        };
+        assert_eq!(indexed.index, "FloatTableSelector");
+        assert_eq!(indexed.entries[0].value, IndexedSrc::Literal(100.1));
+        assert_eq!(indexed.default, Some(IndexedSrc::Literal(600.6)));
+        assert!(matches!(
+            model.nodes[1],
+            NodeDecl::Float {
+                value: Some(0.1),
+                ..
+            }
+        ));
+    }
+
+    /// A register's `<pIndex>` is an address term, as is an `<Integer>`'s
+    /// when the `<Integer>` declares an address of its own and no indexed
+    /// value — a form hand-written documents use.
+    #[test]
+    fn a_p_index_beside_an_address_stays_an_address_term() {
+        let model = parse_fragment(
+            r#"<IntReg Name="Reg">
+                 <pIndex Offset="4">Sel</pIndex>
+                 <Address>0x100</Address><Length>4</Length>
+               </IntReg>
+               <Integer Name="Lenient">
+                 <Address>0x200</Address>
+                 <pIndex Offset="64">Sel</pIndex>
+                 <Length>4</Length>
+               </Integer>"#,
+        );
+        for node in &model.nodes {
+            let NodeDecl::Integer {
+                addressing: Some(Addressing::Sum { terms, .. }),
+                indexed: None,
+                ..
+            } = node
+            else {
+                panic!("not a register: {node:?}");
+            };
+            assert!(
+                terms
+                    .iter()
+                    .any(|term| matches!(term, AddressTerm::Index { node, .. } if node == "Sel")),
+                "{terms:?}"
+            );
+        }
+    }
+
+    /// Indexed values with nothing to index them by: the node is skipped and
+    /// says why, rather than read from a register it does not have.
+    #[test]
+    fn indexed_values_without_p_index_are_refused() {
+        let model = parse_fragment(
+            r#"<Integer Name="Orphan"><ValueIndexed Index="1">5</ValueIndexed></Integer>"#,
+        );
+        assert!(model.nodes.is_empty(), "{:?}", model.nodes);
+        assert!(
+            model.skipped[0].error.contains("<pIndex>"),
+            "{:?}",
+            model.skipped
+        );
+    }
+
+    /// A `<StructEntry>`'s own `<pInvalidator>`s join the `<StructReg>`'s:
+    /// the Basler a2A4096-44g5m's `d_1664` names its sibling bits this way.
+    #[test]
+    fn struct_entry_invalidators_join_the_struct_regs() {
+        let model = parse_fragment(
+            r#"<StructReg Comment="d_1664">
+                 <Address>0x10007de8</Address><Length>4</Length>
+                 <pInvalidator>Shared</pInvalidator>
+                 <StructEntry Name="d_1664_0">
+                   <pInvalidator>d_1664</pInvalidator>
+                   <pInvalidator>Shared</pInvalidator>
+                   <Bit>31</Bit>
+                 </StructEntry>
+                 <StructEntry Name="d_1664_1"><Bit>30</Bit></StructEntry>
+               </StructReg>"#,
+        );
+        assert!(model.ignored().is_empty(), "{:?}", model.ignored());
+        let lists: Vec<&[String]> = model.nodes.iter().map(invalidators_of).collect();
+        assert_eq!(lists, [&["Shared", "d_1664"][..], &["Shared"][..]]);
     }
 
     /// A hex address keeps its bit pattern: device addresses above 2^31 stay

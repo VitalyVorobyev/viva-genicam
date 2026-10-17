@@ -104,6 +104,11 @@ const EXPECTED_IGNORED: &[(&str, &str, &str)] = &[
         "pAlias",
         "§2.8.1: the same feature described another way, \"mainly used in a GUI\" (GA-41)",
     ),
+    (
+        "Integer",
+        "pAlias",
+        "§2.8.1: the same feature described another way, \"mainly used in a GUI\" (GA-41)",
+    ),
     ("Port", "Description", PORT_DOCUMENTATION),
     ("Port", "ToolTip", PORT_DOCUMENTATION),
     ("Port", "Visibility", PORT_DOCUMENTATION),
@@ -121,22 +126,9 @@ const EXPECTED_IGNORED: &[(&str, &str, &str)] = &[
     ),
     (
         "Float",
-        "Value",
-        "GA-49: a Float's constant <Value> is not read",
-    ),
-    (
-        "Float",
         "Sign",
         "GA-18: the sign of a scaled Float's payload",
     ),
-    ("Integer", "ValueIndexed", INDEXED),
-    ("Integer", "ValueDefault", INDEXED),
-    ("Integer", "pValueIndexed", INDEXED),
-    ("Integer", "pValueDefault", INDEXED),
-    ("Float", "ValueIndexed", INDEXED),
-    ("Float", "ValueDefault", INDEXED),
-    ("Float", "pValueIndexed", INDEXED),
-    ("Float", "pValueDefault", INDEXED),
     (
         "Integer",
         "pValueCopy",
@@ -162,7 +154,6 @@ const EXPECTED_IGNORED: &[(&str, &str, &str)] = &[
 const EXTENSION: &str = "vendor data, ignored by definition (§2.8.1)";
 const DEPRECATED: &str = "a note for new designs (§2.8.1, GA-41)";
 const PORT_DOCUMENTATION: &str = "a port is not a feature: its documentation has nowhere to go";
-const INDEXED: &str = "GA-50: an indexed value (<pIndex> with <ValueIndexed>) is not supported";
 
 /// Count declarations that carry a resolved bitfield, as `(single-bit, ranged)`.
 ///

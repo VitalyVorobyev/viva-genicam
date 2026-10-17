@@ -193,10 +193,10 @@ fn failure_class(err: &GenApiError) -> &'static str {
         // `FF FE FD FC` is 4 GiB.
         GenApiError::BadLength { .. } => "length",
         GenApiError::Unavailable(_) => "unavailable",
-        // Backlog GA-49: a `<Float>` whose value is a constant `<Value>`,
-        // which the XML layer does not read (GA-17's embedded address knives
-        // used to be most of these).
         GenApiError::NoValueSource { .. } => "no register, pValue or Value",
+        // An index the stub's bytes give that no entry names, on a node with
+        // no default.
+        GenApiError::NoIndexedValue { .. } => "no indexed value",
         _ => "other",
     }
 }
@@ -838,6 +838,46 @@ const REFUSED_CASES: &[RefusedCase] = &[
     },
 ];
 
+/// Features written on one document, with every write they must cause.
+struct WriteCase {
+    document: &'static str,
+    device: &'static [(u64, &'static [u8])],
+    set: &'static [Set],
+    writes: &'static [(u64, &'static [u8])],
+}
+
+const WRITE_CASES: &[WriteCase] = &[
+    // Basler_a2A4096_44g5m.xml (#210): `TriggerSelector` (1205) writes the
+    // floating `d_88` (1046-1048), so selecting writes nothing. `TriggerMode`
+    // (1270) delegates to `d_90` (1059), whose `<pIndex>d_88</pIndex>` selects
+    // `<pValueIndexed Index="3">d_257</pValueIndexed>`: `FrameStart` is 3, and
+    // `d_257` is at 0x10002060 (11399, BigEndian). `On` is available through
+    // `d_150` (26211), entry 3 `d_1613` at 0x10001FE4 (19866); the lock
+    // `d_90_lockedMux` (1049) is `d_890` at 0x100087B4 (8188), zero. Read as an
+    // address term, the `<pIndex>` put `TriggerMode` at 0 + 3 × 4 = 0x000C.
+    WriteCase {
+        document: "Basler_a2A4096_44g5m.xml",
+        device: &[(0x1000_1FE4, &[0x00, 0x00, 0x00, 0x01])],
+        set: &[
+            Set::Entry("TriggerSelector", "FrameStart"),
+            Set::Entry("TriggerMode", "On"),
+        ],
+        writes: &[(0x1000_2060, &[0x00, 0x00, 0x00, 0x01])],
+    },
+    // Same document: `FrameBurstStart` is 0, which no `d_90` entry names, so
+    // `<pValueDefault>d_1049</pValueDefault>` at 0x10001FBC (11367); its lock
+    // is `d_90_lockedMux`'s `<ValueDefault>0</ValueDefault>`.
+    WriteCase {
+        document: "Basler_a2A4096_44g5m.xml",
+        device: &[],
+        set: &[
+            Set::Entry("TriggerSelector", "FrameBurstStart"),
+            Set::Entry("TriggerMode", "Off"),
+        ],
+        writes: &[(0x1000_1FBC, &[0x00, 0x00, 0x00, 0x00])],
+    },
+];
+
 /// A register read whose bytes decode to a different number in the other
 /// byte order.
 struct ReadCase {
@@ -959,6 +999,32 @@ fn corpus_commands_are_refused_where_their_document_says_so() {
         if writes != owned(case.writes) {
             failures.push(format!(
                 "{label}: wrote {writes:02X?}, expected only the selector's {:02X?}",
+                owned(case.writes)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// What writing a feature sends, byte for byte, where its document routes the
+/// write through something other than a plain `<pValue>` chain.
+#[test]
+fn corpus_writes_reach_the_register_their_document_names() {
+    let mut failures = Vec::new();
+    for case in WRITE_CASES {
+        let Some(mut nodemap) = corpus_nodemap(case.document) else {
+            continue;
+        };
+        let io = DeviceIo::with(case.device);
+        if let Err(err) = apply(&mut nodemap, case.set, &io) {
+            failures.push(format!("{}: {err}", case.document));
+            continue;
+        }
+        let writes = io.writes.borrow().clone();
+        if writes != owned(case.writes) {
+            failures.push(format!(
+                "{}: wrote {writes:02X?}, expected {:02X?}",
+                case.document,
                 owned(case.writes)
             ));
         }
@@ -1546,6 +1612,65 @@ fn corpus_save_plans_respect_dependencies_and_put_selectors_back() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The nodes of `model` that are indexed values (GenICam Standard v2.1.1
+/// §2.8.5), or take their value through one by `<pValue>`.
+fn read_through_indexed(model: &viva_genapi_xml::XmlModel) -> std::collections::HashSet<String> {
+    use viva_genapi_xml::NodeDecl;
+    let mut pvalue: HashMap<&str, &str> = HashMap::new();
+    let mut found = std::collections::HashSet::new();
+    for node in &model.nodes {
+        match node {
+            NodeDecl::Integer {
+                name,
+                indexed: Some(_),
+                ..
+            }
+            | NodeDecl::Float {
+                name,
+                indexed: Some(_),
+                ..
+            } => {
+                found.insert(name.clone());
+            }
+            NodeDecl::Integer {
+                name,
+                pvalue: Some(target),
+                ..
+            }
+            | NodeDecl::Float {
+                name,
+                pvalue: Some(target),
+                ..
+            }
+            | NodeDecl::Enum {
+                name,
+                pvalue: Some(target),
+                ..
+            }
+            | NodeDecl::Boolean {
+                name,
+                pvalue: Some(target),
+                ..
+            } => {
+                pvalue.insert(name, target);
+            }
+            _ => {}
+        }
+    }
+    for start in pvalue.keys() {
+        let mut current = *start;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(next) = pvalue.get(current).filter(|next| seen.insert(**next)) {
+            if found.contains(*next) {
+                found.insert(start.to_string());
+                break;
+            }
+            current = next;
+        }
+    }
+    found
+}
+
 /// GA-05: every value a document declares `NoCache` — on its register, or on
 /// a register it is read through — is read from the device every time, not
 /// answered from a cache. Before 0.9 every one of them was cached until
@@ -1566,7 +1691,7 @@ fn corpus_no_cache_values_are_read_from_the_device_every_time() {
     documents.sort();
 
     let mut failures = Vec::new();
-    let (mut checked, mut inherited, mut polled) = (0usize, 0usize, 0usize);
+    let (mut checked, mut inherited, mut polled, mut indexed) = (0usize, 0usize, 0usize, 0usize);
     for path in &documents {
         let document = path
             .file_name()
@@ -1575,6 +1700,7 @@ fn corpus_no_cache_values_are_read_from_the_device_every_time() {
             .into_owned();
         let xml = String::from_utf8_lossy(&std::fs::read(path).expect("read")).into_owned();
         let model = viva_genapi_xml::parse(&xml).expect("parse");
+        let through_indexed = read_through_indexed(&model);
         let nodemap = NodeMap::try_from_xml(model).expect("build");
         let io = RecordingIo::default();
         for name in nodemap.node_names() {
@@ -1583,6 +1709,13 @@ fn corpus_no_cache_values_are_read_from_the_device_every_time() {
                 || nodemap.command_targets().contains(name)
                 || nodemap.is_write_only(name)
             {
+                continue;
+            }
+            // An indexed value is `NoCache` when any node it can select is;
+            // the one its index selects now may be cached. Each of those
+            // nodes is checked on its own.
+            if through_indexed.contains(name) {
+                indexed += 1;
                 continue;
             }
             // A value on a chunk or event port, or one zeros do not decode,
@@ -1604,7 +1737,8 @@ fn corpus_no_cache_values_are_read_from_the_device_every_time() {
     }
     println!(
         "=== NoCache: {checked} values read twice, {inherited} of them NoCache through a \
-         register they read; {polled} nodes with a polling time ==="
+         register they read; {indexed} read through an indexed value; {polled} nodes with a \
+         polling time ==="
     );
     assert!(
         failures.is_empty(),

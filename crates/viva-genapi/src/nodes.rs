@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use viva_genapi_xml::{
     AccessMode, Addressing, BitField, ByteOrder, CommandValueSrc, EnumEntryDecl, FloatEncoding,
-    Sign, Slope,
+    IndexedValue, Sign, Slope,
 };
 use viva_genapi_xml::{NodeMeta, PredicateRefs, Representation, SkOutput, Visibility};
 
@@ -287,6 +287,8 @@ pub struct IntegerNode {
     /// `<Value>`: the start value of a "floating" integer, one with no
     /// register behind it (GenICam Standard v2.1.1 §2.8.5).
     pub value: Option<i64>,
+    /// A value picked from a table by an index node (§2.8.5).
+    pub(crate) indexed: Option<Indexed<i64>>,
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<i64>>,
@@ -325,6 +327,11 @@ pub struct FloatNode {
     pub p_min: Option<String>,
     /// Node providing the dynamic maximum.
     pub p_max: Option<String>,
+    /// `<Value>`: the start value of a floating `<Float>`, one with no
+    /// register behind it (GenICam Standard v2.1.1 §2.8.9).
+    pub value: Option<f64>,
+    /// A value picked from a table by an index node (§2.8.9).
+    pub(crate) indexed: Option<Indexed<f64>>,
     /// How the register payload is encoded (IEEE 754 or scaled integer).
     pub encoding: FloatEncoding,
     /// Byte order of the register payload.
@@ -332,6 +339,29 @@ pub struct FloatNode {
     /// Predicate refs gating implementation / availability / lock state.
     pub predicates: PredicateRefs,
     pub(crate) cache: RefCell<Option<f64>>,
+    /// What was last written to a floating `<Float>`. Its state, not a cache
+    /// of the device's: invalidation leaves it alone.
+    pub(crate) floating: RefCell<Option<f64>>,
+}
+
+/// An indexed `<Integer>` or `<Float>`'s table, and what was written to the
+/// constants in it.
+#[derive(Debug)]
+pub(crate) struct Indexed<T> {
+    pub(crate) table: IndexedValue<T>,
+    /// A constant written, by the index of its entry, or `None` for the
+    /// default. Each constant is floating, as a `<Value>` is: the host's
+    /// state, which invalidation leaves alone.
+    pub(crate) written: RefCell<HashMap<Option<i64>, T>>,
+}
+
+impl<T> Indexed<T> {
+    pub(crate) fn new(table: IndexedValue<T>) -> Self {
+        Self {
+            table,
+            written: RefCell::new(HashMap::new()),
+        }
+    }
 }
 
 /// Enumeration feature metadata and mapping tables.

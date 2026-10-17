@@ -151,6 +151,19 @@ pub enum GenApiError {
         /// The node.
         name: String,
     },
+    /// An indexed `<Integer>` or `<Float>` has no value for the index its
+    /// `<pIndex>` node reads now: no `<ValueIndexed>` or `<pValueIndexed>`
+    /// names it, and there is no `<ValueDefault>` or `<pValueDefault>`
+    /// (GenICam Standard v2.1.1 §2.8.5). Nothing was read or written.
+    #[error("{name} has no value for index {index}, which {index_node} reads, and no default")]
+    NoIndexedValue {
+        /// The indexed node.
+        name: String,
+        /// Its `<pIndex>` node.
+        index_node: String,
+        /// The index read.
+        index: i64,
+    },
     /// Register I/O failed in the transport. The source is the transport's
     /// error: a GVCP status, a USB failure, a timeout.
     #[error("register I/O failed: {0}")]

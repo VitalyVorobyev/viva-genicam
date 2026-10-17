@@ -27,6 +27,25 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **Indexed values.** An `<Integer>` or `<Float>` that picks its value from a
+  table by an index node — `<pIndex>` with `<ValueIndexed>`/`<pValueIndexed>`
+  and `<ValueDefault>`/`<pValueDefault>` (GenICam Standard §2.8.5) — reads and
+  writes the entry its index selects, and takes its bounds, access and lock
+  from that entry. An `<Integer>`'s `<pIndex>` was read as an address term,
+  so with `TriggerSelector` at `FrameStart` (3) a Basler a2A4096-44g5m's
+  `TriggerMode` read bootstrap register 0x000C (3 × 4 bytes) and reported
+  1396185518. An index no entry names, on a node with no default, is
+  `GenApiError::NoIndexedValue`
+  ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
+  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
+- **A `<Float>`'s `<Value>`** is its value, and a write is kept, as an
+  `<Integer>`'s is; such a `<Float>` had no value, and the converters reading
+  it failed ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
+  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
+- **A `<StructEntry>`'s own `<pInvalidator>`s** make its cached value stale,
+  as its `<StructReg>`'s do
+  ([#210](https://github.com/VitalyVorobyev/viva-genicam/issues/210),
+  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
 - **rustls 0.23.45 → 0.23.46** in `Cargo.lock` and `studio/Cargo.lock`, which
   clears RUSTSEC-2026-0346, -0347, -0348 and -0349. rustls arrives only
   through zenoh's QUIC link, so it reaches `viva-service`, the release

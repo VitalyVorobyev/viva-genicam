@@ -112,13 +112,23 @@ fn own_mode(node: &Node) -> Option<CachingMode> {
     }))
 }
 
-/// The nodes `node`'s value is read from: its `<pValue>`, a formula's
-/// variables, a converter's `<pValue>` and the variables of its
-/// `<FormulaFrom>`.
+/// The nodes `node`'s value is read from: its `<pValue>`, an indexed value's
+/// index and every node it can select, a formula's variables, a converter's
+/// `<pValue>` and the variables of its `<FormulaFrom>`.
 fn value_sources(node: &Node) -> Vec<&str> {
     match node {
-        Node::Integer(n) => n.pvalue.iter().map(String::as_str).collect(),
-        Node::Float(n) => n.pvalue.iter().map(String::as_str).collect(),
+        Node::Integer(n) => n
+            .pvalue
+            .iter()
+            .map(String::as_str)
+            .chain(n.indexed.iter().flat_map(|i| i.table.referenced_nodes()))
+            .collect(),
+        Node::Float(n) => n
+            .pvalue
+            .iter()
+            .map(String::as_str)
+            .chain(n.indexed.iter().flat_map(|i| i.table.referenced_nodes()))
+            .collect(),
         Node::Enum(n) => n.pvalue.iter().map(String::as_str).collect(),
         Node::Boolean(n) => n.pvalue.iter().map(String::as_str).collect(),
         Node::Command(n) => n.pvalue.iter().map(String::as_str).collect(),

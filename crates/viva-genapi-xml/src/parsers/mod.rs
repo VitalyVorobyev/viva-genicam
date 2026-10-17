@@ -24,8 +24,13 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::builders::AddressingBuilder;
-use crate::util::{attribute_value, parse_address, parse_u64, read_text_start};
-use crate::{IndexOffset, NodeDecl, NodeMeta, PredicateRefs, Representation, Visibility, XmlError};
+use crate::util::{
+    attribute_value, attribute_value_required, parse_address, parse_i64, parse_u64, read_text_start,
+};
+use crate::{
+    IndexOffset, IndexedEntry, IndexedSrc, IndexedValue, NodeDecl, NodeMeta, PredicateRefs,
+    Representation, Visibility, XmlError,
+};
 
 /// XML element name referencing another node that provides an address.
 pub(crate) const TAG_P_ADDRESS: &str = "pAddress";
@@ -247,6 +252,104 @@ pub(crate) fn index_offset(event: &BytesStart<'_>) -> Result<IndexOffset, XmlErr
         }
     }
     Ok(IndexOffset::Length)
+}
+
+/// `<ValueIndexed Index="…">`: a constant for one index.
+pub(crate) const TAG_VALUE_INDEXED: &str = "ValueIndexed";
+/// `<pValueIndexed Index="…">`: a node for one index.
+pub(crate) const TAG_P_VALUE_INDEXED: &str = "pValueIndexed";
+/// `<ValueDefault>`: the constant for an index no entry names.
+pub(crate) const TAG_VALUE_DEFAULT: &str = "ValueDefault";
+/// `<pValueDefault>`: the node for an index no entry names.
+pub(crate) const TAG_P_VALUE_DEFAULT: &str = "pValueDefault";
+
+/// Collects an indexed value's elements on an `<Integer>` or a `<Float>`
+/// (GenICam Standard v2.1.1 §2.8.5): `<pIndex>`, `<ValueIndexed>`,
+/// `<pValueIndexed>`, `<ValueDefault>` and `<pValueDefault>`.
+#[derive(Debug)]
+pub(crate) struct IndexedBuilder<T> {
+    index: Option<(String, IndexOffset)>,
+    entries: Vec<IndexedEntry<T>>,
+    default: Option<IndexedSrc<T>>,
+}
+
+impl<T> Default for IndexedBuilder<T> {
+    fn default() -> Self {
+        Self {
+            index: None,
+            entries: Vec::new(),
+            default: None,
+        }
+    }
+}
+
+impl<T> IndexedBuilder<T> {
+    /// Read one of the five elements, parsing a constant with `parse`.
+    /// Returns `false` for any other element, which is left unread.
+    pub(crate) fn handle_start(
+        &mut self,
+        reader: &mut Reader<&[u8]>,
+        event: &BytesStart<'_>,
+        parse: fn(&str) -> Result<T, XmlError>,
+    ) -> Result<bool, XmlError> {
+        let tag = event.name().as_ref().to_string();
+        let index = match tag.as_str() {
+            TAG_VALUE_INDEXED | TAG_P_VALUE_INDEXED => {
+                Some(parse_i64(&attribute_value_required(event, "Index")?)?)
+            }
+            TAG_P_INDEX | TAG_VALUE_DEFAULT | TAG_P_VALUE_DEFAULT => None,
+            _ => return Ok(false),
+        };
+        let text = read_text_start(reader, event)?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(true);
+        }
+        let value = match tag.as_str() {
+            TAG_VALUE_INDEXED | TAG_VALUE_DEFAULT => IndexedSrc::Literal(parse(text)?),
+            TAG_P_VALUE_INDEXED | TAG_P_VALUE_DEFAULT => IndexedSrc::FromNode(text.to_string()),
+            _ => {
+                self.index = Some((text.to_string(), index_offset(event)?));
+                return Ok(true);
+            }
+        };
+        match index {
+            Some(index) => self.entries.push(IndexedEntry { index, value }),
+            None => self.default = Some(value),
+        }
+        Ok(true)
+    }
+
+    /// The indexed value, if the node declares one.
+    ///
+    /// The GenApi schema gives an `<Integer>` no address, but this parser
+    /// takes one, and this workspace's own examples and fixtures write
+    /// `<Address>` on an `<Integer>`; no vendor document in the corpus does.
+    /// On a node with an address term of its own and no indexed values,
+    /// `<pIndex>` is what it is on a register: a term of that address,
+    /// scaled by its stride.
+    pub(crate) fn finish(
+        self,
+        name: &str,
+        addressing: &mut AddressingBuilder,
+    ) -> Result<Option<IndexedValue<T>>, XmlError> {
+        let has_values = !self.entries.is_empty() || self.default.is_some();
+        let Some((index, offset)) = self.index else {
+            if has_values {
+                return Err(XmlError::missing(name, "<pIndex>"));
+            }
+            return Ok(None);
+        };
+        if addressing.has_terms() && !has_values {
+            addressing.push_index(&index, offset);
+            return Ok(None);
+        }
+        Ok(Some(IndexedValue {
+            index,
+            entries: self.entries,
+            default: self.default,
+        }))
+    }
 }
 
 /// Handle common addressing elements for start events.

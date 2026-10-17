@@ -209,6 +209,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             p_min,
             p_max,
             p_inc,
+            indexed,
             ..
         } => UiNode {
             access_mode: Some(
@@ -221,7 +222,9 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             dependencies: [pvalue, p_min, p_max, p_inc]
                 .into_iter()
                 .flatten()
-                .cloned()
+                .map(String::as_str)
+                .chain(indexed.iter().flat_map(|i| i.referenced_nodes()))
+                .map(str::to_string)
                 .collect(),
             int_min: *min,
             int_max: *max,
@@ -237,6 +240,7 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             pvalue,
             p_min,
             p_max,
+            indexed,
             ..
         } => UiNode {
             access_mode: Some(
@@ -249,7 +253,9 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             dependencies: [pvalue, p_min, p_max]
                 .into_iter()
                 .flatten()
-                .cloned()
+                .map(String::as_str)
+                .chain(indexed.iter().flat_map(|i| i.referenced_nodes()))
+                .map(str::to_string)
                 .collect(),
             ..described(&name, UiNodeKind::Float, meta)
         },
@@ -710,6 +716,7 @@ mod tests {
             p_min: None,
             p_inc: None,
             value: None,
+            indexed: None,
             predicates: Default::default(),
             invalidators: vec![],
         };

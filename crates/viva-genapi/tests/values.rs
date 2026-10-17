@@ -698,6 +698,258 @@ fn a_floating_integer_holds_what_is_written_within_its_limits() {
     assert!(io.writes().is_empty(), "{:?}", io.writes());
 }
 
+/// Backlog GA-49. §2.8.9 gives a `<Float>` the `<Value>` of §2.8.5: with no
+/// `<pValue>`, a floating variable whose start value it is. 23 `<Float>`s in
+/// 4 corpus documents carry their value this way, TIS's `GainDbPerRawStep`
+/// (`TIS_dmk_33GX174.xml`) among them, and every one had no value source.
+#[test]
+fn a_floating_float_holds_what_is_written_within_its_limits() {
+    const XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Float Name="GainDbPerRawStep">
+                <Value>1e-1</Value>
+                <Min>0</Min>
+                <Max>1</Max>
+            </Float>
+            <SwissKnife Name="Doubled">
+                <pVariable Name="S">GainDbPerRawStep</pVariable>
+                <Formula>S * 2</Formula>
+            </SwissKnife>
+        </RegisterDescription>
+    "#;
+    let mut nodemap = nodemap(XML);
+    let io = MemIo::default();
+    assert_eq!(
+        nodemap.get_float("GainDbPerRawStep", &io).expect("start"),
+        0.1
+    );
+    assert_eq!(nodemap.get_float("Doubled", &io).expect("start"), 0.2);
+    nodemap
+        .set_float("GainDbPerRawStep", 0.25, &io)
+        .expect("within [0, 1]");
+    assert_eq!(
+        nodemap.get_float("GainDbPerRawStep", &io).expect("written"),
+        0.25
+    );
+    assert_eq!(nodemap.get_float("Doubled", &io).expect("follows"), 0.5);
+    let err = nodemap
+        .set_float("GainDbPerRawStep", 2.0, &io)
+        .expect_err("above the maximum");
+    assert!(matches!(err, GenApiError::Range { .. }), "{err:?}");
+    nodemap.invalidate("GainDbPerRawStep");
+    assert_eq!(
+        nodemap.get_float("GainDbPerRawStep", &io).expect("kept"),
+        0.25
+    );
+    assert!(io.writes().is_empty(), "{:?}", io.writes());
+}
+
+// ── Indexed values ──────────────────────────────────────────────────────────
+
+/// `aravis_genicam.xml`'s `Table`, `FloatTable`, `Multiplexer` and
+/// `FloatMultiplexer`: an `<Integer>` or `<Float>` whose `<pIndex>` selects a
+/// `<ValueIndexed>` constant or a `<pValueIndexed>` node, and an index no
+/// entry names its `<ValueDefault>` or `<pValueDefault>` (GenICam Standard
+/// v2.1.1 §2.8.5, §2.8.9). Every entry node here is floating, so nothing
+/// reaches a device.
+const INDEXED_XML: &str = r#"
+    <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+        <Integer Name="Table">
+            <pIndex>TableSelector</pIndex>
+            <ValueIndexed Index="10">100</ValueIndexed>
+            <ValueIndexed Index="20">200</ValueIndexed>
+            <ValueDefault>600</ValueDefault>
+        </Integer>
+        <Integer Name="TableSelector"><Value>20</Value></Integer>
+        <Float Name="FloatTable">
+            <pIndex>TableSelector</pIndex>
+            <ValueIndexed Index="10">100.1</ValueIndexed>
+            <ValueIndexed Index="20">200.2</ValueIndexed>
+            <ValueDefault>600.6</ValueDefault>
+        </Float>
+        <Integer Name="Multiplexer">
+            <pIndex>TableSelector</pIndex>
+            <pValueIndexed Index="10">MultiplexerEntry0</pValueIndexed>
+            <pValueIndexed Index="20">MultiplexerEntry1</pValueIndexed>
+            <pValueDefault>MultiplexerDefaultValue</pValueDefault>
+        </Integer>
+        <Integer Name="MultiplexerEntry0"><Value>100</Value></Integer>
+        <Integer Name="MultiplexerEntry1"><Value>200</Value></Integer>
+        <Integer Name="MultiplexerDefaultValue"><Value>600</Value></Integer>
+        <Float Name="FloatMultiplexer">
+            <pIndex>TableSelector</pIndex>
+            <pValueIndexed Index="10">FloatMultiplexerEntry0</pValueIndexed>
+            <pValueIndexed Index="20">FloatMultiplexerEntry1</pValueIndexed>
+            <pValueDefault>FloatMultiplexerDefaultValue</pValueDefault>
+        </Float>
+        <Float Name="FloatMultiplexerEntry0"><Value>100.1</Value></Float>
+        <Float Name="FloatMultiplexerEntry1"><Value>200.2</Value></Float>
+        <Float Name="FloatMultiplexerDefaultValue"><Value>600.6</Value></Float>
+    </RegisterDescription>
+"#;
+
+/// A constant entry or default is floating, as a `<Value>` is: a write is
+/// kept for that entry alone, and the others keep theirs.
+#[test]
+fn an_indexed_table_holds_a_value_per_index() {
+    let mut nodemap = nodemap(INDEXED_XML);
+    let io = MemIo::default();
+    assert_eq!(nodemap.get_integer("Table", &io).expect("20"), 200);
+    assert_eq!(nodemap.get_float("FloatTable", &io).expect("20"), 200.2);
+    nodemap.set_integer("Table", 150, &io).expect("write 20");
+    nodemap
+        .set_float("FloatTable", 150.15, &io)
+        .expect("write 20");
+    for (index, integer, float) in [(-1, 600, 600.6), (10, 100, 100.1), (20, 150, 150.15)] {
+        nodemap
+            .set_integer("TableSelector", index, &io)
+            .expect("select");
+        assert_eq!(nodemap.get_integer("Table", &io).expect("read"), integer);
+        assert_eq!(nodemap.get_float("FloatTable", &io).expect("read"), float);
+    }
+    assert!(io.writes().is_empty(), "{:?}", io.writes());
+}
+
+/// A `<pValueIndexed>` entry is read and written through the node it names.
+#[test]
+fn an_indexed_multiplexer_reads_and_writes_the_node_its_index_selects() {
+    let mut nodemap = nodemap(INDEXED_XML);
+    let io = MemIo::default();
+    assert_eq!(nodemap.get_integer("Multiplexer", &io).expect("20"), 200);
+    assert_eq!(
+        nodemap.get_float("FloatMultiplexer", &io).expect("20"),
+        200.2
+    );
+    nodemap.set_integer("Multiplexer", 150, &io).expect("write");
+    nodemap
+        .set_float("FloatMultiplexer", 150.15, &io)
+        .expect("write");
+    assert_eq!(nodemap.get_integer("MultiplexerEntry1", &io).unwrap(), 150);
+    assert_eq!(nodemap.get_integer("MultiplexerEntry0", &io).unwrap(), 100);
+    assert_eq!(
+        nodemap.get_float("FloatMultiplexerEntry1", &io).unwrap(),
+        150.15
+    );
+    assert_eq!(
+        nodemap.get_float("FloatMultiplexerEntry0", &io).unwrap(),
+        100.1
+    );
+    nodemap
+        .set_integer("TableSelector", -1, &io)
+        .expect("select");
+    assert_eq!(nodemap.get_integer("Multiplexer", &io).unwrap(), 600);
+    assert_eq!(nodemap.get_float("FloatMultiplexer", &io).unwrap(), 600.6);
+    // The index node and every entry are dependencies.
+    for provider in [
+        "TableSelector",
+        "MultiplexerEntry0",
+        "MultiplexerDefaultValue",
+    ] {
+        assert!(
+            nodemap
+                .dependents(provider)
+                .iter()
+                .any(|d| d == "Multiplexer"),
+            "{provider}: {:?}",
+            nodemap.dependents(provider)
+        );
+    }
+}
+
+/// An indexed value's bounds and access are those of the node its index
+/// selects, as a `<pValue>`'s are: the registers here differ in both.
+#[test]
+fn an_indexed_value_takes_bounds_and_access_from_the_node_it_selects() {
+    const XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Selector"><Value>0</Value></Integer>
+            <Integer Name="Mode">
+                <pIndex>Selector</pIndex>
+                <pValueIndexed Index="0">ModeA</pValueIndexed>
+                <pValueIndexed Index="1">ModeB</pValueIndexed>
+            </Integer>
+            <Integer Name="ModeA"><pValue>ModeAReg</pValue><Min>0</Min><Max>10</Max></Integer>
+            <IntReg Name="ModeAReg">
+                <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntReg Name="ModeB">
+                <Address>0x104</Address><Length>4</Length><AccessMode>RO</AccessMode>
+                <Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+    let mut nodemap = nodemap(XML);
+    let io = MemIo::with(&[(0x100, be32(3)), (0x104, be32(4))]);
+    assert_eq!(
+        nodemap.effective_access_mode("Mode", &io).unwrap(),
+        viva_genapi::AccessMode::RW
+    );
+    assert_eq!(
+        nodemap.feature_state("Mode", &io).unwrap().range,
+        Some(ValueRange {
+            min: 0.0,
+            max: 10.0,
+            inc: None
+        })
+    );
+    let err = nodemap
+        .set_integer("Mode", 11, &io)
+        .expect_err("ModeA's maximum is 10");
+    assert!(matches!(err, GenApiError::Range { .. }), "{err:?}");
+    nodemap.set_integer("Mode", 10, &io).expect("within ModeA");
+    assert_eq!(io.writes(), [(0x100, be32(10))]);
+
+    nodemap.set_integer("Selector", 1, &io).expect("select B");
+    assert_eq!(nodemap.get_integer("Mode", &io).unwrap(), 4);
+    assert_eq!(
+        nodemap.effective_access_mode("Mode", &io).unwrap(),
+        viva_genapi::AccessMode::RO
+    );
+    let err = nodemap
+        .set_integer("Mode", 5, &io)
+        .expect_err("ModeB is read-only");
+    assert!(matches!(err, GenApiError::Access { .. }), "{err:?}");
+    assert_eq!(io.writes_to(0x104), Vec::<Vec<u8>>::new());
+}
+
+/// An index no entry names, on a node with no default, has no value: a typed
+/// error naming the index, and no register is read or written for it.
+#[test]
+fn an_index_without_an_entry_or_a_default_is_refused() {
+    const XML: &str = r#"
+        <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Selector"><Value>7</Value></Integer>
+            <Integer Name="Mode">
+                <pIndex>Selector</pIndex>
+                <pValueIndexed Index="3">ModeReg</pValueIndexed>
+            </Integer>
+            <IntReg Name="ModeReg">
+                <Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode>
+            </IntReg>
+        </RegisterDescription>
+    "#;
+    let mut nodemap = nodemap(XML);
+    let io = MemIo::default();
+    let refused = |err: &GenApiError| {
+        matches!(
+            err,
+            GenApiError::NoIndexedValue { name, index_node, index: 7 }
+                if name == "Mode" && index_node == "Selector"
+        )
+    };
+    let err = nodemap
+        .get_integer("Mode", &io)
+        .expect_err("no entry for 7");
+    assert!(refused(&err), "{err:?}");
+    let err = nodemap
+        .set_integer("Mode", 1, &io)
+        .expect_err("no entry for 7");
+    assert!(refused(&err), "{err:?}");
+    assert!(io.reads.borrow().is_empty(), "{:?}", io.reads.borrow());
+    assert!(io.writes().is_empty(), "{:?}", io.writes());
+}
+
 // ── Selectors ───────────────────────────────────────────────────────────────
 
 /// The Basler acA1600-20gm gain block (`Basler_acA1600_20gm.xml:518-547`, the

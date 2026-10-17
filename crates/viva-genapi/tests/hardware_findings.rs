@@ -8,6 +8,10 @@
 //! node names, addresses, lengths and gating are copied from it; only the
 //! number of nodes is cut down. The camera's document is not in the corpus,
 //! so these constructs are pinned here.
+//!
+//! A Basler a2A4096-44g5m (GigE, issue #210) showed one more: an `<Integer>`
+//! that picks its value from a table by an index node. Its document is in the
+//! corpus, and its miniature is the second fixture below.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -149,6 +153,17 @@ impl Camera {
         for (i, b) in data.iter().enumerate() {
             bytes.insert(addr + i as u64, *b);
         }
+    }
+
+    fn put_be(&self, addr: u64, value: u32) {
+        self.put_bytes(addr, &value.to_be_bytes());
+    }
+
+    fn be(&self, addr: u64) -> u32 {
+        let bytes = self.bytes.borrow();
+        u32::from_be_bytes(std::array::from_fn(|i| {
+            bytes.get(&(addr + i as u64)).copied().unwrap_or(0)
+        }))
     }
 
     fn le(&self, addr: u64) -> u32 {
@@ -415,6 +430,151 @@ fn a_load_leaves_a_selector_alone_that_already_holds_the_entry() {
     assert!(report.is_complete(), "{:?}", report.failures);
     assert_eq!(camera.le(AREA_WIDTH), 512);
     assert_eq!(camera.writes_to(AREA_SELECTOR), 0);
+}
+
+// --- #210: indexed values ---------------------------------------------------
+
+/// The Basler a2A4096-44g5m's trigger block, from the camera's own XML
+/// (`ModelName="vvb_imx545m_bas"`): `TriggerMode` delegates to `d_90`, which
+/// picks its register by `TriggerSelector`'s value, and is locked by
+/// `d_90_lockedMux`, which picks its lock the same way. `FrameBurstStart` (0)
+/// has no entry in either table, so it takes the defaults. The names,
+/// indexes and addresses are the camera's; the tables are cut to the entries
+/// the tests use.
+const BASLER_XML: &str = r#"<RegisterDescription ModelName="vvb_imx545m_bas" VendorName="Basler" SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0" MajorVersion="1" MinorVersion="0" SubMinorVersion="0">
+  <Port Name="Device"/>
+  <Integer Name="d_88"><Value>3</Value></Integer>
+  <Enumeration Name="TriggerSelector" NameSpace="Standard">
+    <EnumEntry Name="FrameBurstStart"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="FrameStart"><Value>3</Value></EnumEntry>
+    <pValue>d_88</pValue>
+    <pSelected>TriggerMode</pSelected>
+  </Enumeration>
+  <Integer Name="d_90">
+    <pIndex>d_88</pIndex>
+    <pValueIndexed Index="3">d_257</pValueIndexed>
+    <pValueDefault>d_1049</pValueDefault>
+  </Integer>
+  <Integer Name="d_90_lockedMux">
+    <pIndex>d_88</pIndex>
+    <pValueIndexed Index="3">d_890</pValueIndexed>
+    <ValueDefault>0</ValueDefault>
+  </Integer>
+  <Enumeration Name="TriggerMode" NameSpace="Standard">
+    <pIsLocked>d_90_lockedMux</pIsLocked>
+    <Streamable>Yes</Streamable>
+    <EnumEntry Name="Off"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="On"><Value>1</Value></EnumEntry>
+    <pValue>d_90</pValue>
+  </Enumeration>
+  <IntReg Name="d_257"><Address>0x10002060</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="d_1049"><Address>0x10001fbc</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntReg Name="d_890"><Address>0x100087b4</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>Device</pPort><Endianess>BigEndian</Endianess></IntReg>
+</RegisterDescription>"#;
+
+/// GigE Vision bootstrap register `DeviceMACAddressLow`: where `d_90` read
+/// when its `<pIndex>` was an address term, 0 + 3 × 4. The reporter's
+/// `TriggerMode` read 0x533819AE, this register's value on their camera.
+const MAC_LOW: u64 = 0x000C;
+const FRAME_START_MODE: u64 = 0x1000_2060;
+const DEFAULT_MODE: u64 = 0x1000_1FBC;
+const FRAME_START_LOCK: u64 = 0x1000_87B4;
+
+/// The camera with `FrameStart`'s trigger on and every other trigger off:
+/// the three registers `TriggerMode` could read hold three different values,
+/// so a read of the wrong one cannot pass.
+fn basler() -> (NodeMap, Camera) {
+    let nm =
+        NodeMap::try_from_xml(viva_genapi_xml::parse(BASLER_XML).expect("parse")).expect("build");
+    let camera = Camera::default();
+    camera.put_be(MAC_LOW, 0x5338_19AE);
+    camera.put_be(FRAME_START_MODE, 1);
+    camera.put_be(DEFAULT_MODE, 0);
+    camera.put_be(FRAME_START_LOCK, 0);
+    (nm, camera)
+}
+
+/// GenICam Standard v2.1.1 §2.8.5: `<pIndex>` on an `<Integer>` selects one
+/// of its `<pValueIndexed>` entries; it is not an address. Writing
+/// `TriggerMode` under `FrameStart` writes `d_257` and nothing else.
+#[test]
+fn an_indexed_integer_reads_and_writes_the_entry_its_index_selects() {
+    let (mut nm, camera) = basler();
+    nm.set_enum("TriggerSelector", "FrameStart", &camera)
+        .unwrap();
+    assert_eq!(nm.get_integer("d_90", &camera).unwrap(), 1);
+    assert_eq!(nm.get_enum("TriggerMode", &camera).unwrap(), "On");
+
+    nm.set_enum("TriggerMode", "Off", &camera).unwrap();
+    assert_eq!(camera.be(FRAME_START_MODE), 0);
+    assert_eq!(camera.be(MAC_LOW), 0x5338_19AE);
+    assert_eq!(camera.be(DEFAULT_MODE), 0);
+    assert_eq!(*camera.writes.borrow(), [FRAME_START_MODE]);
+    assert_eq!(nm.get_enum("TriggerMode", &camera).unwrap(), "Off");
+}
+
+/// An index no entry names takes `<pValueDefault>`: `FrameBurstStart` has no
+/// entry in `d_90`, so its trigger mode is `d_1049`.
+#[test]
+fn an_index_without_an_entry_takes_the_default() {
+    let (mut nm, camera) = basler();
+    nm.set_enum("TriggerSelector", "FrameBurstStart", &camera)
+        .unwrap();
+    assert_eq!(nm.get_enum("TriggerMode", &camera).unwrap(), "Off");
+
+    nm.set_enum("TriggerMode", "On", &camera).unwrap();
+    assert_eq!(camera.be(DEFAULT_MODE), 1);
+    assert_eq!(camera.be(FRAME_START_MODE), 1);
+    assert_eq!(camera.be(MAC_LOW), 0x5338_19AE);
+    assert_eq!(*camera.writes.borrow(), [DEFAULT_MODE]);
+}
+
+/// The index node and every entry are dependencies of the indexed node, so a
+/// selector write leaves no stale `TriggerMode` behind.
+#[test]
+fn a_selector_change_invalidates_the_indexed_value() {
+    let (mut nm, camera) = basler();
+    nm.set_enum("TriggerSelector", "FrameStart", &camera)
+        .unwrap();
+    assert_eq!(nm.get_enum("TriggerMode", &camera).unwrap(), "On");
+    nm.set_enum("TriggerSelector", "FrameBurstStart", &camera)
+        .unwrap();
+    assert_eq!(nm.get_enum("TriggerMode", &camera).unwrap(), "Off");
+
+    for provider in ["d_88", "d_257", "d_1049"] {
+        assert!(
+            nm.dependents(provider).iter().any(|d| d == "d_90"),
+            "{provider}: {:?}",
+            nm.dependents(provider)
+        );
+    }
+    assert!(nm.dependents("d_88").iter().any(|d| d == "d_90_lockedMux"));
+    assert!(nm.dependents("d_890").iter().any(|d| d == "d_90_lockedMux"));
+}
+
+/// `TriggerMode`'s lock is indexed too: under `FrameStart` it is `d_890`,
+/// under `FrameBurstStart` the constant 0. A lock read from 0x000C was never
+/// zero, so the trigger could not be switched under any selector.
+#[test]
+fn the_lock_reads_the_entry_its_index_selects() {
+    let (mut nm, camera) = basler();
+    camera.put_be(FRAME_START_LOCK, 1);
+    nm.set_enum("TriggerSelector", "FrameStart", &camera)
+        .unwrap();
+    let err = nm
+        .set_enum("TriggerMode", "Off", &camera)
+        .expect_err("d_890 locks FrameStart's trigger");
+    assert!(
+        matches!(&err, GenApiError::Locked { locked_by, .. } if locked_by == "d_90_lockedMux"),
+        "{err:?}"
+    );
+    assert!(camera.writes.borrow().is_empty());
+
+    nm.set_enum("TriggerSelector", "FrameBurstStart", &camera)
+        .unwrap();
+    nm.set_enum("TriggerMode", "On", &camera).unwrap();
+    assert_eq!(camera.be(DEFAULT_MODE), 1);
+    assert_eq!(camera.be(FRAME_START_MODE), 1);
 }
 
 fn saved(feature: &str, value: &str) -> SavedValue {

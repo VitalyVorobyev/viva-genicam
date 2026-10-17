@@ -4,7 +4,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row no milestone names stays there unscheduled.
 
-**One release.** Every 0.9.0 milestone has merged; 0.9.0 ships what is on `main`. The receive engine, packet resend, the chunk and event ports and the GigE session lifecycle are derived from the specifications and arithmetic, so the release notes say what was verified only on fakes; USB3 Vision met one camera ([ADR-0032](adrs/adr0032-usb3-vision-transport.md) §8).
+**Next release.** 0.9.0 has shipped; 0.10.0 ships what is on `main`, and a hardware report promotes the rows it bears on.
 
 ## Waiting on hardware
 
@@ -41,7 +41,7 @@ Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-referen
 - **Distribution**: ST-07.
 - **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-49, ST-50.
 
-## Not planned for 0.9.0
+## Not planned
 
 - CoaXPress and Camera Link: reachable only through a vendor's GenTL producer, which we do not consume ([ADR-0011](adrs/adr0011-pure-rust-genicam-stack.md)).
 - The GenTL producer's optional functions, USB3 Vision cameras, events beyond new-buffer, and writing frames in place (GT-02 to GT-05).

@@ -4,10 +4,11 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{
-    NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS, TAG_INT_SWISS_KNIFE,
-    TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS, TAG_P_INDEX,
-    TAG_P_PORT, TAG_P_SELECTED, TAG_VALUE, handle_addressing_empty, handle_addressing_start,
-    handle_invalidator_start, handle_p_selected_start, handle_predicate_start,
+    IndexedBuilder, NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
+    TAG_INT_SWISS_KNIFE, TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS,
+    TAG_P_INDEX, TAG_P_PORT, TAG_P_SELECTED, TAG_VALUE, handle_addressing_empty,
+    handle_addressing_start, handle_invalidator_start, handle_p_selected_start,
+    handle_predicate_start,
 };
 use crate::builders::{AddressingBuilder, BitfieldBuilder};
 use crate::util::{
@@ -49,12 +50,19 @@ pub(crate) fn parse_integer(
     let mut selected = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
     let node_name = start.name().as_ref().to_string();
+    // An `<IntReg>` or a `<MaskedIntReg>` is a register; an `<Integer>` is
+    // not, and its `<pIndex>` selects a value (GenICam Standard v2.1.1
+    // §2.8.5).
+    let is_register = node_name != "Integer";
+    let mut indexed = IndexedBuilder::default();
     let mut buf = Vec::new();
     let mut bitfield = BitfieldBuilder::default();
     let mut pending_bit_length = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e))
+                if !is_register && indexed.handle_start(reader, e, parse_i64)? => {}
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
                 "pValue" => {
                     let text = read_text_start(reader, e)?;
@@ -254,6 +262,7 @@ pub(crate) fn parse_integer(
         buf.clear();
     }
 
+    let indexed = indexed.finish(&name, &mut addressing)?;
     // Addressing is optional: nodes may delegate via pValue, have a static
     // Value, or appear as pure UI features without register backing.
     let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
@@ -284,6 +293,7 @@ pub(crate) fn parse_integer(
         p_min,
         p_inc,
         value: static_value,
+        indexed,
         predicates,
         invalidators,
     })
@@ -324,6 +334,8 @@ pub(crate) fn parse_float(
     let mut p_min = None;
     let mut p_max = None;
     let mut byte_order: Option<ByteOrder> = None;
+    let mut value = None;
+    let mut indexed = IndexedBuilder::default();
     let mut predicates = PredicateRefs::default();
     let mut invalidators = Vec::new();
     let mut meta_builder = NodeMetaBuilder::default();
@@ -331,6 +343,10 @@ pub(crate) fn parse_float(
 
     loop {
         match reader.read_event_into(&mut buf) {
+            // A `<Float>` is no register: its `<pIndex>` selects a value
+            // (GenICam Standard v2.1.1 §2.8.9).
+            Ok(Event::Start(ref e))
+                if !is_float_reg && indexed.handle_start(reader, e, parse_f64)? => {}
             Ok(Event::Start(ref e)) => match e.name().as_ref() {
                 "pValue" => {
                     let text = read_text_start(reader, e)?;
@@ -358,6 +374,11 @@ pub(crate) fn parse_float(
                     if !handle_addressing_start(reader, e, &name, &mut addressing)? {
                         meta_builder.ignore(reader, e, None)?;
                     }
+                }
+                // A floating `<Float>`'s start value (backlog GA-49).
+                TAG_VALUE if !is_float_reg => {
+                    let text = read_text_start(reader, e)?;
+                    value = Some(parse_f64(&text)?);
                 }
                 "AccessMode" => {
                     let text = read_text_start(reader, e)?;
@@ -434,6 +455,7 @@ pub(crate) fn parse_float(
         _ => None,
     };
 
+    let indexed = indexed.finish(&name, &mut addressing)?;
     let addressing = addressing.finalize(&name, Some(8)).ok();
 
     let has_scale_or_offset = scale.is_some() || offset.is_some();
@@ -460,6 +482,8 @@ pub(crate) fn parse_float(
         pvalue,
         p_min,
         p_max,
+        value,
+        indexed,
         encoding,
         byte_order,
         predicates,

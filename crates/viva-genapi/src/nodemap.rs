@@ -12,7 +12,8 @@ use tracing::{debug, trace, warn};
 use viva_genapi_xml::{
     AccessMode, AddressTerm, Addressing, ByteOrder, CommandValueSrc, DocumentIdentity,
     EnumEntryDecl, EnumValueSrc, FloatEncoding, FormulaBindings, IgnoredElement, IndexOffset,
-    NodeDecl, PortKind, PredicateRefs, Sign, SkippedNode, Slope, Visibility, XmlModel,
+    IndexedSrc, IndexedValue, NodeDecl, PortKind, PredicateRefs, Sign, SkippedNode, Slope,
+    Visibility, XmlModel,
 };
 
 use crate::bitops::{extract, insert};
@@ -22,7 +23,7 @@ use crate::conversions::{
 };
 use crate::nodes::{
     BooleanNode, CategoryNode, CommandNode, ConverterNode, EnumMapping, EnumNode, FloatNode,
-    FormulaVar, IntConverterNode, IntegerNode, Node, RegisterNode, SkNode, StringNode,
+    FormulaVar, Indexed, IntConverterNode, IntegerNode, Node, RegisterNode, SkNode, StringNode,
 };
 use crate::swissknife::{
     AstNode as SkAst, EvalError as SkEvalError, EvalMode, Value as SkValue, VarAttr,
@@ -102,6 +103,22 @@ fn register_invalidator_dependencies(
     }
 }
 
+/// Record `node_name` as stale whenever its index node, or a node one of its
+/// indexed values reads, changes (GenICam Standard v2.1.1 §2.8.5).
+fn register_indexed_dependencies<T>(
+    dependents: &mut HashMap<String, Vec<String>>,
+    node_name: &str,
+    indexed: Option<&IndexedValue<T>>,
+) {
+    let providers = indexed.map(IndexedValue::referenced_nodes);
+    for provider in providers.into_iter().flatten() {
+        let list = dependents.entry(provider.to_string()).or_default();
+        if !list.iter().any(|dependent| dependent == node_name) {
+            list.push(node_name.to_string());
+        }
+    }
+}
+
 /// Record each feature `selector` names in `<pSelected>` as stale whenever
 /// `selector` changes.
 ///
@@ -131,6 +148,34 @@ fn ensure_readable(access: &AccessMode, name: &str) -> Result<(), GenApiError> {
         return Err(GenApiError::access(name, AccessDirection::Read));
     }
     Ok(())
+}
+
+/// Every node `node` may take its value from: its `<pValue>`, or each node
+/// an indexed `<Integer>` or `<Float>` can select.
+fn value_providers(node: &Node) -> Vec<&str> {
+    let indexed = match node {
+        Node::Integer(n) => n.indexed.as_ref().map(|i| i.table.value_nodes()),
+        Node::Float(n) => n.indexed.as_ref().map(|i| i.table.value_nodes()),
+        _ => None,
+    };
+    value_provider(node)
+        .into_iter()
+        .chain(indexed.into_iter().flatten())
+        .collect()
+}
+
+/// Whether `a` and `b` together allow reading and writing: what a node that
+/// declares `a` allows over one that declares `b`. `None` allows neither.
+fn combine_access(a: Option<AccessMode>, b: Option<AccessMode>) -> Option<AccessMode> {
+    let (a, b) = (a?, b?);
+    let readable = a != AccessMode::WO && b != AccessMode::WO;
+    let writable = a != AccessMode::RO && b != AccessMode::RO;
+    match (readable, writable) {
+        (true, true) => Some(AccessMode::RW),
+        (true, false) => Some(AccessMode::RO),
+        (false, true) => Some(AccessMode::WO),
+        (false, false) => None,
+    }
 }
 
 /// The node `node` takes its value from through `<pValue>`, if it delegates.
@@ -273,14 +318,15 @@ impl NodeMap {
 
     /// The nodes whose value or state may change when `name` is written.
     ///
-    /// A write reaches the register at the end of `name`'s `<pValue>` chain,
-    /// and from there it can move anything that depends on a node along that
-    /// chain — directly or through other nodes: a converter reading the same
-    /// register, a node whose `<pMin>`/`<pMax>`, address, `pIsAvailable` or
-    /// `pIsLocked` refers to it, a node the selector `name` selects, a node
-    /// naming it as a `<pInvalidator>`. All of them are returned, sorted,
-    /// without `name` itself; a viewer re-reads the ones it shows, so that
-    /// writing `BalanceRatioSelector` refreshes `BalanceRatio` (backlog ST-30).
+    /// A write reaches the register at the end of `name`'s `<pValue>` chain
+    /// (through any entry an indexed value can select), and from there it can
+    /// move anything that depends on a node along that chain — directly or
+    /// through other nodes: a converter reading the same register, a node
+    /// whose `<pMin>`/`<pMax>`, address, `pIsAvailable` or `pIsLocked` refers
+    /// to it, a node the selector `name` selects, a node naming it as a
+    /// `<pInvalidator>`. All of them are returned, sorted, without `name`
+    /// itself; a viewer re-reads the ones it shows, so that writing
+    /// `BalanceRatioSelector` refreshes `BalanceRatio` (backlog ST-30).
     ///
     /// Empty for an unknown name.
     pub fn invalidated_by(&self, name: &str) -> Vec<String> {
@@ -288,7 +334,7 @@ impl NodeMap {
             return Vec::new();
         }
         let mut seen: HashSet<&str> = HashSet::new();
-        let mut pending: Vec<&str> = self.value_chain(name);
+        let mut pending: Vec<&str> = self.value_reach(name);
         while let Some(current) = pending.pop() {
             if !seen.insert(current) {
                 continue;
@@ -333,6 +379,27 @@ impl NodeMap {
             current = next;
         }
         chain
+    }
+
+    /// `start` followed by every node it may take its value from — through
+    /// `<pValue>`, or as any entry or the default of an indexed node — each
+    /// once: the nodes whose caches can hold `start`'s value.
+    /// [`NodeMap::value_chain`] is the `<pValue>` part.
+    pub(crate) fn value_reach<'a>(&'a self, start: &'a str) -> Vec<&'a str> {
+        let mut reach = vec![start];
+        let mut next = 0;
+        while let Some(&current) = reach.get(next) {
+            next += 1;
+            let Some(node) = self.nodes.get(current) else {
+                continue;
+            };
+            for provider in value_providers(node) {
+                if !reach.contains(&provider) {
+                    reach.push(provider);
+                }
+            }
+        }
+        reach
     }
 
     /// Return names of nodes visible at the given level or below.
@@ -442,7 +509,7 @@ impl NodeMap {
                 if matches!(self.nodes.get(feature.as_str()), Some(Node::Command(_))) {
                     continue;
                 }
-                for link in self.value_chain(feature).into_iter().skip(1) {
+                for link in self.value_reach(feature).into_iter().skip(1) {
                     links.push((node.name().to_string(), link.to_string()));
                 }
             }
@@ -523,6 +590,17 @@ impl NodeMap {
             let pv = pv.clone();
             return self.get_integer(&pv, io);
         }
+        if let Some(indexed) = &node.indexed {
+            return match self.indexed_value(name, indexed, io)? {
+                (_, IndexedSrc::FromNode(target)) => self.get_integer(target, io),
+                (slot, IndexedSrc::Literal(start)) => Ok(indexed
+                    .written
+                    .borrow()
+                    .get(&slot)
+                    .copied()
+                    .unwrap_or(*start)),
+            };
+        }
         let addressing = node
             .addressing
             .as_ref()
@@ -588,6 +666,20 @@ impl NodeMap {
             let pv = pv.clone();
             return self.set_integer(&pv, value, io);
         }
+        if let Some(indexed) = &node.indexed {
+            match self.indexed_value(name, indexed, io)? {
+                (_, IndexedSrc::FromNode(target)) => {
+                    let target = target.clone();
+                    return self.set_integer(&target, value, io);
+                }
+                (slot, IndexedSrc::Literal(_)) => {
+                    debug!(node = %name, ?slot, value, "write indexed constant");
+                    indexed.written.borrow_mut().insert(slot, value);
+                    self.invalidate_dependents(name);
+                    return Ok(());
+                }
+            }
+        }
         let addressing = node
             .addressing
             .as_ref()
@@ -651,9 +743,24 @@ impl NodeMap {
         }
         let node = self.get_float_node(name)?;
         self.ensure_readable_now(&node.access, name)?;
+        // A floating float: what was written, else its start value.
+        if let Some(start) = node.value {
+            return Ok(node.floating.borrow().unwrap_or(start));
+        }
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             return self.get_float(&pv, io);
+        }
+        if let Some(indexed) = &node.indexed {
+            return match self.indexed_value(name, indexed, io)? {
+                (_, IndexedSrc::FromNode(target)) => self.get_float(target, io),
+                (slot, IndexedSrc::Literal(start)) => Ok(indexed
+                    .written
+                    .borrow()
+                    .get(&slot)
+                    .copied()
+                    .unwrap_or(*start)),
+            };
         }
         let addressing = node
             .addressing
@@ -707,9 +814,32 @@ impl NodeMap {
         // v2.1.1 §2.8.9).
         self.ensure_float_in_range(name, value, io)?;
         let node = self.get_float_node(name)?;
+        // A floating float has no register: the value lives here, as a
+        // floating integer's does (§2.8.9 gives a `<Float>` the `<Value>` of
+        // §2.8.5).
+        if node.value.is_some() {
+            debug!(node = %name, value, "write floating float");
+            node.floating.replace(Some(value));
+            self.invalidate_dependents(name);
+            return Ok(());
+        }
         if let Some(ref pv) = node.pvalue {
             let pv = pv.clone();
             return self.set_float(&pv, value, io);
+        }
+        if let Some(indexed) = &node.indexed {
+            match self.indexed_value(name, indexed, io)? {
+                (_, IndexedSrc::FromNode(target)) => {
+                    let target = target.clone();
+                    return self.set_float(&target, value, io);
+                }
+                (slot, IndexedSrc::Literal(_)) => {
+                    debug!(node = %name, ?slot, value, "write indexed constant");
+                    indexed.written.borrow_mut().insert(slot, value);
+                    self.invalidate_dependents(name);
+                    return Ok(());
+                }
+            }
         }
         let addressing = node
             .addressing
@@ -752,7 +882,7 @@ impl NodeMap {
         // cache" — the register's behind it too.
         let active = self.self_clearing_active(name);
         if active {
-            for link in self.value_chain(name) {
+            for link in self.value_reach(name) {
                 if let Some(node) = self.nodes.get(link) {
                     node.invalidate_cache();
                 }
@@ -1097,10 +1227,10 @@ impl NodeMap {
         if !self.nodes.contains_key(name) {
             return Err(GenApiError::NodeNotFound(name.to_string()));
         }
-        let base = self.declared_access_mode(name).unwrap_or(AccessMode::RO);
         if !self.is_available(name, io)? {
             return Ok(AccessMode::RO);
         }
+        let base = self.access_now(name, io)?.unwrap_or(AccessMode::RO);
         let prefs = self.predicate_refs(name)?;
         if let Some(provider) = &prefs.p_is_locked
             && self.eval_predicate_ref(name, provider, io)?
@@ -1111,6 +1241,76 @@ impl NodeMap {
             });
         }
         Ok(base)
+    }
+
+    /// [`NodeMap::declared_access_mode`] of `name`, combined with that of the
+    /// node an indexed node at the end of its `<pValue>` chain reads through
+    /// now, and so on along the nodes it selects: an indexed value is as
+    /// writable as the node its index selects, as a `<pValue>` is (GenICam
+    /// Standard v2.1.1 §2.8.5).
+    fn access_now(
+        &self,
+        name: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<Option<AccessMode>, GenApiError> {
+        let mut mode = self.declared_access_mode(name);
+        let mut seen = HashSet::new();
+        let mut current = name;
+        while seen.insert(current) {
+            let last = self.value_chain(current).last().copied().unwrap_or(current);
+            let Some(next) = self.indexed_target(last, io)? else {
+                break;
+            };
+            mode = combine_access(mode, self.declared_access_mode(next));
+            current = next;
+        }
+        Ok(mode)
+    }
+
+    /// The node `name`, when it is an indexed `<Integer>` or `<Float>`, reads
+    /// and writes through now; `None` when its index selects a constant, and
+    /// for any other node.
+    fn indexed_target(&self, name: &str, io: &dyn RegisterIo) -> Result<Option<&str>, GenApiError> {
+        let source = match self.nodes.get(name) {
+            Some(Node::Integer(IntegerNode {
+                indexed: Some(indexed),
+                ..
+            })) => self.indexed_value(name, indexed, io)?.1.node(),
+            Some(Node::Float(FloatNode {
+                indexed: Some(indexed),
+                ..
+            })) => self.indexed_value(name, indexed, io)?.1.node(),
+            _ => None,
+        };
+        Ok(source)
+    }
+
+    /// The value an indexed node's `<pIndex>` selects now: the entry naming
+    /// the index it reads, or the default (GenICam Standard v2.1.1 §2.8.5),
+    /// with the index of that entry — `None` for the default — under which a
+    /// constant keeps what is written to it.
+    fn indexed_value<'a, T>(
+        &self,
+        name: &str,
+        indexed: &'a Indexed<T>,
+        io: &dyn RegisterIo,
+    ) -> Result<(Option<i64>, &'a IndexedSrc<T>), GenApiError> {
+        let table = &indexed.table;
+        let index = self.get_integer(&table.index, io)?;
+        if let Some(entry) = table.entries.iter().find(|entry| entry.index == index) {
+            trace!(node = %name, index, "indexed value: entry");
+            return Ok((Some(index), &entry.value));
+        }
+        trace!(node = %name, index, "indexed value: default");
+        table
+            .default
+            .as_ref()
+            .map(|value| (None, value))
+            .ok_or_else(|| GenApiError::NoIndexedValue {
+                name: name.to_string(),
+                index_node: table.index.clone(),
+                index,
+            })
     }
 
     /// Return the subset of enum entries currently reported as available by
@@ -1933,8 +2133,9 @@ impl NodeMap {
     /// an increment we track). A pointer wins over a constant. A node that
     /// declares neither takes the bound of the node its `<pValue>` names —
     /// otherwise SFNC `Width`, an `<Integer>` over an `<IntReg>`, would have
-    /// none. That delegation is our reading; the standard does not spell it
-    /// out. A `<Converter>` or `<IntConverter>` maps its `<pValue>`'s bounds
+    /// none — and an indexed node that of the node its index selects now.
+    /// That delegation is our reading; the standard does not spell it out. A
+    /// `<Converter>` or `<IntConverter>` maps its `<pValue>`'s bounds
     /// through `<FormulaFrom>` as its `<Slope>` says (backlog GA-07).
     pub(crate) fn limit(
         &self,
@@ -1966,7 +2167,10 @@ impl NodeMap {
                     if let Some(value) = declared {
                         return Ok(Some(SkValue::Int(value)));
                     }
-                    node.pvalue.as_deref()
+                    match node.pvalue.as_deref() {
+                        Some(pv) => Some(pv),
+                        None => self.indexed_target(current, io)?,
+                    }
                 }
                 Some(Node::Float(node)) => {
                     let (pointer, declared) = match which {
@@ -1981,7 +2185,10 @@ impl NodeMap {
                     if let Some(value) = declared {
                         return Ok(Some(SkValue::Float(value)));
                     }
-                    node.pvalue.as_deref()
+                    match node.pvalue.as_deref() {
+                        Some(pv) => Some(pv),
+                        None => self.indexed_target(current, io)?,
+                    }
                 }
                 Some(Node::Converter(node)) => {
                     let formula = FromFormula {
@@ -2217,9 +2424,9 @@ impl NodeMap {
     }
 
     /// Forget `name`'s cached value — and that of every node it takes its
-    /// value from through `<pValue>`, which is where a register reading is
-    /// held — and those of the nodes that depend on it, so the next read asks
-    /// the device.
+    /// value from through `<pValue>` or an indexed value's entries, which is
+    /// where a register reading is held — and those of the nodes that depend
+    /// on it, so the next read asks the device.
     ///
     /// For a value the device changes in a way its XML does not describe — a
     /// timestamp a latch command fills, with nothing linking the two. A value
@@ -2230,7 +2437,7 @@ impl NodeMap {
     /// #187). The invalidation is a change for [`NodeMap::changed_since`].
     pub fn invalidate(&self, name: &str) {
         self.bump_generation();
-        for link in self.value_chain(name) {
+        for link in self.value_reach(name) {
             if let Some(node) = self.nodes.get(link) {
                 node.invalidate_cache();
                 self.note_changed(link);
@@ -2719,6 +2926,7 @@ fn build_node(
             p_min,
             p_inc,
             value,
+            indexed,
             predicates,
             invalidators,
         } => {
@@ -2731,6 +2939,7 @@ fn build_node(
                     .or_default()
                     .push(name.clone());
             }
+            register_indexed_dependencies(dependents, &name, indexed.as_ref());
             register_selection_dependencies(dependents, &name, &selected);
             register_predicate_dependencies(dependents, &name, &predicates);
             register_invalidator_dependencies(dependents, &name, &invalidators);
@@ -2753,6 +2962,7 @@ fn build_node(
                 p_min,
                 p_inc,
                 value,
+                indexed: indexed.map(Indexed::new),
                 predicates,
                 cache: std::cell::RefCell::new(None),
                 raw_cache: std::cell::RefCell::new(None),
@@ -2773,6 +2983,8 @@ fn build_node(
             pvalue,
             p_min,
             p_max,
+            value,
+            indexed,
             encoding,
             byte_order,
             predicates,
@@ -2787,6 +2999,7 @@ fn build_node(
                     .or_default()
                     .push(name.clone());
             }
+            register_indexed_dependencies(dependents, &name, indexed.as_ref());
             register_predicate_dependencies(dependents, &name, &predicates);
             register_invalidator_dependencies(dependents, &name, &invalidators);
             let node = FloatNode {
@@ -2802,10 +3015,13 @@ fn build_node(
                 pvalue,
                 p_min,
                 p_max,
+                value,
+                indexed: indexed.map(Indexed::new),
                 encoding,
                 byte_order,
                 predicates,
                 cache: std::cell::RefCell::new(None),
+                floating: std::cell::RefCell::new(None),
             };
             Ok((name, Node::Float(node)))
         }

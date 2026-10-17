@@ -54,7 +54,8 @@ release opens with what to read before upgrading.
   `<Float>` whose selected entry is write-only is reported by `feature_state`
   without a value; the read was refused and the feature dropped from the
   snapshot (Codex review of
-  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211)).
+  [#211](https://github.com/VitalyVorobyev/viva-genicam/pull/211);
+  [#212](https://github.com/VitalyVorobyev/viva-genicam/pull/212)).
 - **rustls 0.23.45 → 0.23.46** in `Cargo.lock` and `studio/Cargo.lock`, which
   clears RUSTSEC-2026-0346, -0347, -0348 and -0349. rustls arrives only
   through zenoh's QUIC link, so it reaches `viva-service`, the release

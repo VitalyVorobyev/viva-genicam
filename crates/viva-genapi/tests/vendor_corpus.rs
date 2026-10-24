@@ -769,6 +769,11 @@ const COMMAND_CASES: &[CommandCase] = &[
         document: "AVT_Manta_G125B_1.44.4.xml",
         ..AVT_TRIGGER_SOFTWARE
     },
+    // AVT_Manta_G125B_1.44.28514.xml: 1065-1072, 1074-1077, 4069-4076, 4177-4185, 988.
+    CommandCase {
+        document: "AVT_Manta_G125B_1.44.28514.xml",
+        ..AVT_TRIGGER_SOFTWARE
+    },
     // AVT_Manta_G146B.xml: 927-934, 936-939, 3418-3425, 3526-3534, 857.
     CommandCase {
         document: "AVT_Manta_G146B.xml",

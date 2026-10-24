@@ -8,7 +8,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-plan.md); its areas settle these rows of the next section, in this order:
 
-- **Found on this camera**: TC-40, CL-03, GA-58, TC-41.
+- **Found on this camera**: CL-03, GA-58, TC-41.
 - **Control channel**: TC-38, GT-07.
 - **GenApi**: GA-44, GA-47, TC-39, API-19.
 - **Streaming**: SR-24, SR-25, SR-23, PX-05.
@@ -41,6 +41,7 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
 - **API-19**: whether a camera declares an exposure name it does not implement, and what SVS's binning `On` does; a report from either camera settles it.
 - **GA-46**: whether vendor tools' configuration files are the layout ADR-0028 writes; a user's saved file settles it.
+- **TC-40**: whether Linux and Windows deliver a broadcast discovery acknowledgement to the discovery socket.
 - **GA-47**: whether a camera reads back a `WriteAround` register's new value at once, or the old one until it applies the write; a `set` then `get` with `-vv` settles it.
 
 ## Studio

@@ -10,6 +10,10 @@ release opens with what to read before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- `viva-camctl list --allow-broadcast-ack` and `viva-camctl report` find a camera configured for another subnet on macOS: its broadcast acknowledgement reached the host but not the discovery socket, which was bound to the interface's own address. With broadcast acknowledgements allowed, discovery now binds the unspecified address and keeps the socket on its interface. Found on an Allied Vision Manta G-125B ([#215](https://github.com/VitalyVorobyev/viva-genicam/pull/215)).
+
 ## Releases
 
 | Series | Releases | File |

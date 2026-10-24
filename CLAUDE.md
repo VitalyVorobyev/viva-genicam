@@ -44,8 +44,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 CI rejects all three: its `cargo doc` runs with `--all-features` and
 `RUSTDOCFLAGS=-D warnings`. CI also runs what this list does not: a
 per-feature check (`cargo hack --each-feature`), a `cargo check` on the
-declared MSRV, and a `wasm32-unknown-unknown` check of `viva-genapi-xml` and
-`viva-genapi`.
+declared MSRV, and a `wasm32-unknown-unknown` check of `viva-genapi-xml`,
+`viva-genapi` and `viva-pfnc` (the **quality-gate** skill has the exact commands).
 Transitive feature unification can mask breakage locally (a workspace sibling
 may already pull a crate in with extra features) — don't rely on "it built on
 my machine".

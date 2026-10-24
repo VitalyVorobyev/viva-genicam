@@ -49,7 +49,7 @@ the same version (ADR-0024).
 A missed file breaks the wheel build or publishes wrong metadata.
 
 Do **not** add a version-pinned install snippet to a README — both use
-`cargo add viva-genicam` precisely so there is no seventh thing to forget.
+`cargo add viva-genicam` precisely so there is no ninth touchpoint to forget.
 See "Version Bumps" in `CLAUDE.md`.
 
 ## 2. Verify locally
@@ -67,10 +67,9 @@ See "Version Bumps" in `CLAUDE.md`.
 
   Every crate version appears in each of them, so a stale one fails CI rather
   than merely looking untidy: the `lint viva-pygenicam` job runs
-  `cargo clippy --locked`, and `--locked` refuses to update the file. Missing
-  `crates/viva-pygenicam/Cargo.lock` is what broke the 0.4.1 release PR — it is
-  easy to forget precisely because that crate is also the one manifest that
-  does not inherit `version.workspace`.
+  `cargo clippy --locked`, and `--locked` refuses to update the file.
+  `crates/viva-pygenicam/Cargo.lock` is the easiest to forget, because that
+  crate is also the one manifest that does not inherit `version.workspace`.
 - Run the **quality-gate** skill — all gates must pass.
 
 ## 3. Release PR

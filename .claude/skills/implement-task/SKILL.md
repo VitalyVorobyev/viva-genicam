@@ -34,7 +34,8 @@ Delegate to a subagent with a tight, file-precise prompt (plan, exact
 files, test names) to keep the main context lean. Constraints:
 
 - No out-of-scope refactors; no one-use abstractions.
-- No `unwrap()`/`expect()` outside tests (docs/design.md tenets).
+- No panic reachable from remote input (camera XML, packets) through a
+  public API — return `Err` (docs/design.md tenet 6).
 - Follow existing module/test conventions in the touched crates.
 
 ## 4. Verify
@@ -44,17 +45,18 @@ needed) until all gates pass.
 
 ## 5. Ship
 
-- **NEVER push to main.** Create a feature branch, commit using the repo
-  commit-footer conventions, and open a PR whose title/body reference the
-  backlog ID.
+- **NEVER push to main.** Create a feature branch, commit, and open a PR
+  whose title/body reference the backlog ID.
 - Add a bullet to `[Unreleased]` in `CHANGELOG.md` when the change is
   user-visible, following the changelog rules in `CONTRIBUTING.md` (one
   bullet per change, what and why, the PR linked).
 - Update the user docs in the same PR: the book page for the feature, and the
   status list on `book/src/welcome.md` if a limitation changed.
+- Delete the task's row from `docs/backlog.md` in the same PR (the backlog's
+  rule: it lists only open work); the changelog records what shipped.
 
 ## 6. After merge
 
-Delete the task's row from `docs/backlog.md` in the same PR (the backlog's
-rule: it lists only open work); the changelog records what shipped. Never
-push to main directly.
+Tick or update the task's item on
+[issue #191](https://github.com/VitalyVorobyev/viva-genicam/issues/191), the
+public list of known gaps.

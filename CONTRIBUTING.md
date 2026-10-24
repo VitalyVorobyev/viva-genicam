@@ -143,6 +143,30 @@ cargo test -p viva-genicam --features u3v-usb --test u3v_hardware -- --ignored -
 One camera has run it (ADR-0032 §8). Run it with any other, and
 attach the output to the pull request or issue.
 
+A real GigE Vision camera has one too, `crates/viva-genicam/tests/gige_hardware.rs`,
+the parts of the [hardware test plan](docs/hardware-test-plan.md) a test can
+judge: discovery by broadcast and by address; control, monitor and exclusive
+access, and a second application refused while one holds control; every
+readable node read, every writable feature given its own value back, every
+enumeration entry set; commands reporting done; the standard-feature helpers,
+the region of interest, binning and decimation; a software trigger; a stream
+in every pixel format and across acquisition restarts; chunks, events and the
+fitted clock; and a save and load round trip. `VIVA_GIGE_IP` names the camera
+and `VIVA_GIGE_IFACE` the host interface (by name or address; without it, the
+one routed to the camera). Each test loads the camera's configuration back at
+the end; non-volatile state is written, unchanged, only with
+`VIVA_GIGE_ALLOW_PERSISTENT=1`. A feature the camera lacks is skipped with a
+message. Run no fake-camera suite meanwhile (UDP 3956), and one test at a
+time, since a camera takes one controller:
+
+```bash
+VIVA_GIGE_IP=<CAM> VIVA_GIGE_IFACE=<NIC> \
+  cargo test -p viva-genicam --test gige_hardware -- --ignored --test-threads=1 --nocapture
+```
+
+Attach its output, which prints what each test found, to the pull request or
+issue.
+
 GVSP parsing and block assembly also have fuzz targets, in `fuzz/` (outside
 the workspace; needs nightly and `cargo install cargo-fuzz`):
 `cargo +nightly fuzz run gvsp_parse`, `gvsp_assemble` or `chunk_parse`.

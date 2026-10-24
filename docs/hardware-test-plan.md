@@ -7,8 +7,11 @@ features get. It is written for any camera. Many rows in
 [roadmap.md → Waiting on hardware](roadmap.md#waiting-on-hardware) are settled
 by one area of it, and the **Settles** column names them.
 
-USB3 Vision has its own smoke suite (`crates/viva-genicam/tests/u3v_hardware.rs`,
-see [CONTRIBUTING → Tests](../CONTRIBUTING.md#tests)). Studio's UI steps are in
+The cases a test can judge are also a suite,
+`crates/viva-genicam/tests/gige_hardware.rs`: run it first, and by hand the
+cases it does not cover. USB3 Vision has its own,
+`crates/viva-genicam/tests/u3v_hardware.rs`. Both are described in
+[CONTRIBUTING → Tests](../CONTRIBUTING.md#tests). Studio's UI steps are in
 [studio/manual-e2e-test.md](studio/manual-e2e-test.md); this plan refers to them
 rather than repeating them.
 
@@ -60,9 +63,10 @@ state.
 | Case | Passes when | Settles |
 |---|---|---|
 | Open with `Access::Control`, then `Access::Monitor`; drop each | CCP reads as expected while held, and is released on drop | |
-| Exclusive access (`GigeDevice::set_exclusive_access`), then a second process reads | The camera's answer and the second reader's are recorded | GT-07 |
+| Exclusive access (`--access exclusive`, `Access::Exclusive`), then a second process reads | CCP reads `0x1`; the second reader's answer is recorded | |
 | Two applications: one holds control, a second `viva-camctl set` | The second is refused, and the first keeps control | TC-38 |
-| SIGSTOP the holder past `GevHeartbeatTimeout`, let a second take control, then SIGCONT | The first reports `ControlState::Lost`; the capture shows what CCP read | TC-38 |
+| A write from an application without control while nobody holds it (`gige_hardware` prints the answer) | The camera's answer is recorded | TC-38 |
+| SIGSTOP the holder past `GevHeartbeatTimeout`, let a second take control, then SIGCONT and write | The first reports `ControlState::Lost`, at its next write at the latest on a camera that does not name its controller; the log shows what CCP read | TC-38 |
 | A slow command (`UserSetSave`, `UserSetLoad`) with `-vv` and a capture | Any `PENDING_ACK` is captured, and its timeout field decoded both ways | TC-12, TC-24 |
 | `VIVA_GIGE_FORCE_READMEM=1` with area C's sweep | Same values as with READREG | |
 
@@ -73,8 +77,8 @@ state.
 | `viva-camctl dump` | Every readable node reads; no node is skipped that `NodeMap::skipped()` does not list | |
 | Write each RW node's own value back (every selector entry) | Each write succeeds and reads back the same | |
 | Every enumeration's available entries, set and read back; an unavailable entry | Each is accepted; the unavailable one is refused | |
-| `execute` each safe command, with and without `--no-wait` | `is_done` turns true before the timeout; a camera whose registers never clear is recorded | GA-44 |
-| `set` then `get` of a `WriteAround` exposure or gain, `-vv` | The read-back value is recorded: the new one or the old | GA-47 |
+| `execute` each safe command, with and without `--no-wait` | `is_done` turns true before the timeout; a camera whose registers never clear is recorded | |
+| `set` then `get` of a `WriteAround` feature, `-vv` (exposure and gain are `NoCache` on some cameras) | The read-back value is recorded: the new one or the old | |
 | A register narrower than a word, written | The camera's answer to the widened WRITEMEM is recorded | TC-39 |
 | Register nodes through `get_register`/`set_register` | Bytes match the capture | |
 
@@ -114,7 +118,7 @@ state.
 
 | Case | Passes when | Settles |
 |---|---|---|
-| `viva-camctl chunks --enable` with a capture of one frame | Raw chunks parse (`Frame::chunks`); `chunk_features` reads the values if the XML declares a chunk port, and the report says when it does not; the leader's payload type is recorded | TC-37 |
+| `viva-camctl chunks --enable` (`--selectors ""` on a camera without `ChunkSelector`) with a capture of one frame | Raw chunks parse (`Frame::chunks`); `chunk_features` reads the values if the XML declares a chunk port, and the report says when it does not; the leader's payload type is recorded | TC-37 |
 
 ### H. Events
 

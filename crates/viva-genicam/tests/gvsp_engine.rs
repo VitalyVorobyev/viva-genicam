@@ -222,10 +222,20 @@ fn small_block(block_id: u64) -> Vec<Datagram> {
 #[tokio::test]
 async fn the_frame_rate_is_measured_where_frames_complete_not_where_they_are_read() {
     let mut h = Harness::new(576);
+    // A loaded runner oversleeps, so the bounds come from the gaps the
+    // frames were actually sent with.
+    let mut sent = Vec::new();
     for block in 1..=4 {
+        sent.push(std::time::Instant::now());
         h.send(&small_block(block));
         std::thread::sleep(Duration::from_millis(40));
     }
+    let gaps: Vec<f64> = sent
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64())
+        .collect();
+    let slowest = 1.0 / gaps.iter().cloned().fold(f64::MIN, f64::max);
+    let fastest = 1.0 / gaps.iter().cloned().fold(f64::MAX, f64::min);
     h.settle(|s| s.packets_received >= 4 * 4);
     for _ in 0..4 {
         tokio::time::timeout(WAIT, h.stream.next_frame())
@@ -235,7 +245,10 @@ async fn the_frame_rate_is_measured_where_frames_complete_not_where_they_are_rea
             .expect("stream open");
     }
     let fps = h.stream.stats().avg_fps;
-    assert!((15.0..40.0).contains(&fps), "{fps} fps");
+    assert!(
+        (slowest / 2.0..fastest * 2.0).contains(&fps),
+        "{fps} fps for frames sent at {slowest:.1}..{fastest:.1} fps"
+    );
 }
 
 /// 16-bit block ids run 1..=65535 and skip 0. 65535 → 1 is the next block,

@@ -180,7 +180,8 @@ fn describe_says_what_a_feature_is_and_what_it_depends_on() {
 fn dump_lists_every_readable_value() {
     let fake = Fake::start();
     let camera = fake.camera();
-    let values = cmd_inspect::dump(&camera);
+    let (values, failures) = cmd_inspect::dump(&camera);
+    assert!(failures.is_empty(), "{failures:?}");
     let value = |name: &str| {
         values
             .iter()
@@ -196,6 +197,51 @@ fn dump_lists_every_readable_value() {
     );
     assert_eq!(value("AcquisitionStart"), None, "a command has no value");
     assert_eq!(value("ImageFormatControl"), None, "nor a category");
+}
+
+/// Set in the child process [`logs_go_to_stderr_and_data_to_stdout`] starts.
+const DUMP_CHILD: &str = "VIVA_CAMCTL_TEST_DUMP_CHILD";
+
+/// CL-03: `viva-camctl dump --ip <CAM> > file` wrote the log lines into the
+/// file (an Allied Vision Manta G-125B's twelve `WARN`s). The CLI's output is
+/// data and its logs are diagnostics: they go to different streams.
+///
+/// A process's own stdout cannot be inspected from inside it, so the test
+/// runs itself again as a child — this test binary, this test alone — which
+/// runs `dump` against a fake, and reads the two streams apart.
+#[test]
+fn logs_go_to_stderr_and_data_to_stdout() {
+    if std::env::var_os(DUMP_CHILD).is_some() {
+        let fake = Fake::start();
+        let code = crate::run(["viva-camctl", "dump", "--ip", "127.0.0.1"]);
+        drop(fake);
+        std::process::exit(code.into());
+    }
+    // The child's fake binds UDP 3956: no other fake in this process meanwhile.
+    let _port = PORT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "field_engineer::logs_go_to_stderr_and_data_to_stdout",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(DUMP_CHILD, "1")
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("run the child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("Width = 640"), "the dump: {stdout}");
+    assert!(
+        stderr.contains("connecting to GigE Vision camera"),
+        "the logs: {stderr}"
+    );
+    assert!(
+        !stdout.contains("connecting to GigE Vision camera") && !stdout.contains("INFO"),
+        "no log line among the data: {stdout}"
+    );
 }
 
 #[test]
@@ -439,4 +485,145 @@ fn every_new_command_parses_with_either_transport() {
     ] {
         assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
     }
+}
+
+/// API-22: `--access exclusive` claims exclusive access (CCP `0x1`), so
+/// another application cannot even read; `--access monitor` claims nothing
+/// and is refused a write before it reaches the camera.
+#[test]
+fn the_access_a_command_asks_for_is_the_one_the_camera_sees() {
+    let fake = Fake::start();
+    let target = crate::common::Target {
+        ip: Some(Ipv4Addr::LOCALHOST),
+        access: Some(crate::common::AccessArg::Exclusive),
+        ..Default::default()
+    };
+    let camera = fake
+        .runtime
+        .block_on(crate::common::open_target(
+            &target,
+            None,
+            viva_genicam::Access::Monitor,
+        ))
+        .expect("open exclusively");
+    assert_eq!(
+        fake.peek_word(viva_genicam::gige::consts::CONTROL_CHANNEL_PRIVILEGE),
+        viva_genicam::gige::consts::CCP_EXCLUSIVE,
+        "exclusive access on the camera"
+    );
+    let mut other = fake.control();
+    let refused = fake
+        .runtime
+        .block_on(cmd_registers::read_gige(&mut other, HEARTBEAT_TIMEOUT, 4));
+    assert!(refused.is_err(), "another application reads nothing");
+    drop(camera);
+    assert_eq!(fake.controller(), None, "released on drop");
+
+    let writes = || {
+        let commands = fake.camera.as_ref().unwrap().commands();
+        commands.total(viva_fake_gige::GvcpCommand::WriteReg)
+            + commands.total(viva_fake_gige::GvcpCommand::WriteMem)
+    };
+    let before = writes();
+    assert_eq!(
+        crate::run([
+            "viva-camctl",
+            "set",
+            "--ip",
+            "127.0.0.1",
+            "--access",
+            "monitor",
+            "--name",
+            "BlackLevel",
+            "--value",
+            "7",
+        ]),
+        1,
+        "a monitor does not write"
+    );
+    assert_eq!(writes(), before, "nothing reached the camera");
+    assert_eq!(fake.peek_word(REG_BLACK_LEVEL), 0);
+}
+
+/// Whether loopback carries multicast on this host; some do not.
+fn loopback_multicast_works() -> bool {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let group = Ipv4Addr::new(239, 192, 1, 98);
+    let probe = || -> std::io::Result<bool> {
+        let rx = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        rx.set_reuse_address(true)?;
+        rx.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
+        rx.join_multicast_v4(&group, &Ipv4Addr::LOCALHOST)?;
+        let port = rx.local_addr()?.as_socket().map_or(0, |a| a.port());
+        let rx: std::net::UdpSocket = rx.into();
+        rx.set_read_timeout(Some(Duration::from_millis(300)))?;
+        let tx = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        tx.bind(&std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+        tx.set_multicast_if_v4(&Ipv4Addr::LOCALHOST)?;
+        tx.set_multicast_loop_v4(true)?;
+        tx.send_to(b"probe", &std::net::SocketAddr::from((group, port)).into())?;
+        let mut buf = [0u8; 8];
+        Ok(rx.recv_from(&mut buf).is_ok())
+    };
+    probe().unwrap_or(false)
+}
+
+/// CL-02: `stream --monitor` watches the multicast stream another
+/// application set up, while that application holds control: it opens
+/// without claiming (a claim would be refused and the command fail), and
+/// starts and stops nothing (no write reaches the camera).
+#[test]
+fn stream_monitor_watches_a_stream_another_application_controls() {
+    if !loopback_multicast_works() {
+        eprintln!("skipped: loopback does not carry multicast on this host");
+        return;
+    }
+    let fake = Fake::start();
+    let mut controller = fake.camera();
+    let lo = viva_genicam::gige::Iface::from_ipv4(Ipv4Addr::LOCALHOST).expect("loopback");
+    let _own = controller
+        .open_stream(
+            viva_genicam::StreamOptions::new()
+                .iface(lo)
+                .multicast(Ipv4Addr::new(239, 192, 1, 22)),
+        )
+        .expect("the controller streams to a group");
+    controller.acquisition_start().expect("start");
+    let writes = || {
+        let commands = fake.camera.as_ref().unwrap().commands();
+        commands.total(viva_fake_gige::GvcpCommand::WriteReg)
+            + commands.total(viva_fake_gige::GvcpCommand::WriteMem)
+    };
+    let before = writes();
+    let code = crate::run([
+        "viva-camctl",
+        "--iface",
+        "127.0.0.1",
+        "stream",
+        "--ip",
+        "127.0.0.1",
+        "--monitor",
+        "--save",
+        "0",
+        "--duration-s",
+        "1",
+    ]);
+    assert_eq!(code, 0, "the monitor opened and watched");
+    assert_eq!(writes(), before, "the monitor wrote to the camera");
+    assert!(fake.controller().is_some(), "the controller still holds it");
+    controller.acquisition_stop().expect("stop");
+
+    assert_ne!(
+        crate::run([
+            "viva-camctl",
+            "stream",
+            "--ip",
+            "127.0.0.1",
+            "--monitor",
+            "--mode",
+            "multicast",
+        ]),
+        0,
+        "a monitor configures no stream"
+    );
 }

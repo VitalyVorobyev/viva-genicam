@@ -1829,12 +1829,13 @@ impl RegisterMap {
     ///
     /// While an application holds control, another may still read (it
     /// monitors) unless the privilege is exclusive, and may not write. While
-    /// nobody holds control every application may do both, as aravis's fake
-    /// camera allows (`arvgvfakecamera.c`); what a real device does then is
-    /// not something we have seen.
+    /// nobody holds control every application may read and none may write:
+    /// an Allied Vision Manta G-125B answered a write from an application
+    /// without control `ACCESS_DENIED` while nobody held it (aravis's fake
+    /// camera takes it, `arvgvfakecamera.c`).
     pub fn may_access(&self, peer: SocketAddr, write: bool) -> bool {
         match self.controller {
-            None => true,
+            None => !write,
             Some(controller) if controller == peer => true,
             Some(_) if write => false,
             Some(_) => self.read_u32_be(CONTROL_CHANNEL_PRIVILEGE) & CCP_EXCLUSIVE == 0,
@@ -1878,6 +1879,33 @@ impl RegisterMap {
         }
         self.regs
             .insert(GVCP_CAPABILITY, caps.to_be_bytes().to_vec());
+    }
+
+    /// Say, or stop saying, that the device names its primary application
+    /// (GVCP Capability `0x0800_0000`); without it `0x0A04` and `0x0A14` are
+    /// not registers of this device ([`Self::is_invalid_address`]).
+    pub fn set_names_primary_application(&mut self, names: bool) {
+        let mut caps = self.read_u32_be(GVCP_CAPABILITY);
+        if names {
+            caps |= CAPABILITY_CCP_APPLICATION_PORT_IP;
+        } else {
+            caps &= !CAPABILITY_CCP_APPLICATION_PORT_IP;
+        }
+        self.regs
+            .insert(GVCP_CAPABILITY, caps.to_be_bytes().to_vec());
+    }
+
+    /// Whether `len` bytes at `addr` touch a register this device does not
+    /// have, which it answers with `INVALID_ADDRESS`: the primary application
+    /// registers of a device whose GVCP Capability does not offer them.
+    pub fn is_invalid_address(&self, addr: u64, len: usize) -> bool {
+        let names_owner =
+            self.read_u32_be(GVCP_CAPABILITY) & CAPABILITY_CCP_APPLICATION_PORT_IP != 0;
+        let end = addr + len as u64;
+        !names_owner
+            && [PRIMARY_APPLICATION_PORT, PRIMARY_APPLICATION_IP]
+                .iter()
+                .any(|&reg| reg < end && addr < reg + 4)
     }
 
     /// Report `ip`, `mask` and `gateway` as the current IP configuration
@@ -2545,7 +2573,11 @@ mod tests {
         let owner: SocketAddr = "127.0.0.1:50001".parse().unwrap();
         let other: SocketAddr = "127.0.0.1:50002".parse().unwrap();
         let mut regs = map();
-        assert!(regs.may_access(other, true), "nobody controls yet");
+        assert!(
+            regs.may_access(other, false),
+            "nobody controls yet: all read"
+        );
+        assert!(!regs.may_access(other, true), "and nobody writes");
         assert!(regs.write_ccp(owner, CCP_CONTROL));
         assert_eq!(regs.controller(), Some(owner));
         assert_eq!(

@@ -38,47 +38,94 @@ pub struct StreamArgs {
     pub raw_out: Option<PathBuf>,
     pub rgb: bool,
     pub duration_s: u64,
+    /// How to open the camera. A monitor watches the multicast stream
+    /// another application set up ([`StreamOptions::monitor`]) and starts
+    /// and stops nothing.
+    pub access: viva_genicam::Access,
+}
+
+/// Refuse stream settings a monitor cannot make: it watches the stream
+/// another application configured, and writes nothing.
+pub fn check_monitor_options(
+    port: Option<u16>,
+    packet_delay: Option<Duration>,
+    packet_size: Option<u32>,
+    auto: bool,
+    mode: &str,
+    group: Option<Ipv4Addr>,
+) -> Result<()> {
+    let multicast = parse_mode(mode)? == StreamMode::Multicast;
+    if port.is_some() || packet_delay.is_some() || packet_size.is_some() || auto || multicast {
+        bail!(
+            "a monitor watches the stream another application configured, reading its group, \
+             port and packet size from the camera: pass no --port, --packet-delay-ns, \
+             --packet-size, --auto or --mode multicast with it"
+        );
+    }
+    if group.is_some() {
+        bail!("a monitor joins the group the camera streams to: pass no --group with it");
+    }
+    Ok(())
 }
 
 pub async fn run(args: StreamArgs) -> Result<()> {
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(args.ip, args.index, args.iface.as_ref(), timeout).await?;
     info!(ip = %device.ip, "opening camera for streaming");
-    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
+    let monitor = args.access == viva_genicam::Access::Monitor;
+    if monitor {
+        check_monitor_options(
+            args.port,
+            args.packet_delay,
+            args.packet_size,
+            args.auto,
+            &args.mode,
+            args.group,
+        )?;
+    }
+    let mut camera = common::open_camera(&device, args.access)
         .await
         .context("open camera for stream")?;
 
     let iface = common::resolve_receive_iface(args.iface.as_ref(), device.ip)?;
-    let mut options = StreamOptions::new().iface(iface);
-    if args.auto {
-        options = options.auto_packet_size();
-    } else if let Some(size) = args.packet_size {
-        options = options.packet_size(size);
-    }
-    if let Some(port) = args.port {
-        options = options.destination_port(port);
-    }
-    if let Some(delay) = args.packet_delay {
-        options = options.packet_delay(delay);
-    }
-    if !args.resend {
-        options = options.resend(ResendPolicy::Off);
-    }
-    if let StreamMode::Multicast = parse_mode(&args.mode)? {
-        let group = args
-            .group
-            .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
-        options = options.multicast(group);
-    }
+    let options = if monitor {
+        StreamOptions::monitor().iface(iface)
+    } else {
+        let mut options = StreamOptions::new().iface(iface);
+        if args.auto {
+            options = options.auto_packet_size();
+        } else if let Some(size) = args.packet_size {
+            options = options.packet_size(size);
+        }
+        if let Some(port) = args.port {
+            options = options.destination_port(port);
+        }
+        if let Some(delay) = args.packet_delay {
+            options = options.packet_delay(delay);
+        }
+        if !args.resend {
+            options = options.resend(ResendPolicy::Off);
+        }
+        if let StreamMode::Multicast = parse_mode(&args.mode)? {
+            let group = args
+                .group
+                .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
+            options = options.multicast(group);
+        }
+        options
+    };
     // One recipe for every consumer: claim control, configure the stream
     // channel, negotiate the packet size, and start the receive engine with
     // the camera's PayloadSize. The engine owns reception, reassembly, chunk
-    // parsing and the counters.
+    // parsing and the counters. A monitor reads the stream channel instead.
     let mut frame_stream = camera.open_stream(options).context("open stream")?;
     let stats = frame_stream.stats_handle();
 
-    // Sets TLParamsLocked too, and acquisition_stop clears it.
-    camera.acquisition_start().context("start acquisition")?;
+    // Sets TLParamsLocked too, and acquisition_stop clears it. A monitor
+    // starts and stops nothing: the application that set the stream up does.
+    if !monitor {
+        camera.acquisition_start().context("start acquisition")?;
+    }
     let mut saved_frames = 0usize;
     let mut frame_index = 0usize;
     let mut warned_evs_rgb = false;
@@ -180,7 +227,9 @@ pub async fn run(args: StreamArgs) -> Result<()> {
         }
     }
 
-    camera.acquisition_stop().context("stop acquisition")?;
+    if !monitor {
+        camera.acquisition_stop().context("stop acquisition")?;
+    }
     if interrupted {
         println!("Stream interrupted by user.");
     }

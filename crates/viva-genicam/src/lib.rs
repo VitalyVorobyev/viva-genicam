@@ -1087,9 +1087,11 @@ pub enum ControlState {
     Monitor,
     /// Privilege was lost: CCP reads without control bits — the heartbeat
     /// expired — or, on a camera that names its primary application, another
-    /// application holds it. Checked by the keepalive and after a write
-    /// refused with `ACCESS_DENIED`. [`GigeRegisterIo::reclaim_control`] asks
-    /// for it again.
+    /// application holds it. Checked by the keepalive, and after a write
+    /// refused with `ACCESS_DENIED`, when a camera that does not name its
+    /// primary application is also asked by claiming again
+    /// ([`GigeDevice::holds_control`]). [`GigeRegisterIo::reclaim_control`]
+    /// asks for it again.
     Lost,
     /// Given up with [`GigeRegisterIo::release_control`];
     /// [`GigeRegisterIo::reclaim_control`] takes it again, and so does
@@ -1108,6 +1110,13 @@ pub enum Access {
     /// Read only: claim nothing, write nothing, send no heartbeat. Works while
     /// another application controls the camera; every write is refused.
     Monitor,
+    /// [`Access::Control`], claimed as exclusive access (CCP `0x1`): while it
+    /// is held, the camera refuses other applications' reads as well as
+    /// their writes, and a [`Access::Monitor`] cannot open it. An Allied
+    /// Vision Manta G-125B granted it and answered another application's
+    /// READREG and READMEM with `ACCESS_DENIED`, while still answering
+    /// discovery. The session is [`ControlState::Held`], as with control.
+    Exclusive,
 }
 
 /// Blocking adapter turning an asynchronous [`GigeDevice`] into a [`RegisterIo`]
@@ -1400,7 +1409,8 @@ impl GigeRegisterIo {
 
     /// A write the camera refused with `ACCESS_DENIED`: either the register
     /// refuses it, or this session no longer holds control. Ask the device
-    /// which, and mark control lost only on its answer.
+    /// which ([`GigeDevice::holds_control`]), and mark control lost only on
+    /// its answer.
     fn check_refusal(&self, device: &mut GigeDevice, err: &gige::GigeError) {
         if !matches!(
             err,
@@ -1410,7 +1420,7 @@ impl GigeRegisterIo {
             return;
         }
         match self
-            .block_on(device.ping_control_channel())
+            .block_on(device.holds_control())
             .and_then(|pinged| pinged.map_err(error::gige("read the control channel")))
         {
             Ok(false) => {
@@ -1495,9 +1505,9 @@ impl RegisterIo for GigeRegisterIo {
     }
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), GenApiError> {
-        // Only a session that holds control writes: a camera nobody controls
-        // may take a write from anyone, and one that another application
-        // controls refuses it anyway.
+        // Only a session that holds control writes: the camera would refuse
+        // it anyway, whether another application controls it or nobody does
+        // (an Allied Vision Manta G-125B answers `ACCESS_DENIED` to both).
         match self.control_state() {
             ControlState::Held => {}
             state => return Err(GenApiError::io(WriteRefused::new(state, addr))),
@@ -1726,8 +1736,10 @@ fn spawn_keepalive(
 /// [`Access::Control`] claims control privilege, switches `PENDING_ACK` on
 /// where GVCP Capability says the camera has it, and keeps the privilege
 /// alive until the camera is dropped, which releases it. It fails while
-/// another application holds control. [`Access::Monitor`] writes nothing at
-/// all, so it works alongside that application.
+/// another application holds control. [`Access::Exclusive`] does the same
+/// with exclusive access, which also keeps other applications from reading.
+/// [`Access::Monitor`] writes nothing at all, so it works alongside an
+/// application holding control, though not one holding exclusive access.
 ///
 /// From a current-thread runtime the camera gets a runtime of its own — one
 /// worker thread, shut down when the camera is dropped — since a
@@ -1801,8 +1813,10 @@ pub(crate) async fn connect_here(
         .await
         .map_err(error::gige("open the control channel"))?;
 
-    if access == Access::Control {
-        // Claim control privilege (required before configuration and streaming).
+    if access != Access::Monitor {
+        // Claim control privilege (required before configuration and
+        // streaming); every later claim, after a loss, asks for the same.
+        device.set_exclusive_access(access == Access::Exclusive);
         device
             .claim_control()
             .await
@@ -1834,7 +1848,7 @@ pub(crate) async fn connect_here(
     let handle = tokio::runtime::Handle::current();
     let control_device = control.into_inner();
     let transport = match access {
-        Access::Control => GigeRegisterIo::new(handle, control_device),
+        Access::Control | Access::Exclusive => GigeRegisterIo::new(handle, control_device),
         Access::Monitor => GigeRegisterIo::monitor(handle, control_device),
     };
     let xml = fetched?;

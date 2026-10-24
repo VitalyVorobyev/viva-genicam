@@ -85,13 +85,14 @@ pub(crate) use viva_gige::consts::{
     CONFIGURATION_PENDING_ACK_ENABLE, CONTROL_CHANNEL_PRIVILEGE, CURRENT_DEFAULT_GATEWAY,
     CURRENT_IP_ADDRESS, CURRENT_IP_CONFIG, CURRENT_SUBNET_MASK, DEVICE_MAC_ADDRESS_HIGH,
     DEVICE_MAC_ADDRESS_LOW, DEVICE_MODE, FIRST_URL, GVCP_CAPABILITY, GVCP_CONFIGURATION,
-    HEARTBEAT_TIMEOUT, MESSAGE_DESTINATION_ADDRESS, MESSAGE_DESTINATION_PORT,
-    NUMBER_OF_MESSAGE_CHANNELS, NUMBER_OF_STREAM_CHANNELS, PERSISTENT_DEFAULT_GATEWAY,
-    PERSISTENT_IP_ADDRESS, PERSISTENT_SUBNET_MASK, PRIMARY_APPLICATION_IP,
-    PRIMARY_APPLICATION_PORT, SCPS_DO_NOT_FRAGMENT, SCPS_FIRE_TEST_PACKET, STREAM_CHANNEL_BASE,
-    STREAM_CHANNEL_STRIDE, STREAM_DESTINATION_ADDRESS, STREAM_DESTINATION_PORT,
-    STREAM_PACKET_DELAY, STREAM_PACKET_SIZE, STREAM_PACKET_SIZE_MASK, SUPPORTED_IP_CONFIG,
-    TIMESTAMP_TICK_FREQUENCY_HIGH, TIMESTAMP_TICK_FREQUENCY_LOW, URL_LEN, VERSION,
+    HEARTBEAT_TIMEOUT, MESSAGE_CHANNEL_RETRY_COUNT, MESSAGE_CHANNEL_TIMEOUT,
+    MESSAGE_DESTINATION_ADDRESS, MESSAGE_DESTINATION_PORT, NUMBER_OF_MESSAGE_CHANNELS,
+    NUMBER_OF_STREAM_CHANNELS, PERSISTENT_DEFAULT_GATEWAY, PERSISTENT_IP_ADDRESS,
+    PERSISTENT_SUBNET_MASK, PRIMARY_APPLICATION_IP, PRIMARY_APPLICATION_PORT, SCPS_DO_NOT_FRAGMENT,
+    SCPS_FIRE_TEST_PACKET, STREAM_CHANNEL_BASE, STREAM_CHANNEL_STRIDE, STREAM_DESTINATION_ADDRESS,
+    STREAM_DESTINATION_PORT, STREAM_PACKET_DELAY, STREAM_PACKET_SIZE, STREAM_PACKET_SIZE_MASK,
+    SUPPORTED_IP_CONFIG, TIMESTAMP_TICK_FREQUENCY_HIGH, TIMESTAMP_TICK_FREQUENCY_LOW, URL_LEN,
+    VERSION,
 };
 
 /// `DeviceMode`: big-endian (bit 31), character set 1 (UTF-8), class
@@ -220,6 +221,13 @@ pub const CHUNK_ID_FRAME_ID: u32 = 0x0504_0003;
 /// `ImageInfo`: width, height, reserved, image length — four big-endian
 /// `u32`s; `ChunkImageLength` reads the last at address `-4`.
 pub const CHUNK_ID_IMAGE_INFO: u32 = 0xA5A5_0100;
+
+/// This fake's `GevMCTT`: milliseconds before an unacknowledged event message
+/// is sent again.
+pub const DEFAULT_MESSAGE_TIMEOUT_MS: u32 = 40;
+/// This fake's `GevMCRC`: retransmissions before an event message is
+/// abandoned.
+pub const DEFAULT_MESSAGE_RETRY_COUNT: u32 = 25;
 
 /// GigE Vision event identifier this fake sends for ExposureEnd, as an
 /// `EVENTDATA` carrying the frame id. Device-specific range, this fake's own
@@ -1580,6 +1588,16 @@ impl RegisterMap {
         );
         regs.insert(MESSAGE_DESTINATION_PORT, 0u32.to_be_bytes().to_vec());
         regs.insert(MESSAGE_DESTINATION_ADDRESS, vec![0, 0, 0, 0]);
+        // This fake's own message channel timing (the Manta G-125B's was
+        // 100 ms and 0xFFFFFFFF retries).
+        regs.insert(
+            MESSAGE_CHANNEL_TIMEOUT,
+            DEFAULT_MESSAGE_TIMEOUT_MS.to_be_bytes().to_vec(),
+        );
+        regs.insert(
+            MESSAGE_CHANNEL_RETRY_COUNT,
+            DEFAULT_MESSAGE_RETRY_COUNT.to_be_bytes().to_vec(),
+        );
 
         // IP configuration: DHCP + persistent + LLA = 0x07
         regs.insert(CURRENT_IP_CONFIG, 0x0000_0005u32.to_be_bytes().to_vec());
@@ -2323,6 +2341,20 @@ impl RegisterMap {
     pub fn message_dest_ip(&self) -> Ipv4Addr {
         let data = self.read(MESSAGE_DESTINATION_ADDRESS, 4);
         Ipv4Addr::new(data[0], data[1], data[2], data[3])
+    }
+
+    /// Milliseconds an event message waits for its acknowledgement before it
+    /// is sent again (`GevMCTT`).
+    pub fn message_timeout_ms(&self) -> u32 {
+        let data = self.read(MESSAGE_CHANNEL_TIMEOUT, 4);
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    }
+
+    /// Times an unacknowledged event message is sent again before it is
+    /// abandoned (`GevMCRC`).
+    pub fn message_retry_count(&self) -> u32 {
+        let data = self.read(MESSAGE_CHANNEL_RETRY_COUNT, 4);
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
     }
 
     /// Message channel destination port (`GevMCP`), low 16 bits of the register.

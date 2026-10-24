@@ -28,7 +28,7 @@ pub use gvsp::{
     PacketBitmap, StreamConfig, StreamDest, has_extended_chunks, is_chunk_data_payload,
     is_image_payload, parse_chunks, parse_header, parse_packet_ref,
 };
-pub use message::{EventPacket, EventSocket};
+pub use message::{EVENT_QUEUE_CAPACITY, EventPacket, EventSocket, EventStats};
 pub use nic::{
     ASSUMED_MTU, DEFAULT_RCVBUF_BYTES, Iface, IfaceSelector, McOptions, Mtu, RecvBuffer,
     best_packet_size, bind_multicast, bind_udp, mtu, set_recv_buffer, wait_readable,

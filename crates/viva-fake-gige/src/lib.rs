@@ -35,6 +35,7 @@ pub use gvcp_server::{
     FAKE_MANUFACTURER, FAKE_MODEL, FAKE_SERIAL, FAKE_SUBNET_MASK, FAKE_USER_NAME, FAKE_VERSION,
     GvcpCommand, RegisterCommandRefusal,
 };
+mod events;
 mod gvsp;
 mod gvsp_sender;
 mod registers;
@@ -67,8 +68,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+pub use events::MessageChannelStats;
 pub use gvsp::{PacketScript, ScriptStep};
-pub use registers::XmlProfile;
+pub use registers::{DEFAULT_MESSAGE_RETRY_COUNT, DEFAULT_MESSAGE_TIMEOUT_MS, XmlProfile};
 pub use resend::ResendStats;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -519,6 +521,19 @@ impl FakeCameraBuilder {
             })
         };
 
+        // The message channel: events leave from a socket of their own on the
+        // camera's address, as the Manta's left from port 10020.
+        let events = Arc::new(events::Counters::default());
+        let (occurred, occurred_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events_handle = {
+            let socket = UdpSocket::bind((self.bind_ip, 0)).await?;
+            let regs = regs.clone();
+            let events = events.clone();
+            tokio::spawn(async move {
+                events::run(socket, occurred_rx, regs, events).await;
+            })
+        };
+
         // Spawn GVSP streaming task.
         let gvsp_handle = {
             let regs = regs.clone();
@@ -531,6 +546,7 @@ impl FakeCameraBuilder {
                 spoofed: spoofed.clone(),
                 retention,
                 source_ip: self.bind_ip,
+                events: occurred,
             };
             tokio::spawn(async move {
                 gvsp_sender::run(regs, acq_start, acq_stop, fps, options, shared).await;
@@ -540,6 +556,8 @@ impl FakeCameraBuilder {
         Ok(FakeCamera {
             gvcp_handle: Some(gvcp_handle),
             gvsp_handle: Some(gvsp_handle),
+            events_handle: Some(events_handle),
+            events,
             regs,
             counters,
             blocks_sent,
@@ -560,6 +578,8 @@ impl FakeCameraBuilder {
 pub struct FakeCamera {
     gvcp_handle: Option<JoinHandle<()>>,
     gvsp_handle: Option<JoinHandle<()>>,
+    events_handle: Option<JoinHandle<()>>,
+    events: Arc<events::Counters>,
     regs: Arc<Mutex<registers::RegisterMap>>,
     counters: Arc<CommandCounters>,
     blocks_sent: Arc<AtomicU64>,
@@ -608,6 +628,14 @@ impl FakeCamera {
     /// complete, incomplete, missed or dropped to backpressure on the host.
     pub fn blocks_sent(&self) -> u64 {
         self.blocks_sent.load(Ordering::Relaxed)
+    }
+
+    /// What this camera's message channel did: messages sent, how often,
+    /// acknowledged or abandoned, and events lost to a full queue
+    /// (`events` module: one message outstanding, sent again every `GevMCTT`
+    /// until acknowledged, as an Allied Vision Manta G-125B does).
+    pub fn message_channel(&self) -> MessageChannelStats {
+        self.events.snapshot()
     }
 
     /// What this camera did with `PACKETRESEND_CMD`s: requests received,
@@ -690,6 +718,10 @@ impl FakeCamera {
             h.abort();
             let _ = h.await;
         }
+        if let Some(h) = self.events_handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
     }
 }
 
@@ -701,6 +733,9 @@ impl Drop for FakeCamera {
             h.abort();
         }
         if let Some(h) = self.gvsp_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.events_handle.take() {
             h.abort();
         }
     }

@@ -174,6 +174,12 @@ costs its block, not the stream, and a gone device ends it with
 drop-oldest queue are the GigE side's own (`StreamStats`, `DeliveryQueue`);
 opened by `Camera::open_stream(U3vStreamOptions)` or `U3vStreamBuilder`.
 
+**`EventSocket` / `EventStream`** (`viva-gige` / `viva-genicam`) — the GVCP
+message channel. A thread per socket acknowledges each message as it arrives,
+drops the device's retransmissions and queues the events for the application,
+at most 1024, the oldest dropped and counted past that
+([ADR-0033](adrs/adr0033-event-channel-acknowledges-on-arrival.md)).
+
 **`Discovery`, `DeviceOps`, `StreamSource`** (`viva-service`) — the one
 service implementation both transports run. A transport supplies a
 `Discovery` (find cameras, name each one's announce, connect); its device is

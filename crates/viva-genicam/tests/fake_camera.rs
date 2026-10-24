@@ -1948,6 +1948,72 @@ async fn test_event_stream_receives_start_of_transfer() {
     .unwrap();
 }
 
+/// TC-42: an application that reads its events late costs the camera no
+/// retransmission. The fake resends an unacknowledged event every `GevMCTT`
+/// (40 ms) as an Allied Vision Manta G-125B does (100 ms); acknowledged only
+/// at the read, a reader a second late made the Manta send one event twelve
+/// times. Each event still arrives once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_event_reader_costs_the_camera_no_retransmission() {
+    let cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+
+    let (mut frame_stream, mut camera) = setup_stream_owned(&device_info).await;
+    let local: std::net::Ipv4Addr = [127, 0, 0, 1].into();
+    let port = 10_024u16;
+    camera
+        .configure_events(local, port, &["ExposureEnd"])
+        .await
+        .expect("configure events");
+    let events = camera
+        .open_event_stream(local, port)
+        .await
+        .expect("open event stream");
+
+    let camera = Arc::new(Mutex::new(camera));
+    let cam_start = camera.clone();
+    tokio::task::spawn_blocking(move || cam_start.lock().unwrap().acquisition_start())
+        .await
+        .unwrap()
+        .expect("start");
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+            .await
+            .expect("a frame")
+            .expect("frame")
+            .expect("stream open");
+    }
+    let cam_stop = camera.clone();
+    tokio::task::spawn_blocking(move || cam_stop.lock().unwrap().acquisition_stop())
+        .await
+        .unwrap()
+        .expect("stop");
+
+    // Nobody reads for a second: 25 of the fake's timeouts.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut blocks = Vec::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(300), events.next()).await
+    {
+        blocks.push(event.block_id);
+    }
+    let sent = cam.fake().message_channel();
+    assert!(!blocks.is_empty(), "events arrived");
+    let mut distinct = blocks.clone();
+    distinct.dedup();
+    assert_eq!(distinct, blocks, "each event once");
+    assert_eq!(
+        sent.events,
+        blocks.len() as u64,
+        "every event the camera sent"
+    );
+    assert_eq!(
+        sent.transmissions, sent.messages,
+        "the camera sent each message once: {sent:?}"
+    );
+    assert_eq!(sent.acknowledged, sent.messages);
+    assert_eq!(events.stats().retransmissions, 0);
+}
+
 /// An event feature read from a received event (GA-39): the fake sends an
 /// `EVENTDATA` for ExposureEnd, and `EventExposureEndTimestamp` and
 /// `EventExposureEndFrameID` read through GenApi from the port whose

@@ -671,8 +671,12 @@ impl<T: RegisterIo> Camera<T> {
     /// Configure chunk mode and enable the requested selectors.
     pub fn configure_chunks(&mut self, cfg: &ChunkConfig) -> Result<(), GenicamError> {
         self.ensure_chunk_feature(viva_sfnc::CHUNK_MODE_ACTIVE)?;
-        self.ensure_chunk_feature(viva_sfnc::CHUNK_SELECTOR)?;
-        self.ensure_chunk_feature(viva_sfnc::CHUNK_ENABLE)?;
+        // Only a selector asked for needs them: an Allied Vision Manta G-125B
+        // declares `ChunkModeActive` alone.
+        if !cfg.selectors.is_empty() {
+            self.ensure_chunk_feature(viva_sfnc::CHUNK_SELECTOR)?;
+            self.ensure_chunk_feature(viva_sfnc::CHUNK_ENABLE)?;
+        }
 
         // SAFE: split-borrow distinct fields of `self`
         self.with_map(|nm, tr| {
@@ -2203,6 +2207,56 @@ mod tests {
             1500u32.to_be_bytes(),
             "the don't-fragment bit is untouched"
         );
+    }
+
+    /// An Allied Vision Manta G-125B declares `ChunkModeActive` — the
+    /// stream channel's chunk bit, `0x0D24` bit 31 — and no `ChunkSelector`
+    /// or `ChunkEnable`. Chunk mode alone is turned on and off; a selector
+    /// asked for is what needs those features.
+    #[test]
+    fn chunk_mode_alone_needs_no_chunk_selector() {
+        const XML: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Boolean Name="ChunkModeActive" NameSpace="Standard">
+                    <Streamable>Yes</Streamable>
+                    <pValue>RegSCCFGChunk</pValue>
+                    <OnValue>1</OnValue>
+                    <OffValue>0</OffValue>
+                </Boolean>
+                <MaskedIntReg Name="RegSCCFGChunk" NameSpace="Custom">
+                    <Address>0xD24</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <pPort>Device</pPort>
+                    <Bit>31</Bit>
+                    <Endianess>BigEndian</Endianess>
+                </MaskedIntReg>
+                <Port Name="Device" NameSpace="Standard"/>
+            </RegisterDescription>
+        "#;
+        let model = viva_genapi_xml::parse(XML).expect("parse");
+        let nodemap = NodeMap::try_from_xml(model).expect("build nodemap");
+        let mut camera = Camera::new(MemoryIo::default(), nodemap);
+        let mode = |active| ChunkConfig {
+            selectors: Vec::new(),
+            active,
+        };
+
+        camera.configure_chunks(&mode(true)).expect("chunk mode on");
+        assert_eq!(camera.transport().read(0xD24, 4).unwrap(), [0, 0, 0, 1]);
+        camera
+            .configure_chunks(&mode(false))
+            .expect("chunk mode off");
+        assert_eq!(camera.transport().read(0xD24, 4).unwrap(), [0, 0, 0, 0]);
+
+        let timestamp = ChunkConfig {
+            selectors: vec!["Timestamp".into()],
+            active: true,
+        };
+        assert!(matches!(
+            camera.configure_chunks(&timestamp),
+            Err(GenicamError::MissingChunkFeature(name)) if name == "ChunkSelector"
+        ));
     }
 
     /// `Camera::set` on a feature that is itself a `<Converter>` writes through

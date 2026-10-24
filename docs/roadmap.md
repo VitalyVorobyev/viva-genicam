@@ -4,6 +4,19 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 **Ordering principle.** Priority is argued from measurement (a corpus count, a wire capture, a user report), not intuition ([ADR-0018](adrs/adr0018-genapi-conformance-over-convenience.md)): wrong results first, then streaming reliability, breadth real cameras use, usability, reach, and USB3 Vision last. The [evidence hierarchy](../CLAUDE.md#evidence-hierarchy) can promote any row when a user with hardware appears. Corpus counts live only in the backlog, and a row this file does not name stays there unscheduled.
 
+## Hardware validation
+
+One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-plan.md); its areas settle these rows of the next section, in this order:
+
+- **Found on this camera**: TC-40, CL-03, GA-58, TC-41.
+- **Control channel**: TC-38, GT-07.
+- **GenApi**: GA-44, GA-47, TC-39, API-19.
+- **Streaming**: SR-24, SR-25, SR-23, PX-05.
+- **Chunks and events**: TC-37.
+- **Repeatable**: CI-21 turns the plan into a command, then CI-22 runs it nightly.
+- **Endurance**: SR-27 and API-21, decided by the plan's area L.
+- **Surfaces it needs**: CL-02, API-22, PY-06, GT-08; then DOC-19 records what ran.
+
 ## Waiting on hardware
 
 - **GA-44**: whether cameras clear a command register once the command is done, which `IsDone` relies on.
@@ -35,9 +48,9 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); a change to a type it consumes updates it in the same PR.
 
 - **Foundations**: ST-45, ST-46, ST-47.
-- **Viewer parity**: ST-39.
+- **Viewer parity**: ST-39, ST-51, ST-52, ST-56, ST-49.
 - **Distribution**: ST-07.
-- **Later**: ST-08, ST-09, ST-10, ST-11, ST-12, ST-13, ST-49, ST-50.
+- **Later**: ST-50, ST-53, ST-54, ST-55, ST-57, ST-58, ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.
 
 ## Not planned
 

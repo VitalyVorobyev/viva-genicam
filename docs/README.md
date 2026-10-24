@@ -12,6 +12,7 @@ pull requests.
 | [`adrs/`](adrs/README.md) | Architecture decision records: why the big choices were made |
 | [`roadmap.md`](roadmap.md) | The order of the open work, by backlog ID |
 | [`backlog.md`](backlog.md) | Actionable tasks, each with its evidence |
+| [`hardware-test-plan.md`](hardware-test-plan.md) | Exercising every feature against a real GigE Vision camera, and which backlog rows each area settles |
 | [`studio/zenoh-api.md`](studio/zenoh-api.md) | The Zenoh contract between the services and Viva Studio, and any other client |
 | [`studio/testing-cookbook.md`](studio/testing-cookbook.md) | Running and testing Viva Studio without a camera |
 | [`studio/manual-e2e-test.md`](studio/manual-e2e-test.md) | The manual end-to-end checklist for Studio, against a fake or real camera |

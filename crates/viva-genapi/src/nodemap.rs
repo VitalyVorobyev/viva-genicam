@@ -1292,7 +1292,7 @@ impl NodeMap {
     /// now, and so on along the nodes it selects: an indexed value is as
     /// writable as the node its index selects, as a `<pValue>` is (GenICam
     /// Standard v2.1.1 §2.8.5).
-    fn access_now(
+    pub(crate) fn access_now(
         &self,
         name: &str,
         io: &dyn RegisterIo,
@@ -1382,6 +1382,19 @@ impl NodeMap {
             }
         }
         Ok(unique_in_order(out))
+    }
+
+    /// `name`'s own `<pIsAvailable>`, without its `<pIsImplemented>`: `true`
+    /// when it declares none.
+    pub(crate) fn own_availability(
+        &self,
+        name: &str,
+        io: &dyn RegisterIo,
+    ) -> Result<bool, GenApiError> {
+        match &self.predicate_refs(name)?.p_is_available {
+            Some(provider) => self.eval_predicate_ref(name, provider, io),
+            None => Ok(true),
+        }
     }
 
     /// The provider of `name`'s `<pIsLocked>`, when it reports the feature

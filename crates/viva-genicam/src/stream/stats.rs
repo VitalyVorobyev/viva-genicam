@@ -289,11 +289,14 @@ impl StreamStatsAccumulator {
         add(&self.inner.packets_missing, count);
     }
 
-    /// A complete frame of `bytes` was handed to the application.
-    pub(crate) fn record_frame(&self, bytes: usize, latency: Option<Duration>) {
+    /// A complete frame of `bytes`, finished arriving at `completed`, was
+    /// handed to the application. The rates count from `completed`, not from
+    /// the hand-over: frames held back behind an older one, or read late,
+    /// leave in a burst that says nothing about the camera's rate.
+    pub(crate) fn record_frame(&self, bytes: usize, latency: Option<Duration>, completed: Instant) {
         add(&self.inner.frames_complete, 1);
         add(&self.inner.bytes, bytes as u64);
-        let now = Instant::now();
+        let now = completed;
         let mut rates = self.inner.rates.lock().expect("stats mutex poisoned");
         if let Some(prev) = rates.last_frame_instant.replace(now) {
             let dt = now.saturating_duration_since(prev);
@@ -394,8 +397,8 @@ mod tests {
     #[test]
     fn counters_are_independent_and_sum_as_documented() {
         let stats = StreamStatsAccumulator::new();
-        stats.record_frame(100, None);
-        stats.record_frame(100, None);
+        stats.record_frame(100, None, Instant::now());
+        stats.record_frame(100, None, Instant::now());
         stats.record_incomplete_frame();
         stats.record_missed_frames(3);
         stats.record_backpressure_drop();

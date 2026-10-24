@@ -166,6 +166,9 @@ pub(crate) struct AssembledBlock {
     /// leader's geometry (bounded by the trailer's packet count); `None`
     /// when nothing said.
     pub expected_size: Option<usize>,
+    /// When its last packet arrived: when the camera finished sending it,
+    /// as near as the host can tell.
+    pub last_packet: Instant,
 }
 
 #[derive(Debug)]
@@ -952,6 +955,7 @@ impl Assembler {
                 payload: Bytes::from(buffer),
                 trailer_size_y,
                 expected_size,
+                last_packet: block.last_packet,
             });
         }
     }

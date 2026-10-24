@@ -84,6 +84,8 @@ pub enum StreamBlock {
 #[derive(Debug, Clone)]
 pub struct GenericStreamBlock {
     inner: StreamBlock,
+    /// When the block's last packet arrived, for the frame rate.
+    completed: Option<std::time::Instant>,
 }
 
 impl From<GenericStreamBlock> for StreamBlock {
@@ -242,7 +244,8 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
             StreamBlock::Image(frame)
         }
     };
-    (GenericStreamBlock { inner }, chunk_error)
+    let completed = Some(block.last_packet);
+    (GenericStreamBlock { inner, completed }, chunk_error)
 }
 
 /// Smallest GVSP packet size we will configure: the IPv4 minimum reassembly
@@ -1694,7 +1697,11 @@ impl FrameStream {
                 block.set_host_time(ts_host);
                 if block.status().is_complete() {
                     let latency = ts_host.and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                    self.stats.record_frame(block.payload().len(), latency);
+                    self.stats.record_frame(
+                        block.payload().len(),
+                        latency,
+                        block.completed.unwrap_or_else(std::time::Instant::now),
+                    );
                 } else {
                     self.stats.record_incomplete_frame();
                 }
@@ -1765,6 +1772,7 @@ mod tests {
             }),
             payload_type: 0x0001,
             expected_size: Some(payload.len()),
+            last_packet: std::time::Instant::now(),
             payload,
             trailer_size_y: Some(trailer_size_y),
         }

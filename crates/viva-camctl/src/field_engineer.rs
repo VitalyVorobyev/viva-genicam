@@ -36,18 +36,22 @@ struct Fake {
 
 impl Fake {
     fn start() -> Self {
+        Self::start_with(|builder| builder)
+    }
+
+    fn start_with(
+        configure: impl Fn(viva_fake_gige::FakeCameraBuilder) -> viva_fake_gige::FakeCameraBuilder,
+    ) -> Self {
         let port = PORT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let runtime = tokio::runtime::Runtime::new().expect("runtime for the fake");
         let camera = runtime.block_on(async {
             loop {
-                match FakeCamera::builder()
+                let builder = FakeCamera::builder()
                     .bind_ip(Ipv4Addr::LOCALHOST)
                     .port(GVCP_PORT)
                     .width(640)
-                    .height(480)
-                    .build()
-                    .await
-                {
+                    .height(480);
+                match configure(builder).build().await {
                     Ok(camera) => break camera,
                     Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                         tokio::time::sleep(Duration::from_millis(100)).await
@@ -334,6 +338,37 @@ fn an_action_command_is_acknowledged_by_the_camera_whose_keys_match() {
         .block_on(cmd_action::send(Ipv4Addr::LOCALHOST, &params, 200))
         .expect("send");
     assert_eq!(acks.acks, 0, "another group's action is ignored");
+}
+
+/// A camera without action commands answers `NOT_IMPLEMENTED`, as the
+/// Manta G-125B did: the summary names it, rather than reporting no
+/// acknowledgement as if nothing had answered.
+#[test]
+fn an_action_command_the_camera_does_not_implement_is_reported_as_refused() {
+    let fake = Fake::start_with(|builder| builder.action_commands(false));
+    let params = ActionParams {
+        device_key: FAKE_DEVICE_KEY,
+        group_key: FAKE_GROUP_KEY,
+        group_mask: FAKE_GROUP_MASK,
+        scheduled_time: None,
+    };
+    let summary = fake
+        .runtime
+        .block_on(cmd_action::send(Ipv4Addr::LOCALHOST, &params, 200))
+        .expect("send");
+    assert_eq!(summary.acks, 0);
+    assert_eq!(
+        summary.refusals,
+        [viva_gige::ActionRefusal {
+            source: Ipv4Addr::LOCALHOST.into(),
+            status: viva_gige::GigeStatus::from_raw(0x8001),
+        }]
+    );
+    assert!(
+        cmd_action::describe(Ipv4Addr::LOCALHOST, &summary, 200).contains("NOT_IMPLEMENTED"),
+        "{}",
+        cmd_action::describe(Ipv4Addr::LOCALHOST, &summary, 200)
+    );
 }
 
 fn usb_camera() -> (

@@ -36,8 +36,13 @@ pub(crate) fn parse_mac(text: &str) -> PyResult<[u8; 6]> {
     Ok(mac)
 }
 
+/// What an action command reached: datagrams sent, cameras that acknowledged,
+/// and each camera that answered with an error, by address and status code.
+type ActionAnswers = (usize, usize, Vec<(String, u16)>);
+
 /// Send an `ACTION_CMD` to `destination` and count the acknowledgements
-/// within `timeout_ms`: `(sent, acknowledged)`.
+/// within `timeout_ms`: `(sent, acknowledged, refusals)`, each refusal the
+/// address of a device that answered with an error and its status code.
 #[pyfunction]
 #[pyo3(signature = (device_key, group_key, group_mask, scheduled_time=None, destination="255.255.255.255", timeout_ms=200))]
 fn send_action(
@@ -48,7 +53,7 @@ fn send_action(
     scheduled_time: Option<u64>,
     destination: &str,
     timeout_ms: u64,
-) -> PyResult<(usize, usize)> {
+) -> PyResult<ActionAnswers> {
     let ip = parse_ip("destination", destination)?;
     let params = gige::ActionParams {
         device_key,
@@ -60,7 +65,12 @@ fn send_action(
     let summary = py
         .detach(|| runtime().block_on(gige::send_action(dest, &params, timeout_ms)))
         .map_err(|err| transport_error(format!("action command to {ip}: {err}")))?;
-    Ok((summary.sent, summary.acks))
+    let refusals = summary
+        .refusals
+        .iter()
+        .map(|r| (r.source.to_string(), r.status.to_raw()))
+        .collect();
+    Ok((summary.sent, summary.acks, refusals))
 }
 
 /// Broadcast a FORCEIP: give the camera with `mac` a temporary address.

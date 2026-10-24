@@ -101,6 +101,7 @@ pub struct FakeCameraBuilder {
     tick_frequency: Option<u64>,
     pending_ack: bool,
     names_primary_application: bool,
+    action_commands: bool,
     delayed_acks: HashMap<u64, Duration>,
     profile: registers::XmlProfile,
 }
@@ -140,6 +141,7 @@ impl Default for FakeCameraBuilder {
             tick_frequency: None,
             pending_ack: true,
             names_primary_application: true,
+            action_commands: true,
             delayed_acks: HashMap::new(),
             profile: registers::XmlProfile::default(),
         }
@@ -416,6 +418,17 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Act on `ACTION_CMD`s addressed to this device (default: on).
+    ///
+    /// Off, the device answers every action command as an Allied Vision
+    /// Manta G-125B (firmware 00.01.44.28514, GVCP Capability without the
+    /// action bit) did, broadcast or not: with status `NOT_IMPLEMENTED` under
+    /// the command's own opcode, `0x0100`, not `ACTION_ACK`.
+    pub fn action_commands(mut self, implemented: bool) -> Self {
+        self.action_commands = implemented;
+        self
+    }
+
     /// Acknowledge every register-access command that starts at `addr` only
     /// after `delay`, as a device busy with a flash write or a mode change
     /// does — first with a `PENDING_ACK` of one and a half times `delay` when
@@ -511,6 +524,7 @@ impl FakeCameraBuilder {
                 delayed_acks: Arc::new(self.delayed_acks),
                 expiries: expiries.clone(),
                 actions: actions.clone(),
+                action_commands: self.action_commands,
             };
             let identity = self.identity;
             tokio::spawn(async move {

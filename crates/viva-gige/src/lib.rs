@@ -15,7 +15,7 @@ mod nic;
 mod status;
 mod time;
 
-pub use action::{AckSummary, ActionParams, send_action};
+pub use action::{AckSummary, ActionParams, ActionRefusal, send_action};
 pub use gvcp::{
     DeviceInfo, DiscoveryOptions, FORCE_READMEM_ENV, GVCP_PORT, GigeDevice, GigeError,
     GvcpCapability, StreamParams, discover, discover_all, discover_ip, discover_on_interface,

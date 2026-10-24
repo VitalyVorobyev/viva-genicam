@@ -38,6 +38,28 @@ struct ActionResult {
     destination: String,
     sent: usize,
     acknowledged: usize,
+    refused: Vec<Refused>,
+}
+
+#[derive(Serialize)]
+struct Refused {
+    source: String,
+    status: String,
+}
+
+/// The summary in one line: who acknowledged, and who refused and why.
+pub fn describe(destination: Ipv4Addr, summary: &AckSummary, timeout_ms: u64) -> String {
+    let mut line = format!(
+        "action sent to {destination}; acknowledged by {} device(s) within {timeout_ms} ms",
+        summary.acks
+    );
+    for refusal in &summary.refusals {
+        line.push_str(&format!(
+            "; refused by {}: {}",
+            refusal.source, refusal.status
+        ));
+    }
+    line
 }
 
 pub async fn run(
@@ -52,11 +74,16 @@ pub async fn run(
             destination: destination.to_string(),
             sent: summary.sent,
             acknowledged: summary.acks,
+            refused: summary
+                .refusals
+                .iter()
+                .map(|r| Refused {
+                    source: r.source.to_string(),
+                    status: r.status.to_string(),
+                })
+                .collect(),
         });
     }
-    println!(
-        "action sent to {destination}; acknowledged by {} device(s) within {timeout_ms} ms",
-        summary.acks
-    );
+    println!("{}", describe(destination, &summary, timeout_ms));
     Ok(())
 }

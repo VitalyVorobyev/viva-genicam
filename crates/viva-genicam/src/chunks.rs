@@ -115,6 +115,15 @@ mod tests {
         );
     }
 
+    /// GigE Vision 1.x's extended chunk data (`0x0005`), as an Allied Vision
+    /// Manta G-125B sends it: the image is the first chunk, as with `0x4001`.
+    #[test]
+    fn a_gige_vision_1_extended_chunk_block_splits_like_0x4001() {
+        let (image, chunks) = split(Bytes::from_static(&BLOCK), 0x0005);
+        assert_eq!(&image[..], &[0xA0, 0xA1, 0xA2, 0xA3]);
+        assert_eq!(chunks.expect("chunks").expect("well-formed").len(), 2);
+    }
+
     #[test]
     fn a_chunk_data_block_keeps_its_payload_whole() {
         let (payload, chunks) = split(Bytes::from_static(&BLOCK), 0x0004);

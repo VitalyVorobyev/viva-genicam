@@ -24,9 +24,9 @@ pub use gvcp::{
 pub use gvsp::{
     ChunkError, ChunkRaw, GVSP_EXTENDED_HEADER_SIZE, GVSP_HEADER_SIZE, GvspContent, GvspError,
     GvspHeader, GvspLeader, GvspPacketRef, GvspTrailer, ImageLeader, PAYLOAD_TYPE_CHUNK_DATA,
-    PAYLOAD_TYPE_EXTENDED_CHUNK, PAYLOAD_TYPE_IMAGE, PacketBitmap, StreamConfig, StreamDest,
-    has_extended_chunks, is_chunk_data_payload, is_image_payload, parse_chunks, parse_header,
-    parse_packet_ref,
+    PAYLOAD_TYPE_EXTENDED_CHUNK, PAYLOAD_TYPE_EXTENDED_CHUNK_DATA, PAYLOAD_TYPE_IMAGE,
+    PacketBitmap, StreamConfig, StreamDest, has_extended_chunks, is_chunk_data_payload,
+    is_image_payload, parse_chunks, parse_header, parse_packet_ref,
 };
 pub use message::{EventPacket, EventSocket};
 pub use nic::{

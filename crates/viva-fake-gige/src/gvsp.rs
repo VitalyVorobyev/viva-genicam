@@ -52,6 +52,11 @@ const EXTENDED_CHUNK_FLAG: u16 = viva_gige::PAYLOAD_TYPE_EXTENDED_CHUNK;
 pub const PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK: u16 = PAYLOAD_TYPE_IMAGE | EXTENDED_CHUNK_FLAG;
 /// Bits of the payload type that name the type.
 const PAYLOAD_TYPE_MASK: u16 = 0x3FFF;
+/// Payload type: GigE Vision 1.x's extended chunk data, what an Allied Vision
+/// Manta G-125B sends with chunk mode on. Its leader is an image's; its
+/// trailer is reserved | payload type | payload data length | Size Y | chunk
+/// layout ID.
+pub const PAYLOAD_TYPE_EXTENDED_CHUNK_DATA: u16 = 0x0005;
 /// A chunk's tag: its ID, then its data length, both 32-bit big-endian.
 pub(crate) const CHUNK_TAG_LEN: usize = 8;
 
@@ -163,7 +168,10 @@ impl BlockSpec {
 
     /// Whether the leader carries image geometry.
     fn is_image(&self) -> bool {
-        self.payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_IMAGE
+        matches!(
+            self.payload_type & PAYLOAD_TYPE_MASK,
+            PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_DATA
+        )
     }
 
     /// Header length this block's packets carry.
@@ -268,6 +276,12 @@ pub fn trailer(spec: &BlockSpec, packet_id: u32, payload_len: usize) -> Vec<u8> 
     );
     buf.extend_from_slice(&0u16.to_be_bytes());
     buf.extend_from_slice(&spec.payload_type.to_be_bytes());
+    if spec.payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_EXTENDED_CHUNK_DATA {
+        buf.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        buf.extend_from_slice(&spec.size_y.to_be_bytes());
+        buf.extend_from_slice(&spec.chunk_layout_id.to_be_bytes());
+        return buf;
+    }
     let size_field = if spec.payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_CHUNK_DATA {
         payload_len as u32
     } else {

@@ -44,8 +44,8 @@ mod resend;
 // (ADR-0030). GigE Vision's own register addresses are `viva_gige::consts`;
 // the ones below are this fake camera's feature registers.
 pub use gvsp::{
-    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketKind, block_datagrams,
-    chunk_payload, image_size, interleave,
+    BlockSpec, Datagram, PAYLOAD_TYPE_EXTENDED_CHUNK_DATA, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK,
+    PacketKind, block_datagrams, chunk_payload, image_size, interleave,
 };
 pub use registers::{
     CHUNK_ID_EXPOSURE_TIME, CHUNK_ID_FRAME_ID, CHUNK_ID_IMAGE, CHUNK_ID_IMAGE_INFO,
@@ -253,6 +253,15 @@ impl FakeCameraBuilder {
     /// too far.
     pub fn extended_ids(mut self, enable: bool) -> Self {
         self.sender.extended_ids = enable;
+        self
+    }
+
+    /// Send chunk-mode blocks with `payload_type` instead of `0x4001`: an
+    /// Allied Vision Manta G-125B sends GigE Vision 1.x's extended chunk data,
+    /// [`PAYLOAD_TYPE_EXTENDED_CHUNK_DATA`] (`0x0005`), in the layout that
+    /// constant describes.
+    pub fn chunk_payload_type(mut self, payload_type: u16) -> Self {
+        self.sender.chunk_payload_type = Some(payload_type);
         self
     }
 

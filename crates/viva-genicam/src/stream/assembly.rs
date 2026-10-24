@@ -579,7 +579,7 @@ impl Assembler {
         if !self.warned.unsupported {
             self.warned.unsupported = true;
             warn!(
-                "{what}; the receive engine assembles images (0x0001, 0x4001) and chunk \
+                "{what}; the receive engine assembles images (0x0001, 0x4001, 0x0005) and chunk \
                  data (0x0004, 0x4004). Such packets are counted in packets_ignored_unsupported"
             );
         }

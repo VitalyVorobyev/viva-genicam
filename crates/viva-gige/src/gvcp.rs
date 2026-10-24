@@ -539,6 +539,7 @@ async fn discover_impl(
         interfaces.push((iface.name, iface.index, v4));
     }
     let flags = discovery_flags(options.allow_broadcast_ack);
+    let broadcast_ack = options.allow_broadcast_ack;
 
     if interfaces.is_empty() {
         return Ok(Vec::new());
@@ -549,23 +550,34 @@ async fn discover_impl(
         let request_id = 0x0100u16.wrapping_add(idx as u16);
         let interface_name = name.clone();
         join_set.spawn(async move {
-            let local_addr = SocketAddr::new(IpAddr::V4(v4.ip), 0);
-            let socket = match UdpSocket::bind(local_addr).await {
-                Ok(socket) => socket,
-                Err(err) => {
-                    warn!(%interface_name, local = %v4.ip, error = %err,
-                          "skipping interface: bind failed");
-                    return Vec::new();
+            let pinned = if broadcast_ack && !v4.ip.is_loopback() {
+                broadcast_ack_socket(index, &interface_name)
+            } else {
+                None
+            };
+            let socket = match pinned {
+                Some(socket) => socket,
+                None => {
+                    let local_addr = SocketAddr::new(IpAddr::V4(v4.ip), 0);
+                    let socket = match UdpSocket::bind(local_addr).await {
+                        Ok(socket) => socket,
+                        Err(err) => {
+                            warn!(%interface_name, local = %v4.ip, error = %err,
+                                  "skipping interface: bind failed");
+                            return Vec::new();
+                        }
+                    };
+                    if !v4.ip.is_loopback() {
+                        if let Err(err) = socket.set_broadcast(true) {
+                            warn!(%interface_name, local = %v4.ip, error = %err,
+                                  "skipping interface: SO_BROADCAST failed");
+                            return Vec::new();
+                        }
+                        bind_to_interface(&socket, index, &interface_name);
+                    }
+                    socket
                 }
             };
-            if !v4.ip.is_loopback() {
-                if let Err(err) = socket.set_broadcast(true) {
-                    warn!(%interface_name, local = %v4.ip, error = %err,
-                          "skipping interface: SO_BROADCAST failed");
-                    return Vec::new();
-                }
-                bind_to_interface(&socket, index, &interface_name);
-            }
 
             let header = GvcpRequestHeader {
                 flags,
@@ -707,6 +719,80 @@ fn bind_to_interface(socket: &UdpSocket, index: Option<u32>, name: &str) {
     }
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let _ = (socket, index, name);
+}
+
+/// A discovery socket that receives broadcast acknowledgements.
+///
+/// A camera that broadcasts its acknowledgement sends it to the limited
+/// broadcast, at the request's source port. macOS does not deliver that to a
+/// socket bound to the interface's unicast address (backlog TC-40, seen on a
+/// Manta G-125B), so this socket binds the unspecified address and is kept on
+/// its interface: `IP_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux, which
+/// may need privileges. `None` where it cannot be kept there, since an
+/// unpinned `0.0.0.0` socket sends and receives on every interface; the
+/// caller then binds the interface's address as for any discovery.
+fn broadcast_ack_socket(index: Option<u32>, name: &str) -> Option<UdpSocket> {
+    let open = || -> std::io::Result<Option<UdpSocket>> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket.set_broadcast(true)?;
+        if !pin_to_interface(&socket, index, name)? {
+            return Ok(None);
+        }
+        socket.bind(&SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).into())?;
+        socket.set_nonblocking(true)?;
+        Ok(Some(UdpSocket::from_std(socket.into())?))
+    };
+    match open() {
+        Ok(socket) => socket,
+        Err(err) => {
+            debug!(name, error = %err,
+                   "cannot keep an unbound discovery socket on its interface; broadcast acknowledgements may be missed");
+            None
+        }
+    }
+}
+
+/// Keep `socket` on one interface for sending and receiving; `false` where
+/// this OS offers no way to.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn pin_to_interface(
+    socket: &socket2::Socket,
+    index: Option<u32>,
+    _name: &str,
+) -> std::io::Result<bool> {
+    let Some(index) = index.and_then(std::num::NonZeroU32::new) else {
+        return Ok(false);
+    };
+    socket.bind_device_by_index_v4(Some(index))?;
+    Ok(true)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn pin_to_interface(
+    socket: &socket2::Socket,
+    _index: Option<u32>,
+    name: &str,
+) -> std::io::Result<bool> {
+    socket.bind_device(Some(name.as_bytes()))?;
+    Ok(true)
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android"
+)))]
+fn pin_to_interface(
+    _socket: &socket2::Socket,
+    _index: Option<u32>,
+    _name: &str,
+) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 /// Derive an IPv4 directed-broadcast address from an interface address and

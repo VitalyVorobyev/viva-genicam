@@ -79,6 +79,10 @@ done
 # also skipped), are evidence for backlog GA-09 and are why the same contributor
 # asked for NodeMap::register_address in #92.
 #
+# The Manta G-125B at firmware 00.01.44.28514 is a newer revision of the
+# documents fetched above; it was read from the maintainer's own camera with
+# `viva-camctl xml` while testing the hardware plan (#215).
+#
 # Gist URLs are pinned to a revision SHA. The bare `/raw` form follows the
 # latest revision, so an edit upstream would silently change what the corpus
 # tests run against.
@@ -88,6 +92,7 @@ USER_CONTRIBUTED=$(
 Hikrobot_MV-CS050-10GC.xml	https://github.com/user-attachments/files/30513169/xml.raw.xml	35
 MicroEpsilon_scanCONTROL_850050.xml	https://gist.githubusercontent.com/Katze719/f1116fda94ff1f424fc7bf5955c86952/raw/9e3153952c8fab3b64e60268c4a6119fcc70f39d/scancontrol-device.xml	93
 TIS_DMK_33GP2000e.xml	https://github.com/user-attachments/files/31440543/camera_dmk_33GP2000e.xml	122
+AVT_Manta_G125B_1.44.28514.xml	https://gist.githubusercontent.com/VitalyVorobyev/a458f692ab7944f3fb3b4684efab8453/raw/46c5189a402852361022c34580a9ad67de820070/AVT_Manta_G125B_1.44.28514.xml	215
 EOF
 )
 

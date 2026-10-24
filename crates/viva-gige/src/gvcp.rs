@@ -1986,6 +1986,11 @@ impl GigeDevice {
     /// value is refused rather than truncated, because truncation is silent and
     /// arrives as a stream that never completes a frame — writing 70 000 would
     /// configure 4 464.
+    ///
+    /// The flags the register holds are kept: an Allied Vision Manta G-125B
+    /// stores do-not-fragment and reads it back (`0x400005DC`), and a write
+    /// of the size alone cleared it. A register that cannot be read first is
+    /// written with the size alone.
     pub async fn set_stream_packet_size(
         &mut self,
         channel: u32,
@@ -1996,7 +2001,45 @@ impl GigeDevice {
         }
         info!(channel, packet_size, "configuring stream packet size");
         let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
-        self.write_u32(addr, packet_size).await
+        let flags = match self.read_u32(addr).await {
+            Ok(raw) => raw & !(STREAM_PACKET_SIZE_MASK | SCPS_FIRE_TEST_PACKET),
+            Err(err) => {
+                debug!(channel, error = %err, "GevSCPSPacketSize unreadable; writing the size alone");
+                0
+            }
+        };
+        self.write_u32(addr, flags | packet_size).await
+    }
+
+    /// Whether `GevSCPSPacketSize` holds the do-not-fragment flag (bit 30).
+    pub async fn stream_do_not_fragment(&mut self, channel: u32) -> Result<bool, GigeError> {
+        let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
+        Ok(self.read_u32(addr).await? & SCPS_DO_NOT_FRAGMENT != 0)
+    }
+
+    /// Set or clear `GevSCPSPacketSize`'s do-not-fragment flag, keeping the
+    /// size: how the packet-size probe, whose test packets set it, gives it
+    /// back as it found it.
+    pub async fn set_stream_do_not_fragment(
+        &mut self,
+        channel: u32,
+        on: bool,
+    ) -> Result<(), GigeError> {
+        let addr = Self::stream_reg(channel, consts::STREAM_PACKET_SIZE);
+        let raw = self.read_u32(addr).await? & !SCPS_FIRE_TEST_PACKET;
+        let word = if on {
+            raw | SCPS_DO_NOT_FRAGMENT
+        } else {
+            raw & !SCPS_DO_NOT_FRAGMENT
+        };
+        if word != raw {
+            debug!(
+                channel,
+                on, "setting GevSCPSPacketSize's do-not-fragment flag"
+            );
+            self.write_u32(addr, word).await?;
+        }
+        Ok(())
     }
 
     /// Ask the device to emit one GVSP test packet of `packet_size` bytes.

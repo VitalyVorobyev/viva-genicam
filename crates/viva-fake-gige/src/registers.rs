@@ -819,11 +819,15 @@ pub const FAKE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <Min>0</Min>
     <Max>65535</Max>
   </Integer>
-  <IntReg Name="GevSCPSPacketSizeReg">
+  <!-- The size is the low 16 bits; bit 30, do-not-fragment, is stored
+       above it, so the size is a masked field, as the corpus declares it
+       (the Manta G-125B's RegSCPSPacketSize: LSB 31, MSB 16). -->
+  <MaskedIntReg Name="GevSCPSPacketSizeReg">
     <Address>0x0D04</Address>
     <pIndex Offset="0x40">GevStreamChannelSelector</pIndex>
-    <Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
-  </IntReg>
+    <Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort>
+    <LSB>31</LSB><MSB>16</MSB><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>
+  </MaskedIntReg>
 
   <!-- ════════════════════════════════════════════════════════════════════
        Acquisition Control Features
@@ -2088,18 +2092,18 @@ impl RegisterMap {
     /// Write `data` starting at `addr`.
     pub fn write(&mut self, addr: u64, data: &[u8]) {
         // `GevSCPSPacketSize` carries two flags above the 16-bit size field:
-        // bit 31 fires a test packet and bit 30 sets do-not-fragment. Neither
-        // is part of the stored value — a device that echoed them back would
-        // report a packet size of over a billion — so they are recorded for
-        // the caller and stripped here.
+        // bit 31 fires a test packet and bit 30 sets do-not-fragment. The first
+        // is an action, recorded for the caller and not stored; the second is
+        // a setting, stored and read back as an Allied Vision Manta G-125B
+        // does (it read `0x400005DC`).
         let stripped;
         let mut data = data;
         if addr == STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE && data.len() >= 4 {
             let raw = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             self.pending_test_packet =
                 (raw & SCPS_FIRE_TEST_PACKET != 0).then_some(raw & STREAM_PACKET_SIZE_MASK);
-            if raw & (SCPS_FIRE_TEST_PACKET | SCPS_DO_NOT_FRAGMENT) != 0 {
-                stripped = (raw & STREAM_PACKET_SIZE_MASK).to_be_bytes();
+            if raw & !(SCPS_DO_NOT_FRAGMENT | STREAM_PACKET_SIZE_MASK) != 0 {
+                stripped = (raw & (SCPS_DO_NOT_FRAGMENT | STREAM_PACKET_SIZE_MASK)).to_be_bytes();
                 data = &stripped[..];
             }
         }
@@ -2111,9 +2115,13 @@ impl RegisterMap {
             Some(max)
                 if addr == STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE
                     && data.len() >= 4
-                    && u32::from_be_bytes([data[0], data[1], data[2], data[3]]) > max =>
+                    && u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+                        & STREAM_PACKET_SIZE_MASK
+                        > max =>
             {
-                clamped = max.to_be_bytes();
+                let flags = u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+                    & !STREAM_PACKET_SIZE_MASK;
+                clamped = (flags | max).to_be_bytes();
                 &clamped[..]
             }
             _ => data,
@@ -2378,10 +2386,11 @@ impl RegisterMap {
         self.enabled_events.contains(&event_id)
     }
 
-    /// Stream packet size.
+    /// Stream packet size: the register's low 16 bits, without the
+    /// do-not-fragment flag stored above them.
     pub fn stream_packet_size(&self) -> u32 {
         let data = self.read(STREAM_CHANNEL_BASE + STREAM_PACKET_SIZE, 4);
-        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & STREAM_PACKET_SIZE_MASK
     }
 
     /// `GevSCPD`: the delay between stream packets, in timestamp ticks.

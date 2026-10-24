@@ -396,6 +396,9 @@ async fn probe_packet_size(
         return Ok(requested);
     }
 
+    // The test packets set do-not-fragment; whatever the register held is
+    // put back below (an Allied Vision Manta G-125B stores the flag).
+    let do_not_fragment = device.stream_do_not_fragment(channel).await.ok();
     let negotiated = probe_path_ceiling(device, channel, socket, requested).await?;
 
     // The register now holds the last size the probe *tested*, not `negotiated`.
@@ -406,7 +409,17 @@ async fn probe_packet_size(
     // reporter measured as the first failing one. Left uncorrected, the host
     // strides at `negotiated` while the camera sends something else, which is
     // the SR-02 failure mode this probe was built on top of.
-    configure_packet_size(device, channel, negotiated).await
+    let negotiated = configure_packet_size(device, channel, negotiated).await?;
+    if let Some(on) = do_not_fragment
+        && let Err(err) = device.set_stream_do_not_fragment(channel, on).await
+    {
+        warn!(
+            channel,
+            error = %err,
+            "could not put GevSCPSPacketSize's do-not-fragment flag back after the probe"
+        );
+    }
+    Ok(negotiated)
 }
 
 /// The bisection itself: the largest size that arrives, or `requested` when the

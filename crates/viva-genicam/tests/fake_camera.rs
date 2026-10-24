@@ -742,6 +742,53 @@ async fn test_default_preserves_camera_packet_size() {
     assert_eq!(held, PRESET, "preserve must not write the camera register");
 }
 
+/// The probe borrows `GevSCPSPacketSize`'s do-not-fragment bit and gives it
+/// back as it found it. An Allied Vision Manta G-125B stores the bit and reads
+/// it back (`0x400005DC` before a stream); after streams that probed, it read
+/// `0x000005DC`. The fake stores it too, and is read directly.
+#[tokio::test]
+async fn the_probe_leaves_the_do_not_fragment_bit_as_it_found_it() {
+    let cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let scps = gige::consts::STREAM_CHANNEL_BASE + gige::consts::STREAM_PACKET_SIZE;
+    let control_addr = std::net::SocketAddr::new(device_info.ip.into(), gige::GVCP_PORT);
+    // 2500, above the probe's 1500-byte floor, so the probe runs.
+    for preset in [0x4000_09C4u32, 0x0000_09C4] {
+        let mut device = gige::GigeDevice::open(control_addr)
+            .await
+            .expect("open device");
+        device.claim_control().await.expect("claim control");
+        device
+            .write_register(scps as u32, preset)
+            .await
+            .expect("preset GevSCPSPacketSize");
+        assert_eq!(cam.fake().peek(scps, 4).await, preset.to_be_bytes());
+        let stream = viva_genicam::StreamBuilder::new(&mut device)
+            .iface(loopback_iface())
+            .build()
+            .await
+            .expect("build: preserve, probed");
+        assert_eq!(stream.params().packet_size, 2500);
+        drop(stream);
+        assert_eq!(
+            u32::from_be_bytes(cam.fake().peek(scps, 4).await.try_into().unwrap()),
+            preset,
+            "GevSCPSPacketSize after the probe"
+        );
+        // An explicit size keeps the bit as well.
+        device
+            .set_stream_packet_size(0, 1400)
+            .await
+            .expect("set the size");
+        assert_eq!(
+            u32::from_be_bytes(cam.fake().peek(scps, 4).await.try_into().unwrap()),
+            (preset & 0x4000_0000) | 1400,
+            "GevSCPSPacketSize after an explicit size"
+        );
+        device.release_control().await.expect("release");
+    }
+}
+
 /// Accumulates every `WARN` this test binary emits.
 #[derive(Clone, Default)]
 struct LogCapture(Arc<Mutex<Vec<u8>>>);

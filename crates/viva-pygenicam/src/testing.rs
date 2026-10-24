@@ -345,6 +345,17 @@ impl PyFakeGigeCamera {
         Ok(self.running()?.blocks_sent())
     }
 
+    /// The flag byte of every discovery command received, oldest first:
+    /// `0x01` asks for an acknowledgement, `0x10` allows a broadcast one.
+    fn discovery_flags(&self) -> PyResult<Vec<u8>> {
+        Ok(self
+            .running()?
+            .discovery_requests()
+            .into_iter()
+            .map(|request| request.flags)
+            .collect())
+    }
+
     /// Register writes received (WRITEREG and WRITEMEM), from anyone.
     fn writes(&self) -> PyResult<u64> {
         let commands = self.running()?.commands();

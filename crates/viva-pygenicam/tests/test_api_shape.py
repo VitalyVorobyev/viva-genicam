@@ -25,11 +25,14 @@ def test_public_signatures_are_real():
         "timeout_ms",
         "iface",
         "all",
+        "allow_broadcast_ack",
     ]
+    assert list(inspect.signature(vg.discover_ip).parameters) == ["ip", "timeout_ms"]
     assert list(inspect.signature(vg.connect_gige).parameters) == [
         "device_info",
         "iface",
         "monitor",
+        "exclusive",
     ]
     assert list(inspect.signature(vg.connect_u3v).parameters) == ["device_info"]
     # discover_u3v takes no args — just confirm it's introspectable.

@@ -416,20 +416,28 @@ While one application controls the camera, a second one opening it normally
 is refused. It can still **watch**:
 
 - Open the camera read-only — `connect_gige_as` with `Access::Monitor` in
-  Rust, `monitor=True` in Python, and `viva-camctl get` always. A monitor
-  claims nothing and writes nothing; reading features works, and a write is
-  refused with an error that says why.
+  Rust, `monitor=True` in Python, `--access monitor` in `viva-camctl` (the
+  default of every command that only reads, such as `get` and `dump`). A
+  monitor claims nothing and writes nothing; reading features works, and a
+  write is refused with an error that says why.
 - If the controlling application streams to a **multicast group**, a monitor
   receives the same frames: `Camera::open_stream` with
-  `StreamOptions::monitor()` (Python: `stream(monitor=True)`) reads the group,
-  port and packet size from the camera and joins the group. A camera streaming to one host's own address
-  cannot be watched by another.
+  `StreamOptions::monitor()` (Python: `stream(monitor=True)`, `viva-camctl
+  stream --monitor`) reads the group, port and packet size from the camera
+  and joins the group. A camera streaming to one host's own address cannot be
+  watched by another.
 
-An application that loses the privilege — its heartbeat lapsed, or, on a
-camera that names its controller, another application took it meanwhile — is
-told: the camera's `control_state()` becomes `Lost` (in Python,
-`control_state` is `ControlState.LOST`), and `reclaim_control()` asks for it
-again.
+An application that wants nobody else even reading claims **exclusive
+access** instead: `Access::Exclusive` in Rust, `exclusive=True` in Python,
+`--access exclusive` in `viva-camctl`. While it holds it, the camera refuses
+other applications' reads too, so a monitor cannot open it either.
+
+An application that loses the privilege — its heartbeat lapsed, or another
+application took it meanwhile — is told: the camera's `control_state()`
+becomes `Lost` (in Python, `control_state` is `ControlState.LOST`), and
+`reclaim_control()` asks for it again. A takeover shows at once on a camera
+that names its controller; on one that does not, at the next write it
+refuses.
 
 ---
 

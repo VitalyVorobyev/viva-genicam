@@ -145,6 +145,12 @@ class FakeGigeCamera:
         """GVSP blocks produced, those ``drop_packets`` damaged included."""
         return self._native.blocks_sent()
 
+    def discovery_flags(self) -> list[int]:
+        """The flag byte of every discovery command received, oldest first:
+        ``0x01`` asks for an acknowledgement, ``0x10`` allows a broadcast
+        one."""
+        return self._native.discovery_flags()
+
     def writes(self) -> int:
         """Register writes received, from any application."""
         return self._native.writes()

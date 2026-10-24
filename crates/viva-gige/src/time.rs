@@ -404,10 +404,9 @@ mod tests {
 
     /// A camera that reports its tick frequency fixes the slope: only the
     /// offset is fitted. Sixteen samples taken 50 ms apart over GVCP fitted
-    /// an Allied Vision Manta G-125B's 48 MHz clock about 1 % slow, and
+    /// an Allied Vision Manta G-125B's 48 MHz clock at 48.46 MHz, and
     /// frames mapped through that fit drifted 9.5 ms a second from their
-    /// arrival; the clock itself ran within 0.02 % of 48 MHz for 25
-    /// minutes.
+    /// arrival; mapped at 48 MHz they drifted 31 ms in 20 minutes.
     #[test]
     fn a_reported_frequency_fixes_the_slope() {
         let start = Instant::now();

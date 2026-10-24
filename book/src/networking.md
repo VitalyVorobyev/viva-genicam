@@ -373,6 +373,9 @@ If you see frame drops at high frame rates:
    `viva-camctl stream --packet-delay-ns 2000`, `StreamOptions::packet_delay`
    in Rust, `packet_delay_ns=` in Python. The library converts it to the
    camera's timestamp ticks; without a delay it leaves `GevSCPD` as it is.
+   Some cameras honour `GevSCPD` only in a bandwidth mode of their own: an
+   Allied Vision Manta G-125B paces packets by `StreamBytesPerSecond` unless
+   `BandwidthControlMode` is `SCPD` or `Both`.
 2. Check whether the drop rate decreases, and whether overall throughput is
    still sufficient.
 

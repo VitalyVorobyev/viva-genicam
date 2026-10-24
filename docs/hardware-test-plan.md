@@ -98,7 +98,7 @@ state.
 | `stream --save 1` in every pixel format the camera offers | Each saved frame looks right, and its row stride matches the leader | |
 | An odd width in a packed format (`Mono12Packed`, `…12p`) | The capture's line or image padding is recorded and the frame decodes | PX-05 |
 | Packet size Preserve, `--auto`, `--packet-size N`, and one above the path MTU | Each streams complete frames; the probe bisects down from the oversized one | |
-| `--packet-delay-ns`, and `StreamBytesPerSecond` lowered | Throughput drops as set, with no loss | |
+| `--packet-delay-ns`, and `StreamBytesPerSecond` lowered | Throughput drops as set, with no loss. A camera may honour `GevSCPD` only in a bandwidth mode of its own (the Manta G-125B: `BandwidthControlMode` `SCPD`); record which | |
 | Induced loss (a small `rcvbuf_bytes`, the highest frame rate) | `resend_requested` and `resend_recovered` both climb; the capture shows the request's source port | SR-24 |
 | A resend for a block the camera no longer holds | The camera's answer (status, per packet or per range, or silence) is captured | SR-25 |
 | AcquisitionStop/Start 100 times in one stream | No frame is lost to the block-id heuristics; the capture shows the ids across a restart | SR-23 |
@@ -109,9 +109,9 @@ state.
 
 | Case | Passes when |
 |---|---|
-| Continuous, SingleFrame, MultiFrame (`AcquisitionFrameCount`), and a vendor's recorder mode | Exactly the expected number of frames |
+| Continuous, SingleFrame, MultiFrame (`AcquisitionFrameCount`), and a vendor's recorder mode (whose record trigger may accept only a hardware line) | Exactly the expected number of frames |
 | Software trigger at a steady rate below the maximum | One frame per trigger, none lost |
-| `TriggerDelay*` | Frame timestamps shift by the delay |
+| `TriggerDelay*`, with a hardware trigger where the camera applies the delay to those alone (the Manta G-125B's `TriggerDelayAbs` did not delay a software trigger) | Frame timestamps shift by the delay |
 | Hardware trigger lines | Needs wiring; otherwise not applicable |
 
 ### G. Chunks

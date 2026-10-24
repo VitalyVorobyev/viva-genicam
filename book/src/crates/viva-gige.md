@@ -142,10 +142,15 @@ cargo run -p viva-camctl -- set-ip --mac DE:AD:BE:EF:CA:FE --ip 192.168.1.100 --
 
 - **Events** are device-to-host notifications on the message channel (exposure
   end, and vendor-defined ones). `set_message_destination` points the device at
-  a host socket; `viva_genicam::EventStream` presents the result.
+  a host socket; `EventSocket` acknowledges each message as it arrives, so a
+  slow reader costs the camera no retransmission, and keeps up to
+  `EVENT_QUEUE_CAPACITY` events for the application, dropping the oldest past
+  that; `stats()` counts what it received and dropped.
+  `viva_genicam::EventStream` presents the result.
 - **Actions** are host-to-many-devices: `send_action` broadcasts an action
   command so several cameras trigger together, optionally at a scheduled
-  timestamp. `AckSummary` reports which devices acknowledged.
+  timestamp. `AckSummary` reports which devices acknowledged, and which
+  answered with an error status instead (`refusals`).
 
 Both are vendor-variable. If you schedule actions, keep the time bases
 consistent — see `TimeSync` below.
@@ -250,7 +255,10 @@ Devices report a tick counter, not wall-clock time. `TimeSync` maintains a
 linear mapping from device ticks to host `SystemTime`, calibrated by latching
 the device timestamp against a host reading. Without that calibration there is
 no origin to map from — so treat an uncalibrated host timestamp as absent
-rather than as data.
+rather than as data. Given the device's tick frequency, the mapping's slope is
+that frequency and only the offset is fitted; the device's clock still drifts
+from the host's (an Allied Vision Manta G-125B's by 31 ms in 20 minutes), so
+calibrate again to stay within a few milliseconds over a long run.
 
 ---
 

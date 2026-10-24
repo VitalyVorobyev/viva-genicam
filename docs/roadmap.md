@@ -34,7 +34,7 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 - **SR-24**: whether cameras accept a packet resend request sent from the stream socket rather than the control channel's port; a lossy stream's `-vv` log, or a capture, settles it.
 - **SR-25**: how a camera answers a resend it cannot serve (which status, per packet or per range, or silence), and whether resent packets carry status `0x0100`.
 - **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
-- **PX-05**: line or image padding when a width ends inside a packing group (an odd width in `Mono12p`) and no padding is declared; needs a capture from such a camera.
+- **PX-05**: how a camera that declares line padding counts a packing group its line ends inside (an odd width in `Mono12p`); needs a capture from such a camera.
 - **TC-38**: whether cameras other than the Manta G-125B refuse a non-holder's claim and writes while nobody holds control, and whether the keepalive should write CCP to see a takeover at once.
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
 - **API-19**: whether a camera declares an exposure name it does not implement, and what SVS's binning `On` does; a report from either camera settles it.

@@ -278,6 +278,9 @@ impl PixelFormat {
     /// `12Packed` and 4:2:2, four for 4:1:1. `None` for an event stream, whose
     /// leader fields are not image geometry, for a code that declares no size,
     /// and for a size that overflows `usize`.
+    ///
+    /// A camera may send a bit-packed image without completing that group;
+    /// [`convert`]'s *Geometry* section says what the converters accept.
     pub const fn image_bytes(self, width: u32, height: u32) -> Option<usize> {
         let Some(pixels) = (width as usize).checked_mul(height as usize) else {
             return None;

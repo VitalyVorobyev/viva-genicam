@@ -25,7 +25,7 @@ message socket (backlog TC-42, `-vv` evidence in the PR):
 - left unacknowledged for ten seconds at 60 events a second, it delivered 44
   and an `EventOverflow` (`0xFFFE`), and lost the rest.
 
-0.10 recognised the copies and delivered each event once (#216), but the
+#216 recognised the copies and delivered each event once, but the
 retransmissions, the delay and the camera's own overflow remained: a slow
 reader lost events on the camera, where nothing on the host could count
 them.

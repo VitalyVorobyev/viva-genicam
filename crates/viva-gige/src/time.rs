@@ -157,8 +157,13 @@ impl TimeSync {
 
     /// Fit the linear model, optionally updating the frequency.
     ///
-    /// Returns the updated `(slope, intercept)` coefficients when enough samples
-    /// are available, or `None` if fewer than 2 samples exist.
+    /// With a frequency — given here, or earlier through
+    /// [`set_freq_hz`](Self::set_freq_hz) — the slope is one over it and only
+    /// the offset is fitted, as the median over the samples; without one both
+    /// come from a least-squares regression. Returns the updated
+    /// `(slope, intercept)` coefficients when enough samples are available,
+    /// or `None` if fewer than 2 samples exist or the device clock did not
+    /// move.
     pub fn fit(&mut self, freq_hz: Option<f64>) -> Option<(f64, f64)> {
         if let Some(freq) = freq_hz {
             self.freq_hz = Some(freq);
@@ -189,6 +194,30 @@ impl TimeSync {
                 (x, y)
             })
             .collect();
+
+        // A reported frequency is the slope; only the offset is fitted. A
+        // short window of samples taken over the network cannot beat it: the
+        // host instant of each sample carries the round trip's jitter.
+        if let Some(freq) = self.freq_hz.filter(|f| f.is_finite() && *f > 0.0) {
+            let (first, last) = (samples[0], samples[samples.len() - 1]);
+            if last.0 <= first.0 {
+                return;
+            }
+            let slope = 1.0 / freq;
+            let mut offsets: Vec<f64> = samples.iter().map(|(x, y)| y - slope * x).collect();
+            offsets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+            let intercept_rel = offsets[offsets.len() / 2];
+            self.a = slope;
+            self.b = intercept_rel - slope * base_tick;
+            self.fitted = true;
+            trace!(
+                slope = self.a,
+                intercept = self.b,
+                samples = self.window.len(),
+                "recomputed time mapping from the reported frequency"
+            );
+            return;
+        }
 
         let (mut slope, mut intercept_rel) = match compute_fit(&samples) {
             Some((s, i)) => (s, i),
@@ -371,6 +400,45 @@ mod tests {
         let (a, _) = sync.coefficients();
         assert!(a > 0.0);
         assert_eq!(sync.freq_hz(), Some(100_000.0));
+    }
+
+    /// A camera that reports its tick frequency fixes the slope: only the
+    /// offset is fitted. Sixteen samples taken 50 ms apart over GVCP fitted
+    /// an Allied Vision Manta G-125B's 48 MHz clock at 48.46 MHz, and
+    /// frames mapped through that fit drifted 9.5 ms a second from their
+    /// arrival; mapped at 48 MHz they drifted 31 ms in 20 minutes.
+    #[test]
+    fn a_reported_frequency_fixes_the_slope() {
+        let start = Instant::now();
+        let mut sync = TimeSync::new();
+        sync.set_auto_fit(false);
+        // 1 MHz, the host instant of each sample 0.2 ms later than the one
+        // before: a regression reads the clock 0.4 % slow.
+        for i in 0..16u64 {
+            let late = Duration::from_micros(i * 200);
+            sync.update(i * 50_000, start + Duration::from_millis(i * 50) + late);
+        }
+        let (slope, _) = sync.fit(Some(1_000_000.0)).expect("fit");
+        assert_eq!(slope, 1e-6);
+        // An hour on, the mapping is off by the offset's error, not by 2 %.
+        let origin = sync.origin_system().expect("origin");
+        let mapped = sync.to_host_time(3_600_000_000).expect("mapped");
+        let off = mapped
+            .duration_since(origin)
+            .expect("after origin")
+            .as_secs_f64()
+            - 3600.0;
+        assert!(off.abs() < 0.01, "{off} s off after an hour, not 14 s");
+
+        let mut unreported = TimeSync::new();
+        for (ticks, host) in sync.samples() {
+            unreported.update(ticks, host);
+        }
+        let (regressed, _) = unreported.fit(None).expect("fit");
+        assert!(
+            (regressed - 1.004e-6).abs() < 1e-12,
+            "without the frequency the slope is regressed: {regressed}"
+        );
     }
 
     #[test]

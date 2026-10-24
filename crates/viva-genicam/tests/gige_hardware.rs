@@ -615,7 +615,7 @@ async fn geometry_follows_roi_binning_and_decimation() {
     restore(&mut camera, &saved);
 }
 
-/// One frame per software trigger.
+/// One frame per software trigger, twenty at 10 Hz, and none untriggered.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
 async fn a_software_trigger_takes_one_frame() {
@@ -629,17 +629,26 @@ async fn a_software_trigger_takes_one_frame() {
     let mut stream = open_stream(&mut camera);
     camera.acquisition_start().expect("start");
     let mut ids = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..20 {
+        let triggered = Instant::now();
         camera.trigger_software().expect("trigger");
         ids.push(frames(&mut stream, 1, Duration::from_secs(3)).await[0].block_id);
+        if let Some(rest) = Duration::from_millis(100).checked_sub(triggered.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
     }
     let extra = tokio::time::timeout(Duration::from_millis(500), stream.next_frame()).await;
     camera.acquisition_stop().expect("stop");
+    let stats = stream.stats();
     drop(stream);
     camera.disable_trigger("FrameStart").expect("trigger off");
     restore(&mut camera, &saved);
-    println!("three triggers, blocks {ids:?}");
+    println!("twenty triggers at 10 Hz, blocks {ids:?}");
     assert!(extra.is_err(), "a frame nobody triggered");
+    for pair in ids.windows(2) {
+        assert_eq!(pair[1], pair[0] + 1, "one frame per trigger");
+    }
+    assert_eq!((stats.frames_incomplete, stats.frames_missed), (0, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -693,8 +702,11 @@ async fn a_stream_delivers_frames_in_every_pixel_format() {
     restore(&mut camera, &saved);
 }
 
-/// Acquisition stops and starts again in one stream; every frame of each
-/// round arrives complete. The resend counters are printed.
+/// Acquisition stops and starts again a hundred times in one stream (SR-23);
+/// every frame of every round arrives complete, and no block id is skipped.
+/// The block ids across a restart and the resend counters are printed: the
+/// Manta G-125B's ids run on across a restart rather than starting again
+/// at 1.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
 async fn a_stream_survives_acquisition_restarts() {
@@ -703,23 +715,29 @@ async fn a_stream_survives_acquisition_restarts() {
     free_running(&mut camera);
     let mut stream = open_stream(&mut camera);
     println!("packet resend enabled: {}", stream.resend_enabled());
-    for round in 0..5 {
+    let mut firsts = Vec::new();
+    let mut all = Vec::new();
+    for _ in 0..100 {
         camera.acquisition_start().expect("start");
-        let got = frames(&mut stream, 3, Duration::from_secs(5)).await;
+        let got = frames(&mut stream, 2, Duration::from_secs(5)).await;
         camera.acquisition_stop().expect("stop");
-        println!(
-            "round {round}: blocks {:?}",
-            got.iter().map(|f| f.block_id).collect::<Vec<_>>()
-        );
-        for pair in got.windows(2) {
-            assert!(pair[1].block_id > pair[0].block_id, "block ids increase");
-        }
+        firsts.push(got[0].block_id);
+        all.extend(got.iter().map(|f| f.block_id));
         assert!(got.iter().all(Frame::is_complete));
+        // What the camera sent before it stopped.
+        while let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(Duration::from_millis(250), stream.next_frame()).await
+        {
+            assert!(frame.is_complete());
+            all.push(frame.block_id);
+        }
     }
     let stats = stream.stats();
+    println!("first block of each round: {firsts:?}");
     println!(
-        "complete {}, incomplete {}, missed {}, resend requested {}, recovered {}, \
-         unavailable {}",
+        "{} frames; complete {}, incomplete {}, missed {}, resend requested {}, \
+         recovered {}, unavailable {}",
+        all.len(),
         stats.frames_complete,
         stats.frames_incomplete,
         stats.frames_missed,
@@ -728,6 +746,180 @@ async fn a_stream_survives_acquisition_restarts() {
         stats.resend_unavailable
     );
     drop(stream);
+    restore(&mut camera, &saved);
+    assert_eq!((stats.frames_incomplete, stats.frames_missed), (0, 0));
+    for pair in all.windows(2) {
+        assert!(
+            pair[1] == pair[0] + 1 || pair[1] == 1,
+            "block {} after {}",
+            pair[1],
+            pair[0]
+        );
+    }
+}
+
+/// A packet asked for again comes back (SR-24, SR-25): a resend request for
+/// a block just sent, from the stream's own socket, is answered with the
+/// packets; one for a block the camera no longer holds is answered as the
+/// camera answers it, which is printed. The Manta G-125B resent with status
+/// `0x0000` and answered each packet it no longer held with a header-only
+/// `0x800C`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
+async fn a_resend_request_from_the_stream_socket_is_answered() {
+    use viva_genicam::gige::consts::{
+        STREAM_CHANNEL_BASE, STREAM_DESTINATION_ADDRESS, STREAM_DESTINATION_PORT,
+    };
+    let mut camera = open(Access::Control).await;
+    let caps = camera
+        .transport()
+        .read(viva_genicam::gige::consts::GVCP_CAPABILITY, 4)
+        .expect("GVCP Capability");
+    if caps[3] & 0x4 == 0 {
+        println!("GVCP Capability {caps:02x?}: no packet resend");
+        return;
+    }
+    let saved = snapshot(&mut camera);
+    free_running(&mut camera);
+    let local = iface().ipv4().expect("the interface has an IPv4 address");
+    let socket = tokio::net::UdpSocket::bind((local, 0)).await.expect("bind");
+    let port = socket.local_addr().expect("address").port();
+    // The stream channel pointed at a socket of the test's own.
+    let io = camera.transport();
+    io.write(
+        STREAM_CHANNEL_BASE + STREAM_DESTINATION_ADDRESS,
+        &local.octets(),
+    )
+    .expect("GevSCDA");
+    io.write(
+        STREAM_CHANNEL_BASE + STREAM_DESTINATION_PORT,
+        &u32::from(port).to_be_bytes(),
+    )
+    .expect("GevSCPHostPort");
+    camera.acquisition_start().expect("start");
+    // Watch the stream for a second: the packets of each block.
+    let mut seen: BTreeMap<u16, u32> = BTreeMap::new();
+    let mut buf = vec![0u8; 16_384];
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if let Ok(Ok(len)) =
+            tokio::time::timeout(Duration::from_millis(100), socket.recv(&mut buf)).await
+            && len >= 8
+        {
+            let block = u16::from_be_bytes([buf[2], buf[3]]);
+            let packet = u32::from_be_bytes([0, buf[5], buf[6], buf[7]]);
+            let last = seen.entry(block).or_default();
+            *last = (*last).max(packet);
+        }
+    }
+    let blocks: Vec<u16> = seen.keys().copied().collect();
+    assert!(blocks.len() >= 3, "blocks streamed: {blocks:?}");
+    let camera_gvcp = std::net::SocketAddr::from((camera_ip(), gige::GVCP_PORT));
+    let ask = |block: u16| gige::encode_packet_resend(0x7001, 0, u64::from(block), 2, 3, false);
+    async fn answers(
+        socket: &tokio::net::UdpSocket,
+        block: u16,
+        buf: &mut [u8],
+    ) -> Vec<(u32, u16, usize)> {
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if let Ok(Ok(len)) =
+                tokio::time::timeout(Duration::from_millis(20), socket.recv(buf)).await
+                && len >= 8
+                && u16::from_be_bytes([buf[2], buf[3]]) == block
+            {
+                let status = u16::from_be_bytes([buf[0], buf[1]]);
+                let packet = u32::from_be_bytes([0, buf[5], buf[6], buf[7]]);
+                got.push((packet, status, len));
+            }
+        }
+        got
+    }
+    let recent = blocks[blocks.len() - 2];
+    socket
+        .send_to(&ask(recent), camera_gvcp)
+        .await
+        .expect("send the request");
+    let resent = answers(&socket, recent, &mut buf).await;
+    let oldest = blocks[0];
+    socket
+        .send_to(&ask(oldest), camera_gvcp)
+        .await
+        .expect("send the request");
+    let old = answers(&socket, oldest, &mut buf).await;
+    camera.acquisition_stop().expect("stop");
+    camera
+        .transport()
+        .write(STREAM_CHANNEL_BASE + STREAM_DESTINATION_PORT, &[0; 4])
+        .expect("GevSCPHostPort");
+    restore(&mut camera, &saved);
+    println!("block {recent} (just sent), packets 2-3: (packet, status, bytes) {resent:x?}");
+    println!("block {oldest} (a second old), packets 2-3: {old:x?}");
+    let resent: Vec<u32> = resent.iter().map(|(packet, ..)| *packet).collect();
+    assert!(
+        resent.contains(&2) && resent.contains(&3),
+        "the packets asked for came back"
+    );
+}
+
+/// An odd width and an odd pixel count in a bit-packed format (PX-05): the
+/// frames are `PayloadSize` long and convert. The leader's `padding_x` and
+/// the size are printed: the Manta G-125B declared no padding and sent
+/// ⌈pixels × 12 / 8⌉ bytes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
+async fn an_odd_width_in_a_packed_format_converts() {
+    let mut camera = open(Access::Control).await;
+    let offered = camera
+        .feature_state("PixelFormat")
+        .ok()
+        .and_then(|state| state.enum_entries)
+        .unwrap_or_default();
+    let packed: Vec<String> = offered
+        .into_iter()
+        .filter(|f| f.ends_with("Packed") || f.ends_with('p'))
+        .collect();
+    if packed.is_empty() {
+        println!("no packed pixel format offered");
+        return;
+    }
+    let saved = snapshot(&mut camera);
+    free_running(&mut camera);
+    let width = camera.get_integer("Width").expect("Width");
+    let height = camera.get_integer("Height").expect("Height");
+    let (width, height) = (width - 1 + width % 2, height - 1 + height % 2);
+    camera.set("Width", &width.to_string()).expect("odd width");
+    camera
+        .set("Height", &height.to_string())
+        .expect("odd height");
+    for format in packed {
+        camera.set("PixelFormat", &format).expect("format");
+        let payload = camera.get_integer("PayloadSize").expect("PayloadSize") as usize;
+        let mut stream = open_stream(&mut camera);
+        camera.acquisition_start().expect("start");
+        let got = frames(&mut stream, 2, Duration::from_secs(5)).await;
+        camera.acquisition_stop().expect("stop");
+        drop(stream);
+        let frame = &got[0];
+        let converted = frame.to_rgb8();
+        println!(
+            "{format} at {width}x{height}: PayloadSize {payload}, frame {} bytes, padding_x {}, \
+             converts: {}",
+            frame.payload.len(),
+            frame.padding_x,
+            converted
+                .as_ref()
+                .map_or_else(|e| e.to_string(), |_| "yes".into())
+        );
+        assert!(frame.is_complete());
+        assert_eq!(
+            frame.payload.len(),
+            payload,
+            "{format}: the frame is PayloadSize"
+        );
+        assert!(converted.is_ok(), "{format}: the frame converts");
+    }
     restore(&mut camera, &saved);
 }
 
@@ -854,6 +1046,129 @@ async fn events_arrive_while_streaming() {
     let mut seen: Vec<_> = received.iter().map(|e| (e.id, e.block_id)).collect();
     seen.dedup();
     assert_eq!(seen.len(), received.len(), "an event delivered twice");
+}
+
+/// TC-42: an application that reads its events a second late sees each
+/// once, and the camera sent each once: the message channel acknowledges as
+/// messages arrive. Acknowledged at the read instead, the Manta G-125B sent
+/// one event twelve times to such a reader.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
+async fn a_late_event_reader_sees_each_event_once() {
+    let mut camera = open(Access::Control).await;
+    let saved = snapshot(&mut camera);
+    free_running(&mut camera);
+    let offered = camera.enum_entries("EventSelector").unwrap_or_default();
+    let Some(event) = ["ExposureEnd", "FrameStart"]
+        .into_iter()
+        .find(|e| offered.iter().any(|o| o == e))
+    else {
+        println!("EventSelector offers neither ExposureEnd nor FrameStart");
+        restore(&mut camera, &saved);
+        return;
+    };
+    let local = iface().ipv4().expect("the interface has an IPv4 address");
+    let port = 10_022;
+    camera
+        .configure_events(local, port, &[event])
+        .await
+        .expect("configure events");
+    let events = camera
+        .open_event_stream(local, port)
+        .await
+        .expect("event stream");
+    let mut stream = open_stream(&mut camera);
+    camera.acquisition_start().expect("start");
+    let got = frames(&mut stream, 5, Duration::from_secs(5)).await;
+    camera.acquisition_stop().expect("stop");
+    drop(stream);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut received = Vec::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(500), events.next()).await
+    {
+        received.push(event.block_id);
+    }
+    let stats = events.stats();
+    let _ = camera.set("EventSelector", event);
+    let _ = camera.set("EventNotification", "Off");
+    restore(&mut camera, &saved);
+    println!(
+        "{event} for blocks {received:?} (frames {:?}); {stats:?}",
+        got.iter().map(|f| f.block_id).collect::<Vec<_>>()
+    );
+    assert!(!received.is_empty(), "events arrived");
+    let mut distinct = received.clone();
+    distinct.dedup();
+    assert_eq!(distinct, received, "an event delivered twice");
+    assert_eq!(stats.retransmissions, 0, "the camera resent a message");
+}
+
+/// An action command gets an answer or silence within the timeout, never a
+/// hang; what came back is printed. The Manta G-125B, without the action
+/// capability, answered a unicast one with `NOT_IMPLEMENTED` and a
+/// broadcast one with silence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
+async fn an_action_command_is_answered_or_refused() {
+    let params = gige::ActionParams {
+        device_key: 0,
+        group_key: 0,
+        group_mask: 0,
+        scheduled_time: None,
+    };
+    for destination in [
+        std::net::IpAddr::V4(camera_ip()),
+        Ipv4Addr::BROADCAST.into(),
+    ] {
+        let started = Instant::now();
+        let summary = gige::send_action((destination, gige::GVCP_PORT).into(), &params, 300)
+            .await
+            .expect("send the action command");
+        println!(
+            "to {destination}: {} acknowledged, refused by {:?}, in {:?}",
+            summary.acks,
+            summary.refusals,
+            started.elapsed()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}
+
+/// The device clock restarts near zero on `time_reset`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
+async fn time_reset_restarts_the_device_clock() {
+    let mut camera = open(Access::Control).await;
+    let Some(latch) = ["GevTimestampControlLatch", "TimestampLatch"]
+        .into_iter()
+        .find(|name| camera.nodemap().node(name).is_some())
+    else {
+        println!("no timestamp latch");
+        return;
+    };
+    let Some(value) = ["GevTimestampValue", "TimestampLatchValue"]
+        .into_iter()
+        .find(|name| camera.nodemap().node(name).is_some())
+    else {
+        println!("no timestamp value");
+        return;
+    };
+    let read = |camera: &mut GigeCamera| {
+        camera.execute_command(latch).expect("latch");
+        camera.get_integer(value).expect("timestamp") as u64
+    };
+    let hz = camera
+        .get_integer("GevTimestampTickFrequency")
+        .unwrap_or(1_000_000_000) as f64;
+    let before = read(&mut camera);
+    camera.time_reset().expect("time_reset");
+    let after = read(&mut camera);
+    println!(
+        "device clock {:.3} s before the reset, {:.3} ms after it",
+        before as f64 / hz,
+        after as f64 / hz * 1e3
+    );
+    assert!((after as f64 / hz) < 1.0, "the clock restarted");
 }
 
 #[tokio::test(flavor = "multi_thread")]

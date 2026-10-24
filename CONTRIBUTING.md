@@ -149,9 +149,11 @@ judge: discovery by broadcast and by address; control, monitor and exclusive
 access, and a second application refused while one holds control; every
 readable node read, every writable feature given its own value back, every
 enumeration entry set; commands reporting done; the standard-feature helpers,
-the region of interest, binning and decimation; a software trigger; a stream
-in every pixel format and across acquisition restarts; chunks, events and the
-fitted clock; and a save and load round trip. `VIVA_GIGE_IP` names the camera
+the region of interest, binning and decimation; a software trigger at a steady
+rate; a stream in every pixel format, at an odd width in each packed one, and
+across a hundred acquisition restarts; a resend request from the stream's
+socket; chunks, events and a reader a second late; action commands; the fitted
+clock and its reset; and a save and load round trip. `VIVA_GIGE_IP` names the camera
 and `VIVA_GIGE_IFACE` the host interface (by name or address; without it, the
 one routed to the camera). Each test loads the camera's configuration back at
 the end; non-volatile state is written, unchanged, only with

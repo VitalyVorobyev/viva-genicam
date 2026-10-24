@@ -47,9 +47,14 @@
 //! # Geometry
 //!
 //! Without a row stride, pixels are read as one continuous run from the
-//! first line to the last — PFNC 2.4 §6.7's *image padding* — and a payload
-//! must hold at least [`PixelFormat::image_bytes`]; bytes past that are
-//! ignored.
+//! first line to the last — PFNC 2.4 §6.7's *image padding*. A bit-packed
+//! payload (`…p`, `…Packed`) must hold every pixel's bits,
+//! ⌈pixels × bits / 8⌉, and any other at least
+//! [`PixelFormat::image_bytes`]; bytes past that are ignored. §6.7 completes
+//! the packing group the image ends inside, but an Allied Vision Manta
+//! G-125B does not: at 1291 × 963 in `Mono12Packed`, an odd pixel count, it
+//! sends ⌈pixels × 12 / 8⌉ bytes, one short of the completed group. A payload
+//! with the group completed decodes the same.
 //!
 //! With a row stride — a camera that sends bytes after every line, as the
 //! GVSP image leader's `padding_x` declares — each line is decoded on its
@@ -59,7 +64,9 @@
 //!
 //! The two readings differ only when a line ends inside a packing group (an
 //! odd width in `12p`, say). PFNC leaves the choice to the transport
-//! standard, and which one cameras use for an unpadded odd width is still
+//! standard. The Manta G-125B declares no padding at an odd width in
+//! `Mono12Packed` and runs its pixels on, which is the first reading; how a
+//! camera that declares `padding_x` counts the group its line ends inside is
 //! open (backlog PX-05).
 
 use core::fmt;
@@ -495,7 +502,20 @@ fn geometry(
         .checked_mul(height as usize)
         .ok_or(too_large.clone())?;
     // Every format with a layout declares a size; `None` here is overflow.
-    let expected = format.image_bytes(width, height).ok_or(too_large)?;
+    let completed = format.image_bytes(width, height).ok_or(too_large.clone())?;
+    let expected = match layout(format) {
+        // A bit-packed run needs only its pixels' bits: a camera may stop
+        // inside the last packing group (the module's *Geometry*).
+        Some(Layout::Mono(single) | Layout::Bayer(single, _))
+            if matches!(single.packing, Packing::Lsb | Packing::Gige) =>
+        {
+            pixels
+                .checked_mul(usize::from(single.bits))
+                .ok_or(too_large)?
+                .div_ceil(8)
+        }
+        _ => completed,
+    };
     if src.len() < expected {
         return Err(ConvertError::ShortPayload {
             format,
@@ -503,7 +523,7 @@ fn geometry(
             actual: src.len(),
         });
     }
-    Ok((pixels, &src[..expected]))
+    Ok((pixels, &src[..completed.min(src.len())]))
 }
 
 // ── Layouts ──────────────────────────────────────────────────────────────────
@@ -669,9 +689,15 @@ fn unpack_append(single: Single, pixels: usize, src: &[u8], out: &mut Vec<u16>) 
         Packing::Gige => {
             let shift = single.bits - 8;
             let mask = (1u16 << shift) - 1;
-            for &[msb0, lsb, msb1] in src.as_chunks::<3>().0 {
+            let (groups, tail) = src.as_chunks::<3>();
+            for &[msb0, lsb, msb1] in groups {
                 out.push((u16::from(msb0) << shift) | (u16::from(lsb) & mask));
                 out.push((u16::from(msb1) << shift) | ((u16::from(lsb) >> 4) & mask));
+            }
+            // A run that stops inside its last group: that group's first
+            // pixel, from its eight msb and the low nibble after them.
+            if let &[msb0, lsb, ..] = tail {
+                out.push((u16::from(msb0) << shift) | (u16::from(lsb) & mask));
             }
             // A completed last group carries one pixel too many.
             out.truncate(start + pixels);
@@ -891,23 +917,42 @@ mod tests {
         );
     }
 
-    /// PFNC 2.4 §6.7: a group the image ends inside is completed with zero
-    /// components, so one Mono12p pixel still occupies three bytes.
+    /// An image that ends inside a packing group needs only the bytes its
+    /// pixels' bits fill. PFNC 2.4 §6.7 completes the group with zero
+    /// components, but an Allied Vision Manta G-125B at 1291 × 963 in
+    /// `Mono12Packed` — 1 243 233 pixels, an odd count — gave `PayloadSize`
+    /// 1 864 850 and sent frames of that length: ⌈1 243 233 × 12 / 8⌉, one
+    /// byte short of the completed group. A completed group still decodes.
     #[test]
-    fn a_partial_last_group_needs_its_whole_group() {
-        assert_eq!(
-            unpack_u16(P::Mono12p, 1, 1, None, &[0xBC, 0x0A]),
-            Err(ConvertError::ShortPayload {
-                format: P::Mono12p,
-                expected: 3,
-                actual: 2
-            })
-        );
-        assert_eq!(unpack(P::Mono12p, 1, 1, &[0xBC, 0x0A, 0x00]), [0xABC]);
+    fn a_partial_last_group_needs_only_its_pixels_bits() {
+        // The last pixel's eight msb, then its four lsb in the next byte.
+        let manta = [0xAB, 0x3C, 0x12, 0x45, 0x06];
+        assert_eq!(unpack(P::Mono12Packed, 3, 1, &manta), [0xABC, 0x123, 0x456]);
         assert_eq!(
             unpack(P::Mono12Packed, 3, 1, &[0xAB, 0x3C, 0x12, 0x45, 0x06, 0x00]),
-            [0xABC, 0x123, 0x456]
+            [0xABC, 0x123, 0x456],
+            "the group completed"
         );
+        assert_eq!(unpack(P::Mono12p, 1, 1, &[0xBC, 0x0A]), [0xABC]);
+        assert_eq!(unpack(P::Mono12p, 1, 1, &[0xBC, 0x0A, 0x00]), [0xABC]);
+        assert_eq!(
+            unpack_u16(P::Mono12Packed, 3, 1, None, &manta[..4]),
+            Err(ConvertError::ShortPayload {
+                format: P::Mono12Packed,
+                expected: 5,
+                actual: 4
+            })
+        );
+        // The Manta's own geometry, through every conversion.
+        let (width, height) = (1291, 963);
+        let src = vec![0x80; 1_864_850];
+        let mut conv = Converter::new();
+        assert_eq!(
+            conv.gray8(P::Mono12Packed, width, height, None, &src)
+                .map(<[u8]>::len),
+            Ok(1_243_233)
+        );
+        assert!(to_rgb8(P::Mono12Packed, width, height, None, &src).is_ok());
     }
 
     /// A GVSP image leader declares `padding_x` bytes after every line

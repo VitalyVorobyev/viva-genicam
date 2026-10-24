@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bytes::{BufMut, BytesMut};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, trace, warn};
@@ -26,14 +25,8 @@ const IPV4_HEADER_SIZE: usize = 20;
 /// UDP header size counted by `GevSCPSPacketSize` per the GigE Vision spec.
 const UDP_HEADER_SIZE: usize = 8;
 
-// GVCP vocabulary, imported (ADR-0030).
-use viva_gige::consts::{
-    EVENT_COMMAND as EVENT_CMD, EVENTDATA_COMMAND as EVENTDATA_CMD, GVCP_CMD_KEY,
-};
 /// `GEV_EVENT_START_OF_TRANSFER`, emitted as each frame begins.
 const GEV_EVENT_START_OF_TRANSFER: u16 = 0x0005;
-/// Size of one 16-bit-block-id event entry.
-const EVENT_ENTRY_LEN: u16 = 16;
 
 /// Stream options set on the builder rather than through registers.
 #[derive(Debug, Clone, Default)]
@@ -67,6 +60,8 @@ pub(crate) struct SenderShared {
     pub retention: Arc<std::sync::Mutex<Retention>>,
     /// The camera's own address: GVSP leaves from it.
     pub source_ip: Ipv4Addr,
+    /// Where events go: the message channel, which sends them.
+    pub events: tokio::sync::mpsc::UnboundedSender<crate::events::Occurred>,
 }
 
 /// Run the GVSP frame sender loop.
@@ -87,6 +82,7 @@ pub(crate) async fn run(
         spoofed,
         retention,
         source_ip,
+        events,
     } = shared;
     loop {
         // Wait for acquisition start.
@@ -123,7 +119,6 @@ pub(crate) async fn run(
 
         let frame_interval = Duration::from_micros(1_000_000 / fps.max(1) as u64);
         let mut block_id: u64 = 1;
-        let mut request_id: u16 = 1;
         // Device clock: nanoseconds since acquisition start (1 GHz tick rate).
         let clock_origin = Instant::now();
 
@@ -254,33 +249,26 @@ pub(crate) async fn run(
                     .find(|d| d.kind == PacketKind::Leader && d.block_id == first)
                     .and_then(|leader| leader_timestamp(&leader.bytes, options.extended_ids))
                     .unwrap_or_default();
-                let event = build_eventdata(
-                    request_id,
-                    EVENT_EXPOSURE_END,
-                    first as u16,
+                let _ = events.send(crate::events::Occurred {
+                    dest,
+                    event_id: EVENT_EXPOSURE_END,
+                    block_id: first as u16,
                     timestamp,
-                    &first.to_le_bytes(),
-                );
-                let _ = socket.send_to(&event, dest).await;
-                request_id = request_id.wrapping_add(1).max(1);
+                    data: Some(first.to_le_bytes().to_vec()),
+                });
             }
 
             // GEV_EVENT_START_OF_TRANSFER precedes the leader, as on a real
             // device: the controller learns a block is starting before its
             // first GVSP packet arrives.
             if let Some(event_dest) = config.event_dest {
-                let timestamp = clock_origin.elapsed().as_nanos() as u64;
-                let event = build_event(
-                    request_id,
-                    GEV_EVENT_START_OF_TRANSFER,
-                    first as u16,
-                    timestamp,
-                );
-                let _ = socket.send_to(&event, event_dest).await;
-                request_id = request_id.wrapping_add(1);
-                if request_id == 0 {
-                    request_id = 1;
-                }
+                let _ = events.send(crate::events::Occurred {
+                    dest: event_dest,
+                    event_id: GEV_EVENT_START_OF_TRANSFER,
+                    block_id: first as u16,
+                    timestamp: clock_origin.elapsed().as_nanos() as u64,
+                    data: None,
+                });
             }
 
             // GevSCPD spaces consecutive packets. Sleeping per packet would be
@@ -518,29 +506,6 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
-/// Build a GVCP `EVENT_CMD` carrying one event.
-///
-/// Written out from the GigE Vision field table, not from the client parser:
-/// key byte, flags, opcode, length, request id, then a 16-byte entry of
-/// reserved / event id / stream channel / block id / timestamp. Emitting these
-/// bytes is what proves `viva-gige::message` reads the right offsets — the
-/// previous fake emitted nothing at all, which is why a parser keyed on a
-/// non-existent opcode survived.
-fn build_event(request_id: u16, event_id: u16, block_id: u16, timestamp: u64) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(8 + EVENT_ENTRY_LEN as usize);
-    buf.put_u8(GVCP_CMD_KEY);
-    buf.put_u8(0); // no acknowledgement requested, 16-bit block ids
-    buf.put_u16(EVENT_CMD);
-    buf.put_u16(EVENT_ENTRY_LEN);
-    buf.put_u16(request_id);
-    buf.put_u16(0); // reserved
-    buf.put_u16(event_id);
-    buf.put_u16(0); // stream channel index
-    buf.put_u16(block_id);
-    buf.put_u64(timestamp);
-    buf.to_vec()
-}
-
 /// An image with the enabled chunks after it, in the layout a GigE Vision
 /// device sends with payload type `0x4001`: the image as the first chunk,
 /// then each value's chunk, every chunk followed by its tag
@@ -616,29 +581,4 @@ fn leader_timestamp(leader: &[u8], extended_ids: bool) -> Option<u64> {
     let at = if extended_ids { 20 } else { 8 } + 4;
     let bytes: [u8; 8] = leader.get(at..at + 8)?.try_into().ok()?;
     Some(u64::from_be_bytes(bytes))
-}
-
-/// Build a GVCP `EVENTDATA_CMD`: one 16-byte event entry — reserved, event
-/// id, stream channel, block id, timestamp — followed by device data, written
-/// out from the GigE Vision field table with this crate's own constants.
-fn build_eventdata(
-    request_id: u16,
-    event_id: u16,
-    block_id: u16,
-    timestamp: u64,
-    data: &[u8],
-) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(8 + EVENT_ENTRY_LEN as usize + data.len());
-    buf.put_u8(GVCP_CMD_KEY);
-    buf.put_u8(0); // no acknowledgement requested, 16-bit block ids
-    buf.put_u16(EVENTDATA_CMD);
-    buf.put_u16(EVENT_ENTRY_LEN + data.len() as u16);
-    buf.put_u16(request_id);
-    buf.put_u16(0); // reserved
-    buf.put_u16(event_id);
-    buf.put_u16(0); // stream channel index
-    buf.put_u16(block_id);
-    buf.put_u64(timestamp);
-    buf.extend_from_slice(data);
-    buf.to_vec()
 }

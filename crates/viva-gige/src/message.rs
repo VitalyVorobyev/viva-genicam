@@ -25,14 +25,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::ErrorKind;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 #[cfg(test)]
 use bytes::{BufMut, BytesMut};
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tracing::{debug, info, trace, warn};
 
 use crate::consts as gvcp;
@@ -237,21 +239,100 @@ fn encode_ack(ack_opcode: u16, request_id: u16) -> [u8; consts::GVCP_HEADER] {
     buf
 }
 
-/// Async GVCP message channel socket.
+/// Events kept for the application before the oldest is dropped.
+pub const EVENT_QUEUE_CAPACITY: usize = 1024;
+
+/// How long the receive thread waits for a datagram before checking whether
+/// to stop.
+const RECEIVE_TICK: Duration = Duration::from_millis(20);
+
+/// What a GVCP message channel has received, counted by its receive thread.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EventStats {
+    /// Datagrams that parsed as `EVENT_CMD` or `EVENTDATA_CMD`, copies
+    /// included.
+    pub messages: u64,
+    /// Messages that asked for an acknowledgement and were sent one.
+    pub acknowledged: u64,
+    /// Copies of the message before them, the device's retransmissions:
+    /// acknowledged again, their events not queued twice.
+    pub retransmissions: u64,
+    /// Events queued for the application.
+    pub events: u64,
+    /// Events dropped, oldest first, because the application left
+    /// [`EVENT_QUEUE_CAPACITY`] of them unread.
+    pub dropped: u64,
+    /// Datagrams that were not an event message.
+    pub malformed: u64,
+}
+
+#[derive(Default)]
+struct Counters {
+    messages: AtomicU64,
+    acknowledged: AtomicU64,
+    retransmissions: AtomicU64,
+    events: AtomicU64,
+    dropped: AtomicU64,
+    malformed: AtomicU64,
+}
+
+struct QueueState {
+    events: VecDeque<EventPacket>,
+    /// The receive thread's failure, reported once after the queue drains.
+    failed: Option<io::Error>,
+    /// The receive thread stopped.
+    ended: bool,
+}
+
+/// State a socket shares with its receive thread.
+struct Shared {
+    queue: std::sync::Mutex<QueueState>,
+    notify: Notify,
+    stop: AtomicBool,
+    counters: Counters,
+    capacity: usize,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState> {
+        // A thread that panicked holding the lock left a queue of values,
+        // still coherent.
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A GVCP message channel: the socket a device sends its events to.
+///
+/// Binding starts a receive thread. It **acknowledges each message as it
+/// arrives**, whether or not the application is reading, and queues its
+/// events for [`recv`](Self::recv), up to [`EVENT_QUEUE_CAPACITY`]; past
+/// that the oldest is dropped, counted in [`EventStats::dropped`] and
+/// logged. A device whose acknowledgement does not come resends the message
+/// every `GevMCTT` and holds back the events behind it: an Allied Vision
+/// Manta G-125B (`GevMCTT` 100 ms) sent one `ExposureEnd` twelve times to an
+/// application that read a second late when the acknowledgement waited for
+/// the read, and, left unread for ten seconds, kept 44 events and sent
+/// `EventOverflow` for the rest.
+///
+/// A retransmission repeats the request id and the bytes of the message
+/// before it; it is acknowledged again and its events are not queued twice.
+/// Distinct events under one request id are each queued. Dropping the
+/// socket stops the thread within one tick.
 pub struct EventSocket {
-    sock: UdpSocket,
-    buffer: Mutex<Vec<u8>>,
-    /// Events decoded from a multi-event datagram but not yet returned.
-    pending: Mutex<VecDeque<EventPacket>>,
-    /// The request id and the events (the datagram after its GVCP header)
-    /// of the last message each device sent, to recognise its
-    /// retransmissions.
-    last_message: std::sync::Mutex<HashMap<SocketAddr, (u16, Vec<u8>)>>,
+    shared: Arc<Shared>,
+    local: SocketAddr,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl EventSocket {
-    /// Bind a GVCP message socket on the provided local address.
+    /// Bind a GVCP message socket on the provided local address and start
+    /// its receive thread.
     pub async fn bind(local_ip: IpAddr, port: u16) -> io::Result<Self> {
+        Self::bind_with_capacity(local_ip, port, EVENT_QUEUE_CAPACITY)
+    }
+
+    fn bind_with_capacity(local_ip: IpAddr, port: u16, capacity: usize) -> io::Result<Self> {
         let domain = match local_ip {
             IpAddr::V4(_) => Domain::IPV4,
             IpAddr::V6(_) => Domain::IPV6,
@@ -264,121 +345,228 @@ impl EventSocket {
         }
         let addr = SocketAddr::new(local_ip, port);
         socket.bind(&addr.into())?;
-        let sock = UdpSocket::from_std(socket.into())?;
-        info!(local = %addr, "bound GVCP message socket");
+        let socket: StdUdpSocket = socket.into();
+        let local = socket.local_addr()?;
+        info!(local = %local, "bound GVCP message socket");
+        let shared = Arc::new(Shared {
+            queue: std::sync::Mutex::new(QueueState {
+                events: VecDeque::new(),
+                failed: None,
+                ended: false,
+            }),
+            notify: Notify::new(),
+            stop: AtomicBool::new(false),
+            counters: Counters::default(),
+            capacity: capacity.max(1),
+        });
+        let thread = {
+            let shared = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name("viva-gige-events".into())
+                .spawn(move || receive_loop(&socket, &shared))?
+        };
         Ok(Self {
-            sock,
-            buffer: Mutex::new(vec![0u8; consts::MAX_EVENT_SIZE]),
-            pending: Mutex::new(VecDeque::new()),
-            last_message: std::sync::Mutex::new(HashMap::new()),
+            shared,
+            local,
+            thread: Some(thread),
         })
     }
 
-    /// Receive and parse the next GVCP event.
+    /// The next event, waiting until one arrives. Events come in the order
+    /// the device sent them; a datagram carrying several is queued whole.
     ///
-    /// A datagram carrying several events is decoded once and drained across
-    /// successive calls. When the device set the acknowledge-required flag the
-    /// acknowledgement is sent before any of its events are returned — a device
-    /// that does not get one will retransmit.
-    ///
-    /// A retransmission repeats the request id and the bytes of the message
-    /// before it; it is acknowledged again and its events are not delivered
-    /// twice. Distinct events under one request id are each delivered. The
-    /// acknowledgement goes out when the message is read, so an application
-    /// that reads late makes the device resend: an Allied Vision Manta G-125B
-    /// (`GevMCTT` 100 ms) sent one event eleven times to a reader a second
-    /// late.
-    ///
-    /// Concurrent callers are symmetric consumers of one queue, and none of
-    /// them is promised the event its own `recv_from` decoded.
+    /// Cancel-safe: an event is taken only by the poll that returns it.
+    /// Concurrent callers are symmetric consumers of one queue. An error
+    /// once the receive thread has failed, after the events it queued.
     pub async fn recv(&self) -> io::Result<EventPacket> {
         loop {
-            if let Some(packet) = self.pending.lock().await.pop_front() {
-                return Ok(packet);
+            let notified = self.shared.notify.notified();
+            tokio::pin!(notified);
+            // Register before checking, so an event queued in between still
+            // wakes us.
+            notified.as_mut().enable();
+            if let Some(result) = self.try_take() {
+                return result;
             }
+            notified.await;
+        }
+    }
 
-            // Two locks, and only one order: the receive lock, then the queue.
-            // A caller blocked in `recv_from` must not hold the queue, or a
-            // second caller could not drain events that have already arrived.
-            let mut buffer = self.buffer.lock().await;
-            // Recheck: waiting for the receive lock is the window in which
-            // another caller queues a decoded datagram, and those events are
-            // older than anything the socket will hand us next.
-            if let Some(packet) = self.pending.lock().await.pop_front() {
-                return Ok(packet);
-            }
+    /// The next event if one is queued: `None` when none is, an error once
+    /// the receive thread has failed or stopped.
+    fn try_take(&self) -> Option<io::Result<EventPacket>> {
+        let mut state = self.shared.lock();
+        if let Some(event) = state.events.pop_front() {
+            return Some(Ok(event));
+        }
+        if let Some(err) = state.failed.take() {
+            return Some(Err(err));
+        }
+        state.ended.then(|| {
+            Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "the GVCP message channel's receive thread has stopped",
+            ))
+        })
+    }
 
-            let (len, src) = self.sock.recv_from(&mut buffer[..]).await?;
-            trace!(bytes = len, %src, "received GVCP message");
-
-            match EventPacket::parse_datagram(src, &buffer[..len]) {
-                Ok((header, events)) => {
-                    if events.is_empty() {
-                        continue;
-                    }
-                    if header.ack_required {
-                        let ack = encode_ack(header.ack_opcode(), header.request_id);
-                        if let Err(err) = self.sock.send_to(&ack, src).await {
-                            warn!(%src, error = %err, "failed to acknowledge event");
-                        } else {
-                            trace!(%src, request_id = header.request_id, "acknowledged event");
-                        }
-                    }
-                    // A retransmission repeats both the request id and the
-                    // events: a device that reuses one request id for
-                    // distinct events still has them delivered, since their
-                    // timestamps differ.
-                    let message = (
-                        header.request_id,
-                        buffer[consts::GVCP_HEADER.min(len)..len].to_vec(),
-                    );
-                    let repeated = self
-                        .last_message
-                        .lock()
-                        .map(|mut last| last.insert(src, message.clone()))
-                        .ok()
-                        .flatten()
-                        .is_some_and(|previous| previous == message);
-                    if repeated {
-                        debug!(%src, request_id = header.request_id, "dropping a retransmitted event");
-                        continue;
-                    }
-                    // Every event this datagram carried is published in one
-                    // step, while the receive lock is still held. Returning
-                    // one directly and queueing the remainder would be the
-                    // same code with a window in it: between releasing the
-                    // receive lock and queueing the rest, another caller can
-                    // take the lock, find the queue empty and block in
-                    // `recv_from` on a device that may never speak again,
-                    // while the events it wanted sat undelivered.
-                    debug!(events = events.len(), %src, "queueing GVCP events");
-                    self.pending.lock().await.extend(events);
-                }
-                Err(err) => {
-                    warn!(%src, error = %err, "discarding malformed event packet");
-                }
-            }
+    /// What the receive thread has counted so far.
+    pub fn stats(&self) -> EventStats {
+        let c = &self.shared.counters;
+        EventStats {
+            messages: c.messages.load(Ordering::Relaxed),
+            acknowledged: c.acknowledged.load(Ordering::Relaxed),
+            retransmissions: c.retransmissions.load(Ordering::Relaxed),
+            events: c.events.load(Ordering::Relaxed),
+            dropped: c.dropped.load(Ordering::Relaxed),
+            malformed: c.malformed.load(Ordering::Relaxed),
         }
     }
 
     /// Return the local address bound to the socket.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.sock.local_addr()
+        Ok(self.local)
     }
+}
 
-    /// Access the underlying UDP socket (tests only).
-    #[cfg(test)]
-    pub fn socket(&self) -> &UdpSocket {
-        &self.sock
+impl Drop for EventSocket {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
+}
+
+/// The receive thread: read, acknowledge, queue, until told to stop or the
+/// socket fails.
+fn receive_loop(socket: &StdUdpSocket, shared: &Shared) {
+    let mut buffer = vec![0u8; consts::MAX_EVENT_SIZE];
+    let mut last_message: HashMap<SocketAddr, (u16, Vec<u8>)> = HashMap::new();
+    let mut warned_overflow = false;
+    let failure = loop {
+        if shared.stop.load(Ordering::Acquire) {
+            break None;
+        }
+        match crate::nic::wait_readable(socket, RECEIVE_TICK) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(err) => break Some(err),
+        }
+        // Drain everything the socket holds before waiting again.
+        let failed = loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((len, src)) => handle_datagram(
+                    socket,
+                    shared,
+                    &buffer[..len],
+                    src,
+                    &mut last_message,
+                    &mut warned_overflow,
+                ),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break None,
+                Err(err) if err.kind() == ErrorKind::Interrupted => {}
+                // An ICMP reply to an acknowledgement, reported on the next
+                // read: the socket is still good (SR-22).
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    debug!(error = %err, "ignoring a connection reset on the GVCP message socket");
+                }
+                Err(err) => break Some(err),
+            }
+        };
+        if failed.is_some() {
+            break failed;
+        }
+    };
+    let mut state = shared.lock();
+    if let Some(err) = failure {
+        warn!(error = %err, "GVCP message socket receive failed; no more events");
+        state.failed = Some(err);
+    }
+    state.ended = true;
+    drop(state);
+    shared.notify.notify_waiters();
+}
+
+/// One datagram: acknowledge it if asked, then queue its events unless it
+/// repeats the message before it.
+fn handle_datagram(
+    socket: &StdUdpSocket,
+    shared: &Shared,
+    data: &[u8],
+    src: SocketAddr,
+    last_message: &mut HashMap<SocketAddr, (u16, Vec<u8>)>,
+    warned_overflow: &mut bool,
+) {
+    trace!(bytes = data.len(), %src, "received GVCP message");
+    let counters = &shared.counters;
+    let (header, events) = match EventPacket::parse_datagram(src, data) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            counters.malformed.fetch_add(1, Ordering::Relaxed);
+            warn!(%src, error = %err, "discarding malformed event packet");
+            return;
+        }
+    };
+    counters.messages.fetch_add(1, Ordering::Relaxed);
+    if header.ack_required {
+        let ack = encode_ack(header.ack_opcode(), header.request_id);
+        match socket.send_to(&ack, src) {
+            Ok(_) => {
+                counters.acknowledged.fetch_add(1, Ordering::Relaxed);
+                trace!(%src, request_id = header.request_id, "acknowledged event");
+            }
+            Err(err) => warn!(%src, error = %err, "failed to acknowledge event"),
+        }
+    }
+    // A retransmission repeats both the request id and the events: a device
+    // that reuses one request id for distinct events still has them
+    // delivered, since their timestamps differ.
+    let message = (header.request_id, data[consts::GVCP_HEADER..].to_vec());
+    if last_message.insert(src, message.clone()).as_ref() == Some(&message) {
+        counters.retransmissions.fetch_add(1, Ordering::Relaxed);
+        debug!(%src, request_id = header.request_id, "dropping a retransmitted event");
+        return;
+    }
+    if events.is_empty() {
+        return;
+    }
+    let count = events.len() as u64;
+    let dropped = {
+        let mut state = shared.lock();
+        state.events.extend(events);
+        let excess = state.events.len().saturating_sub(shared.capacity);
+        state.events.drain(..excess);
+        excess as u64
+    };
+    counters.events.fetch_add(count, Ordering::Relaxed);
+    debug!(events = count, %src, "queueing GVCP events");
+    if dropped > 0 {
+        let total = counters.dropped.fetch_add(dropped, Ordering::Relaxed) + dropped;
+        if !*warned_overflow {
+            *warned_overflow = true;
+            warn!(
+                capacity = shared.capacity,
+                "events arrive faster than the application reads them; dropping the oldest \
+                 (counted in EventStats::dropped)"
+            );
+        } else {
+            debug!(dropped = total, "dropped unread events");
+        }
+    }
+    shared.notify.notify_waiters();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use tokio::net::UdpSocket;
 
     fn src() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3956)
@@ -628,6 +816,61 @@ mod tests {
             assert_eq!(len, consts::GVCP_HEADER);
         }
         assert_eq!(acks, [1, 1, 1, 2], "every copy acknowledged");
+        let stats = sock.stats();
+        assert_eq!((stats.messages, stats.acknowledged), (4, 4));
+        assert_eq!((stats.retransmissions, stats.events), (2, 2));
+    }
+
+    /// TC-42: the acknowledgement goes out when the message arrives, not
+    /// when the application reads it. Acknowledged at the read, a device
+    /// resends every `GevMCTT` until then: an Allied Vision Manta G-125B
+    /// sent one event twelve times to a reader a second late.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_event_is_acknowledged_when_it_arrives_not_when_it_is_read() {
+        let sock = EventSocket::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+            .await
+            .expect("bind");
+        let device = UdpSocket::bind("127.0.0.1:0").await.expect("device");
+        device
+            .send_to(&EVENT_CMD_GOLDEN, sock.local_addr().expect("local addr"))
+            .await
+            .expect("send");
+        let mut ack = [0u8; 64];
+        let (len, _) = tokio::time::timeout(Duration::from_millis(500), device.recv_from(&mut ack))
+            .await
+            .expect("acknowledged while nobody reads")
+            .expect("ack");
+        assert_eq!(&ack[..len], &encode_ack(gvcp::EVENT_ACK, 0xCAFE));
+        let event = sock.recv().await.expect("the event, read later");
+        assert_eq!(event.block_id, 8);
+    }
+
+    /// Events nobody reads are bounded: past the capacity the oldest goes,
+    /// and is counted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unread_events_beyond_the_capacity_drop_the_oldest() {
+        let sock =
+            EventSocket::bind_with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 2).expect("bind");
+        let dest = sock.local_addr().expect("local addr");
+        let device = UdpSocket::bind("127.0.0.1:0").await.expect("device");
+        for block in 1..=3u16 {
+            let mut event = EVENT_CMD_GOLDEN;
+            event[6..8].copy_from_slice(&block.to_be_bytes());
+            event[14..16].copy_from_slice(&block.to_be_bytes());
+            device.send_to(&event, dest).await.expect("send");
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while sock.stats().events < 3 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(sock.stats().dropped, 1);
+        let first = sock.recv().await.expect("event");
+        let second = sock.recv().await.expect("event");
+        assert_eq!(
+            (first.block_id, second.block_id),
+            (2, 3),
+            "the oldest dropped"
+        );
     }
 
     /// A device that gives every event the same request id — GigE Vision has

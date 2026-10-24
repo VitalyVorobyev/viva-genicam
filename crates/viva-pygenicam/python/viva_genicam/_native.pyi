@@ -310,7 +310,7 @@ def send_action(
     scheduled_time: Optional[int] = None,
     destination: str = "255.255.255.255",
     timeout_ms: int = 200,
-) -> tuple[int, int]: ...
+) -> tuple[int, int, list[tuple[str, int]]]: ...
 def force_ip(
     mac: str,
     ip: str,

@@ -742,6 +742,53 @@ async fn test_default_preserves_camera_packet_size() {
     assert_eq!(held, PRESET, "preserve must not write the camera register");
 }
 
+/// The probe borrows `GevSCPSPacketSize`'s do-not-fragment bit and gives it
+/// back as it found it. An Allied Vision Manta G-125B stores the bit and reads
+/// it back (`0x400005DC` before a stream); after streams that probed, it read
+/// `0x000005DC`. The fake stores it too, and is read directly.
+#[tokio::test]
+async fn the_probe_leaves_the_do_not_fragment_bit_as_it_found_it() {
+    let cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+    let scps = gige::consts::STREAM_CHANNEL_BASE + gige::consts::STREAM_PACKET_SIZE;
+    let control_addr = std::net::SocketAddr::new(device_info.ip.into(), gige::GVCP_PORT);
+    // 2500, above the probe's 1500-byte floor, so the probe runs.
+    for preset in [0x4000_09C4u32, 0x0000_09C4] {
+        let mut device = gige::GigeDevice::open(control_addr)
+            .await
+            .expect("open device");
+        device.claim_control().await.expect("claim control");
+        device
+            .write_register(scps as u32, preset)
+            .await
+            .expect("preset GevSCPSPacketSize");
+        assert_eq!(cam.fake().peek(scps, 4).await, preset.to_be_bytes());
+        let stream = viva_genicam::StreamBuilder::new(&mut device)
+            .iface(loopback_iface())
+            .build()
+            .await
+            .expect("build: preserve, probed");
+        assert_eq!(stream.params().packet_size, 2500);
+        drop(stream);
+        assert_eq!(
+            u32::from_be_bytes(cam.fake().peek(scps, 4).await.try_into().unwrap()),
+            preset,
+            "GevSCPSPacketSize after the probe"
+        );
+        // An explicit size keeps the bit as well.
+        device
+            .set_stream_packet_size(0, 1400)
+            .await
+            .expect("set the size");
+        assert_eq!(
+            u32::from_be_bytes(cam.fake().peek(scps, 4).await.try_into().unwrap()),
+            (preset & 0x4000_0000) | 1400,
+            "GevSCPSPacketSize after an explicit size"
+        );
+        device.release_control().await.expect("release");
+    }
+}
+
 /// Accumulates every `WARN` this test binary emits.
 #[derive(Clone, Default)]
 struct LogCapture(Arc<Mutex<Vec<u8>>>);
@@ -1946,6 +1993,72 @@ async fn test_event_stream_receives_start_of_transfer() {
     })
     .await
     .unwrap();
+}
+
+/// TC-42: an application that reads its events late costs the camera no
+/// retransmission. The fake resends an unacknowledged event every `GevMCTT`
+/// (40 ms) as an Allied Vision Manta G-125B does (100 ms); acknowledged only
+/// at the read, a reader a second late made the Manta send one event twelve
+/// times. Each event still arrives once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_event_reader_costs_the_camera_no_retransmission() {
+    let cam = common::TestCamera::start().await;
+    let device_info = discover_fake().await;
+
+    let (mut frame_stream, mut camera) = setup_stream_owned(&device_info).await;
+    let local: std::net::Ipv4Addr = [127, 0, 0, 1].into();
+    let port = 10_024u16;
+    camera
+        .configure_events(local, port, &["ExposureEnd"])
+        .await
+        .expect("configure events");
+    let events = camera
+        .open_event_stream(local, port)
+        .await
+        .expect("open event stream");
+
+    let camera = Arc::new(Mutex::new(camera));
+    let cam_start = camera.clone();
+    tokio::task::spawn_blocking(move || cam_start.lock().unwrap().acquisition_start())
+        .await
+        .unwrap()
+        .expect("start");
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_secs(5), frame_stream.next_frame())
+            .await
+            .expect("a frame")
+            .expect("frame")
+            .expect("stream open");
+    }
+    let cam_stop = camera.clone();
+    tokio::task::spawn_blocking(move || cam_stop.lock().unwrap().acquisition_stop())
+        .await
+        .unwrap()
+        .expect("stop");
+
+    // Nobody reads for a second: 25 of the fake's timeouts.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut blocks = Vec::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(300), events.next()).await
+    {
+        blocks.push(event.block_id);
+    }
+    let sent = cam.fake().message_channel();
+    assert!(!blocks.is_empty(), "events arrived");
+    let mut distinct = blocks.clone();
+    distinct.dedup();
+    assert_eq!(distinct, blocks, "each event once");
+    assert_eq!(
+        sent.events,
+        blocks.len() as u64,
+        "every event the camera sent"
+    );
+    assert_eq!(
+        sent.transmissions, sent.messages,
+        "the camera sent each message once: {sent:?}"
+    );
+    assert_eq!(sent.acknowledged, sent.messages);
+    assert_eq!(events.stats().retransmissions, 0);
 }
 
 /// An event feature read from a received event (GA-39): the fake sends an

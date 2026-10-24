@@ -41,6 +41,10 @@ pub struct Event {
 }
 
 /// Asynchronous stream of events delivered over the GVCP message channel.
+///
+/// A receive thread acknowledges each message as it arrives and queues its
+/// events, so a late reader costs the camera no retransmission;
+/// [`EventSocket`] says how many it keeps and what it does with more.
 pub struct EventStream {
     socket: EventSocket,
     time_sync: Option<Arc<TimeSync>>,
@@ -64,6 +68,13 @@ impl EventStream {
             "event received"
         );
         Ok(Self::map_packet(packet, self.time_sync.clone()))
+    }
+
+    /// What the message channel has received: messages, acknowledgements,
+    /// the camera's retransmissions, events queued and events dropped
+    /// unread.
+    pub fn stats(&self) -> viva_gige::EventStats {
+        self.socket.stats()
     }
 
     /// Access the local socket address used by the stream.

@@ -162,7 +162,13 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
 
     let stats = frames.stats();
     common::print_stream_counters("Summary:", &stats);
-    let report = BenchReport::new(&stats, duration, &args.mode);
+    // A monitor's stream is whatever the controller set up: multicast.
+    let mode = if monitor {
+        "monitor"
+    } else {
+        args.mode.as_str()
+    };
+    let report = BenchReport::new(&stats, duration, mode);
 
     if let Some(path) = args.json_out.as_ref() {
         let file = File::create(path).with_context(|| format!("create {}", path.display()))?;

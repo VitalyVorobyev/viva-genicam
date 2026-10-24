@@ -44,13 +44,27 @@ pub struct ActionParams {
 }
 
 /// Summary of the broadcast performed by [`send_action`].
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AckSummary {
     /// Number of GVCP datagrams transmitted.
     pub sent: usize,
     /// Number of distinct acknowledgement sources observed.
     pub acks: usize,
+    /// Devices that answered with an error status instead, each once.
+    pub refusals: Vec<ActionRefusal>,
+}
+
+/// A device's error answer to an action command: an Allied Vision Manta
+/// G-125B, whose GVCP Capability lacks the action bit, answered
+/// `NOT_IMPLEMENTED` under the command's own opcode, `0x0100`, rather than
+/// under `ACTION_ACK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionRefusal {
+    /// Who answered.
+    pub source: IpAddr,
+    /// The status it answered with.
+    pub status: crate::GigeStatus,
 }
 
 fn encode_payload(params: &ActionParams) -> BytesMut {
@@ -107,9 +121,10 @@ pub async fn send_action(
         }
     };
     let socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
-    if is_broadcast(&destination) {
-        socket.set_broadcast(true)?;
-    }
+    // Every broadcast needs it, a subnet's own (192.168.2.255) as much as
+    // the limited one, and only a socket can tell which address is which:
+    // without it, macOS refuses a send to a subnet broadcast (`EACCES`).
+    socket.set_broadcast(true)?;
 
     let mut summary = AckSummary::default();
     let payload = encode_payload(params);
@@ -149,13 +164,6 @@ pub async fn send_action(
             Ok(Ok((len, src))) => {
                 trace!(bytes = len, %src, "received acknowledgement");
                 let header = parse_ack(&buf[..len])?;
-                if header.command != consts::ACTION_ACK {
-                    debug!(
-                        opcode = header.command,
-                        "ignoring unrelated acknowledgement"
-                    );
-                    continue;
-                }
                 if header.request_id != request_id {
                     debug!(
                         expected = request_id,
@@ -164,11 +172,25 @@ pub async fn send_action(
                     );
                     continue;
                 }
-                if !header.status.is_success() {
-                    warn!(status = %header.status, %src, "device reported action failure");
+                // A refusal may come back under the command's own opcode.
+                if !matches!(header.command, consts::ACTION_ACK | consts::ACTION_COMMAND) {
+                    debug!(
+                        opcode = header.command,
+                        "ignoring unrelated acknowledgement"
+                    );
                     continue;
                 }
-                if seen.insert(src.ip()) {
+                if !header.status.is_success() {
+                    warn!(status = %header.status, %src, "device refused the action command");
+                    if !summary.refusals.iter().any(|r| r.source == src.ip()) {
+                        summary.refusals.push(ActionRefusal {
+                            source: src.ip(),
+                            status: header.status,
+                        });
+                    }
+                    continue;
+                }
+                if header.command == consts::ACTION_ACK && seen.insert(src.ip()) {
                     summary.acks += 1;
                 }
             }
@@ -180,7 +202,11 @@ pub async fn send_action(
         }
     }
 
-    info!(acks = summary.acks, "action command completed");
+    info!(
+        acks = summary.acks,
+        refused = summary.refusals.len(),
+        "action command completed"
+    );
     Ok(summary)
 }
 

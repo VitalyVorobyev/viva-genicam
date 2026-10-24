@@ -240,6 +240,8 @@ pub(crate) struct ServerOptions {
     pub expiries: Arc<AtomicU64>,
     /// Action commands addressed to this device and acted on.
     pub actions: Arc<AtomicU64>,
+    /// Whether action commands are implemented at all.
+    pub action_commands: bool,
 }
 
 /// Run the GVCP control server loop.
@@ -349,6 +351,13 @@ pub async fn run(
             READMEM_CMD => handle_readmem(peer, request_id, payload, &regs).await,
             WRITEMEM_CMD => {
                 handle_writemem(peer, request_id, payload, bind_ip, &regs, acquisition).await
+            }
+            ACTION_CMD if !options.action_commands => {
+                // What the Manta G-125B sent: the error under the command's
+                // own opcode, whatever the keys.
+                let resp = build_error_ack(ACTION_CMD, request_id, STATUS_NOT_IMPLEMENTED);
+                let _ = socket.send_to(&resp, peer).await;
+                continue;
             }
             ACTION_CMD => {
                 if handle_action(&socket, peer, request_id, flags, payload).await {

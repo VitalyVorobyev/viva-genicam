@@ -15,10 +15,12 @@
 //!
 //! The command asks for no acknowledgement, and the fake sends none. The
 //! packets go out again from the **stream** socket, byte for byte as first
-//! built; a range the fake no longer holds is answered with one header-only
-//! GVSP packet carrying `PACKET_UNAVAILABLE` (`0x800C`), the block id and the
-//! range's first packet id. Whether real cameras answer that way, or stay
-//! silent, is open (backlog).
+//! built, status `0x0000` like the first time; each packet the fake no longer
+//! holds is answered with a header-only GVSP packet of its own, data packet
+//! format, carrying `PACKET_UNAVAILABLE` (`0x800C`), the block id and that
+//! packet's id. That is how an Allied Vision Manta G-125B answered, for a
+//! block it no longer held, a packet past a block's end and a block not yet
+//! sent, wherever the request came from; it held about 23 blocks.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -137,12 +139,12 @@ pub(crate) struct Retention {
     path: Option<StreamPath>,
 }
 
-/// How a request is answered: packets to send again, and the header-only
-/// packet for whatever the fake no longer holds.
+/// How a request is answered: packets to send again, and a header-only
+/// packet for each one the fake no longer holds.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Answer {
     pub resend: Vec<Vec<u8>>,
-    pub unavailable: Option<(Vec<u8>, u64)>,
+    pub unavailable: Vec<Vec<u8>>,
 }
 
 impl Retention {
@@ -182,8 +184,8 @@ impl Retention {
         self.blocks.push_back((block_id, by_id));
     }
 
-    /// Answer `request`: the packets still held, and one unavailable packet
-    /// for the first id of the part that is not.
+    /// Answer `request`: the packets still held, and an unavailable packet
+    /// for each that is not.
     pub fn answer(&self, request: &ResendRequest) -> Answer {
         let mut answer = Answer::default();
         if request.first > request.last {
@@ -194,30 +196,19 @@ impl Retention {
             .iter()
             .find(|(id, _)| *id == request.block_id)
             .map(|(_, packets)| packets);
-        let mut first_missing = None;
-        let mut missing = 0u64;
         for id in request.first..=request.last {
             match held
                 .and_then(|p| p.get(id as usize))
                 .filter(|b| !b.is_empty())
             {
                 Some(bytes) => answer.resend.push(bytes.clone()),
-                None => {
-                    first_missing.get_or_insert(id);
-                    missing += 1;
-                }
-            }
-        }
-        if let Some(first) = first_missing {
-            answer.unavailable = Some((
-                header_only(
+                None => answer.unavailable.push(header_only(
                     request.block_id,
                     request.extended_ids,
-                    first,
+                    id,
                     STATUS_PACKET_UNAVAILABLE,
-                ),
-                missing,
-            ));
+                )),
+            }
         }
         answer
     }
@@ -258,11 +249,9 @@ pub(crate) async fn serve(
             counters.packets_resent.fetch_add(1, Ordering::Relaxed);
         }
     }
-    if let Some((packet, count)) = answer.unavailable {
-        counters
-            .packets_unavailable
-            .fetch_add(count, Ordering::Relaxed);
-        let _ = path.socket.send_to(&packet, path.dest).await;
+    for packet in &answer.unavailable {
+        counters.packets_unavailable.fetch_add(1, Ordering::Relaxed);
+        let _ = path.socket.send_to(packet, path.dest).await;
     }
 }
 
@@ -344,7 +333,7 @@ mod tests {
             answer.resend,
             vec![datagrams[1].bytes.clone(), datagrams[2].bytes.clone()]
         );
-        assert!(answer.unavailable.is_none());
+        assert!(answer.unavailable.is_empty());
     }
 
     #[test]
@@ -355,9 +344,14 @@ mod tests {
         }
         let answer = retention.answer(&request(1, 2, 3));
         assert!(answer.resend.is_empty());
-        let (packet, count) = answer.unavailable.expect("unavailable");
-        assert_eq!(count, 2);
-        assert_eq!(packet, vec![0x80, 0x0C, 0x00, 0x01, 0x03, 0x00, 0x00, 0x02]);
+        // One per packet, as the Manta G-125B answered.
+        assert_eq!(
+            answer.unavailable,
+            [
+                vec![0x80, 0x0C, 0x00, 0x01, 0x03, 0x00, 0x00, 0x02],
+                vec![0x80, 0x0C, 0x00, 0x01, 0x03, 0x00, 0x00, 0x03],
+            ]
+        );
         // Block 3 is still held.
         assert_eq!(retention.answer(&request(3, 1, 1)).resend.len(), 1);
     }

@@ -104,9 +104,11 @@ viva-camctl action --destination 192.168.0.10 --device-key 0x42 --group-key 1 \
 ```
 
 Every camera whose `ActionDeviceKey`, `ActionGroupKey` and `ActionGroupMask`
-match acts and acknowledges; `action` reports how many did. Broadcast is the
-default; `--destination` sends to one address. A scheduled action carries
-its time in the cameras' timestamp ticks.
+match acts and acknowledges; `action` reports how many did, and names any
+camera that answered with an error instead — a camera without action commands
+may answer `NOT_IMPLEMENTED` whatever the keys, or say nothing. Broadcast is the
+default; `--destination` sends to one address, or to a subnet's broadcast
+address. A scheduled action carries its time in the cameras' timestamp ticks.
 
 ## Streaming
 

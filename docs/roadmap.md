@@ -8,11 +8,9 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-plan.md); its areas settle these rows of the next section, in this order:
 
-- **Found on this camera**: TC-41, TC-42.
+- **Found on this camera**: TC-41.
 - **Control channel**: TC-38.
 - **GenApi**: TC-39, API-19.
-- **Streaming**: SR-24, SR-25, SR-23, PX-05.
-- **Chunks and events**: TC-37.
 - **Repeatable**: CI-22 runs the GigE hardware suite nightly.
 - **Endurance**: SR-27 and API-21, decided by the plan's area L.
 - **Surfaces it needs**: GT-08; then DOC-19 records what ran.
@@ -25,16 +23,15 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 - **UV-05**: which transfer errors a camera recovers from; a `-vv` log of a stream that hit one settles it.
 - **UV-06**: an event that asks for an acknowledgement the USB3 Vision event interface cannot send.
 - **TC-21**: whether #112's `BAD_ALIGNMENT` reads were event-port registers, as their names and the corpus suggest; needs the reporter's confirmation or XML.
-- **TC-37**: chunk features read through a chunk port, and event ports, have met no camera; the Manta G-125B confirmed the chunk and event layouts but declares neither.
+- **TC-37**: chunk features read through a chunk port, and event ports, have met no camera; the Manta G-125B confirmed the chunk and event layouts and the event timing but declares neither port.
 - **DC-02**: `Coord3D_*` on the Zenoh wire; a wire-format change, made only together with DC-03.
 - **DC-03**: `Scan3d*` scale, offset and invalid value; one capture ([#93](https://github.com/VitalyVorobyev/viva-genicam/pull/93)) is the only evidence of what a 3D device sends.
 - **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture.
 - **DC-05**: event-vision blocks in Python; their format is known only from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)'s camera.
-- **SR-23**: the receive engine's block-id and packet heuristics (late window, restart on block 1, refusing an oversized data packet); a capture through an AcquisitionStop/Start settles them.
-- **SR-24**: whether cameras accept a packet resend request sent from the stream socket rather than the control channel's port; a lossy stream's `-vv` log, or a capture, settles it.
-- **SR-25**: how a camera answers a resend it cannot serve (which status, per packet or per range, or silence), and whether resent packets carry status `0x0100`.
+- **SR-23**: the receive engine's restart, late-window and oversized-packet rules; a camera whose block ids restart at 1, or whose packet size the host misjudges mid-stream, settles them (the Manta G-125B's ids run on).
+- **SR-25**: the standard-id resend request's first word on a stream channel other than 0, and other vendors' answers to a resend they cannot serve.
 - **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
-- **PX-05**: line or image padding when a width ends inside a packing group (an odd width in `Mono12p`) and no padding is declared; needs a capture from such a camera.
+- **PX-05**: how a camera that declares line padding counts a packing group its line ends inside (an odd width in `Mono12p`); needs a capture from such a camera.
 - **TC-38**: whether cameras other than the Manta G-125B refuse a non-holder's claim and writes while nobody holds control, and whether the keepalive should write CCP to see a takeover at once.
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.
 - **API-19**: whether a camera declares an exposure name it does not implement, and what SVS's binning `On` does; a report from either camera settles it.

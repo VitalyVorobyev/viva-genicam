@@ -16,6 +16,10 @@ class AckSummary:
     sent: int
     #: Cameras that acknowledged: those whose keys matched.
     acks: int
+    #: Cameras that answered with an error instead, as ``(address, status)``:
+    #: a camera without action commands may answer ``NOT_IMPLEMENTED``
+    #: (``0x8001``) whatever the keys.
+    refusals: tuple[tuple[str, int], ...] = ()
 
 
 def send_action(
@@ -35,10 +39,10 @@ def send_action(
     ``scheduled_time``, in the cameras' timestamp ticks, asks them to act then
     — only cameras that support scheduled actions accept it.
     """
-    sent, acks = _native.send_action(
+    sent, acks, refusals = _native.send_action(
         device_key, group_key, group_mask, scheduled_time, destination, timeout_ms
     )
-    return AckSummary(sent=sent, acks=acks)
+    return AckSummary(sent=sent, acks=acks, refusals=tuple(refusals))
 
 
 def force_ip(

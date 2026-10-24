@@ -214,6 +214,43 @@ fn small_block(block_id: u64) -> Vec<Datagram> {
     )
 }
 
+/// The frame rate is the camera's, not the application's: frames 40 ms
+/// apart read in one burst still report about 25 fps. Measured at delivery,
+/// a burst read as thousands of frames a second — `viva-camctl bench`
+/// reported 10 742 fps for a Manta G-125B at 30.9 fps when lost packets held
+/// frames back behind an older one.
+#[tokio::test]
+async fn the_frame_rate_is_measured_where_frames_complete_not_where_they_are_read() {
+    let mut h = Harness::new(576);
+    // A loaded runner oversleeps, so the bounds come from the gaps the
+    // frames were actually sent with.
+    let mut sent = Vec::new();
+    for block in 1..=4 {
+        sent.push(std::time::Instant::now());
+        h.send(&small_block(block));
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let gaps: Vec<f64> = sent
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64())
+        .collect();
+    let slowest = 1.0 / gaps.iter().cloned().fold(f64::MIN, f64::max);
+    let fastest = 1.0 / gaps.iter().cloned().fold(f64::MAX, f64::min);
+    h.settle(|s| s.packets_received >= 4 * 4);
+    for _ in 0..4 {
+        tokio::time::timeout(WAIT, h.stream.next_frame())
+            .await
+            .expect("a frame")
+            .expect("frame")
+            .expect("stream open");
+    }
+    let fps = h.stream.stats().avg_fps;
+    assert!(
+        (slowest / 2.0..fastest * 2.0).contains(&fps),
+        "{fps} fps for frames sent at {slowest:.1}..{fastest:.1} fps"
+    );
+}
+
 /// 16-bit block ids run 1..=65535 and skip 0. 65535 → 1 is the next block,
 /// not a gap; 1 → 3 misses one block and 3 → 7 misses three.
 #[test]
@@ -748,6 +785,59 @@ async fn a_range_the_camera_no_longer_holds_is_not_asked_for_again() {
             stats.resend_unavailable
         ),
         (1, 0, 1),
+        "{stats:?}"
+    );
+}
+
+/// An Allied Vision Manta G-125B answers a request it cannot serve with one
+/// header-only `PACKET_UNAVAILABLE` packet per packet asked for (SR-25):
+/// three answers for a three-packet range count three packets unavailable,
+/// once each, and nothing is asked again. (Ten packets, so a quarter covers
+/// the three.)
+#[tokio::test]
+async fn an_unavailable_answer_per_packet_closes_the_range_once() {
+    let (mut h, control) = resend_harness(576, 0);
+    h.stream.set_deliver_incomplete(true);
+    h.stream
+        .set_resend_retry_interval(Duration::from_millis(60));
+    let mut script = PacketScript::new();
+    for packet in 2..=4 {
+        script = script.step(ScriptStep::Drop { block: 9, packet });
+    }
+    h.send(&script.apply(block_datagrams(
+        &BlockSpec::image(9, 64, 64, MONO8, 576),
+        &image(64 * 64, 5),
+    )));
+    let (request, _) = control.next(WAIT).expect("a resend request");
+    assert_eq!((request.first, request.last), (2, 4));
+    for packet in 2..=4u8 {
+        h.send(&[Datagram {
+            block_id: 9,
+            packet_id: u32::from(packet),
+            kind: viva_fake_gige::PacketKind::Payload,
+            bytes: vec![0x80, 0x0C, 0x00, 0x09, 0x03, 0x00, 0x00, packet],
+        }]);
+    }
+    assert_eq!(
+        control.next(Duration::from_millis(250)),
+        None,
+        "asked again"
+    );
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("the frame closes")
+        .expect("stream error")
+        .expect("stream ended");
+    assert_eq!(frame.status, FrameStatus::Incomplete { missing_packets: 3 });
+    let stats = h.stream.stats();
+    assert_eq!(
+        (
+            stats.resend_requested,
+            stats.resend_recovered,
+            stats.resend_unavailable,
+            stats.packets_ignored_error_status
+        ),
+        (3, 0, 3, 3),
         "{stats:?}"
     );
 }

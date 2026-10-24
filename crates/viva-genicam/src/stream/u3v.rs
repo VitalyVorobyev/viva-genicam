@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{debug, warn};
 use viva_pfnc::PixelFormat;
@@ -167,7 +167,8 @@ impl U3vFrameStream {
                     let latency = frame
                         .ts_host
                         .and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                    self.stats.record_frame(frame.payload.len(), latency);
+                    self.stats
+                        .record_frame(frame.payload.len(), latency, Instant::now());
                 } else {
                     self.stats.record_incomplete_frame();
                 }

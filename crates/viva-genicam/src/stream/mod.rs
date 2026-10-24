@@ -84,6 +84,8 @@ pub enum StreamBlock {
 #[derive(Debug, Clone)]
 pub struct GenericStreamBlock {
     inner: StreamBlock,
+    /// When the block's last packet arrived, for the frame rate.
+    completed: Option<std::time::Instant>,
 }
 
 impl From<GenericStreamBlock> for StreamBlock {
@@ -242,7 +244,8 @@ fn classify_completed_block(block: AssembledBlock) -> (GenericStreamBlock, Optio
             StreamBlock::Image(frame)
         }
     };
-    (GenericStreamBlock { inner }, chunk_error)
+    let completed = Some(block.last_packet);
+    (GenericStreamBlock { inner, completed }, chunk_error)
 }
 
 /// Smallest GVSP packet size we will configure: the IPv4 minimum reassembly
@@ -393,6 +396,9 @@ async fn probe_packet_size(
         return Ok(requested);
     }
 
+    // The test packets set do-not-fragment; whatever the register held is
+    // put back below (an Allied Vision Manta G-125B stores the flag).
+    let do_not_fragment = device.stream_do_not_fragment(channel).await.ok();
     let negotiated = probe_path_ceiling(device, channel, socket, requested).await?;
 
     // The register now holds the last size the probe *tested*, not `negotiated`.
@@ -403,7 +409,17 @@ async fn probe_packet_size(
     // reporter measured as the first failing one. Left uncorrected, the host
     // strides at `negotiated` while the camera sends something else, which is
     // the SR-02 failure mode this probe was built on top of.
-    configure_packet_size(device, channel, negotiated).await
+    let negotiated = configure_packet_size(device, channel, negotiated).await?;
+    if let Some(on) = do_not_fragment
+        && let Err(err) = device.set_stream_do_not_fragment(channel, on).await
+    {
+        warn!(
+            channel,
+            error = %err,
+            "could not put GevSCPSPacketSize's do-not-fragment flag back after the probe"
+        );
+    }
+    Ok(negotiated)
 }
 
 /// The bisection itself: the largest size that arrives, or `requested` when the
@@ -1694,7 +1710,11 @@ impl FrameStream {
                 block.set_host_time(ts_host);
                 if block.status().is_complete() {
                     let latency = ts_host.and_then(|ts| SystemTime::now().duration_since(ts).ok());
-                    self.stats.record_frame(block.payload().len(), latency);
+                    self.stats.record_frame(
+                        block.payload().len(),
+                        latency,
+                        block.completed.unwrap_or_else(std::time::Instant::now),
+                    );
                 } else {
                     self.stats.record_incomplete_frame();
                 }
@@ -1765,6 +1785,7 @@ mod tests {
             }),
             payload_type: 0x0001,
             expected_size: Some(payload.len()),
+            last_packet: std::time::Instant::now(),
             payload,
             trailer_size_y: Some(trailer_size_y),
         }

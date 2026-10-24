@@ -377,25 +377,33 @@ pub struct DumpedValue {
 /// the registers and formulas behind them alike. Categories, commands and
 /// the registers commands write through, write-only nodes, and nodes not
 /// implemented or not available now are left out; a register shows its
-/// size, not its bytes.
-pub fn dump<T: RegisterIo>(camera: &Camera<T>) -> Vec<DumpedValue> {
+/// size, not its bytes. The second list holds the nodes whose state could
+/// not be read, with why, so a value missing from the first is never
+/// missing silently.
+pub fn dump<T: RegisterIo>(camera: &Camera<T>) -> (Vec<DumpedValue>, Vec<(String, String)>) {
     let nodemap = camera.nodemap();
-    nodemap
-        .node_names()
-        .filter(|name| {
-            !matches!(
-                nodemap.node(name),
-                Some(Node::Category(_) | Node::Command(_))
-            )
-        })
-        .filter_map(|name| {
-            let state = camera.feature_state(name).ok()?;
-            Some(DumpedValue {
-                name: name.to_string(),
-                value: value_text(&state.value)?,
-            })
-        })
-        .collect()
+    let mut values = Vec::new();
+    let mut failures = Vec::new();
+    for name in nodemap.node_names() {
+        if matches!(
+            nodemap.node(name),
+            Some(Node::Category(_) | Node::Command(_))
+        ) {
+            continue;
+        }
+        match camera.feature_state(name) {
+            Ok(state) => {
+                if let Some(value) = value_text(&state.value) {
+                    values.push(DumpedValue {
+                        name: name.to_string(),
+                        value,
+                    });
+                }
+            }
+            Err(error) => failures.push((name.to_string(), error.to_string())),
+        }
+    }
+    (values, failures)
 }
 
 pub async fn run_features(
@@ -443,7 +451,10 @@ pub async fn run_dump(target: Target, iface: Option<IfaceSelector>, json: bool) 
     let camera = common::open_target(&target, iface.as_ref(), viva_genicam::Access::Monitor)
         .await
         .context("open camera for dump")?;
-    let values = with_camera!(&camera, camera => dump(camera));
+    let (values, failures) = with_camera!(&camera, camera => dump(camera));
+    for (name, error) in &failures {
+        eprintln!("warning: {name} could not be read: {error}");
+    }
     if json {
         return common::print_json(&values);
     }
@@ -470,6 +481,21 @@ mod tests {
         fn write(&self, _addr: u64, _data: &[u8]) -> Result<(), GenApiError> {
             Err(GenApiError::io("timed out"))
         }
+    }
+
+    /// GA-58: a value `dump` could not read is reported, not left out
+    /// without a word.
+    #[test]
+    fn dump_reports_what_it_could_not_read() {
+        let xml = r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+            <Integer Name="Width"><Address>0x100</Address><Length>4</Length><AccessMode>RW</AccessMode><Min>1</Min><Max>4096</Max></Integer>
+        </RegisterDescription>"#;
+        let nodemap = NodeMap::try_from_xml(viva_genapi_xml::parse(xml).unwrap()).unwrap();
+        let (values, failures) = dump(&Camera::new(Unreachable, nodemap));
+        assert!(values.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "Width");
+        assert!(failures[0].1.contains("timed out"), "{failures:?}");
     }
 
     /// Codex review of #200: a feature whose state cannot be read is

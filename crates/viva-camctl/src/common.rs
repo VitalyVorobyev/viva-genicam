@@ -24,6 +24,43 @@ use viva_u3v::NusbTransfer;
 
 pub const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 500;
 
+/// How a command opens a GigE Vision camera (`--access`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AccessArg {
+    /// Claim control: write, and keep other applications to reading.
+    Control,
+    /// Claim exclusive access: no other application may even read.
+    Exclusive,
+    /// Read only, alongside the application that controls the camera.
+    Monitor,
+}
+
+impl From<AccessArg> for Access {
+    fn from(access: AccessArg) -> Self {
+        match access {
+            AccessArg::Control => Access::Control,
+            AccessArg::Exclusive => Access::Exclusive,
+            AccessArg::Monitor => Access::Monitor,
+        }
+    }
+}
+
+/// The access to open with: the one asked for, or the command's own.
+///
+/// A USB3 Vision camera is opened by one application at a time, which then
+/// has it to itself, so control and exclusive access are what every open
+/// already is; a monitor, reading alongside another application, is not
+/// possible.
+pub fn chosen_access(asked: Option<AccessArg>, default: Access, usb: bool) -> Result<Access> {
+    if usb && asked == Some(AccessArg::Monitor) {
+        bail!(
+            "a USB3 Vision camera has no monitor access: one application opens it at a time \
+             (--access control and exclusive are both what opening it already is)"
+        );
+    }
+    Ok(asked.map_or(default, Access::from))
+}
+
 /// The camera a command acts on: a GigE Vision camera by address or by its
 /// place in discovery order, or a USB3 Vision camera by its place in
 /// `list-usb` order.
@@ -38,6 +75,10 @@ pub struct Target {
     /// A USB3 Vision camera, by its place in `list-usb` order
     #[arg(long)]
     pub usb: Option<usize>,
+    /// How to open the camera [default: monitor for a command that only
+    /// reads, control for one that writes]
+    #[arg(long, value_enum)]
+    pub access: Option<AccessArg>,
 }
 
 /// A camera opened through either transport. Commands that need only what
@@ -62,13 +103,15 @@ macro_rules! with_camera {
 }
 pub(crate) use with_camera;
 
-/// Open the camera `target` names, with its nodemap. `access` applies to a
-/// GigE Vision camera; USB3 Vision has no control privilege.
+/// Open the camera `target` names, with its nodemap: with the access its
+/// `--access` asks for, else with `access`, the command's own
+/// ([`chosen_access`]).
 pub async fn open_target(
     target: &Target,
     iface: Option<&IfaceSelector>,
     access: Access,
 ) -> Result<AnyCamera> {
+    let access = chosen_access(target.access, access, target.usb.is_some())?;
     if let Some(usb) = target.usb {
         return Ok(AnyCamera::Usb(crate::cmd_usb::open_usb_camera(Some(usb))?));
     }

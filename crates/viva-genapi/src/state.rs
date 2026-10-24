@@ -121,9 +121,12 @@ impl NodeMap {
     /// commonly refuse to read the register behind it. It is reported with
     /// [`FeatureValue::None`], its static range and its declared entries.
     ///
-    /// A predicate that fails to evaluate is logged and treated as satisfied,
-    /// so one bad `pIsAvailable` does not hide a feature; a failed value read
-    /// is an error.
+    /// A predicate that cannot be evaluated — its register refused, its link
+    /// down — is not satisfied, and is logged: an unread `pIsImplemented`
+    /// reports the feature not implemented, an unread `pIsAvailable` not
+    /// available, an unread `pIsLocked` locked (backlog GA-58: an Allied Vision
+    /// Manta G-125B refuses the inquiry register of the lens control it does
+    /// not have). A failed value read is an error.
     pub fn feature_state(
         &self,
         name: &str,
@@ -133,22 +136,44 @@ impl NodeMap {
             .node(name)
             .ok_or_else(|| GenApiError::NodeNotFound(name.to_string()))?;
 
+        // A predicate the device will not let us read has no value to satisfy
+        // it (GA-58). Each failure is logged once, with what it was taken
+        // for: the same path carries a register the camera does not have
+        // and a link that dropped mid-read, and only the log tells them apart.
         let is_implemented = self.is_implemented(name, io).unwrap_or_else(|e| {
-            warn!(%name, error = %e, "is_implemented eval failed");
-            true
+            warn!(%name, error = %e, "pIsImplemented could not be read: not implemented");
+            false
         });
-        let is_available = self.is_available(name, io).unwrap_or_else(|e| {
-            warn!(%name, error = %e, "is_available eval failed");
-            true
-        });
+        let is_available = is_implemented
+            && self.own_availability(name, io).unwrap_or_else(|e| {
+                warn!(%name, error = %e, "pIsAvailable could not be read: not available");
+                false
+            });
         let declared = self.declared_access_mode(name);
-        let access = match self.effective_access_mode(name, io) {
-            // An unavailable node with no access at all stays without one.
-            Ok(_) if declared.is_none() => None,
-            Ok(mode) => Some(mode),
-            Err(e) => {
-                warn!(%name, error = %e, "effective_access_mode eval failed");
-                declared
+        let access = match declared {
+            // A node with no access at all, as a category, stays without one.
+            None => None,
+            // Unavailable: nothing can be written now.
+            Some(_) if !is_available => Some(AccessMode::RO),
+            Some(_) => {
+                let base = match self.access_now(name, io) {
+                    Ok(mode) => mode.unwrap_or(AccessMode::RO),
+                    Err(e) => {
+                        warn!(%name, error = %e, "the access of the selected value could not be read");
+                        declared.unwrap_or(AccessMode::RO)
+                    }
+                };
+                let locked = self.locked_by(name, io).map_or_else(
+                    |e| {
+                        warn!(%name, error = %e, "pIsLocked could not be read: locked");
+                        true
+                    },
+                    |provider| provider.is_some(),
+                );
+                Some(match base {
+                    AccessMode::RW if locked => AccessMode::RO,
+                    other => other,
+                })
             }
         };
 
@@ -572,6 +597,125 @@ mod tests {
         assert!(state.is_available);
         assert_eq!(state.value, FeatureValue::Integer(6));
         assert_eq!(state.range.map(|r| r.max), Some(24.0));
+    }
+
+    /// GA-58: an Allied Vision Manta G-125B (firmware 00.01.44.28514) gates
+    /// its `LensVoltage` on an inquiry bit at `0x23000`, a register that
+    /// camera, which has no lens control, answers with `INVALID_ADDRESS`. A
+    /// predicate that cannot be read gives no value to satisfy it: the
+    /// feature is reported as not implemented, and nothing behind it is read.
+    /// The same holds for `pIsAvailable` (not available) and `pIsLocked`
+    /// (locked, so not writable).
+    #[test]
+    fn a_predicate_the_camera_refuses_to_read_is_not_satisfied() {
+        const LENS: &str = r#"
+            <RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+                <Integer Name="LensVoltage" NameSpace="Custom">
+                    <pIsImplemented>RegLensControlInqVoltage</pIsImplemented>
+                    <Streamable>Yes</Streamable>
+                    <pValue>RegLensVoltage</pValue>
+                    <Min>0</Min>
+                    <pMax>RegLensVoltageMax</pMax>
+                </Integer>
+                <Integer Name="LensVoltageControl" NameSpace="Custom">
+                    <pIsAvailable>RegLensControlInqVoltage</pIsAvailable>
+                    <pValue>RegLensVoltageControl</pValue>
+                </Integer>
+                <Integer Name="LensDriveDuration" NameSpace="Custom">
+                    <pIsLocked>RegLensControlInqVoltage</pIsLocked>
+                    <pValue>RegLensVoltageControl</pValue>
+                </Integer>
+                <MaskedIntReg Name="RegLensControlInqVoltage" NameSpace="Custom">
+                    <Address>0x23000</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <pPort>Device</pPort>
+                    <Bit>31</Bit>
+                    <Endianess>BigEndian</Endianess>
+                </MaskedIntReg>
+                <IntReg Name="RegLensVoltageMax" NameSpace="Custom">
+                    <Address>0x23100</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <pPort>Device</pPort>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <IntReg Name="RegLensVoltage" NameSpace="Custom">
+                    <Address>0x23104</Address>
+                    <Length>4</Length>
+                    <AccessMode>RO</AccessMode>
+                    <pPort>Device</pPort>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+                <IntReg Name="RegLensVoltageControl" NameSpace="Custom">
+                    <Address>0x23108</Address>
+                    <Length>4</Length>
+                    <AccessMode>RW</AccessMode>
+                    <pPort>Device</pPort>
+                    <Cachable>WriteAround</Cachable>
+                    <Sign>Unsigned</Sign>
+                    <Endianess>BigEndian</Endianess>
+                </IntReg>
+            </RegisterDescription>
+        "#;
+        let nodemap = || {
+            let model = viva_genapi_xml::parse(LENS).expect("parse");
+            NodeMap::try_from_xml(model).expect("build nodemap")
+        };
+        // The inquiry register is refused; the registers behind it answer, so
+        // a value here would mean the feature was read after all.
+        let refused =
+            MemIo::with(&[(0x23100, 24000), (0x23104, 12000), (0x23108, 5)]).denying(&[0x23000]);
+        let map = nodemap();
+
+        let state = map.feature_state("LensVoltage", &refused).expect("state");
+        assert!(!state.is_implemented, "not implemented");
+        assert!(!state.is_available, "nor available");
+        assert_eq!(state.value, FeatureValue::None, "and not read");
+        assert_eq!(state.range, None, "nor its <pMax>");
+
+        let state = map
+            .feature_state("LensVoltageControl", &refused)
+            .expect("state");
+        assert!(state.is_implemented);
+        assert!(!state.is_available, "pIsAvailable unread: not available");
+        assert_eq!(state.value, FeatureValue::None);
+
+        let state = map
+            .feature_state("LensDriveDuration", &refused)
+            .expect("state");
+        assert!(state.is_implemented && state.is_available);
+        assert_eq!(state.value, FeatureValue::Integer(5));
+        assert_eq!(
+            state.access,
+            Some(AccessMode::RO),
+            "pIsLocked unread: locked"
+        );
+
+        // Negative control: with the inquiry bit set, each predicate is
+        // satisfied and the features read.
+        let lens = MemIo::with(&[
+            (0x23000, 0xFFFF_FFFF),
+            (0x23100, 24000),
+            (0x23104, 12000),
+            (0x23108, 5),
+        ]);
+        let map = nodemap();
+        let state = map.feature_state("LensVoltage", &lens).expect("state");
+        assert!(state.is_implemented && state.is_available);
+        assert_eq!(state.value, FeatureValue::Integer(12000));
+        assert_eq!(state.range.map(|r| r.max), Some(24000.0));
+        let state = map
+            .feature_state("LensVoltageControl", &lens)
+            .expect("state");
+        assert!(state.is_available);
+        assert_eq!(state.access, Some(AccessMode::RW));
+        let state = map
+            .feature_state("LensDriveDuration", &lens)
+            .expect("state");
+        assert_eq!(state.access, Some(AccessMode::RO), "locked: the bit is set");
     }
 
     /// A Float that declares no bounds has none to report: the parser's

@@ -1626,6 +1626,47 @@ async fn test_chunk_features_read_through_genapi_from_a_streamed_frame() {
     .unwrap();
 }
 
+/// A camera that sends chunk-mode frames as GigE Vision 1.x's extended chunk
+/// data (`0x0005`), as an Allied Vision Manta G-125B does: the receive engine
+/// assembled none of them, and a stream with chunk mode on delivered nothing.
+/// The frame is the image, with its chunks and the lines the trailer's
+/// Size Y reports.
+#[tokio::test]
+async fn test_gige_vision_1_extended_chunk_data_is_an_image_with_chunks() {
+    use viva_genicam::ChunkConfig;
+
+    let _cam = common::TestCamera::start_with(|b| {
+        b.chunk_payload_type(viva_fake_gige::PAYLOAD_TYPE_EXTENDED_CHUNK_DATA)
+    })
+    .await;
+    let device_info = discover_fake().await;
+    let (mut frame_stream, camera) = setup_stream(&device_info).await;
+    let cam = camera.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut cam = cam.lock().unwrap();
+        cam.configure_chunks(&ChunkConfig {
+            selectors: vec!["Timestamp".to_string()],
+            active: true,
+        })
+        .expect("configure chunks");
+        cam.acquisition_start().expect("start acquisition");
+    })
+    .await
+    .unwrap();
+    let frame = next_frame_within(&mut frame_stream, "an 0x0005 frame").await;
+    stop_acquisition(&camera).await;
+
+    assert_eq!(frame.payload_type, 0x0005);
+    assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+    assert_eq!(frame.payload.len(), (frame.width * frame.height) as usize);
+    assert_eq!(frame.delivered_height, Some(frame.height));
+    let chunks = frame.chunks.as_ref().expect("the frame carried chunks");
+    assert_eq!(
+        chunks.ids().collect::<Vec<_>>(),
+        vec![0x0000_0001, 0x0000_0002]
+    );
+}
+
 /// With chunk mode off, the frame is a plain image (`0x0001`) with no chunks.
 ///
 /// The negative control for the test above: it is what makes a passing

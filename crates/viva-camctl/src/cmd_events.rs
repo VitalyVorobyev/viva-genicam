@@ -27,15 +27,32 @@ fn parse_events(csv: &str) -> Vec<String> {
         .collect()
 }
 
-pub async fn run(
-    ip: Option<Ipv4Addr>,
-    index: Option<usize>,
-    iface: Option<IfaceSelector>,
-    port: u16,
-    enable: String,
-    count: u32,
-    json: bool,
-) -> Result<()> {
+/// What `events` was asked for.
+#[derive(Debug, Clone)]
+pub struct EventsArgs {
+    pub ip: Option<Ipv4Addr>,
+    pub index: Option<usize>,
+    pub iface: Option<IfaceSelector>,
+    /// The host port the camera sends events to.
+    pub port: u16,
+    /// Comma-separated `EventSelector` entries to turn on.
+    pub enable: String,
+    /// How many events to read.
+    pub count: u32,
+    /// Control or exclusive: the session configures the message channel.
+    pub access: viva_genicam::Access,
+}
+
+pub async fn run(args: EventsArgs, json: bool) -> Result<()> {
+    let EventsArgs {
+        ip,
+        index,
+        iface,
+        port,
+        enable,
+        count,
+        access,
+    } = args;
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(ip, index, iface.as_ref(), timeout).await?;
 
@@ -48,7 +65,7 @@ pub async fn run(
         .ipv4()
         .ok_or_else(|| anyhow!("interface routing to {} has no IPv4 address", device.ip))?;
     info!(ip = %device.ip, %local_ip, port, "configuring events");
-    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
+    let mut camera = common::open_camera(&device, access)
         .await
         .context("open camera for events")?;
 

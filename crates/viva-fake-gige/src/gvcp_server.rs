@@ -107,6 +107,7 @@ const STATUS_NOT_IMPLEMENTED: u16 = StatusCode::NotImplemented.to_raw();
 const STATUS_INVALID_PARAMETER: u16 = StatusCode::InvalidParameter.to_raw();
 const STATUS_BAD_ALIGNMENT: u16 = StatusCode::BadAlignment.to_raw();
 const STATUS_ACCESS_DENIED: u16 = StatusCode::AccessDenied.to_raw();
+const STATUS_INVALID_ADDRESS: u16 = StatusCode::InvalidAddress.to_raw();
 
 /// The four GVCP register-access commands, as the fake counts them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -584,6 +585,8 @@ async fn handle_readreg(
         // not a register, and GVCP says so with its own status.
         let refusal = if !addr.is_multiple_of(4) {
             Some(STATUS_BAD_ALIGNMENT)
+        } else if store.is_invalid_address(addr, 4) {
+            Some(STATUS_INVALID_ADDRESS)
         } else if store.is_write_only(addr, 4) {
             Some(STATUS_ACCESS_DENIED)
         } else {
@@ -699,6 +702,14 @@ async fn handle_readmem(
     }
 
     let store = regs.lock().await;
+    if store.is_invalid_address(addr, count) {
+        debug!(%peer, addr = format!("0x{addr:x}"), count, "READMEM refused: no such register");
+        return Reply::ack(build_error_ack(
+            READMEM_ACK,
+            request_id,
+            STATUS_INVALID_ADDRESS,
+        ));
+    }
     // A write-only register is no more readable through READMEM than through
     // READREG. Serving the stored bytes here is what let a read-modify-write
     // of a WO bitfield pass against the fake and fail on hardware (#135).

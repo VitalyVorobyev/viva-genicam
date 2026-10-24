@@ -22,7 +22,7 @@
 //!                                  16  timestamp           u64
 //! ```
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
@@ -243,6 +243,10 @@ pub struct EventSocket {
     buffer: Mutex<Vec<u8>>,
     /// Events decoded from a multi-event datagram but not yet returned.
     pending: Mutex<VecDeque<EventPacket>>,
+    /// The request id and the events (the datagram after its GVCP header)
+    /// of the last message each device sent, to recognise its
+    /// retransmissions.
+    last_message: std::sync::Mutex<HashMap<SocketAddr, (u16, Vec<u8>)>>,
 }
 
 impl EventSocket {
@@ -266,6 +270,7 @@ impl EventSocket {
             sock,
             buffer: Mutex::new(vec![0u8; consts::MAX_EVENT_SIZE]),
             pending: Mutex::new(VecDeque::new()),
+            last_message: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -275,6 +280,14 @@ impl EventSocket {
     /// successive calls. When the device set the acknowledge-required flag the
     /// acknowledgement is sent before any of its events are returned — a device
     /// that does not get one will retransmit.
+    ///
+    /// A retransmission repeats the request id and the bytes of the message
+    /// before it; it is acknowledged again and its events are not delivered
+    /// twice. Distinct events under one request id are each delivered. The
+    /// acknowledgement goes out when the message is read, so an application
+    /// that reads late makes the device resend: an Allied Vision Manta G-125B
+    /// (`GevMCTT` 100 ms) sent one event eleven times to a reader a second
+    /// late.
     ///
     /// Concurrent callers are symmetric consumers of one queue, and none of
     /// them is promised the event its own `recv_from` decoded.
@@ -310,6 +323,25 @@ impl EventSocket {
                         } else {
                             trace!(%src, request_id = header.request_id, "acknowledged event");
                         }
+                    }
+                    // A retransmission repeats both the request id and the
+                    // events: a device that reuses one request id for
+                    // distinct events still has them delivered, since their
+                    // timestamps differ.
+                    let message = (
+                        header.request_id,
+                        buffer[consts::GVCP_HEADER.min(len)..len].to_vec(),
+                    );
+                    let repeated = self
+                        .last_message
+                        .lock()
+                        .map(|mut last| last.insert(src, message.clone()))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|previous| previous == message);
+                    if repeated {
+                        debug!(%src, request_id = header.request_id, "dropping a retransmitted event");
+                        continue;
                     }
                     // Every event this datagram carried is published in one
                     // step, while the receive lock is still held. Returning
@@ -555,6 +587,71 @@ mod tests {
         let mut ids = [both.0.event_id, both.1.event_id];
         ids.sort_unstable();
         assert_eq!(ids, [0x2000, 0x2001]);
+    }
+
+    /// An Allied Vision Manta G-125B (`GevMCTT` 100 ms) sent one
+    /// `ExposureEnd` event eleven times, each with request id 1, to an
+    /// application that read it a second late: a device resends a message
+    /// until it is acknowledged, under the same request id. Each copy is
+    /// acknowledged, and the event is delivered once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retransmitted_event_is_acknowledged_and_delivered_once() {
+        let sock = EventSocket::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+            .await
+            .expect("bind");
+        let dest = sock.local_addr().expect("local addr");
+        let device = UdpSocket::bind("127.0.0.1:0").await.expect("device");
+        let event = |request_id: u16, block_id: u16| {
+            let mut copy = EVENT_CMD_GOLDEN;
+            copy[6..8].copy_from_slice(&request_id.to_be_bytes());
+            copy[14..16].copy_from_slice(&block_id.to_be_bytes());
+            copy
+        };
+        for _ in 0..3 {
+            device.send_to(&event(1, 8), dest).await.expect("send");
+        }
+        device.send_to(&event(2, 9), dest).await.expect("send");
+
+        let first = sock.recv().await.expect("first event");
+        let second = tokio::time::timeout(Duration::from_secs(2), sock.recv())
+            .await
+            .expect("the next event")
+            .expect("second event");
+        assert_eq!((first.block_id, second.block_id), (8, 9), "each once");
+
+        let mut acks = Vec::new();
+        let mut buf = [0u8; 64];
+        while let Ok(Ok((len, _))) =
+            tokio::time::timeout(Duration::from_millis(200), device.recv_from(&mut buf)).await
+        {
+            acks.push(u16::from_be_bytes([buf[6], buf[7]]));
+            assert_eq!(len, consts::GVCP_HEADER);
+        }
+        assert_eq!(acks, [1, 1, 1, 2], "every copy acknowledged");
+    }
+
+    /// A device that gives every event the same request id — GigE Vision has
+    /// it increment, but a device that does not still sends distinct events —
+    /// loses none: a copy is a retransmission only when its events are the
+    /// same bytes, and distinct events differ at least in their timestamps.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn distinct_events_under_one_request_id_are_all_delivered() {
+        let sock = EventSocket::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+            .await
+            .expect("bind");
+        let dest = sock.local_addr().expect("local addr");
+        let device = UdpSocket::bind("127.0.0.1:0").await.expect("device");
+        for timestamp in [1u8, 2] {
+            let mut event = EVENT_CMD_GOLDEN;
+            event[23] = timestamp;
+            device.send_to(&event, dest).await.expect("send");
+        }
+        let first = sock.recv().await.expect("first event");
+        let second = tokio::time::timeout(Duration::from_secs(2), sock.recv())
+            .await
+            .expect("the second event is delivered")
+            .expect("second event");
+        assert_ne!(first.timestamp_dev, second.timestamp_dev);
     }
 
     #[test]

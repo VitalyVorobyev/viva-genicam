@@ -43,6 +43,8 @@ pub(crate) struct SenderOptions {
     /// Payload type for the leader and trailer; `None` is image, or image
     /// with extended chunk data while chunk mode is active.
     pub payload_type: Option<u16>,
+    /// The payload type while chunk mode is active, instead of `0x4001`.
+    pub chunk_payload_type: Option<u16>,
     /// Deterministic damage to apply to the stream.
     pub script: PacketScript,
     /// Also send every block, first and with its image bytes inverted, from a
@@ -361,11 +363,13 @@ fn build_block(
     block_id: u64,
     clock_origin: Instant,
 ) -> Option<Vec<Datagram>> {
-    let payload_type = options.payload_type.unwrap_or(if config.chunk_active {
-        PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK
-    } else {
-        PAYLOAD_TYPE_IMAGE
-    });
+    let payload_type = match (options.payload_type, config.chunk_active) {
+        (Some(payload_type), _) => payload_type,
+        (None, true) => options
+            .chunk_payload_type
+            .unwrap_or(PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK),
+        (None, false) => PAYLOAD_TYPE_IMAGE,
+    };
     let mut spec = BlockSpec {
         block_id,
         packet_size: config.packet_size,

@@ -345,6 +345,91 @@ async fn a_write_refused_for_lack_of_privilege_marks_control_lost() {
     other.release_control().await.expect("release");
 }
 
+/// TC-38, as an Allied Vision Manta G-125B behaves: the camera does not name
+/// its primary application (no GVCP Capability `0x0800_0000`,
+/// `INVALID_ADDRESS` at `0x0A04`), and CCP reads as controlled to every
+/// application, so after another took control nothing the session reads
+/// tells it so. A claim does: the Manta took one from the application
+/// holding control and refused one from any other with `ACCESS_DENIED`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_takeover_is_seen_on_a_camera_that_does_not_name_its_controller() {
+    let cam = common::TestCamera::start_with(|b| b.names_primary_application(false)).await;
+    let mut camera = open(Access::Control).await;
+    let addr = client_addr(&camera);
+
+    cam.fake().revoke_control().await;
+    let mut other = GigeDevice::open(fake_addr()).await.expect("open");
+    other
+        .claim_control()
+        .await
+        .expect("the other application claims");
+    let other_addr = other.local_addr().expect("local address");
+    let before = cam.fake().commands().from(addr).len();
+
+    camera
+        .set("Width", "320")
+        .expect_err("the camera refuses a write from a non-controller");
+    assert_eq!(camera.transport().control_state(), ControlState::Lost);
+
+    let asked = &cam.fake().commands().from(addr)[before..];
+    assert!(
+        asked
+            .iter()
+            .any(|&(command, at)| is_write(command) && at == CCP),
+        "asked by claiming: {asked:x?}"
+    );
+    assert!(
+        !asked.iter().any(|&(_, at)| at == 0x0a04 || at == 0x0a14),
+        "not through registers this camera does not have: {asked:x?}"
+    );
+    assert_eq!(
+        cam.fake().controller().await,
+        Some(other_addr),
+        "the claim took nothing from the other application"
+    );
+    other.release_control().await.expect("release");
+}
+
+/// The negative control of the takeover above: the application that holds
+/// control claims again and is still the controller, so a refusal it then
+/// sees is the register's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_controller_claiming_again_still_holds_control() {
+    let cam = common::TestCamera::start_with(|b| b.names_primary_application(false)).await;
+    let mut device = GigeDevice::open(fake_addr()).await.expect("open");
+    device.claim_control().await.expect("claim");
+    let addr = device.local_addr().expect("local address");
+    assert!(device.holds_control().await.expect("ask"), "still held");
+    assert_eq!(cam.fake().controller().await, Some(addr));
+
+    cam.fake().revoke_control().await;
+    let mut other = GigeDevice::open(fake_addr()).await.expect("open");
+    other
+        .claim_control()
+        .await
+        .expect("the other application claims");
+    assert!(!device.holds_control().await.expect("ask"), "taken over");
+    assert_eq!(
+        cam.fake().controller().await,
+        Some(other.local_addr().expect("local address"))
+    );
+    other.release_control().await.expect("release");
+}
+
+/// The Manta refused a write from an application without control while
+/// nobody held it, and the fake does as it did.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_without_control_is_refused_while_nobody_holds_it() {
+    let cam = common::TestCamera::start().await;
+    let mut device = GigeDevice::open(fake_addr()).await.expect("open");
+    let err = device
+        .write_register(REG_BLACK_LEVEL as u32, 7)
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("ACCESS_DENIED"), "{err}");
+    assert_eq!(cam.fake().peek(REG_BLACK_LEVEL, 4).await, [0, 0, 0, 0]);
+}
+
 /// `ACCESS_DENIED` for the register itself — a read of a write-only one —
 /// is the register's answer, not a lost privilege.
 #[tokio::test(flavor = "multi_thread")]

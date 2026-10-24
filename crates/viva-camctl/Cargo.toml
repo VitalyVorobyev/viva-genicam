@@ -30,5 +30,6 @@ viva-u3v = { version = "0.10", path = "../viva-u3v", features = ["usb"] }
 
 [dev-dependencies]
 viva-fake-gige = { path = "../viva-fake-gige" }
+socket2 = { workspace = true }
 viva-fake-u3v = { path = "../viva-fake-u3v" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

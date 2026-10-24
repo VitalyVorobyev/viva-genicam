@@ -95,6 +95,7 @@ def discover(
     timeout_ms: int = 500,
     iface: Optional[str] = None,
     all: bool = False,
+    allow_broadcast_ack: bool = False,
 ) -> list[GigeDeviceInfo]:
     """Discover GigE Vision cameras on the local network.
 
@@ -108,12 +109,31 @@ def discover(
         all: If True, also search the loopback interface (where a local fake
             camera answers). Every routable non-loopback interface is
             searched either way.
+        allow_broadcast_ack: If True, let a camera that cannot answer the
+            host directly — one configured for another subnet, typically —
+            broadcast its answer instead. Every listener on the subnet then
+            receives it, which is why it is off by default.
+            ``viva-camctl list --allow-broadcast-ack`` does the same.
 
     Returns:
         A list of ``GigeDeviceInfo`` — may be empty.
     """
-    natives = _native.discover_gige(timeout_ms, iface, all)
+    natives = _native.discover_gige(timeout_ms, iface, all, allow_broadcast_ack)
     return [GigeDeviceInfo._from_native(n) for n in natives]
+
+
+def discover_ip(ip: str, timeout_ms: int = 500) -> Optional[GigeDeviceInfo]:
+    """Ask the GigE Vision camera at ``ip`` directly (unicast discovery).
+
+    For a camera that broadcast discovery does not reach, such as one on a
+    routed subnet. ``viva-camctl list --ip`` does the same.
+
+    Returns:
+        The camera's ``GigeDeviceInfo``, or ``None`` when nothing answered
+        within ``timeout_ms``.
+    """
+    native = _native.discover_gige_ip(ip, timeout_ms)
+    return None if native is None else GigeDeviceInfo._from_native(native)
 
 
 def discover_u3v() -> list[U3vDeviceInfo]:
@@ -122,4 +142,11 @@ def discover_u3v() -> list[U3vDeviceInfo]:
     return [U3vDeviceInfo._from_native(n) for n in natives]
 
 
-__all__ = ["GigeDeviceInfo", "U3vDeviceInfo", "DeviceInfo", "discover", "discover_u3v"]
+__all__ = [
+    "GigeDeviceInfo",
+    "U3vDeviceInfo",
+    "DeviceInfo",
+    "discover",
+    "discover_ip",
+    "discover_u3v",
+]

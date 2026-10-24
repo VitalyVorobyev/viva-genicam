@@ -46,6 +46,27 @@ fake camera on `127.0.0.1` (see [Install & hello-camera](install.md#hello-camera
 real cameras are already covered by the default scan. `iface=` takes precedence
 when both are given.
 
+### One camera by address
+
+```python
+cam_info = vg.discover_ip("192.168.2.25")   # None when nothing answers
+```
+
+`vg.discover_ip()` asks one address directly instead of broadcasting, for a
+camera that broadcast discovery does not reach, such as one on a routed
+subnet. `viva-camctl list --ip` does the same.
+
+### A camera configured for another subnet
+
+```python
+cams = vg.discover(timeout_ms=500, allow_broadcast_ack=True)
+```
+
+A camera whose address is outside every host subnet may be unable to answer
+the host directly. `allow_broadcast_ack=True` lets it broadcast its answer
+instead, as `viva-camctl list --allow-broadcast-ack` does. Every listener on
+the subnet then hears it, which is why it is not the default.
+
 ### Slower cameras
 
 Some cameras are slow to reply or sit on busy networks. Bump the timeout:

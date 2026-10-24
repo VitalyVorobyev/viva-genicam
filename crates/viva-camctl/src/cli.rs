@@ -19,7 +19,7 @@ use crate::cmd_set_ip;
 use crate::cmd_stream::{self, StreamArgs};
 use crate::cmd_usb;
 use crate::cmd_xml::{self, XmlArgs};
-use crate::common::{self, SaveFormat, Target};
+use crate::common::{self, AccessArg, SaveFormat, Target};
 use crate::{cmd_action, cmd_config, cmd_inspect, cmd_registers};
 use viva_gige::ActionParams;
 
@@ -272,6 +272,14 @@ pub enum Cmd {
         rgb: bool,
         #[arg(long, default_value_t = 0)]
         duration_s: u64,
+        /// How to open the camera [default: control]
+        #[arg(long, value_enum, conflicts_with = "monitor")]
+        access: Option<AccessArg>,
+        /// Watch the multicast stream another application set up: open
+        /// read-only (`--access monitor`), read the group, port and packet
+        /// size from the camera, and start and stop nothing
+        #[arg(long, conflicts_with_all = ["usb", "auto", "packet_size", "packet_delay_ns", "port", "group"])]
+        monitor: bool,
     },
     /// Configure + read events: the GVCP message channel, or a USB3 Vision
     /// camera's event interface with --usb (which streams while it listens)
@@ -293,6 +301,11 @@ pub enum Cmd {
         enable: String,
         #[arg(long, default_value_t = 10)]
         count: u32,
+        /// How to open the camera: control or exclusive [default: control].
+        /// Not monitor: the camera sends events to the one destination its
+        /// controller sets
+        #[arg(long, value_enum)]
+        access: Option<AccessArg>,
     },
     /// Toggle ChunkModeActive + selectors
     Chunks {
@@ -307,6 +320,10 @@ pub enum Cmd {
         enable: bool,
         #[arg(long, default_value = "Timestamp")]
         selectors: String,
+        /// How to open the camera: control or exclusive [default: control].
+        /// Not monitor: configuring chunks writes
+        #[arg(long, value_enum)]
+        access: Option<AccessArg>,
     },
     /// Sustained stream soak/benchmark
     Bench {
@@ -341,6 +358,13 @@ pub enum Cmd {
         duration_s: u64,
         #[arg(long)]
         json_out: Option<PathBuf>,
+        /// How to open the camera [default: control]
+        #[arg(long, value_enum, conflicts_with = "monitor")]
+        access: Option<AccessArg>,
+        /// Benchmark the multicast stream another application set up, as
+        /// `stream --monitor` watches it
+        #[arg(long, conflicts_with_all = ["usb", "packet_delay_ns", "port", "group"])]
+        monitor: bool,
     },
     /// Configure IP address of a GigE camera
     SetIp {
@@ -366,6 +390,9 @@ pub enum Cmd {
 
 /// Install the tracing subscriber for a CLI run.
 ///
+/// Logs go to stderr: stdout carries a command's data, which is piped or
+/// redirected into files (`dump > values.txt`, `xml > camera.xml`).
+///
 /// `try_init` rather than `init`: when the CLI is invoked through the Python
 /// wheel's console script it runs inside a process that may already have a
 /// global subscriber, and a second CLI invocation in the same process must not
@@ -382,7 +409,33 @@ fn init_tracing(verbose: u8) {
             std::env::var("RUST_LOG").unwrap_or_else(|_| format!("{level},nusb=warn")),
         ))
         .with_target(false)
+        .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// The access `stream` and `bench` open a GigE Vision camera with:
+/// `--monitor` is `--access monitor`, and control is the default.
+fn stream_access(access: Option<AccessArg>, monitor: bool) -> viva_genicam::Access {
+    match (access, monitor) {
+        (_, true) => viva_genicam::Access::Monitor,
+        (Some(access), false) => access.into(),
+        (None, false) => viva_genicam::Access::Control,
+    }
+}
+
+/// The access a command that writes opens with: control by default, or
+/// exclusive, and never a monitor.
+fn controlling_access(
+    access: Option<AccessArg>,
+    command: &str,
+    usb: bool,
+) -> Result<viva_genicam::Access> {
+    if access == Some(AccessArg::Monitor) {
+        anyhow::bail!(
+            "{command} configures the camera, and a monitor (--access monitor) writes nothing"
+        );
+    }
+    common::chosen_access(access, viva_genicam::Access::Control, usb)
 }
 
 /// Run the command a parsed [`Cli`] selected.
@@ -503,8 +556,12 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             save_format,
             rgb,
             duration_s,
+            access,
             ..
-        } => cmd_usb::run_stream(usb, save, save_format, rgb, duration_s)?,
+        } => {
+            common::chosen_access(access, viva_genicam::Access::Control, true)?;
+            cmd_usb::run_stream(usb, save, save_format, rgb, duration_s)?
+        }
         Cmd::Stream {
             ip,
             index,
@@ -522,8 +579,11 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             rgb,
             duration_s,
             raw_out,
+            access,
+            monitor,
         } => {
             let args = StreamArgs {
+                access: stream_access(access, monitor),
                 ip,
                 index,
                 iface: cmd_iface.or(iface),
@@ -546,8 +606,12 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             usb: Some(usb),
             enable,
             count,
+            access,
             ..
-        } => cmd_usb::run_events(usb, &enable, count, json)?,
+        } => {
+            controlling_access(access, "events", true)?;
+            cmd_usb::run_events(usb, &enable, count, json)?
+        }
         Cmd::Events {
             ip,
             index,
@@ -556,26 +620,51 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             port,
             enable,
             count,
-        } => cmd_events::run(ip, index, cmd_iface.or(iface), port, enable, count, json).await?,
+            access,
+        } => {
+            let access = controlling_access(access, "events", false)?;
+            let args = cmd_events::EventsArgs {
+                ip,
+                index,
+                iface: cmd_iface.or(iface),
+                port,
+                enable,
+                count,
+                access,
+            };
+            cmd_events::run(args, json).await?
+        }
         Cmd::Chunks {
             usb: Some(usb),
             enable,
             selectors,
+            access,
             ..
-        } => cmd_usb::run_chunks(usb, enable, &selectors)?,
+        } => {
+            controlling_access(access, "chunks", true)?;
+            cmd_usb::run_chunks(usb, enable, &selectors)?
+        }
         Cmd::Chunks {
             ip,
             index,
             usb: None,
             enable,
             selectors,
-        } => cmd_chunks::run(ip, index, enable, selectors, iface, json).await?,
+            access,
+        } => {
+            let access = controlling_access(access, "chunks", false)?;
+            cmd_chunks::run(ip, index, enable, selectors, iface, access, json).await?
+        }
         Cmd::Bench {
             usb: Some(usb),
             duration_s,
             json_out,
+            access,
             ..
-        } => cmd_usb::run_bench(usb, duration_s, json, json_out.as_deref())?,
+        } => {
+            common::chosen_access(access, viva_genicam::Access::Control, true)?;
+            cmd_usb::run_bench(usb, duration_s, json, json_out.as_deref())?
+        }
         Cmd::Bench {
             ip,
             index,
@@ -588,8 +677,11 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             no_resend,
             duration_s,
             json_out,
+            access,
+            monitor,
         } => {
             let args = BenchArgs {
+                access: stream_access(access, monitor),
                 ip,
                 index,
                 iface: cmd_iface.or(iface),

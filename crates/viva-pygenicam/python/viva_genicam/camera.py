@@ -21,7 +21,8 @@ class ControlState(str, Enum):
     """Where a GigE Vision session stands with the camera's control
     privilege (``viva_genicam::ControlState``). Only ``HELD`` writes."""
 
-    #: This application holds control and keeps it alive.
+    #: This application holds control, or exclusive access (``exclusive=True``),
+    #: and keeps it alive.
     HELD = "Held"
     #: Opened read-only (``monitor=True``): nothing claimed, nothing written.
     MONITOR = "Monitor"
@@ -588,7 +589,10 @@ class Camera:
 
 
 def connect_gige(
-    device_info: GigeDeviceInfo, iface: Optional[str] = None, monitor: bool = False
+    device_info: GigeDeviceInfo,
+    iface: Optional[str] = None,
+    monitor: bool = False,
+    exclusive: bool = False,
 ) -> Camera:
     """Connect to a GigE Vision camera.
 
@@ -600,9 +604,11 @@ def connect_gige(
     the camera is closed (or garbage-collected); opening fails while another
     application holds it. ``monitor=True`` opens read-only instead: nothing is
     claimed or written, so it works alongside that application, and every
-    ``set`` fails.
+    ``set`` fails. ``exclusive=True`` claims exclusive access: while it is
+    held, no other application may even read the camera, and a monitor cannot
+    open it. Passing both raises ``ValueError``.
     """
-    native = _native.connect_gige(device_info._handle, iface, monitor)
+    native = _native.connect_gige(device_info._handle, iface, monitor, exclusive)
     return Camera(native)
 
 

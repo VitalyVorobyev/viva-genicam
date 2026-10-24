@@ -81,13 +81,13 @@ pub(crate) struct PyEventStream {
 
 /// Either transport's events.
 pub(crate) enum Events {
-    Gige(EventStream),
+    Gige(Box<EventStream>),
     U3v(U3vEventStream),
 }
 
 impl PyEventStream {
     pub(crate) fn new(stream: EventStream, port: u16) -> Self {
-        Self::of(Events::Gige(stream), port)
+        Self::of(Events::Gige(Box::new(stream)), port)
     }
 
     /// A USB3 Vision camera's events; they have no port.

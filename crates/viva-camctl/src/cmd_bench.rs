@@ -29,6 +29,9 @@ pub struct BenchArgs {
     pub resend: bool,
     pub duration_s: u64,
     pub json_out: Option<PathBuf>,
+    /// How to open the camera; a monitor benchmarks the multicast stream
+    /// another application set up, as `stream` watches it.
+    pub access: viva_genicam::Access,
 }
 
 /// The benchmark's result, as the receive engine counted it: every block the
@@ -76,31 +79,49 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(args.ip, args.index, args.iface.as_ref(), timeout).await?;
     info!(ip = %device.ip, "opening camera for benchmark");
-    let mut camera = common::open_camera(&device, viva_genicam::Access::Control)
+    let monitor = args.access == viva_genicam::Access::Monitor;
+    let mut camera = common::open_camera(&device, args.access)
         .await
         .context("open camera for bench")?;
 
     let iface = common::resolve_receive_iface(args.iface.as_ref(), device.ip)?;
-    let mut options = StreamOptions::new().iface(iface).auto_packet_size();
-    if let Some(port) = args.port {
-        options = options.destination_port(port);
-    }
-    if let Some(delay) = args.packet_delay {
-        options = options.packet_delay(delay);
-    }
-    if !args.resend {
-        options = options.resend(ResendPolicy::Off);
-    }
-    if let StreamMode::Multicast = parse_mode(&args.mode)? {
-        let group = args
-            .group
-            .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
-        options = options.multicast(group);
-    }
+    let options = if monitor {
+        crate::cmd_stream::check_monitor_options(
+            args.port,
+            args.packet_delay,
+            None,
+            false,
+            &args.mode,
+            args.group,
+        )?;
+        StreamOptions::monitor().iface(iface)
+    } else {
+        let mut options = StreamOptions::new().iface(iface).auto_packet_size();
+        if let Some(port) = args.port {
+            options = options.destination_port(port);
+        }
+        if let Some(delay) = args.packet_delay {
+            options = options.packet_delay(delay);
+        }
+        if !args.resend {
+            options = options.resend(ResendPolicy::Off);
+        }
+        if let StreamMode::Multicast = parse_mode(&args.mode)? {
+            let group = args
+                .group
+                .ok_or_else(|| anyhow!("multicast mode requires --group"))?;
+            options = options.multicast(group);
+        }
+        options
+    };
     // The receive engine counts every block; the benchmark only reads it.
     let mut frames = camera.open_stream(options).context("open stream")?;
 
-    camera.acquisition_start().context("start acquisition")?;
+    // A monitor starts and stops nothing: the application that set the
+    // stream up does.
+    if !monitor {
+        camera.acquisition_start().context("start acquisition")?;
+    }
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     let mut ticker = time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -132,7 +153,9 @@ pub async fn run(args: BenchArgs, emit_json: bool) -> Result<()> {
         }
     }
 
-    camera.acquisition_stop().context("stop acquisition")?;
+    if !monitor {
+        camera.acquisition_stop().context("stop acquisition")?;
+    }
     if interrupted {
         println!("Benchmark interrupted by user.");
     }

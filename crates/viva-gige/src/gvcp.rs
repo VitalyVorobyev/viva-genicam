@@ -1363,6 +1363,32 @@ impl GigeDevice {
         self.primary_application_is_us().await
     }
 
+    /// Whether this application holds control privilege, asked after the
+    /// device refused one of its writes with `ACCESS_DENIED`, which a
+    /// register may also answer for reasons of its own.
+    ///
+    /// [`Self::ping_control_channel`] first. Where the device does not name
+    /// its primary application, CCP reads as controlled whoever holds it,
+    /// so the answer comes from claiming again (CCP ← this session's
+    /// privilege): a device takes the claim from the application that holds
+    /// control and refuses it to any other with `ACCESS_DENIED`. An Allied
+    /// Vision Manta G-125B, which does not name its primary application,
+    /// did both (backlog TC-38). The claim changes nothing for the holder,
+    /// and nothing for another application, whose control the device keeps.
+    pub async fn holds_control(&mut self) -> Result<bool, GigeError> {
+        if !self.ping_control_channel().await? {
+            return Ok(false);
+        }
+        if self.names_primary_application == Some(true) {
+            return Ok(true);
+        }
+        match self.claim_control().await {
+            Ok(()) => Ok(true),
+            Err(GigeError::Status(GigeStatus::Common(StatusCode::AccessDenied))) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Whether the device's primary application is this socket, where the
     /// device says (`0x0A04` port, `0x0A14` IP); `true` where it does not.
     async fn primary_application_is_us(&mut self) -> Result<bool, GigeError> {

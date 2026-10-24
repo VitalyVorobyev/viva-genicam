@@ -29,12 +29,26 @@ pub const PAYLOAD_TYPE_EXTENDED_CHUNK: u16 = 0x4000;
 /// `dissect_chunk_data_leader` / `_trailer`.
 pub const PAYLOAD_TYPE_CHUNK_DATA: u16 = 0x0004;
 
+/// GVSP payload type for GigE Vision 1.x's extended chunk data, deprecated
+/// by GigE Vision 2.0 for an image with the chunk flag (`0x4001`), whose
+/// layout it shares: an image leader, a payload of chunks with the image
+/// first, and a trailer of reserved | payload type | payload data length |
+/// Size Y | chunk layout ID. An Allied Vision Manta G-125B (GigE Vision 1.2)
+/// sends it with `ChunkModeActive` on. Layout corroborated by Wireshark's
+/// `dissect_extended_chunk_data_leader` / `_trailer`; aravis treats it as an
+/// image with chunks.
+pub const PAYLOAD_TYPE_EXTENDED_CHUNK_DATA: u16 = 0x0005;
+
 /// Bits of the payload type that name the type itself.
 const PAYLOAD_TYPE_MASK: u16 = 0x3FFF;
 
-/// Whether `payload_type` is an image, with or without extended chunk data.
+/// Whether `payload_type` is an image, with or without extended chunk data:
+/// GigE Vision 1.x's [`PAYLOAD_TYPE_EXTENDED_CHUNK_DATA`] is one too.
 pub fn is_image_payload(payload_type: u16) -> bool {
-    payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_IMAGE
+    matches!(
+        payload_type & PAYLOAD_TYPE_MASK,
+        PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_DATA
+    )
 }
 
 /// Whether `payload_type` is chunk data, with or without the chunk flag.
@@ -42,9 +56,11 @@ pub fn is_chunk_data_payload(payload_type: u16) -> bool {
     payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_CHUNK_DATA
 }
 
-/// Whether `payload_type` flags extended chunk data (bit 14).
+/// Whether `payload_type` carries extended chunk data: it has the chunk flag
+/// (bit 14), or is GigE Vision 1.x's [`PAYLOAD_TYPE_EXTENDED_CHUNK_DATA`].
 pub fn has_extended_chunks(payload_type: u16) -> bool {
     payload_type & PAYLOAD_TYPE_EXTENDED_CHUNK != 0
+        || payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_EXTENDED_CHUNK_DATA
 }
 
 /// Size of the standard GVSP header.
@@ -461,6 +477,9 @@ fn parse_leader(body: &[u8]) -> Result<GvspLeader, GvspError> {
 /// |      8 |    4 | Chunk data payload length, with `0x4000`      |
 /// |     12 |    4 | Chunk layout ID, with `0x4000`                |
 ///
+/// GigE Vision 1.x's extended chunk data (`0x0005`) puts the payload data
+/// length at 4, Size Y at 8 and the chunk layout ID at 12.
+///
 /// Chunk data travels in the data packets, not here: with the chunk flag set
 /// the trailer only adds the two fields at 8 and 12. Those 8 bytes used to be
 /// handed to the chunk parser as a "chunk region" (TC-06). The layout is
@@ -491,6 +510,17 @@ fn parse_trailer(block_id: u64, body: &[u8]) -> Result<GvspTrailer, GvspError> {
     }
     let mut cursor = &body[2..];
     let payload_type = cursor.get_u16();
+    if payload_type & PAYLOAD_TYPE_MASK == PAYLOAD_TYPE_EXTENDED_CHUNK_DATA && cursor.len() >= 12 {
+        // GigE Vision 1.x: the payload data length comes first, then Size Y.
+        let length = cursor.get_u32();
+        let size_y = cursor.get_u32();
+        return Ok(GvspTrailer {
+            payload_type,
+            size_y,
+            chunk_payload_length: Some(length),
+            chunk_layout_id: Some(cursor.get_u32()),
+        });
+    }
     let size_y = cursor.get_u32();
     let (chunk_payload_length, chunk_layout_id) =
         if has_extended_chunks(payload_type) && cursor.len() >= 8 {
@@ -714,6 +744,57 @@ mod tests {
         assert_eq!(trailer.payload_type, PAYLOAD_TYPE_IMAGE);
         assert_eq!(trailer.size_y, 824);
         assert_eq!(trailer.chunk_payload_length, None);
+    }
+
+    /// The leader and trailer of one block from an Allied Vision Manta G-125B
+    /// (GigE Vision 1.2, firmware 00.01.44.28514) with `ChunkModeActive` on,
+    /// received on a socket of our own: payload type `0x0005`, GigE Vision
+    /// 1.x's extended chunk data. The leader is an image's; the trailer is
+    /// payload data length (1 245 544: the image, its tag, 40 bytes of the
+    /// camera's chunk and its tag), Size Y, chunk layout ID — the layout
+    /// Wireshark's `dissect_extended_chunk_data_trailer` reads.
+    #[test]
+    fn a_gige_vision_1_extended_chunk_block_is_an_image_with_chunks() {
+        #[rustfmt::skip]
+        const LEADER: [u8; 44] = [
+            0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x01,             // reserved
+            0x00, 0x05,             // EXTENDED CHUNK DATA
+            0x00, 0x00, 0x00, 0x2e, 0xf1, 0xc1, 0x84, 0xe8, // timestamp
+            0x01, 0x08, 0x00, 0x01, // Mono8
+            0x00, 0x00, 0x05, 0x0c, // 1292
+            0x00, 0x00, 0x03, 0xc4, // 964
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        #[rustfmt::skip]
+        const TRAILER: [u8; 24] = [
+            0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x03, 0x54,
+            0x00, 0x00,             // reserved
+            0x00, 0x05,             // EXTENDED CHUNK DATA
+            0x00, 0x13, 0x01, 0x68, // payload data length
+            0x00, 0x00, 0x03, 0xc4, // size Y
+            0x00, 0x00, 0x00, 0x01, // chunk layout ID
+        ];
+        let GvspContent::Leader(leader) = parse_packet_ref(&LEADER).expect("leader").content else {
+            panic!("expected a leader");
+        };
+        let image = leader.image.expect("an image leader");
+        assert_eq!(
+            (image.pixel_format, image.width, image.height),
+            (0x0108_0001, 1292, 964)
+        );
+        assert!(is_image_payload(leader.payload_type));
+        assert!(has_extended_chunks(leader.payload_type));
+
+        let GvspContent::Trailer(trailer) = parse_packet_ref(&TRAILER).expect("trailer").content
+        else {
+            panic!("expected a trailer");
+        };
+        assert_eq!(trailer.payload_type, PAYLOAD_TYPE_EXTENDED_CHUNK_DATA);
+        assert_eq!(trailer.size_y, 964);
+        assert_eq!(trailer.chunk_payload_length, Some(1_245_544));
+        assert_eq!(trailer.chunk_layout_id, Some(1));
     }
 
     /// A standard-header image leader with `payload_type`, written from the

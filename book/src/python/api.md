@@ -10,7 +10,8 @@ vg.__version__            # "X.Y.Z", the installed package version
 ## Discovery
 
 ```python
-vg.discover(timeout_ms=500, iface=None, all=False) -> list[GigeDeviceInfo]
+vg.discover(timeout_ms=500, iface=None, all=False, allow_broadcast_ack=False) -> list[GigeDeviceInfo]
+vg.discover_ip(ip: str, timeout_ms=500) -> Optional[GigeDeviceInfo]
 vg.discover_u3v() -> list[U3vDeviceInfo]
 ```
 
@@ -43,13 +44,14 @@ Both dataclasses expose `.to_dict()` for JSON-friendly export.
 ## Connection
 
 ```python
-vg.connect_gige(device_info: GigeDeviceInfo, iface: Optional[str] = None, monitor: bool = False) -> Camera
+vg.connect_gige(device_info: GigeDeviceInfo, iface: Optional[str] = None, monitor: bool = False, exclusive: bool = False) -> Camera
 vg.connect_u3v(device_info: U3vDeviceInfo) -> Camera
 vg.Camera.open(device_info, **kwargs) -> Camera   # dispatches on type
 ```
 
 `monitor=True` opens a GigE camera read-only, alongside the application that
-controls it ([Networking → One camera, several applications](../networking.md#61-one-camera-several-applications)).
+controls it; `exclusive=True` claims exclusive access, which keeps every other
+application from reading it too ([Networking → One camera, several applications](../networking.md#61-one-camera-several-applications)).
 
 ## Camera
 

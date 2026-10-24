@@ -253,23 +253,30 @@ fn feature_values(
 }
 
 #[pyfunction]
-#[pyo3(signature = (device_info, iface=None, monitor=false))]
+#[pyo3(signature = (device_info, iface=None, monitor=false, exclusive=false))]
 fn connect_gige(
     py: Python<'_>,
     device_info: PyGigeDeviceInfo,
     iface: Option<&str>,
     monitor: bool,
+    exclusive: bool,
 ) -> PyResult<PyCamera> {
+    let access = match (monitor, exclusive) {
+        (true, true) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "monitor=True claims nothing and exclusive=True claims exclusive access: \
+                 pass one of them",
+            ));
+        }
+        (true, false) => Access::Monitor,
+        (false, true) => Access::Exclusive,
+        (false, false) => Access::Control,
+    };
     let iface_resolved = match iface {
         Some(name) => Some(iface_from_str(name)?),
         None => None,
     };
     let info = device_info.inner.clone();
-    let access = if monitor {
-        Access::Monitor
-    } else {
-        Access::Control
-    };
     let (camera, xml) = py
         .detach(|| runtime().block_on(async move { connect_gige_as(&info, access).await }))
         .into_py_err()?;

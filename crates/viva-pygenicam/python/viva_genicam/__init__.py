@@ -19,7 +19,14 @@ Quickstart:
 from __future__ import annotations
 
 from .camera import Camera, ControlState, Roi
-from .discovery import DeviceInfo, GigeDeviceInfo, U3vDeviceInfo, discover, discover_u3v
+from .discovery import (
+    DeviceInfo,
+    GigeDeviceInfo,
+    U3vDeviceInfo,
+    discover,
+    discover_ip,
+    discover_u3v,
+)
 from .errors import (
     GenApiError,
     GenicamError,
@@ -63,6 +70,7 @@ __all__ = [
     "MissingChunkFeatureError",
     "UnsupportedPixelFormatError",
     "discover",
+    "discover_ip",
     "discover_u3v",
     "connect_gige",
     "connect_u3v",

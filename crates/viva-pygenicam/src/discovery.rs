@@ -120,28 +120,46 @@ impl PyU3vDeviceInfo {
 }
 
 #[pyfunction]
-#[pyo3(signature = (timeout_ms=500, iface=None, all=false))]
+#[pyo3(signature = (timeout_ms=500, iface=None, all=false, allow_broadcast_ack=false))]
 fn discover_gige(
     py: Python<'_>,
     timeout_ms: u64,
     iface: Option<&str>,
     all: bool,
+    allow_broadcast_ack: bool,
 ) -> PyResult<Vec<PyGigeDeviceInfo>> {
     let timeout = Duration::from_millis(timeout_ms);
     // `iface` may be an IPv4 address or an OS interface name; the underlying
     // discovery call takes a name, so resolve first (#109).
     let resolved = iface.map(iface_from_str).transpose()?;
-    let devices = py.detach(|| {
-        runtime().block_on(async move {
-            match (resolved.as_ref(), all) {
-                (Some(iface), _) => gige::discover_on_interface(timeout, iface.name()).await,
-                (None, true) => gige::discover_all(timeout).await,
-                (None, false) => gige::discover(timeout).await,
-            }
-        })
-    });
+    let mut options = gige::DiscoveryOptions::new()
+        .include_loopback(all)
+        .allow_broadcast_ack(allow_broadcast_ack);
+    if let Some(iface) = &resolved {
+        options = options.interface(iface.name());
+    }
+    let devices = py.detach(|| runtime().block_on(gige::discover_with(timeout, &options)));
     let devices = devices.map_err(|e| transport_error(e.to_string()))?;
     Ok(devices.into_iter().map(PyGigeDeviceInfo::from).collect())
+}
+
+/// Ask the camera at `ip` directly (unicast), for one that broadcast
+/// discovery does not reach: on a routed subnet, typically.
+#[pyfunction]
+#[pyo3(signature = (ip, timeout_ms=500))]
+fn discover_gige_ip(
+    py: Python<'_>,
+    ip: &str,
+    timeout_ms: u64,
+) -> PyResult<Option<PyGigeDeviceInfo>> {
+    let ip: std::net::Ipv4Addr = ip.parse().map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("{ip:?} is not an IPv4 address: {err}"))
+    })?;
+    let timeout = Duration::from_millis(timeout_ms);
+    let device = py
+        .detach(|| runtime().block_on(gige::discover_ip(ip, timeout)))
+        .map_err(|e| transport_error(e.to_string()))?;
+    Ok(device.map(PyGigeDeviceInfo::from))
 }
 
 #[pyfunction]
@@ -156,6 +174,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGigeDeviceInfo>()?;
     m.add_class::<PyU3vDeviceInfo>()?;
     m.add_function(wrap_pyfunction!(discover_gige, m)?)?;
+    m.add_function(wrap_pyfunction!(discover_gige_ip, m)?)?;
     m.add_function(wrap_pyfunction!(discover_u3v, m)?)?;
     Ok(())
 }

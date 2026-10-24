@@ -44,8 +44,8 @@ mod resend;
 // (ADR-0030). GigE Vision's own register addresses are `viva_gige::consts`;
 // the ones below are this fake camera's feature registers.
 pub use gvsp::{
-    BlockSpec, Datagram, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK, PacketKind, block_datagrams,
-    chunk_payload, image_size, interleave,
+    BlockSpec, Datagram, PAYLOAD_TYPE_EXTENDED_CHUNK_DATA, PAYLOAD_TYPE_IMAGE_EXTENDED_CHUNK,
+    PacketKind, block_datagrams, chunk_payload, image_size, interleave,
 };
 pub use registers::{
     CHUNK_ID_EXPOSURE_TIME, CHUNK_ID_FRAME_ID, CHUNK_ID_IMAGE, CHUNK_ID_IMAGE_INFO,
@@ -98,6 +98,7 @@ pub struct FakeCameraBuilder {
     resend_retention: usize,
     tick_frequency: Option<u64>,
     pending_ack: bool,
+    names_primary_application: bool,
     delayed_acks: HashMap<u64, Duration>,
     profile: registers::XmlProfile,
 }
@@ -136,6 +137,7 @@ impl Default for FakeCameraBuilder {
             resend_retention: resend::DEFAULT_RETENTION,
             tick_frequency: None,
             pending_ack: true,
+            names_primary_application: true,
             delayed_acks: HashMap::new(),
             profile: registers::XmlProfile::default(),
         }
@@ -251,6 +253,15 @@ impl FakeCameraBuilder {
     /// too far.
     pub fn extended_ids(mut self, enable: bool) -> Self {
         self.sender.extended_ids = enable;
+        self
+    }
+
+    /// Send chunk-mode blocks with `payload_type` instead of `0x4001`: an
+    /// Allied Vision Manta G-125B sends GigE Vision 1.x's extended chunk data,
+    /// [`PAYLOAD_TYPE_EXTENDED_CHUNK_DATA`] (`0x0005`), in the layout that
+    /// constant describes.
+    pub fn chunk_payload_type(mut self, payload_type: u16) -> Self {
+        self.sender.chunk_payload_type = Some(payload_type);
         self
     }
 
@@ -390,6 +401,19 @@ impl FakeCameraBuilder {
         self
     }
 
+    /// Say in GVCP Capability (`0x0934`, mask `0x0800_0000`) that this device
+    /// names its primary application at `0x0A04` (port) and `0x0A14` (IP)
+    /// (default: on).
+    ///
+    /// Off, the device is an Allied Vision Manta G-125B (firmware
+    /// 00.01.44.28514): the capability bit is clear and both registers answer
+    /// `INVALID_ADDRESS`, so CCP, which every application reads alike, is all
+    /// that says whether anyone holds control.
+    pub fn names_primary_application(mut self, names: bool) -> Self {
+        self.names_primary_application = names;
+        self
+    }
+
     /// Acknowledge every register-access command that starts at `addr` only
     /// after `delay`, as a device busy with a flash write or a mode change
     /// does — first with a `PENDING_ACK` of one and a half times `delay` when
@@ -428,6 +452,7 @@ impl FakeCameraBuilder {
         register_map.set_mac(self.identity.mac);
         register_map.set_packet_resend(self.packet_resend);
         register_map.set_pending_ack_supported(self.pending_ack);
+        register_map.set_names_primary_application(self.names_primary_application);
         register_map.set_network(
             self.identity.ip.unwrap_or(self.bind_ip),
             self.identity.subnet_mask,

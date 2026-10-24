@@ -21,7 +21,7 @@ use viva_gige::IfaceSelector;
 use viva_u3v::U3vDevice;
 use viva_u3v::UsbTransfer;
 
-use crate::common::{self, DEFAULT_DISCOVERY_TIMEOUT_MS, Target};
+use crate::common::{self, AccessArg, DEFAULT_DISCOVERY_TIMEOUT_MS, Target};
 
 /// The byte order of a device's registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,11 +147,14 @@ impl std::fmt::Display for RegisterRead {
 }
 
 /// Open the control channel of the GigE Vision camera `target` names,
-/// without fetching its XML.
+/// without fetching its XML, set to claim exclusive access when `--access`
+/// asks for it.
 async fn open_gige(target: &Target, iface: Option<&IfaceSelector>) -> Result<GigeDevice> {
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(target.ip, target.index, iface, timeout).await?;
-    common::open_control(&device).await
+    let mut device = common::open_control(&device).await?;
+    device.set_exclusive_access(target.access == Some(AccessArg::Exclusive));
+    Ok(device)
 }
 
 fn open_usb(index: usize) -> Result<U3vDevice<viva_u3v::NusbTransfer>> {
@@ -170,6 +173,11 @@ pub async fn run_read(
     len: usize,
     json: bool,
 ) -> Result<()> {
+    common::chosen_access(
+        target.access,
+        viva_genicam::Access::Monitor,
+        target.usb.is_some(),
+    )?;
     let (bytes, order) = match target.usb {
         Some(index) => (
             read_usb(&mut open_usb(index)?, addr, len)?,
@@ -177,7 +185,19 @@ pub async fn run_read(
         ),
         None => {
             let mut device = open_gige(&target, iface.as_ref()).await?;
-            (read_gige(&mut device, addr, len).await?, WordOrder::Big)
+            // A read needs no privilege; one asked for is held around it.
+            let claim = !matches!(target.access, None | Some(AccessArg::Monitor));
+            if claim {
+                device
+                    .claim_control()
+                    .await
+                    .context("claim control privilege (another application may hold it)")?;
+            }
+            let read = read_gige(&mut device, addr, len).await;
+            if claim && let Err(err) = device.release_control().await {
+                eprintln!("warning: could not release control privilege: {err}");
+            }
+            (read?, WordOrder::Big)
         }
     };
     let read = RegisterRead::new(addr, &bytes, order);
@@ -194,6 +214,9 @@ pub async fn run_write(
     addr: u64,
     value: u32,
 ) -> Result<()> {
+    if target.access == Some(AccessArg::Monitor) {
+        bail!("write-reg writes, and a monitor (--access monitor) does not");
+    }
     match target.usb {
         Some(index) => write_usb(&mut open_usb(index)?, addr, value)?,
         None => {

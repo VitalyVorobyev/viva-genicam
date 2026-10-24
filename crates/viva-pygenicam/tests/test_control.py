@@ -108,3 +108,17 @@ def test_a_monitor_watches_a_multicast_stream_it_did_not_configure(fake_gige, lo
                     got = watched.next_frame(timeout_ms=5000)
                 assert got is not None and (got.width, got.height) == (640, 480)
                 assert fake_gige.writes() == writes, "the monitor wrote to the camera"
+
+
+def test_exclusive_access_keeps_other_applications_from_reading(fake_gige):
+    """API-22: exclusive=True claims CCP 0x1 on the camera, and while it is
+    held a monitor cannot even open it."""
+    info = fake_gige.device_info()
+    with vg.connect_gige(info, exclusive=True) as cam:
+        assert cam.control_state is vg.ControlState.HELD
+        assert u32(fake_gige.peek(0x0A00, 4)) == 0x1, "exclusive access on the camera"
+        with pytest.raises(vg.GenicamError):
+            vg.connect_gige(info, monitor=True)
+    assert fake_gige.controller() is None, "released on close"
+    with pytest.raises(ValueError, match="one of them"):
+        vg.connect_gige(info, monitor=True, exclusive=True)

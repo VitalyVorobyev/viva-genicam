@@ -288,7 +288,7 @@ struct Warned {
 
 /// How a GVSP status that answers a resend request is acted on, or `None`
 /// for any other status. The names are Wireshark's `GEV_STATUS_*`. Gone and
-/// gone-with-previous close the range; "not yet available" and "temporarily
+/// gone-with-previous close only the named ids; "not yet available" and "temporarily
 /// unavailable" leave it to its retries.
 fn resend_answer(status: u16) -> Option<Option<Answer>> {
     match GigeStatus::from_raw(status) {
@@ -1585,9 +1585,9 @@ mod tests {
     }
 
     /// The camera's "no longer available" is a bare header, here in the
-    /// trailer's format. It closes the range and is not the frame's status.
+    /// trailer's format. It closes that packet and is not the frame's status.
     #[test]
-    fn an_unavailable_answer_closes_the_range_not_the_frame() {
+    fn an_unavailable_answer_closes_the_packet_not_the_frame() {
         let (mut asm, stats) = resend_assembler();
         let datagrams = block_datagrams(&spec(5, 64, 32), &image(2048, 32));
         let t0 = Instant::now();

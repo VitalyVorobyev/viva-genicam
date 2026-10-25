@@ -145,9 +145,10 @@ Added in milestone S (backlog SR-04, SR-03, SR-22):
 - **Answers.** A camera that cannot resend says so with a bare GVSP header
   whose status names why, which the engine reads before parsing anything else
   and counts as an error-status packet. `0x800C` (`PACKET_UNAVAILABLE`) and
-  `0x8012` (`PACKET_REMOVED_FROM_MEMORY`) close the gap containing the packet
-  id; `0x8011` (`..._AND_PREVIOUS_...`) also closes the earlier gaps, counting
-  those asked for as unavailable; `0x8010`
+  `0x8012` (`PACKET_REMOVED_FROM_MEMORY`) stop retries for only the named
+  requested packet; `0x8011` (`..._AND_PREVIOUS_...`) stops the named packet
+  and earlier missing ids, preserving any higher tail. Only requested ids
+  count as unavailable; duplicate answers do not count again; `0x8010`
   (`NOT_YET_AVAILABLE`) and `0x8014` (`TEMPORARILY_UNAVAILABLE`) leave the gap
   to its retries. Status names are Wireshark's.
 - **Counters.** `resend_requested` counts each packet asked for once, however
@@ -158,7 +159,9 @@ Added in milestone S (backlog SR-04, SR-03, SR-22):
 The fake camera answers `PACKETRESEND_CMD` from its own reading of the field
 table: it keeps the last four blocks as built, before scripted loss, sends the
 packets again from its stream socket, and answers a block it no longer holds
-with one header-only `0x800C` packet for the range.
+with one header-only `0x800C` packet per requested id, matching the recorded
+Manta G-125B behavior. A mixed-outcome test refuses one id in a three-packet
+range and recovers both neighbours.
 
 Packet parsing and assembly are fuzzed (`fuzz/`, a short run per target in
 CI): every byte of a GVSP datagram is remote input.
@@ -198,8 +201,8 @@ for a leader (aravis treats a short backward jump as late, which would
 discard the first blocks after a quick AcquisitionStop/Start); an oversized data packet is
 refused (aravis writes it and truncates at the buffer end); a resend request is
 retried a fixed number of times (aravis retries until the frame's ratio or its
-retention runs out) and stops for one range on "unavailable" (aravis stops the
-whole frame). None of these has been checked against hardware, and neither has
+retention runs out) and stops for the ids explicitly named by an "unavailable" answer (aravis
+stops the whole frame). None of these has been checked against hardware, and neither has
 anything about resend: whether cameras accept a request from a port other than
 the control channel's, and how they answer one they cannot serve, are open
 (backlog).
@@ -243,3 +246,13 @@ the control channel's, and how they answer one they cannot serve, are open
   packet size are read from the camera, and resend stays off.
 - A frame carries the leader's `padding_x`; conversion reads each line from
   its own start when it is non-zero (`Frame::row_stride`).
+
+**2026-10-25 amendment:** a per-packet refusal previously removed its entire
+containing gap. A deterministic mixed-outcome regression showed that this
+suppressed retries for recoverable neighbours and overcounted unavailability.
+The gap is now split around just the refused id; an all-previous answer clips
+at that id. Both remaining sides retain their request counts and due times.
+An unsolicited single-packet refusal does not suppress an unrequested gap.
+The public API, retry limits and request budget are unchanged. No new camera
+claim is made: this is covered by pure state tests and ephemeral-loopback
+receive-engine tests using the Manta’s already-recorded per-packet layout.

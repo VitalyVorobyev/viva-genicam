@@ -62,6 +62,8 @@ pub(crate) struct SenderShared {
     pub source_ip: Ipv4Addr,
     /// Where events go: the message channel, which sends them.
     pub events: tokio::sync::mpsc::UnboundedSender<crate::events::Occurred>,
+    /// Set while the link is down: blocks are still produced, and lost.
+    pub link_down: Arc<AtomicBool>,
 }
 
 /// Run the GVSP frame sender loop.
@@ -83,6 +85,7 @@ pub(crate) async fn run(
         retention,
         source_ip,
         events,
+        link_down,
     } = shared;
     loop {
         // Wait for acquisition start.
@@ -286,7 +289,9 @@ pub(crate) async fn run(
                         tokio::time::sleep(due - now).await;
                     }
                 }
-                if !send_on_wire(&socket, &datagram.bytes, dest, config.max_on_wire).await {
+                if link_down.load(Ordering::Relaxed)
+                    || !send_on_wire(&socket, &datagram.bytes, dest, config.max_on_wire).await
+                {
                     dropped += 1;
                 }
             }

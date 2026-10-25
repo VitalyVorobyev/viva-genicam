@@ -86,6 +86,7 @@ mod frame;
 #[cfg(feature = "image-io")]
 #[cfg_attr(docsrs, doc(cfg(feature = "image-io")))]
 pub mod image_io;
+mod reopen;
 pub mod report;
 mod standard;
 mod stream;
@@ -113,6 +114,7 @@ pub use events::{Event, EventStream};
 pub use evs::{EvsBlock, EvsFormat};
 pub use frame::{Frame, FrameStatus};
 pub use gige::{AckSummary, ActionParams};
+pub use reopen::{Reopen, Reopened, reopen_gige};
 pub use standard::{ResolvedFeature, Roi, StandardFeature};
 #[cfg(fuzzing)]
 pub use stream::fuzz_assemble;
@@ -385,9 +387,18 @@ impl<T: RegisterIo> Camera<T> {
         let mut text = String::new();
         input.read_to_string(&mut text)?;
         let configuration = genapi::Configuration::parse(&text)?;
-        Ok(self
-            .nodemap
-            .load_configuration(&configuration, &self.transport))
+        Ok(self.load_configuration(&configuration))
+    }
+
+    /// Restore a configuration already read, such as the one
+    /// [`Camera::save_features`] returned: [`Camera::load_features`] without
+    /// the file.
+    pub fn load_configuration(
+        &mut self,
+        configuration: &genapi::Configuration,
+    ) -> genapi::LoadReport {
+        self.nodemap
+            .load_configuration(configuration, &self.transport)
     }
 
     /// Capture device/host timestamp pairs and fit a mapping model.
@@ -1801,6 +1812,24 @@ impl Drop for BackgroundShutdown {
     }
 }
 
+/// A claimed control socket while XML is being fetched. A cancelled connect
+/// must release it too, before a `GigeRegisterIo` exists to do that on drop.
+struct OpeningGigeDevice {
+    device: Option<tokio::sync::Mutex<GigeDevice>>,
+    claimed: bool,
+}
+
+impl Drop for OpeningGigeDevice {
+    fn drop(&mut self) {
+        if self.claimed
+            && let Some(device) = self.device.as_mut()
+            && let Err(error) = device.get_mut().try_send_release()
+        {
+            debug!(%error, "could not send the cancelled connection's control release");
+        }
+    }
+}
+
 /// [`connect_gige_as`] on the runtime it is called from, which must be a
 /// multi-thread one or one other threads drive.
 pub(crate) async fn connect_here(
@@ -1813,18 +1842,33 @@ pub(crate) async fn connect_here(
     let control_addr = SocketAddr::new(IpAddr::V4(device.ip), gige::GVCP_PORT);
     info!(%control_addr, ?access, "connecting to GigE Vision camera");
 
-    let mut device = gige::GigeDevice::open(control_addr)
+    let device = gige::GigeDevice::open(control_addr)
         .await
         .map_err(error::gige("open the control channel"))?;
 
+    let mut opening = OpeningGigeDevice {
+        device: Some(AsyncMutex::new(device)),
+        claimed: false,
+    };
     if access != Access::Monitor {
+        let mut device = opening
+            .device
+            .as_ref()
+            .expect("opening device")
+            .lock()
+            .await;
         // Claim control privilege (required before configuration and
         // streaming); every later claim, after a loss, asks for the same.
         device.set_exclusive_access(access == Access::Exclusive);
-        device
-            .claim_control()
-            .await
-            .map_err(error::gige("claim control"))?;
+        // The camera can apply the claim before its ACK arrives. Arm the
+        // release first so cancellation in that gap does not leave it held.
+        opening.claimed = true;
+        if let Err(source) = device.claim_control().await {
+            // A device refusal acquired nothing; a missing/malformed ACK
+            // may hide a successful claim and still needs a release.
+            opening.claimed = !matches!(source, gige::GigeError::Status(_));
+            return Err(error::gige("claim control")(source));
+        }
         match device.enable_pending_ack().await {
             Ok(enabled) => debug!(enabled, "PENDING_ACK"),
             Err(err) => {
@@ -1833,7 +1877,7 @@ pub(crate) async fn connect_here(
         }
     }
 
-    let control = AsyncMutex::new(device);
+    let control = opening.device.as_ref().expect("opening device");
 
     // Fetch and parse the GenApi XML.
     let fetched = viva_genapi_xml::fetch_and_load_xml(|address, length| {
@@ -1850,7 +1894,8 @@ pub(crate) async fn connect_here(
     // Extract the device and create the blocking adapter. It owns the release
     // of control from here, so a failure below still gives control back.
     let handle = tokio::runtime::Handle::current();
-    let control_device = control.into_inner();
+    let control_device = opening.device.take().expect("opening device").into_inner();
+    opening.claimed = false;
     let transport = match access {
         Access::Control | Access::Exclusive => GigeRegisterIo::new(handle, control_device),
         Access::Monitor => GigeRegisterIo::monitor(handle, control_device),

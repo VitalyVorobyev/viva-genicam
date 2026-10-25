@@ -242,6 +242,11 @@ pub(crate) struct ServerOptions {
     pub actions: Arc<AtomicU64>,
     /// Whether action commands are implemented at all.
     pub action_commands: bool,
+    /// Set while the camera's link is down ([`FakeCamera::unplug`]): every
+    /// datagram that arrives is lost, unanswered.
+    ///
+    /// [`FakeCamera::unplug`]: crate::FakeCamera::unplug
+    pub link_down: Arc<AtomicBool>,
 }
 
 /// Run the GVCP control server loop.
@@ -269,6 +274,10 @@ pub async fn run(
                 continue;
             }
         };
+        if options.link_down.load(Ordering::Relaxed) {
+            trace!(%peer, "link down: datagram lost");
+            continue;
+        }
         let pkt = &buf[..len];
         if len < 8 || pkt[0] != GVCP_CMD_KEY {
             trace!(len, "ignoring non-GVCP packet");

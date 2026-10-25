@@ -487,6 +487,7 @@ impl FakeCameraBuilder {
         let blocks_sent = Arc::new(AtomicU64::new(0));
         let spoofed = Arc::new(AtomicU64::new(0));
         let resends = Arc::new(resend::ResendCounters::default());
+        let link_down = Arc::new(AtomicBool::new(false));
         let retention = Arc::new(std::sync::Mutex::new(resend::Retention::new(
             self.resend_retention,
         )));
@@ -525,6 +526,7 @@ impl FakeCameraBuilder {
                 expiries: expiries.clone(),
                 actions: actions.clone(),
                 action_commands: self.action_commands,
+                link_down: link_down.clone(),
             };
             let identity = self.identity;
             tokio::spawn(async move {
@@ -543,8 +545,9 @@ impl FakeCameraBuilder {
             let socket = UdpSocket::bind((self.bind_ip, 0)).await?;
             let regs = regs.clone();
             let events = events.clone();
+            let link_down = link_down.clone();
             tokio::spawn(async move {
-                events::run(socket, occurred_rx, regs, events).await;
+                events::run(socket, occurred_rx, regs, events, link_down).await;
             })
         };
 
@@ -561,6 +564,7 @@ impl FakeCameraBuilder {
                 retention,
                 source_ip: self.bind_ip,
                 events: occurred,
+                link_down: link_down.clone(),
             };
             tokio::spawn(async move {
                 gvsp_sender::run(regs, acq_start, acq_stop, fps, options, shared).await;
@@ -580,6 +584,7 @@ impl FakeCameraBuilder {
             discoveries,
             expiries,
             actions,
+            link_down,
             local_addr,
         })
     }
@@ -602,6 +607,7 @@ pub struct FakeCamera {
     discoveries: Arc<std::sync::Mutex<Vec<DiscoveryRequest>>>,
     expiries: Arc<AtomicU64>,
     actions: Arc<AtomicU64>,
+    link_down: Arc<AtomicBool>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -674,6 +680,22 @@ impl FakeCamera {
     /// the controller's heartbeat expires: CCP reads 0 from then on.
     pub async fn revoke_control(&self) {
         self.regs.lock().await.revoke_control();
+    }
+
+    /// Take the camera's link down, as a pulled cable does: from now on
+    /// every datagram to it is lost unanswered, and every one it sends —
+    /// stream, events — is lost on the way. The camera itself runs on: it
+    /// keeps acquiring, and its heartbeat timer keeps counting.
+    /// [`plug_in`](Self::plug_in) brings the link back.
+    pub fn unplug(&self) {
+        info!("fake camera unplugged");
+        self.link_down.store(true, Ordering::Relaxed);
+    }
+
+    /// Bring the link [`unplug`](Self::unplug) took down back up.
+    pub fn plug_in(&self) {
+        info!("fake camera plugged in");
+        self.link_down.store(false, Ordering::Relaxed);
     }
 
     /// How often the heartbeat rule has revoked control privilege.

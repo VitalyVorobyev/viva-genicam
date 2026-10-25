@@ -11,10 +11,17 @@
  * Usage:
  *   gentl_harness <path/to/viva_gentl.cti> <xml-out-dir> <frames>
  *                 <AcquisitionStart address> <AcquisitionStop address>
+ *                 [<model>]
  *
  * The camera is the fake's Mono16 image, whose bytes are the ramp
  * (i * 7 + block id) mod 256; the acquisition registers are the fake's own
  * (viva_fake_gige::REG_ACQ_START / REG_ACQ_STOP). Exit status 0 on success.
+ *
+ * With <model>, the camera is the one the producer lists under that model,
+ * and each frame is checked only for completeness and for the bytes its
+ * width, height and pixel format need. An acquisition register is written 1
+ * unless given as <address>=<value>, for a camera whose XML starts and stops
+ * through one register (an Allied Vision Manta: 0x130F4=1 and 0x130F4=0).
  *
  * POSIX only (dlopen): CI runs it on Linux.
  */
@@ -174,17 +181,37 @@ static void save_port_xml(PORT_HANDLE port, const char *dir,
   free(xml);
 }
 
+/* `value` as a GigE Vision register holds it: big-endian. */
+static uint32_t be32(uint32_t value) {
+  uint8_t bytes[4] = {(uint8_t)(value >> 24), (uint8_t)(value >> 16),
+                      (uint8_t)(value >> 8), (uint8_t)value};
+  uint32_t out;
+  memcpy(&out, bytes, sizeof out);
+  return out;
+}
+
 int main(int argc, char **argv) {
-  if (argc != 6) {
+  if (argc != 6 && argc != 8) {
     fprintf(stderr,
-            "usage: %s <cti> <xml-out-dir> <frames> <acq-start> <acq-stop>\n",
+            "usage: %s <cti> <xml-out-dir> <frames> <acq-start>[=value] "
+            "<acq-stop>[=value] [model payload-size]\n",
             argv[0]);
     return 2;
   }
   const char *cti = argv[1], *dir = argv[2];
   int frames = atoi(argv[3]);
-  uint64_t acq_start = strtoull(argv[4], NULL, 0);
-  uint64_t acq_stop = strtoull(argv[5], NULL, 0);
+  char *rest = NULL;
+  uint64_t acq_start = strtoull(argv[4], &rest, 0);
+  uint32_t start_value = *rest == '=' ? (uint32_t)strtoul(rest + 1, NULL, 0) : 1;
+  uint64_t acq_stop = strtoull(argv[5], &rest, 0);
+  uint32_t stop_value = *rest == '=' ? (uint32_t)strtoul(rest + 1, NULL, 0) : 1;
+  const char *model_wanted = argc == 8 ? argv[6] : FAKE_MODEL;
+  int fake = strcmp(model_wanted, FAKE_MODEL) == 0;
+  size_t expected_payload = argc == 8 ? (size_t)strtoull(argv[7], NULL, 0) : 0;
+  if (!fake && (expected_payload == 0 || expected_payload > BUFFER_BYTES)) {
+    fprintf(stderr, "real-camera payload-size must fit the harness buffers\n");
+    return 2;
+  }
   if (!load(cti))
     return 1;
 
@@ -217,7 +244,7 @@ int main(int argc, char **argv) {
   }
   save_port_xml(tl, dir, "system");
 
-  /* Interfaces, then the fake camera on one of them. */
+  /* Interfaces, then the camera on one of them. */
   bool8_t changed = 0;
   GC(pTLUpdateInterfaceList(tl, &changed, 1000));
   uint32_t ifaces = 0;
@@ -243,7 +270,7 @@ int main(int argc, char **argv) {
       GC(pIFGetDeviceInfo(candidate, dev_id, DEVICE_INFO_MODEL, &type, model,
                           &msize));
       printf("    %s: %s\n", dev_id, model);
-      if (strcmp(model, FAKE_MODEL) == 0) {
+      if (strcmp(model, model_wanted) == 0) {
         GC(pIFOpenDevice(candidate, dev_id, DEVICE_ACCESS_CONTROL, &dev));
         iface = candidate;
         break;
@@ -252,7 +279,7 @@ int main(int argc, char **argv) {
     if (iface == GENTL_INVALID_HANDLE)
       GC(pIFClose(candidate));
   }
-  CHECK(dev != GENTL_INVALID_HANDLE, "the fake camera was not found");
+  CHECK(dev != GENTL_INVALID_HANDLE, "no camera %s was found", model_wanted);
   if (dev == GENTL_INVALID_HANDLE)
     goto close;
   save_port_xml(iface, dir, "interface");
@@ -317,9 +344,9 @@ int main(int argc, char **argv) {
   GC(pGCRegisterEvent(ds, EVENT_NEW_BUFFER, &event));
   GC(pDSStartAcquisition(ds, ACQ_START_FLAGS_DEFAULT, GENTL_INFINITE));
   {
-    uint32_t one = 0x01000000; /* 1, big-endian: a GigE Vision register */
-    size_t size = sizeof one;
-    GC(pGCWritePort(remote, acq_start, &one, &size));
+    uint32_t value = be32(start_value); /* a GigE Vision register */
+    size_t size = sizeof value;
+    GC(pGCWritePort(remote, acq_start, &value, &size));
   }
 
   uint64_t last = 0;
@@ -368,13 +395,27 @@ int main(int argc, char **argv) {
     CHECK(infos[2].iType == INFO_DATATYPE_SIZET, "WIDTH type");
     CHECK(!incomplete, "frame %llu is incomplete",
           (unsigned long long)frame_id);
+    CHECK(frame_id > last, "frame %llu after %llu",
+          (unsigned long long)frame_id, (unsigned long long)last);
+    last = frame_id;
+    if (!fake) {
+      /* PayloadSize read from the camera before starting: PFNC effective
+       * bits alone do not account for legacy packed groups or padding. */
+      CHECK(width > 0 && height > 0 && pixel_format != 0,
+            "frame geometry and format must be present");
+      CHECK(filled == expected_payload, "%zu bytes, camera advertises %zu", filled,
+            expected_payload);
+      printf("frame %llu: %zux%zu, pixel format 0x%08llx, %zu bytes, "
+             "complete\n",
+             (unsigned long long)frame_id, width, height,
+             (unsigned long long)pixel_format, filled);
+      GC(pDSQueueBuffer(ds, data.BufferHandle));
+      continue;
+    }
     CHECK(pixel_format == MONO16, "pixel format %llx",
           (unsigned long long)pixel_format);
     CHECK(filled == width * height * 2, "%zu bytes for %zux%zu Mono16", filled,
           width, height);
-    CHECK(frame_id > last, "frame %llu after %llu",
-          (unsigned long long)frame_id, (unsigned long long)last);
-    last = frame_id;
     const uint8_t *pixels = memory[index];
     size_t wrong = 0;
     for (size_t i = 0; i < filled; i++) {
@@ -390,9 +431,9 @@ int main(int argc, char **argv) {
   }
 
   {
-    uint32_t one = 0x01000000;
-    size_t size = sizeof one;
-    GC(pGCWritePort(remote, acq_stop, &one, &size));
+    uint32_t value = be32(stop_value);
+    size_t size = sizeof value;
+    GC(pGCWritePort(remote, acq_stop, &value, &size));
   }
   GC(pDSStopAcquisition(ds, ACQ_STOP_FLAGS_DEFAULT));
   GC(pDSFlushQueue(ds, ACQ_QUEUE_ALL_DISCARD));

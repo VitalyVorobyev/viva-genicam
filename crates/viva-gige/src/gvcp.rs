@@ -1,7 +1,7 @@
 //! GVCP control plane utilities.
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -1462,6 +1462,7 @@ impl GigeDevice {
                     return Err(err.into());
                 }
                 warn!(request_id, ?opcode, attempt, "send failed, retrying");
+                self.refresh_route_after_send_error(&err).await?;
                 self.backoff(attempt).await;
                 continue 'retry;
             }
@@ -1524,6 +1525,19 @@ impl GigeDevice {
     }
 
     /// Send a heartbeat without recursively entering the active transaction.
+    /// A FORCEIP can leave macOS's connected UDP route stale (TC-41).
+    /// Reconnecting the same socket refreshes it without changing the port
+    /// that identifies the controller. The caller retains its retry budget
+    /// and transaction ID; this never replays a command after a receive error.
+    async fn refresh_route_after_send_error(&self, error: &io::Error) -> Result<(), GigeError> {
+        if error.kind() == io::ErrorKind::AddrNotAvailable {
+            warn!(remote = %self.remote, local = %self.socket.local_addr()?,
+                "refreshing GVCP route after address became unavailable");
+            self.socket.connect(self.remote).await?;
+        }
+        Ok(())
+    }
+
     async fn send_inflight_keepalive(&mut self, active_request_id: u16) -> Result<(), GigeError> {
         let mut request_id = self.next_request_id();
         // A long transaction may outlive the 16-bit request-ID counter.
@@ -2185,6 +2199,35 @@ impl GigeDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refreshing_a_stale_route_preserves_the_control_endpoint_and_request_id() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("peer");
+        let device = GigeDevice::open(peer.local_addr().expect("address"))
+            .await
+            .expect("open");
+        let local = device.local_addr().expect("local");
+        let id = device.request_id;
+        device
+            .refresh_route_after_send_error(&io::Error::from(io::ErrorKind::AddrNotAvailable))
+            .await
+            .expect("refresh route");
+        assert_eq!(device.local_addr().expect("local after refresh"), local);
+        assert_eq!(device.request_id, id);
+        device.socket.send(b"same controller").await.expect("send");
+        let mut bytes = [0; 32];
+        let (length, source) = time::timeout(Duration::from_secs(1), peer.recv_from(&mut bytes))
+            .await
+            .expect("deadline")
+            .expect("receive");
+        assert_eq!(source, local);
+        assert_eq!(&bytes[..length], b"same controller");
+        device
+            .refresh_route_after_send_error(&io::Error::from(io::ErrorKind::PermissionDenied))
+            .await
+            .expect("other errors do not reconnect");
+        assert_eq!(device.request_id, id);
+    }
 
     /// Reply after the upstream default deadline and count queued retries.
     async fn delayed_control_ack(

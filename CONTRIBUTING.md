@@ -81,6 +81,7 @@ cargo test -p viva-genicam --test facade             # standard-feature helpers,
 cargo test -p viva-genicam --test blocking           # the blocking API, and a camera opened from a current-thread runtime
 cargo test -p viva-genicam --test persistence        # saving and restoring a configuration (ADR-0028)
 cargo test -p viva-genicam --test refresh            # values the camera changes on its own: NoCache, polling, invalidate (ADR-0029)
+cargo test -p viva-genicam --test reopen             # a camera whose link goes down and comes back: the loss, reopen_gige
 cargo test -p viva-camctl  --lib field_engineer      # features, describe, dump, save/load, registers, action, USB3 Vision
 cargo test -p viva-gige    --test status_codes       # GVCP status codes from literal acknowledgements (ADR-0020)
 # Control-channel keepalive, against fixtures that withhold or delay ACKs
@@ -125,6 +126,19 @@ port's XML with `xmllint` against the GenApi 1.1 schema. With
 (`scripts/gentl-harvesters.py`), a consumer we did not write. CI's `GenTL
 producer` job runs all three on Linux; `GENICAM_PACKAGE_ZIP` reuses a downloaded
 EMVA package.
+
+Both consumers also run against a real GigE Vision camera, which no script
+starts: the C harness takes the camera's discovery model and advertised `PayloadSize`, and its
+acquisition registers as `<address>=<value>`; `gentl-harvesters.py` takes
+`--camera <model>`. Each frame is then checked for completeness and for the
+advertised payload size and valid geometry and format, since a camera's pixels are not
+known in advance:
+
+```bash
+target/gentl/harness/gentl_harness target/gentl/viva_gentl.cti target/gentl/harness/xml 100 \
+  0x130F4=1 0x130F4=0 "Manta_G-125B (E0020002)" 1245488
+python scripts/gentl-harvesters.py target/gentl/viva_gentl.cti 100 --camera "Manta_G-125B (E0020002)"
+```
 
 A real USB3 Vision camera has a smoke suite of its own, which neither
 `cargo test --workspace` nor CI runs: every test is `#[ignore]`d. With a camera

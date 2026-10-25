@@ -50,17 +50,6 @@ impl<T: RegisterIo + Send + 'static> SharedCamera<T> {
             source,
         })?
     }
-
-    /// Swap in `camera` for the one shared now, which is dropped — and with
-    /// it, a GigE camera's control privilege and keepalive.
-    pub(crate) fn replace(&self, camera: Camera<T>) -> Result<(), GenicamError> {
-        let mut slot = self
-            .camera
-            .lock()
-            .map_err(|_| GenicamError::Panicked("a thread holding the camera"))?;
-        *slot = camera;
-        Ok(())
-    }
 }
 
 /// What the Zenoh queryables need of a served camera, GigE Vision and USB3

@@ -8,7 +8,7 @@ Vision cameras through viva, with no vendor SDK.
 
 [Harvesters](https://github.com/genicam/harvesters), the Python GenTL
 consumer, is tested against it on every change. No other consumer has been
-tried yet: if you use one, [tell us](reporting.md) how it went.
+tried yet beyond the project’s C ABI harness: if you use one, [tell us](reporting.md) how it went. Both consumers have acquired frames from the Manta G-125B; see [tested cameras](tested-cameras.md).
 
 ## What it offers
 

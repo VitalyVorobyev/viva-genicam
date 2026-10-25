@@ -7,12 +7,19 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use viva_genicam::gige::{self, Iface, IfaceSelector};
 use viva_genicam::report::ReportTarget;
-use viva_genicam::{GenicamError, GigeRegisterIo, StreamOptions, connect_gige_with_xml};
+use viva_genicam::{
+    ControlState, GenicamError, GigeRegisterIo, Reopen, Reopened, StreamOptions,
+    connect_gige_with_xml, reopen_gige,
+};
 use viva_zenoh_api::DeviceAnnounce;
 
 use crate::device::{DeviceOps, SharedCamera};
 use crate::discovery::Discovery;
 use crate::source::{BlockStream, StreamSource};
+
+/// How long [`DeviceHandle::refresh_connection`] waits for the camera to
+/// answer and be free again.
+const REOPEN_PATIENCE: Duration = Duration::from_secs(15);
 
 /// A GigE Vision camera the service serves.
 pub struct DeviceHandle {
@@ -26,6 +33,8 @@ pub struct DeviceHandle {
     /// is what let the receive path drift into resolving it a second way, and
     /// wrongly (backlog `SVC-06`).
     iface: Option<Iface>,
+    /// The current session's control privilege, as its keepalive reports it.
+    control: tokio::sync::watch::Receiver<ControlState>,
 }
 
 impl DeviceHandle {
@@ -35,8 +44,10 @@ impl DeviceHandle {
         iface: Option<Iface>,
     ) -> Result<Self, GenicamError> {
         let (camera, xml) = connect_gige_with_xml(info).await?;
+        let control = camera.transport().watch_control();
         Ok(Self {
             camera: SharedCamera::new(camera),
+            control,
             raw_xml: xml,
             device_id: derive_device_id(info),
             info: info.clone(),
@@ -54,26 +65,15 @@ impl DeviceHandle {
         self.iface.as_ref()
     }
 
-    /// Refresh the control connection and replace the cached camera handle.
+    /// Reopen this camera and replace its entire session, including the XML,
+    /// discovery information, interface and control-state observation.
     ///
-    /// The Aravis fake camera on macOS loopback can stop producing frames
-    /// after a longer idle period even though register reads still succeed.
-    /// Reopening the control connection immediately before stream setup
-    /// restores the working state without changing the higher-level device
-    /// identity.
-    ///
-    /// The keepalive needs no coordination here. It belongs to the transport,
-    /// so the new connection brings its own and the old one retires when the
-    /// swap below drops the camera that owned it — nothing has to be paused,
-    /// and nothing can outlive the privilege it was protecting.
-    pub async fn refresh_connection(&self) -> Result<(), GenicamError> {
-        const MAX_RETRIES: u32 = 5;
-        const BASE_DELAY: Duration = Duration::from_millis(500);
-        const MAX_DELAY: Duration = Duration::from_secs(16);
-
-        // 1. Give control up first: the old connection holds it until the
-        //    swap below drops it, and a camera refuses a second application's
-        //    claim while another holds control.
+    /// Requires exclusive access to the handle. A handle already being served
+    /// is instead retired and rebuilt by [`run_discovery`](crate::run_discovery),
+    /// so existing XML and report queryables cannot outlive their session.
+    /// A failed reopen leaves the old handle present, with control released
+    /// when the camera accepted that release.
+    pub async fn refresh_connection(&mut self) -> Result<(), GenicamError> {
         if let Err(error) = self
             .camera
             .with(|camera| camera.transport().release_control())
@@ -81,35 +81,38 @@ impl DeviceHandle {
         {
             debug!(device_id = self.device_id, %error, "releasing control before reconnecting");
         }
+        let mut options = Reopen::new().patience(REOPEN_PATIENCE);
+        let iface = self
+            .iface
+            .as_ref()
+            .map(|iface| Iface::from_system(iface.name()))
+            .transpose()
+            .map_err(|source| GenicamError::Network {
+                during: "resolve the camera interface again",
+                source,
+            })?;
+        if let Some(iface) = &iface {
+            options = options.interface(iface.name());
+        }
+        let reopened = reopen_gige(&self.info, &options)
+            .await
+            .inspect_err(|error| {
+                warn!(device_id = self.device_id, %error, "reconnect failed, giving up");
+            })?;
+        *self = Self::from_reopened(reopened, iface);
+        Ok(())
+    }
 
-        // 2. Retry connection with exponential backoff.
-        let mut attempt = 0u32;
-        let (camera, _xml) = loop {
-            attempt += 1;
-            match connect_gige_with_xml(&self.info).await {
-                Ok(pair) => break pair,
-                Err(e) if attempt >= MAX_RETRIES => {
-                    warn!(device_id = self.device_id, error = %e, attempt, "reconnect failed, giving up");
-                    return Err(e);
-                }
-                Err(e) => {
-                    let delay = BASE_DELAY
-                        .saturating_mul(1 << (attempt - 1).min(5))
-                        .min(MAX_DELAY);
-                    warn!(
-                        device_id = self.device_id,
-                        error = %e,
-                        attempt,
-                        ?delay,
-                        "reconnect failed, retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        };
-
-        // 3. Swap the camera handle. Dropping the old one retires its keepalive.
-        self.camera.replace(camera)
+    fn from_reopened(reopened: Reopened, iface: Option<Iface>) -> Self {
+        let control = reopened.camera.transport().watch_control();
+        Self {
+            camera: SharedCamera::new(reopened.camera),
+            raw_xml: reopened.xml,
+            device_id: derive_device_id(&reopened.device),
+            info: reopened.device,
+            iface,
+            control,
+        }
     }
 }
 
@@ -128,6 +131,16 @@ impl DeviceOps for DeviceHandle {
     fn camera(&self) -> &SharedCamera<GigeRegisterIo> {
         &self.camera
     }
+
+    /// A session whose control privilege the camera took back — its
+    /// heartbeat ran out while the link was down, or it was power-cycled —
+    /// is gone: the camera answers again, but it stopped streaming and no
+    /// longer takes this session's writes, so
+    /// [`run_discovery`](crate::run_discovery) retires it and serves the
+    /// camera afresh.
+    fn is_lost(&self) -> bool {
+        *self.control.borrow() == ControlState::Lost
+    }
 }
 
 #[async_trait::async_trait]
@@ -141,21 +154,6 @@ impl StreamSource for DeviceHandle {
         &self,
         packet_size: Option<u32>,
     ) -> Result<Box<dyn BlockStream>, GenicamError> {
-        // Best-effort refresh before stream setup. On macOS loopback the fake
-        // Aravis camera can sit discovered/idle for a while and then fail to
-        // deliver GVSP until the control channel is reopened. Immediate-start
-        // cases can still work with the existing control channel, so a
-        // refresh timeout falls back to the current connection instead of
-        // failing start.
-        if cfg!(target_os = "macos")
-            && let Err(e) = self.refresh_connection().await
-        {
-            warn!(
-                device_id = self.device_id,
-                error = %e,
-                "camera reconnect before acquisition failed; continuing with existing control connection"
-            );
-        }
         let iface = receive_iface(self.iface(), self.info.ip)?;
         let stream = self
             .camera
@@ -272,9 +270,19 @@ impl Discovery for GigeDiscovery {
         device_announce(&found.info)
     }
 
+    fn connection_matches(&self, device: &DeviceHandle, found: &GigeFound) -> bool {
+        same_endpoint(device.info(), device.iface(), found)
+    }
+
     async fn connect(&self, found: &GigeFound) -> Result<DeviceHandle, GenicamError> {
         DeviceHandle::connect(&found.info, found.iface.clone()).await
     }
+}
+
+/// A camera name or serial can change without replacing its socket; an
+/// address or resolved host interface cannot.
+fn same_endpoint(info: &gige::DeviceInfo, iface: Option<&Iface>, found: &GigeFound) -> bool {
+    info.ip == found.info.ip && iface == found.iface.as_ref()
 }
 
 /// Build the announce for a discovered camera from its Discovery ACK.
@@ -342,6 +350,41 @@ mod tests {
         assert_eq!(a.serial, "", "the device id must not stand in for a serial");
         assert_eq!(a.user_name, None);
         assert_eq!(a.name, "FakeGigE");
+    }
+
+    /// A MAC-derived id survives a FORCEIP. The old socket does not follow
+    /// that address, so discovery must replace the session despite its id.
+    #[test]
+    fn the_same_camera_at_another_address_needs_a_new_session() {
+        let old = discovered(Some("SN-1"), Some("Left"));
+        let mut found = GigeFound {
+            info: old.clone(),
+            iface: None,
+        };
+        assert!(same_endpoint(&old, None, &found));
+        found.info.user_name = Some("Renamed".into());
+        assert!(
+            same_endpoint(&old, None, &found),
+            "renaming keeps the endpoint"
+        );
+        found.info.ip = Ipv4Addr::new(192, 168, 1, 11);
+        assert_eq!(derive_device_id(&old), derive_device_id(&found.info));
+        assert!(
+            !same_endpoint(&old, None, &found),
+            "the old socket cannot follow FORCEIP"
+        );
+    }
+
+    #[test]
+    fn a_changed_host_interface_needs_a_new_session() {
+        let info = discovered(None, None);
+        let iface = Iface::from_ipv4(Ipv4Addr::LOCALHOST).expect("loopback");
+        let found = GigeFound {
+            info: info.clone(),
+            iface: Some(iface.clone()),
+        };
+        assert!(!same_endpoint(&info, None, &found));
+        assert!(same_endpoint(&info, Some(&iface), &found));
     }
 
     /// Backlog `SVC-06`. Without `--iface` the receive interface must come

@@ -15,6 +15,14 @@ or let scripts/gentl-harness.sh start the fake (HARVESTERS_PYTHON). The
 fake's Mono16 image is the byte ramp (i * 7 + block id) mod 256, which this
 script recomputes for every frame. Exit status 0 on success.
 
+Against a real camera, name its model as the producer lists it:
+
+    python scripts/gentl-harvesters.py target/gentl/viva_gentl.cti 100 --camera Manta_G-125B
+
+Its pixels are not known in advance, so each frame is checked for
+completeness, for the camera's Width, Height and PixelFormat, and for the
+bytes that geometry needs; nothing else is assumed of the camera.
+
 The book's "Use viva from other tools" page includes the anchored parts.
 """
 
@@ -31,8 +39,11 @@ def check(condition, message):
         raise SystemExit(f"FAIL: {message}")
 
 
-def check_modules(acquirer):
-    """The producer's module node maps and the camera's, through EMVA's GenApi."""
+def check_modules(acquirer, model=FAKE_MODEL):
+    """The producer's module node maps and the camera's, through EMVA's GenApi.
+
+    The camera's own node map is the fake's unless `model` names another.
+    """
     system = acquirer.system.node_map
     check(system.TLVendorName.value == "viva-genicam", "TLVendorName")
     check(system.TLType.value == "GigEVision", "TLType")
@@ -43,15 +54,19 @@ def check_modules(acquirer):
     print(f"interface: {interface.InterfaceID.value}")
     device = acquirer.device.node_map
     check(device.DeviceType.value == "GigEVision", "DeviceType")
-    check(device.DeviceModelName.value == FAKE_MODEL, "DeviceModelName")
+    check(device.DeviceModelName.value == model, f"DeviceModelName {device.DeviceModelName.value}")
     check(device.DeviceAccessStatus.value in ("OpenReadWrite", "OpenReadOnly"), "DeviceAccessStatus")
     stream = acquirer.data_streams[0].node_map
     check(stream.StreamBufferHandlingMode.value == "OldestFirst", "StreamBufferHandlingMode")
 
     # The camera's own node map, read through the remote port.
     remote = acquirer.remote_device.node_map
-    check(remote.PixelFormat.value == "Mono16", f"PixelFormat {remote.PixelFormat.value}")
-    print(f"camera: {remote.Width.value}x{remote.Height.value} Mono16, PayloadSize {remote.PayloadSize.value}")
+    if model == FAKE_MODEL:
+        check(remote.PixelFormat.value == "Mono16", f"PixelFormat {remote.PixelFormat.value}")
+    print(
+        f"camera: {remote.Width.value}x{remote.Height.value} {remote.PixelFormat.value}, "
+        f"PayloadSize {remote.PayloadSize.value}"
+    )
 
 
 def check_frame(image, frame_id, last):
@@ -62,6 +77,34 @@ def check_frame(image, frame_id, last):
     expected = ramp.astype(numpy.uint8).view("<u2").reshape(height, width)
     check(numpy.array_equal(image, expected), f"frame {frame_id}: pixels differ from the ramp")
     print(f"frame {frame_id}: {width}x{height} Mono16, pixels match")
+    return frame_id
+
+
+def check_real_frame(acquirer, buffer, last):
+    """A real camera's frame: complete, and the size and format it says.
+
+    Returns the block ID. Nothing is assumed of the pixels.
+    """
+    remote = acquirer.remote_device.node_map
+    width, height, pixel_format = remote.Width.value, remote.Height.value, remote.PixelFormat.value
+    module = buffer.module
+    frame_id = module.frame_id
+    check(module.is_complete(), f"frame {frame_id} is incomplete")
+    check(frame_id > last, f"frame {frame_id} after {last}")
+    component = buffer.payload.components[0]
+    check(component.data_format == pixel_format, f"frame {frame_id}: {component.data_format}, not {pixel_format}")
+    check(
+        (component.width, component.height) == (width, height),
+        f"frame {frame_id}: {component.width}x{component.height}, not {width}x{height}",
+    )
+    # Use the camera's advertised payload, not PFNC's effective bit depth:
+    # legacy 10Packed groups, padding and chunks need more than pixels' bits.
+    expected = remote.PayloadSize.value
+    check(
+        module.size_filled == expected,
+        f"frame {frame_id}: {module.size_filled} bytes, {width}x{height} {pixel_format} needs {expected}",
+    )
+    print(f"frame {frame_id}: {width}x{height} {pixel_format}, {module.size_filled} bytes, complete")
     return frame_id
 
 
@@ -89,17 +132,31 @@ def fetch_image(acquirer):
 
 
 def main() -> None:
-    cti = sys.argv[1]
-    frames = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    args = sys.argv[1:]
+    camera = None
+    if "--camera" in args:
+        at = args.index("--camera")
+        if at + 1 >= len(args):
+            raise SystemExit("usage: gentl-harvesters.py <cti> [frames] [--camera <model>]")
+        camera = args[at + 1]
+        del args[at : at + 2]
+    if not args:
+        raise SystemExit("usage: gentl-harvesters.py <cti> [frames] [--camera <model>]")
+    cti = args[0]
+    frames = int(args[1]) if len(args) > 1 else 10
 
-    harvester, acquirer = open_camera(cti, FAKE_MODEL)
+    harvester, acquirer = open_camera(cti, camera or FAKE_MODEL)
     try:
-        check_modules(acquirer)
+        check_modules(acquirer, camera or FAKE_MODEL)
         acquirer.start()
         last = 0
         for _ in range(frames):
-            image, frame_id = fetch_image(acquirer)
-            last = check_frame(image, frame_id, last)
+            if camera is None:
+                image, frame_id = fetch_image(acquirer)
+                last = check_frame(image, frame_id, last)
+            else:
+                with acquirer.fetch(timeout=3) as buffer:
+                    last = check_real_frame(acquirer, buffer, last)
         acquirer.stop()
     finally:
         acquirer.destroy()

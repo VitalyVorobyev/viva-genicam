@@ -7,7 +7,7 @@ User-facing documentation lives in the mdBook (`book/`); decision history in
 ## Goals & scope
 
 - **Pure-Rust GenICam stack**: GigE Vision and USB3 Vision implemented from the
-  published EMVA specifications, no C dependencies on the core path
+  published standards and interoperability evidence, no C dependencies on the core path
   (see [ADR-0011](adrs/adr0011-pure-rust-genicam-stack.md)).
 - **Industrial target**: machine-vision applications that need deterministic
   control, sustained streaming, and defensive handling of untrusted network
@@ -189,8 +189,11 @@ acquisition queryable reads. `run_discovery` serves each new camera, re-announce
 the known ones and publishes a lost one disconnected; `run_service` wraps it in
 a Zenoh session and CTRL+C. GigE Vision's `DeviceHandle` also owns
 reconnection with exponential backoff, which needs no keepalive coordination:
-the replacement camera brings its own, and the old one retires when the swap
-drops the camera that owned it. `viva-service-u3v` is a USB `Discovery` and a
+the replacement camera brings its own. Discovery retires and replaces the complete
+served handle when control is lost or the camera’s address or selected interface
+changes, refreshing XML and metadata together. An explicit refresh requires
+exclusive mutable access to the handle. The facade’s `reopen_gige` shares the
+MAC-based rediscovery and bounded connection retry behavior. `viva-service-u3v` is a USB `Discovery` and a
 `U3vDeviceHandle<T: UsbTransfer>`, so the same code runs against
 `FakeU3vTransport` (`--fake`) and `NusbTransfer`.
 

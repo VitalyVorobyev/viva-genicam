@@ -51,6 +51,6 @@ conversion runs per incoming frame.
 updating plot. Retaining the latest source costs one bounded frame; the remote
 path may copy its payload. Bayer PNG export represents demosaiced colour,
 whereas the inspector measures sensor samples. Remote padding requires a future
-versioned per-frame layout contract alongside ST-52, rather than inference from
+versioned per-frame layout contract (SR-26, alongside ST-52), rather than inference from
 payload size. Real camera validation remains a separate gate after the ongoing
 endurance run; pure synthetic captures do not establish hardware coverage.

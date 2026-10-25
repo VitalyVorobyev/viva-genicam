@@ -35,6 +35,7 @@ what was seen on the camera, with verbose logs. The 2026-10-25 run could not cap
 - A two-hour endurance run: 222,375 complete frames, one incomplete frame, no missed frames or delivery backpressure; resident memory stayed bounded and 15 files remained open. A separate ten-minute run delivered 18,531 complete frames without loss. These are measurements, not a loss-free eight-hour qualification.
 - On 2026-10-25, all 24 hardware tests passed again. The C GenTL consumer and Harvesters each acquired ten complete 1292 × 964 Mono8 frames; Python discovery, feature reads, command execution and three NumPy-backed image captures passed.
 - The service published 92 image messages in three seconds and resumed acquisition after an expired heartbeat and temporary IP change. A native Studio debug bundle discovered this camera but failed to claim control with `Broken pipe`; its cause remains unconfirmed. The eight-hour follow-up started on 2026-10-25 and is still pending.
+- The recovery and surface checks above are recorded in [#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218); its eight-hour endurance result is pending.
 - The hardware smoke suite, `crates/viva-genicam/tests/gige_hardware.rs`,
   passes on it (#216, #217).
 

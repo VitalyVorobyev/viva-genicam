@@ -12,8 +12,8 @@ release opens with what to read before upgrading.
 
 ### Added
 
-- **Reopening a GigE camera.** `reopen_gige` rediscovers a camera by MAC, opens a fresh session and XML, and optionally restores a saved configuration with per-feature results. Cancelling an open releases any control already claimed.
-- **Tested cameras.** The user guide records hardware runs and their evidence, including real-camera GenTL checks through Harvesters and the C consumer.
+- **Reopening a GigE camera.** `reopen_gige` rediscovers a camera by MAC, opens a fresh session and XML, and optionally restores a saved configuration with per-feature results. Cancelling an open releases any control already claimed ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
+- **Tested cameras.** The user guide records hardware runs and their evidence, including real-camera GenTL checks through Harvesters and the C consumer ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 
 - **Exclusive access.** `Access::Exclusive` opens a GigE Vision camera with exclusive access (CCP `0x1`): while it is held, other applications cannot even read the camera. `viva-camctl` takes `--access control|exclusive|monitor` on every command that opens a camera, and Python `connect_gige(..., exclusive=True)`. On USB3 Vision, where one application opens a camera at a time, exclusive is what every open already is, and monitor is refused. An Allied Vision Manta G-125B granted it (CCP read `0x1`) and answered another application's READREG and READMEM with `ACCESS_DENIED` ([#216](https://github.com/VitalyVorobyev/viva-genicam/pull/216)).
 - **Watching another application's stream from the command line.** `viva-camctl stream --monitor` and `bench --monitor` open the camera read-only and receive the multicast stream another application set up, starting and stopping nothing. On the Manta G-125B the monitor received 123 frames while the controlling `stream --mode multicast` received all of its 308 complete ([#216](https://github.com/VitalyVorobyev/viva-genicam/pull/216)).
@@ -22,8 +22,8 @@ release opens with what to read before upgrading.
 
 ### Changed
 
-- **Distribution notices and licensing boundaries.** Release archives, Python distributions, GenTL sidecars and Studio bundles carry target-specific dependency notices. Packaging rejects private bench material and placeholder notices. The licensing review separates MIT code rights from unresolved A3 and EMVA questions.
-- **Typed Studio commands.** UI command names, arguments and results now come from registered Rust signatures, so command drift fails type checks.
+- **Distribution notices and licensing boundaries.** Release archives, Python distributions, GenTL sidecars and Studio bundles carry target-specific dependency notices. Packaging rejects private bench material and placeholder notices. The licensing review separates MIT code rights from unresolved A3 and EMVA questions ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
+- **Typed Studio commands.** UI command names, arguments and results now come from registered Rust signatures, so command drift fails type checks ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 
 - **A predicate that cannot be read is not satisfied.** A `pIsImplemented`, `pIsAvailable` or `pIsLocked` whose register the camera refuses made `NodeMap::feature_state` treat the feature as implemented, available and unlocked; it now reports it not implemented, not available, or locked, as the GenICam Standard defines a predicate by the value it reads. The Manta G-125B gates its `Lens*` features on an inquiry register at `0x23000` that it answers with `INVALID_ADDRESS`; they are now not implemented, and the warning is logged once per feature instead of three times. `viva-camctl dump` names on stderr each node it could not read instead of leaving it out silently ([#216](https://github.com/VitalyVorobyev/viva-genicam/pull/216)).
 - **A takeover is seen on a camera that does not name its controller.** After a write refused with `ACCESS_DENIED`, a camera without GVCP Capability's CCP-application bit is asked by claiming control again (`GigeDevice::holds_control`): the Manta G-125B, which reads CCP as `0x2` to every application, accepted the claim from the holder and refused it to another. A session stopped past the heartbeat timeout while another took control now reports `ControlState::Lost` at its next write; before, it stayed `Held` ([#216](https://github.com/VitalyVorobyev/viva-genicam/pull/216)).
@@ -33,9 +33,9 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
-- **GigE session recovery.** The service replaces the complete served handle after control loss or address/interface changes, refreshing XML and connection metadata together.
-- **Stale control routes after FORCEIP.** An address-unavailable send reconnects the existing UDP socket before retrying, preserving its controller port and transaction ID; confirmation of the original link-local hardware failure remains open.
-- **Studio test teardown and fallback access.** Fake-camera tests await socket shutdown before releasing their port lock; fallback command mapping honors imposed access limits.
+- **GigE session recovery.** The service replaces the complete served handle after control loss or address/interface changes, refreshing XML and connection metadata together ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
+- **Stale control routes after FORCEIP.** An address-unavailable send reconnects the existing UDP socket before retrying, preserving its controller port and transaction ID; confirmation of the original link-local hardware failure remains open ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
+- **Studio test teardown and fallback access.** Fake-camera tests await socket shutdown before releasing their port lock; fallback command mapping honors imposed access limits ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 
 - `viva-camctl list --allow-broadcast-ack` and `viva-camctl report` find a camera configured for another subnet on macOS: its broadcast acknowledgement reached the host but not the discovery socket, which was bound to the interface's own address. With broadcast acknowledgements allowed, discovery now binds the unspecified address and keeps the socket on its interface. Found on an Allied Vision Manta G-125B ([#215](https://github.com/VitalyVorobyev/viva-genicam/pull/215)).
 - **`viva-camctl` logs go to stderr.** They went to stdout, so `viva-camctl dump --ip <CAM> > values.txt` wrote twelve `WARN` lines from the Manta G-125B into the file; stdout now carries only the data ([#216](https://github.com/VitalyVorobyev/viva-genicam/pull/216)).

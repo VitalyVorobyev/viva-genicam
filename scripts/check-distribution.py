@@ -2,6 +2,7 @@
 """Inspect prepared zip/wheel/tar archives without extracting them."""
 import argparse
 from pathlib import Path, PurePosixPath
+import stat
 import sys
 import tarfile
 import zipfile
@@ -40,9 +41,13 @@ def check_archive(path):
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as archive:
             check_names(archive.namelist())
-            for name in archive.namelist():
-                if is_notice(name):
-                    check_notice(archive.read(name))
+            notices = [member for member in archive.infolist()
+                       if not member.is_dir() and is_notice(member.filename)
+                       and stat.S_IFMT(member.external_attr >> 16) in (0, stat.S_IFREG)]
+            if not notices:
+                raise ValueError("Archive has no regular dependency notice file")
+            for member in notices:
+                check_notice(archive.read(member))
     else:
         with tarfile.open(path) as archive:
             check_names(archive.getnames())

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import stat
 import tempfile
 import tarfile
 import unittest
@@ -55,6 +56,17 @@ class DistributionTests(unittest.TestCase):
                 member = tarfile.TarInfo("THIRD_PARTY_NOTICES.txt")
                 member.type = tarfile.DIRTYPE
                 archive.addfile(member)
+            with self.assertRaisesRegex(ValueError, "no regular"):
+                distribution.check_archive(path)
+
+    def test_zip_symlink_cannot_substitute_for_notice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "artifact.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                member = zipfile.ZipInfo("THIRD_PARTY_NOTICES.txt")
+                member.create_system = 3
+                member.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(member, "Generated from locked, target-filtered dependency metadata")
             with self.assertRaisesRegex(ValueError, "no regular"):
                 distribution.check_archive(path)
     def test_valid_wheel(self):

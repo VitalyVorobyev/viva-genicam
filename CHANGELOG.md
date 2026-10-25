@@ -22,6 +22,8 @@ release opens with what to read before upgrading.
 
 ### Changed
 
+- **macOS local-network permission.** Studio bundles now declare why camera and service access needs the local network. The troubleshooting guide distinguishes app permission from CLI access; the observed debug-bundle `Broken pipe` failure still needs a controlled hardware reproduction ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
+
 - **Distribution notices and licensing boundaries.** Release archives, Python distributions, GenTL sidecars and Studio bundles carry target-specific dependency notices. Packaging rejects private bench material and placeholder notices. The licensing review separates MIT code rights from unresolved A3 and EMVA questions ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 - **Typed Studio commands.** UI command names, arguments and results now come from registered Rust signatures, so command drift fails type checks ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 

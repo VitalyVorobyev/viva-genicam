@@ -42,6 +42,7 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 
 Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); a change to a type it consumes updates it in the same PR.
 
+- **Found on the bench**: ST-59, the native macOS debug-bundle connection failure.
 - **Viewer parity**: ST-39, ST-51, ST-52, ST-56, ST-49.
 - **Distribution**: ST-07.
 - **Later**: ST-50, ST-53, ST-54, ST-55, ST-57, ST-58, ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.

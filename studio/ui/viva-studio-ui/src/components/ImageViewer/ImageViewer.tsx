@@ -10,7 +10,8 @@ import { ViewerStatusBar } from "./ViewerStatusBar";
 import { ControlSidebar } from "./ControlSidebar";
 import { AnalysisPanel } from "./AnalysisPanel";
 import { useViewerLayout } from "./useViewerLayout";
-import { snapshotImageData, encodeImageDataToPng, suggestFilename } from "./snapshotUtils";
+import { suggestFilename } from "./snapshotUtils";
+import { captureNativeFrame, type NativeFrame } from "./nativeFrame";
 import { saveSnapshot } from "./snapshotSave";
 import type { ImageRect } from "./roiUtils";
 import type { LineSegment } from "./lineProfileUtils";
@@ -66,6 +67,11 @@ export function ImageViewer({
     height: number;
   } | null>(null);
   const snapshotRef = useRef<Uint8Array | null>(null);
+  const [nativeFrame, setNativeFrame] = useState<NativeFrame | null>(null);
+  const [renderedNativeFrame, setRenderedNativeFrame] = useState<NativeFrame | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
+  const captureAbort = useRef<AbortController | null>(null);
+  const [captureBusy, setCaptureBusy] = useState(false);
   const { sidebarCollapsed, toggleSidebar } = useViewerLayout();
   const resetZoomRef = useRef<(() => void) | null>(null);
   const zoomTo100Ref = useRef<(() => void) | null>(null);
@@ -88,9 +94,13 @@ export function ImageViewer({
   if (streamerInfo !== prevStreamerInfo) {
     setPrevStreamerInfo(streamerInfo);
     if (!streamerInfo) setWsStreamInfo(null);
+    setNativeFrame(null);
+    setRenderedNativeFrame(null);
+    setCaptureError(null);
   }
   useEffect(() => {
     if (!streamerInfo) snapshotRef.current = null;
+    return () => { captureAbort.current?.abort(); };
   }, [streamerInfo]);
 
   // Turning a tool off clears what it drew.
@@ -127,7 +137,12 @@ export function ImageViewer({
     });
   }, []);
 
-  const pixelFormat = imageMeta?.pixel_format ?? wsStreamInfo?.pixel_format ?? "Mono8";
+  const pixelFormat = nativeFrame?.pixelFormat ?? imageMeta?.pixel_format ?? wsStreamInfo?.pixel_format ?? "Mono8";
+  const readyNativeFrame = renderedNativeFrame === nativeFrame ? nativeFrame : null;
+  const handleNativePreviewReady = useCallback((frame: NativeFrame | null, error?: string) => {
+    setRenderedNativeFrame(frame);
+    if (error) setCaptureError(`Frozen preview could not be drawn: ${error}`);
+  }, []);
 
   // What arrived from the camera, and apart from it what the viewer drew.
   const statistics = {
@@ -135,32 +150,41 @@ export function ImageViewer({
     fps: receivedFps,
     stats,
     transport,
-    displayed: { frames: frameCount, fps },
+    displayed: { frames: frameCount, fps: nativeFrame ? 0 : fps },
   };
 
   const handleSnapshot = useCallback(async () => {
-    if (isSnapshotBusy) return;
-    const bytes = snapshotRef.current;
-    if (!bytes) return;
-
-    const imageData = snapshotImageData(bytes);
-    if (!imageData) {
-      // Not a BMP the decoder understands — nothing to save.
-      return;
-    }
-
+    if (isSnapshotBusy || captureBusy || !streamerInfo) return;
     setIsSnapshotBusy(true);
+    const controller = new AbortController();
+    captureAbort.current = controller;
     try {
-      const blob = await encodeImageDataToPng(imageData);
-      if (!blob) return;
-      const filename = suggestFilename(pixelFormat, imageData.width, imageData.height);
+      const frame = nativeFrame ?? await captureNativeFrame(streamerInfo.ws_url, controller.signal);
+      if (controller.signal.aborted) return;
+      const blob = new Blob([frame.png], { type: "image/png" });
+      const filename = suggestFilename(frame.pixelFormat, frame.width, frame.height);
       await saveSnapshot(blob, filename);
     } catch (err) {
-      console.error("Snapshot save failed:", err);
+      if (!controller.signal.aborted) setCaptureError(`Snapshot failed: ${String(err)}`);
     } finally {
       setIsSnapshotBusy(false);
     }
-  }, [isSnapshotBusy, pixelFormat]);
+  }, [isSnapshotBusy, captureBusy, nativeFrame, streamerInfo]);
+
+  const freeze = async () => {
+    if (nativeFrame) { setNativeFrame(null); setRenderedNativeFrame(null); setPixelHover(null); return; }
+    if (captureBusy || isSnapshotBusy || !streamerInfo) return;
+    const controller = new AbortController();
+    captureAbort.current = controller;
+    setCaptureBusy(true);
+    setCaptureError(null);
+    try {
+      const frame = await captureNativeFrame(streamerInfo.ws_url, controller.signal);
+      if (!controller.signal.aborted) { setRenderedNativeFrame(null); setNativeFrame(frame); setPixelHover(null); }
+    } catch (err) {
+      if (!controller.signal.aborted) setCaptureError(`Native capture failed: ${String(err)}`);
+    } finally { setCaptureBusy(false); }
+  };
 
   const handleApplyRoi = useCallback(async () => {
     if (!roiRect) return;
@@ -211,7 +235,10 @@ export function ImageViewer({
           deviceName={deviceName}
           onResetZoom={handleResetZoom}
           onZoomTo100={handleZoomTo100}
-          onSnapshot={isSnapshotBusy ? undefined : handleSnapshot}
+          onSnapshot={isSnapshotBusy || captureBusy ? undefined : handleSnapshot}
+          frozen={nativeFrame !== null}
+          onToggleFreeze={freeze}
+          freezeBusy={captureBusy || isSnapshotBusy}
           showHistogram={showHistogram}
           onToggleHistogram={() => setShowHistogram((v) => !v)}
           showRoiTool={showRoiTool}
@@ -227,8 +254,18 @@ export function ImageViewer({
             setRoiTool(false);
           }}
         />
+        {captureError && <div role="alert">{captureError}</div>}
+        <div className="iv-statusbar">
+          {nativeFrame
+            ? readyNativeFrame
+              ? `Frozen · ${nativeFrame.bits}-bit ${nativeFrame.mosaic ? "raw Bayer" : nativeFrame.channels === 1 ? "mono" : "RGB"} · Resume returns to live preview`
+              : captureError ? "Frozen preview unavailable · Resume to try again" : "Preparing frozen preview…"
+            : "Live preview · Freeze for native pixel values, histogram and line profile"}
+        </div>
         <ViewerCanvas
           active={isActive}
+          nativeFrame={nativeFrame}
+          onNativePreviewReady={handleNativePreviewReady}
           wsUrl={streamerInfo.ws_url}
           onFrameStats={setFps}
           onFrame={handleFrame}
@@ -250,11 +287,13 @@ export function ImageViewer({
           showLineTool={showLineTool}
           lineSegment={lineSegment}
           frameRef={snapshotRef}
+          nativeFrame={readyNativeFrame}
+          pending={nativeFrame !== null && readyNativeFrame === null}
         />
         <ViewerStatusBar
-          fps={fps}
-          width={imageMeta?.width ?? wsStreamInfo?.width ?? streamerInfo.width}
-          height={imageMeta?.height ?? wsStreamInfo?.height ?? streamerInfo.height}
+          fps={nativeFrame ? 0 : fps}
+          width={nativeFrame?.width ?? imageMeta?.width ?? wsStreamInfo?.width ?? streamerInfo.width}
+          height={nativeFrame?.height ?? imageMeta?.height ?? wsStreamInfo?.height ?? streamerInfo.height}
           pixelFormat={pixelFormat}
           pixelInfo={
             pixelHover

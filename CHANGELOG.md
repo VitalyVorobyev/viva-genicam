@@ -12,6 +12,8 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Native camera values in Studio.** Freeze one frame to inspect its original sample values, histogram and line profile, then save a PNG that preserves its bit depth. Bayer inspection uses the sensor mosaic; snapshots contain demosaiced colour. Remote capture requires unambiguous tight rows ([#220](https://github.com/VitalyVorobyev/viva-genicam/pull/220)).
+
 - **Reopening a GigE camera.** `reopen_gige` rediscovers a camera by MAC, opens a fresh session and XML, and optionally restores a saved configuration with per-feature results. Cancelling an open releases any control already claimed ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 - **Tested cameras.** The user guide records hardware runs and their evidence, including real-camera GenTL checks through Harvesters and the C consumer ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 

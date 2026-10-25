@@ -34,11 +34,21 @@ pub async fn run(
     source: ZenohSourceConfig,
     shared_meta: Arc<RwLock<ImageMeta>>,
     frame_tx: watch::Sender<Bytes>,
+    native: crate::native::NativeCapture,
     info_tx: watch::Sender<crate::ws::StreamInfo>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), StreamerError> {
     let session = Arc::new(zenoh::open(config).await?);
-    run_inner(session, source, shared_meta, frame_tx, info_tx, shutdown).await
+    run_inner(
+        session,
+        source,
+        shared_meta,
+        frame_tx,
+        native,
+        info_tx,
+        shutdown,
+    )
+    .await
 }
 
 /// Run the Zenoh source with a pre-opened session (for embedding).
@@ -47,10 +57,20 @@ pub async fn run_with_session(
     source: ZenohSourceConfig,
     shared_meta: Arc<RwLock<ImageMeta>>,
     frame_tx: watch::Sender<Bytes>,
+    native: crate::native::NativeCapture,
     info_tx: watch::Sender<crate::ws::StreamInfo>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), StreamerError> {
-    run_inner(session, source, shared_meta, frame_tx, info_tx, shutdown).await
+    run_inner(
+        session,
+        source,
+        shared_meta,
+        frame_tx,
+        native,
+        info_tx,
+        shutdown,
+    )
+    .await
 }
 
 async fn run_inner(
@@ -58,6 +78,7 @@ async fn run_inner(
     source: ZenohSourceConfig,
     shared_meta: Arc<RwLock<ImageMeta>>,
     frame_tx: watch::Sender<Bytes>,
+    native: crate::native::NativeCapture,
     info_tx: watch::Sender<crate::ws::StreamInfo>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), StreamerError> {
@@ -183,6 +204,7 @@ async fn run_inner(
                 };
 
                 let bmp_len = frame.len();
+                native.replace_remote(format, header.width, header.height, pixel_data, frame.clone());
                 // Stored even with no viewer: the next one to connect is sent it.
                 frame_tx.send_replace(frame);
                 pacer.sent(Instant::now());
@@ -227,6 +249,7 @@ mod tests {
             source,
             Arc::new(RwLock::new(meta)),
             frame_tx.clone(),
+            Default::default(),
             info_tx,
             shutdown_rx,
         ));

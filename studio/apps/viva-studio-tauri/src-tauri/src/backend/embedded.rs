@@ -443,6 +443,7 @@ impl DeviceBackend for EmbeddedBackend {
 
         // Create WS broadcast channels.
         let (frame_tx, _) = watch::channel(Bytes::new());
+        let native = viva_streamer::native::NativeCapture::default();
         let info_tx = watch::channel(camera_stream_info(width, height, pixel_format.clone())).0;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -461,6 +462,7 @@ impl DeviceBackend for EmbeddedBackend {
         let frame_reader_handle = tauri::async_runtime::spawn(run_frame_reader(
             frames,
             frame_tx.clone(),
+            native.clone(),
             info_tx.clone(),
             shutdown_rx.clone(),
             StreamInfoTracker::new(width, height, pixel_format),
@@ -469,7 +471,11 @@ impl DeviceBackend for EmbeddedBackend {
 
         // Spawn WS server task.
         let ws_handle = {
-            let state = viva_streamer::ws::AppState { frame_tx, info_tx };
+            let state = viva_streamer::ws::AppState {
+                frame_tx,
+                info_tx,
+                native,
+            };
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = viva_streamer::ws::run_server_with_listener(
                     listener,
@@ -668,6 +674,7 @@ fn gige_of(
 async fn run_frame_reader(
     mut frame_stream: Frames,
     frame_tx: watch::Sender<Bytes>,
+    native: viva_streamer::native::NativeCapture,
     info_tx: watch::Sender<viva_streamer::ws::StreamInfo>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut info: StreamInfoTracker,
@@ -746,6 +753,14 @@ async fn run_frame_reader(
             frame.payload.as_ref(),
         ) {
             Ok(bmp) => {
+                native.replace(viva_streamer::native::SourceFrame {
+                    format: frame.pixel_format,
+                    width: frame.width,
+                    height: frame.height,
+                    row_stride: frame.row_stride(),
+                    pixels: frame.payload.clone(),
+                    bmp: bmp.clone(),
+                });
                 // Stored even with no viewer: the next one to connect is sent it.
                 frame_tx.send_replace(bmp);
                 pacer.sent(Instant::now());

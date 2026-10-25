@@ -6,6 +6,8 @@ import {
   Scan,
   Maximize,
   Camera,
+  Pause,
+  Play,
 } from "lucide-react";
 
 const ICON_SIZE = 15;
@@ -24,6 +26,9 @@ interface ViewerToolbarProps {
   onApplyRoi?: () => void;
   showLineTool?: boolean;
   onToggleLineTool?: () => void;
+  frozen?: boolean;
+  onToggleFreeze?: () => void;
+  freezeBusy?: boolean;
 }
 
 export function ViewerToolbar({
@@ -40,6 +45,9 @@ export function ViewerToolbar({
   onApplyRoi,
   showLineTool,
   onToggleLineTool,
+  frozen,
+  onToggleFreeze,
+  freezeBusy,
 }: ViewerToolbarProps) {
   const titleClass = deviceName
     ? "iv-toolbar__title iv-toolbar__title--connected"
@@ -66,6 +74,14 @@ export function ViewerToolbar({
       )}
 
       {/* ── Analysis tools ── */}
+      {onToggleFreeze && (
+        <button type="button" className={`iv-toolbar__btn${frozen ? " iv-toolbar__btn--active" : ""}`}
+          onClick={onToggleFreeze} aria-pressed={frozen} disabled={freezeBusy}
+          title={frozen ? "Resume live preview" : "Freeze for native pixel analysis"}
+          aria-label={frozen ? "Resume live preview" : "Freeze for native pixel analysis"}>
+          {frozen ? <Play size={ICON_SIZE} /> : <Pause size={ICON_SIZE} />}
+        </button>
+      )}
       {onToggleLineTool !== undefined && (
         <button
           type="button"

@@ -197,6 +197,11 @@ MAC-based rediscovery and bounded connection retry behavior. `viva-service-u3v` 
 `U3vDeviceHandle<T: UsbTransfer>`, so the same code runs against
 `FakeU3vTransport` (`--fake`) and `NusbTransfer`.
 
+Studio’s live BMP remains a preview. Native pixel inspection and export use a
+bounded immutable capture from a loopback-only endpoint: the preview, canonical
+samples and PNG belong to the same source. Analysis is explicitly frozen; PFNC
+decoding stays in Rust ([ADR-0034](adrs/adr0034-native-frame-analysis.md)).
+
 ## Data flows
 
 **Control path** — `camera.set("ExposureTime", …)` → `NodeMap` resolves the

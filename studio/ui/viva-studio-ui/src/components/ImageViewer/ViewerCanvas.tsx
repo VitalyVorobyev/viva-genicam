@@ -1,4 +1,4 @@
-import React, { useEffect, useEffectEvent, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useEffectEvent, useRef, useState } from "react";
 import {
   canvasLayout,
   imageRendering,
@@ -11,8 +11,9 @@ import type { ImageSpan, Point, ViewTransform } from "./viewerUtils";
 import { useZoomPan } from "./useZoomPan";
 import type { ZoomPanState } from "./useZoomPan";
 import { buildTransform } from "./zoomPanUtils";
-import { samplePixel, formatPixelSample } from "./pixelInspectorUtils";
+import { formatPixelSample } from "./pixelInspectorUtils";
 import type { PixelHoverInfo } from "./pixelInspectorUtils";
+import { sampleNativePixel, type NativeFrame } from "./nativeFrame";
 import { CrosshairOverlay } from "./CrosshairOverlay";
 import { RoiOverlay } from "./RoiOverlay";
 import { buildImageRect, clampRoiToImage } from "./roiUtils";
@@ -48,6 +49,8 @@ interface ViewerCanvasProps {
   onLineSelect?: (seg: LineSegment | null) => void;
   /** False while another tab is shown: frames are kept but not drawn. */
   active?: boolean;
+  nativeFrame?: NativeFrame | null;
+  onNativePreviewReady?: (frame: NativeFrame | null, error?: string) => void;
 }
 
 export function ViewerCanvas({
@@ -55,7 +58,6 @@ export function ViewerCanvas({
   onFrameStats,
   onFrame,
   onZoomPanChange,
-  pixelFormat,
   onPixelHover,
   resetZoomRef,
   isStreaming,
@@ -67,6 +69,8 @@ export function ViewerCanvas({
   lineMode,
   onLineSelect,
   active = true,
+  nativeFrame = null,
+  onNativePreviewReady,
 }: ViewerCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -76,6 +80,20 @@ export function ViewerCanvas({
   const [hasRenderedFrame, setHasRenderedFrame] = useState(false);
 
   const isActive = useEffectEvent(() => active);
+  const frozen = useEffectEvent(() => nativeFrame !== null);
+  // The captured samples become inspectable only after their matching BMP
+  // has actually painted; decoding it is asynchronous.
+  const nativeHover = useRef<NativeFrame | null>(null);
+  useLayoutEffect(() => {
+    nativeHover.current = null;
+    // While the captured BMP decodes, do not leave an older live image under
+    // its coordinates or analysis controls.
+    if (nativeFrame) {
+      const canvas = canvasRef.current;
+      if (canvas) canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }, [nativeFrame]);
+  const emitNativeReady = useEffectEvent((frame: NativeFrame | null, error?: string) => onNativePreviewReady?.(frame, error));
   const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
   const [wrapMouse, setWrapMouse] = useState<{ x: number; y: number } | null>(
@@ -84,6 +102,42 @@ export function ViewerCanvas({
 
   // The ROI and line overlays are kept in image pixels, not wrap pixels, and
   // drawn through the current view: a zoom or a pan moves them with the image.
+
+  const drawPreview = useEffectEvent(async (bytes: Uint8Array<ArrayBuffer>, stillCurrent: () => boolean) => {
+    const bitmap = await createImageBitmap(new Blob([bytes]));
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!stillCurrent() || !canvas || !wrap) { bitmap.close(); return false; }
+    const layout = canvasLayout(bitmap.width, bitmap.height, wrap.clientWidth, wrap.clientHeight);
+    if (canvas.width !== layout.backing.width) canvas.width = layout.backing.width;
+    if (canvas.height !== layout.backing.height) canvas.height = layout.backing.height;
+    canvas.style.width = `${layout.css.width}px`;
+    canvas.style.height = `${layout.css.height}px`;
+    canvas.style.left = "50%";
+    canvas.style.top = "50%";
+    canvas.style.transformOrigin = "center center";
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(bitmap, 0, 0);
+    const width = bitmap.width, height = bitmap.height;
+    bitmap.close();
+    setHasRenderedFrame(true);
+    setImgSize(prev => prev.w === width && prev.h === height ? prev : { w: width, h: height });
+    return true;
+  });
+
+  useEffect(() => {
+    if (!nativeFrame) return;
+    let disposed = false;
+    void drawPreview(nativeFrame.bmp, () => !disposed).then((drawn) => {
+      if (drawn && !disposed) {
+        nativeHover.current = nativeFrame;
+        emitNativeReady(nativeFrame);
+      }
+    }).catch((error: unknown) => {
+      if (!disposed) emitNativeReady(null, String(error));
+    });
+    return () => { disposed = true; };
+  }, [nativeFrame]);
 
   // ── ROI drag state ───────────────────────────────────────────────────────────
   const roiDragRef = useRef<{ active: boolean; start: Point }>({
@@ -268,47 +322,10 @@ export function ViewerCanvas({
       // decoding and drawing it would be wasted.
       if (!isActive()) return;
 
-      const blob = new Blob([event.data]);
-      createImageBitmap(blob)
-        .then((bitmap) => {
-          const canvas = canvasRef.current;
-          const wrap = wrapRef.current;
-          if (disposed || !canvas || !wrap) {
-            bitmap.close();
-            return;
-          }
-
-          const newImgW = bitmap.width;
-          const newImgH = bitmap.height;
-
-          // Every camera pixel in the backing store, shown at the fit size.
-          // Resizing the backing store clears it, so only on a change.
-          const layout = canvasLayout(newImgW, newImgH, wrap.clientWidth, wrap.clientHeight);
-          if (canvas.width !== layout.backing.width) canvas.width = layout.backing.width;
-          if (canvas.height !== layout.backing.height) canvas.height = layout.backing.height;
-          canvas.style.width = `${layout.css.width}px`;
-          canvas.style.height = `${layout.css.height}px`;
-
-          // Centre the canvas using CSS; transform is managed by zoom/pan effect
-          canvas.style.left = "50%";
-          canvas.style.top = "50%";
-          canvas.style.transformOrigin = "center center";
-
-          const ctx = canvas.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(bitmap, 0, 0);
-          }
-          bitmap.close();
-          setHasRenderedFrame(true);
-
-          // Update imgSize state only when dimensions actually change
-          setImgSize((prev) => {
-            if (prev.w !== newImgW || prev.h !== newImgH) {
-              return { w: newImgW, h: newImgH };
-            }
-            return prev;
-          });
-
+      if (frozen()) return;
+      drawPreview(new Uint8Array(event.data), () => !disposed && !frozen())
+        .then((drawn) => {
+          if (!drawn) return;
           // Rolling 1-second FPS window
           const now = performance.now();
           frameTimes.push(now);
@@ -370,13 +387,9 @@ export function ViewerCanvas({
         return;
       }
 
-      const frame = lastFrameRef.current;
-      const fmt = pixelFormat ?? "Mono8";
-      const sample =
-        frame
-          ? samplePixel(frame, coords.x, coords.y, imgSize.w, imgSize.h, fmt)
-          : null;
-      const formatted = sample ? formatPixelSample(sample) : "";
+      const analysis = nativeHover.current;
+      const sample = analysis ? sampleNativePixel(analysis, coords.x, coords.y) : null;
+      const formatted = sample ? `${analysis?.mosaic ? "Raw " : ""}${formatPixelSample(sample)}` : "Freeze to inspect native values";
       onPixelHover({ coords, sample, formatted });
     });
   };

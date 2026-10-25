@@ -173,7 +173,7 @@ export function sampleLineProfile(
 /**
  * Render a line intensity profile onto a 2D canvas context as a polyline.
  *
- * Values are normalised from 0–255 to canvas height. When the profile has
+ * Values are normalised from 0–maximum to canvas height. When the profile has
  * fewer than 2 points the canvas is cleared but nothing is drawn.
  *
  * - Mono: single white/gray polyline.
@@ -189,6 +189,7 @@ export function renderLineProfile(
   data: ProfileData,
   w: number,
   h: number,
+  maximum = 255,
 ): void {
   ctx.clearRect(0, 0, w, h);
   if (data.length < 2) return;
@@ -201,7 +202,7 @@ export function renderLineProfile(
     ctx.beginPath();
     for (let i = 0; i < values.length; i++) {
       const px = i * xStep;
-      const py = h - (values[i]! / 255) * h;
+      const py = h - (values[i]! / maximum) * h;
       if (i === 0) {
         ctx.moveTo(px, py);
       } else {

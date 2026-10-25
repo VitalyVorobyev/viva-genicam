@@ -16,6 +16,10 @@
 > **Disclaimer** -- Independent open-source Rust implementation of GenICam-related standards.
 > Not affiliated with, endorsed by, or the reference implementation of EMVA GenICam.
 > GenICam is a trademark of EMVA.
+> GigE Vision and USB3 Vision are trademarks of A3 (Association for Advancing Automation).
+> No A3 registration or certification is claimed. MIT covers the project's code;
+> standards-related rights and distribution questions are recorded in the
+> [licensing and provenance review](docs/legal-review.md).
 
 ---
 

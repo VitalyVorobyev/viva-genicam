@@ -20,9 +20,10 @@ never required for development or CI.
 
 Reasons:
 
-- **Licensing freedom.** LGPL complicates static linking (PyPI wheels,
-  single-binary CLI distribution) and is a non-starter for
-  `wasm32-unknown-unknown`, where dynamic linking does not exist.
+- **Dependency licensing.** Avoiding an LGPL implementation removes its
+  linking and redistribution obligations from the core path, including static
+  binaries and wasm. This does not resolve third-party rights in standards,
+  specifications or trademarks; see the [licensing review](../legal-review.md).
 - **Memory safety on untrusted input.** GVCP/GVSP packets and camera XML
   arrive from the network; parsing them in safe Rust removes an entire bug
   class where a hostile or broken device corrupts host memory.
@@ -37,8 +38,18 @@ Reasons:
 **Positive:** MIT-licensed core, static linking and wasm targets unblocked,
 safe parsers on the network boundary, one language across the stack.
 
+**Licensing clarification (2026-10-25):** independent implementation avoids
+inheriting a copied implementation's license; it does not establish unrestricted
+rights to standards, trademarks, or third-party intellectual property. MIT
+covers our code. See the [licensing and provenance review](../legal-review.md)
+for unresolved A3 distribution questions and separate dependency obligations.
+
 **Negative:** We must earn spec conformance ourselves. The mitigation is the
 fake-camera-first strategy plus a real-hardware feedback loop (ADR-0013) —
 and the two 2026 incidents (SCPS, READMEM alignment) show that loop is not
 optional. Conformance testing against aravis remains a useful cross-check
 precisely because it is an independent implementation.
+
+**2026-10-25 clarification:** this decision chooses an implementation and
+dependency architecture. It does not establish a clean-room history, A3
+permission, patent clearance, or permission to redistribute specification text.

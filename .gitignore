@@ -60,3 +60,9 @@ block_*.evt21
 
 # `viva-camctl report` default output
 viva-report.txt
+
+# Private bench evidence and generated distribution notices.
+.local-evidence/
+*.pcap
+*.pcapng
+crates/viva-pygenicam/python/viva_genicam/THIRD_PARTY_NOTICES.txt

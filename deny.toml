@@ -45,9 +45,8 @@ allow = [
     "Unlicense",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-    # zenoh and friends are "EPL-2.0 OR Apache-2.0"; we take the Apache-2.0
-    # branch, but cargo-deny needs EPL-2.0 allowed for the expression to pass.
-    "EPL-2.0",
+    # zenoh and friends offer "EPL-2.0 OR Apache-2.0"; select Apache-2.0.
+    # The OR expression does not require permitting EPL for unrelated crates.
 ]
 exceptions = [
     # File-level weak copyleft, pulled in via zenoh-util -> shellexpand ->

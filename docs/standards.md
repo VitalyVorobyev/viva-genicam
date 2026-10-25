@@ -1,7 +1,9 @@
 # GenICam standards and the crates that implement them
 
-Which EMVA standard each crate implements, and where the sources come from for
-the one that is not freely available. What the standards are is in the user
+Which standard each crate implements, and where its sources come from.
+EMVA administers the GenICam family; A3 administers GigE Vision (GVCP/GVSP) and
+USB3 Vision. Free document access, implementation rights, and certification are
+separate questions: see the [licensing review](legal-review.md). What the standards are is in the user
 guide's [primer](https://vitalyvorobyev.github.io/viva-genicam/primer.html);
 how the crates layer, in [design.md](design.md).
 

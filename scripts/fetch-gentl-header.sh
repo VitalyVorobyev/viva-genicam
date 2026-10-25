@@ -3,9 +3,9 @@
 # Fetch the EMVA's GenTL.h and GenApi 1.1 schema for the GenTL harnesses.
 #
 # Neither is committed: GenTL.h is published "under the license of the EMVA
-# GenICam Standard Group", whose terms allow redistributing it only
-# unmodified, and say nothing that covers a copy in this repository
-# (ADR-0031). Both come from the EMVA's GenICam package, checked against the
+# GenICam Standard Group". These are test-consumer inputs, not MIT project
+# sources or distribution assets; their original terms still apply (see
+# docs/legal-review.md and ADR-0031). Both come from the EMVA package, checked against the
 # SHA-256 the EMVA publishes on its download page.
 #
 # Usage:

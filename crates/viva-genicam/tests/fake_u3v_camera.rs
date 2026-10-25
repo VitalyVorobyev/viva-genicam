@@ -235,18 +235,22 @@ async fn a_block_the_device_marks_failed_is_dropped_and_counted() {
     use viva_genicam::U3vFrameStream;
     use viva_genicam::u3v::{MockUsbTransfer, StreamLayout, U3vStatus, U3vStream};
 
-    let blocks = || {
+    let blocks = |deliver_incomplete| {
         let mock = Arc::new(MockUsbTransfer::new());
+        let layout = StreamLayout::new(64, 52, 32, 4, 1 << 20).unwrap();
+        let mut frames = U3vFrameStream::start(U3vStream::open(&mock, 0x82, layout).unwrap());
+        // Configure delivery while the input is empty. A preloaded mock can
+        // let the reader discard block 1 before the caller sets the flag.
+        frames.set_deliver_incomplete(deliver_incomplete);
         for (id, status) in [(1, 0xA101), (2, 0x0000), (3, 0x2001)] {
             for transfer in u3v_block(id, status, &[id as u8; 64]) {
                 mock.enqueue_read(0x82, transfer);
             }
         }
-        let layout = StreamLayout::new(64, 52, 32, 4, 1 << 20).unwrap();
-        U3vFrameStream::start(U3vStream::open(&mock, 0x82, layout).unwrap())
+        frames
     };
 
-    let mut frames = blocks();
+    let mut frames = blocks(false);
     let first = frames.next_frame().await.unwrap().expect("a frame");
     assert_eq!(first.payload[0], 2, "the failed block 1 was handed on");
     let second = frames.next_frame().await.unwrap().expect("a frame");
@@ -255,9 +259,9 @@ async fn a_block_the_device_marks_failed_is_dropped_and_counted() {
     assert_eq!((stats.frames_complete, stats.frames_incomplete), (2, 1));
     frames.shutdown().await;
 
-    let mut frames = blocks();
-    frames.set_deliver_incomplete(true);
+    let mut frames = blocks(true);
     let failed = frames.next_frame().await.unwrap().expect("a frame");
+    assert_eq!(failed.payload[0], 1);
     assert_eq!(
         failed.status,
         FrameStatus::U3vDeviceStatus(U3vStatus::DataOverrun)

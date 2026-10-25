@@ -37,6 +37,8 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **A refused resend packet no longer cancels its neighbours.** A packet-specific unavailable answer previously closed the whole missing range, suppressing recovery and counting its neighbours as unavailable. Only the named packet now stops retrying; an all-previous answer preserves higher ids, with request history and budgets unchanged ([#219](https://github.com/VitalyVorobyev/viva-genicam/pull/219)).
+
 - **GigE session recovery.** The service replaces the complete served handle after control loss or address/interface changes, refreshing XML and connection metadata together ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 - **Stale control routes after FORCEIP.** An address-unavailable send reconnects the existing UDP socket before retrying, preserving its controller port and transaction ID; confirmation of the original link-local hardware failure remains open ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
 - **Studio test teardown and fallback access.** Fake-camera tests await socket shutdown before releasing their port lock; fallback command mapping honors imposed access limits ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).

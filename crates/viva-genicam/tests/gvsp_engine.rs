@@ -858,7 +858,7 @@ async fn a_range_the_camera_no_longer_holds_is_not_asked_for_again() {
 /// once each, and nothing is asked again. (Ten packets, so a quarter covers
 /// the three.)
 #[tokio::test]
-async fn an_unavailable_answer_per_packet_closes_the_range_once() {
+async fn an_unavailable_answer_per_packet_is_counted_once() {
     let (mut h, control) = resend_harness(576, 0);
     h.stream.set_deliver_incomplete(true);
     h.stream
@@ -902,6 +902,63 @@ async fn an_unavailable_answer_per_packet_closes_the_range_once() {
         ),
         (3, 0, 3, 3),
         "{stats:?}"
+    );
+}
+
+/// A packet-specific refusal in a requested range must not prevent the two
+/// neighbours from being requested again and counted as recovered. This
+/// models the Manta's per-packet status headers with mixed outcomes.
+#[tokio::test]
+async fn a_packet_refusal_does_not_cancel_its_neighbours_recovery() {
+    let (mut h, control) = resend_harness(576, 0);
+    h.stream.set_deliver_incomplete(true);
+    h.stream.set_block_timeout(Duration::from_secs(1));
+    h.stream
+        .set_resend_retry_interval(Duration::from_millis(60));
+    let img = image(128 * 64, 19);
+    let datagrams = block_datagrams(&BlockSpec::image(9, 128, 64, MONO8, 576), &img);
+    let rest: Vec<_> = datagrams
+        .iter()
+        .filter(|packet| !(2..=4).contains(&packet.packet_id))
+        .cloned()
+        .collect();
+    h.send(&rest);
+    let (request, _) = control.next(WAIT).expect("initial range");
+    assert_eq!((request.first, request.last), (2, 4));
+    let refused = Datagram {
+        block_id: 9,
+        packet_id: 3,
+        kind: viva_fake_gige::PacketKind::Payload,
+        bytes: vec![0x80, 0x0C, 0x00, 0x09, 0x03, 0x00, 0x00, 0x03],
+    };
+    h.send(&[refused.clone(), refused]);
+    let (left, _) = control.next(WAIT).expect("retry before refused packet");
+    let (right, _) = control.next(WAIT).expect("retry after refused packet");
+    assert_eq!((left.first, left.last), (2, 2));
+    assert_eq!((right.first, right.last), (4, 4));
+    h.send(&[datagrams[2].clone(), datagrams[4].clone()]);
+    let frame = tokio::time::timeout(WAIT, h.stream.next_frame())
+        .await
+        .expect("incomplete frame deadline")
+        .expect("receive")
+        .expect("frame");
+    assert_eq!(frame.status, FrameStatus::Incomplete { missing_packets: 1 });
+    let stats = h.stream.stats();
+    assert_eq!(
+        (
+            stats.resend_requested,
+            stats.resend_recovered,
+            stats.resend_unavailable
+        ),
+        (3, 2, 1),
+        "{stats:?}"
+    );
+    let mut expected = img;
+    expected[2 * 540..3 * 540].fill(0);
+    assert_eq!(
+        frame.payload.as_ref(),
+        expected.as_slice(),
+        "only packet 3 is missing"
     );
 }
 

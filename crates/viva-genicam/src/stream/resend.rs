@@ -17,7 +17,8 @@
 //! - **Budget.** A block's requests — retries included — stop once they would
 //!   ask for more than [`ResendConfig::budget`] of its packets.
 //! - **Answers.** A camera that cannot resend says so with a bare GVSP header
-//!   whose status names why; the final ones close the gap
+//!   whose status names why; the final ones stop retries for the named packet
+//!   (or that packet and its predecessors), preserving recoverable neighbours
 //!   ([`ResendState::unavailable`]).
 //!
 //! A lost trailer is never asked for: nothing after it says it is missing.
@@ -137,9 +138,12 @@ impl ResendState {
             self.frontier = id.saturating_add(1);
             return false;
         }
-        let Some(at) = self.gaps.iter().position(|g| g.contains(id)) else {
-            return false;
-        };
+        self.remove_packet(id).is_some_and(|gap| gap.requests > 0)
+    }
+
+    /// Remove just this missing id, preserving retry history on either side.
+    fn remove_packet(&mut self, id: u32) -> Option<Gap> {
+        let at = self.gaps.iter().position(|g| g.contains(id))?;
         let gap = self.gaps[at];
         match (id == gap.first, id == gap.last) {
             (true, true) => {
@@ -158,7 +162,7 @@ impl ResendState {
                 );
             }
         }
-        gap.requests > 0
+        Some(gap)
     }
 
     /// The trailer, packet `id`, arrived: nothing beyond it belongs to the
@@ -180,19 +184,32 @@ impl ResendState {
     /// (Codex review of #195). An earlier gap not yet asked for closes
     /// uncounted.
     pub(super) fn unavailable(&mut self, id: u32, answer: Answer) -> u64 {
-        let mut gone = match self.gaps.iter().position(|g| g.contains(id)) {
-            Some(at) if self.gaps[at].requests > 0 => self.gaps.remove(at).len(),
-            _ => 0,
-        };
-        if answer == Answer::GoneWithPrevious {
-            self.gaps.retain(|gap| {
-                let earlier = gap.last < id;
-                if earlier && gap.requests > 0 {
-                    gone += gap.len();
-                }
-                !earlier
-            });
+        if answer == Answer::Gone {
+            if !self
+                .gaps
+                .iter()
+                .any(|gap| gap.contains(id) && gap.requests > 0)
+            {
+                return 0;
+            }
+            return u64::from(self.remove_packet(id).is_some());
         }
+        let mut gone = 0;
+        self.gaps.retain_mut(|gap| {
+            if gap.first > id {
+                return true;
+            }
+            let last_gone = gap.last.min(id);
+            if gap.requests > 0 {
+                gone += u64::from(last_gone - gap.first) + 1;
+            }
+            if gap.last <= id {
+                return false;
+            }
+            // Here id < gap.last, so incrementing cannot overflow.
+            gap.first = id + 1;
+            true
+        });
         gone
     }
 
@@ -307,6 +324,47 @@ mod tests {
         );
     }
 
+    /// A camera answering per packet has said nothing about this packet's
+    /// neighbours. They remain eligible for recovery, with their retry count
+    /// and due time intact.
+    #[test]
+    fn a_packet_refusal_preserves_recoverable_neighbours() {
+        let mut state = ResendState::default();
+        let t0 = Instant::now();
+        state.arrived(0, t0, DEFAULT_RESEND_DELAY);
+        state.arrived(10, t0, DEFAULT_RESEND_DELAY);
+        assert_eq!(due(&mut state, t0 + 2 * MS, 100), vec![(1, 9)]);
+        assert_eq!(state.unavailable(5, Answer::Gone), 1);
+        assert_eq!(state.unavailable(5, Answer::Gone), 0, "duplicate refusal");
+        assert!(state.arrived(6, t0 + 3 * MS, DEFAULT_RESEND_DELAY));
+        assert!(due(&mut state, t0 + 21 * MS, 100).is_empty());
+        assert_eq!(due(&mut state, t0 + 22 * MS, 100), vec![(1, 4), (7, 9)]);
+    }
+
+    #[test]
+    fn an_unsolicited_refusal_does_not_suppress_the_first_request() {
+        let mut state = ResendState::default();
+        let t0 = Instant::now();
+        state.arrived(0, t0, DEFAULT_RESEND_DELAY);
+        state.arrived(5, t0, DEFAULT_RESEND_DELAY);
+        assert_eq!(state.unavailable(2, Answer::Gone), 0);
+        assert_eq!(due(&mut state, t0 + 2 * MS, 100), vec![(1, 4)]);
+    }
+
+    #[test]
+    fn gone_with_previous_keeps_the_tail_of_a_gap() {
+        let mut state = ResendState::default();
+        let t0 = Instant::now();
+        state.arrived(0, t0, DEFAULT_RESEND_DELAY);
+        state.arrived(10, t0, DEFAULT_RESEND_DELAY);
+        assert_eq!(due(&mut state, t0 + 2 * MS, 100), vec![(1, 9)]);
+        assert_eq!(state.unavailable(5, Answer::GoneWithPrevious), 5);
+        assert_eq!(state.unavailable(5, Answer::GoneWithPrevious), 0);
+        assert!(!state.arrived(4, t0 + 3 * MS, DEFAULT_RESEND_DELAY));
+        assert!(state.arrived(6, t0 + 3 * MS, DEFAULT_RESEND_DELAY));
+        assert_eq!(due(&mut state, t0 + 22 * MS, 100), vec![(7, 9)]);
+    }
+
     /// Each gap is asked for at most three times, 20 ms apart.
     #[test]
     fn a_gap_is_asked_for_three_times_at_most() {
@@ -346,10 +404,10 @@ mod tests {
         assert!(due(&mut state, t0 + 100 * MS, 40).is_empty());
     }
 
-    /// A final "no longer available" closes the gap and counts its packets;
+    /// A final "no longer available" closes that packet and counts it;
     /// "and every one before it" also stops the earlier gaps.
     #[test]
-    fn an_unavailable_answer_closes_the_gap() {
+    fn an_unavailable_answer_preserves_the_rest_of_the_gap() {
         let mut state = ResendState::default();
         let t0 = Instant::now();
         for id in [0, 2, 5, 9] {
@@ -359,16 +417,17 @@ mod tests {
             due(&mut state, t0 + 2 * MS, 100),
             vec![(1, 1), (3, 4), (6, 8)]
         );
-        assert_eq!(state.unavailable(7, Answer::Gone), 3);
+        assert_eq!(state.unavailable(7, Answer::Gone), 1);
         assert_eq!(state.unavailable(7, Answer::Gone), 0, "already closed");
         assert_eq!(
             state.unavailable(3, Answer::GoneWithPrevious),
-            2 + 1,
-            "gap 3-4, and gap 1 before it"
+            1 + 1,
+            "packet 3, and gap 1 before it; packet 4 is still recoverable"
         );
-        assert!(
-            due(&mut state, t0 + 50 * MS, 100).is_empty(),
-            "gap 1 is before 3, so it is not asked for again"
+        assert_eq!(
+            due(&mut state, t0 + 50 * MS, 100),
+            vec![(4, 4), (6, 6), (8, 8)],
+            "only the named ids and predecessors are unavailable"
         );
     }
 
@@ -389,14 +448,14 @@ mod tests {
         );
         assert_eq!(
             state.unavailable(7, Answer::GoneWithPrevious),
-            3 + 2 + 1,
-            "the gap holding 7 and both gaps before it"
+            2 + 2 + 1,
+            "packets 6-7 and both gaps before them; 8 is still recoverable"
         );
         assert!(
             !state.arrived(1, t0 + 3 * MS, DEFAULT_RESEND_DELAY),
             "packet 1 was counted unavailable; it cannot be recovered too"
         );
-        assert!(due(&mut state, t0 + 50 * MS, 100).is_empty());
+        assert_eq!(due(&mut state, t0 + 50 * MS, 100), vec![(8, 8)]);
     }
 
     /// Ids beyond the trailer are not the block's.

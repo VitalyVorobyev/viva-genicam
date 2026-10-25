@@ -1,3 +1,4 @@
+import { invokeCommand } from "../../device/commands";
 import { useState } from "react";
 import { useToast } from "../../context/ToastContext";
 import { formatErrorMessage } from "../../device/errorMessage";
@@ -18,8 +19,7 @@ export function ForceIpForm({ mac, onDone }: { mac: string; onDone: () => void }
   const send = async () => {
     setBusy(true);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("force_ip", { mac, ip, subnet, gateway });
+      await invokeCommand("force_ip", { mac, ip, subnet, gateway });
       addToast(
         "success",
         `Sent: the camera answers at ${ip} until it restarts, and appears there at the next scan`,

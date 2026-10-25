@@ -1,3 +1,4 @@
+import { invokeCommand } from "./commands";
 import {
   createContext,
   useCallback,
@@ -12,7 +13,7 @@ import { isTauri } from "../tauri";
 import { formatErrorMessage } from "./errorMessage";
 import { listenTo } from "./events";
 import { FeatureStore } from "./featureStore";
-import type { CommandResult, FeatureState, JsonValue } from "./types";
+import type { FeatureState, JsonValue } from "./types";
 
 const FeatureStoreContext = createContext<FeatureStore | null>(null);
 
@@ -27,14 +28,9 @@ function sanitize(state: FeatureState): FeatureState {
     : state;
 }
 
-async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, args);
-}
-
 async function fetchStates(names: string[]): Promise<Record<string, FeatureState>> {
   if (!isTauri()) return {};
-  const states = await invoke<Record<string, FeatureState>>("query_feature_states_bulk", {
+  const states = await invokeCommand("query_feature_states_bulk", {
     names,
   });
   return Object.fromEntries(
@@ -121,7 +117,7 @@ export function useFeatureWriter(): (name: string, value: JsonValue) => Promise<
     async (name, value) => {
       if (!isTauri()) return false;
       try {
-        const state = await invoke<FeatureState>("write_node", { nodeName: name, value });
+        const state = await invokeCommand("write_node", { nodeName: name, value });
         store.set(name, sanitize(state));
         return true;
       } catch (error) {
@@ -141,7 +137,7 @@ export function useCommandRunner(): (name: string) => Promise<boolean> {
     async (name) => {
       if (!isTauri()) return false;
       try {
-        const result = await invoke<CommandResult>("execute_command", { nodeName: name });
+        const result = await invokeCommand("execute_command", { nodeName: name });
         if (!result.ok) {
           addToast("error", `${name} failed: ${result.error ?? "refused"}`);
           return false;

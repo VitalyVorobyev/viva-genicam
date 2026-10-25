@@ -1,0 +1,10 @@
+Viva Studio development build
+
+This is a development placeholder, not a distribution license inventory.
+Before a release-mode build, from the repository root run:
+
+python scripts/dependency-notices.py --artifact studio --out studio/apps/viva-studio-tauri/src-tauri/resources/THIRD_PARTY_NOTICES.txt
+
+The release workflow generates full notices for the target and installed UI
+production dependencies. Release-mode builds reject this placeholder.
+See docs/legal-review.md for provenance and unresolved standards-related rights.

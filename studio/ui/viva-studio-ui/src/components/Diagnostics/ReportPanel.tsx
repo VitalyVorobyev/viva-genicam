@@ -1,3 +1,4 @@
+import { invokeCommand } from "../../device/commands";
 import { useState } from "react";
 import { useToast } from "../../context/ToastContext";
 import { formatErrorMessage } from "../../device/errorMessage";
@@ -32,8 +33,7 @@ export function ReportPanel() {
   const generate = async (then: "save" | "copy") => {
     setBusy(true);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const report = await invoke<string>("generate_report", { includeXml });
+      const report = await invokeCommand("generate_report", { includeXml });
       if (then === "copy") {
         await navigator.clipboard.writeText(report);
         addToast("success", "Report copied — paste it into an issue");

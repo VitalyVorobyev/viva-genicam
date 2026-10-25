@@ -354,3 +354,27 @@ export type StudioEvents = {
   "acquisition-status": AcquisitionStatus;
   "image-meta-changed": ImageMeta;
 };
+
+/** Registered Tauri commands: wire arguments and successful response. */
+export type StudioCommands = {
+  "backend_status": { args: Record<string, never>; result: BackendStatus };
+  "connect_device": { args: { deviceId: string }; result: ParseXmlResponse };
+  "disconnect_device": { args: Record<string, never>; result: null };
+  "execute_command": { args: { nodeName: string }; result: CommandResult };
+  "force_ip": { args: { mac: string; ip: string; subnet: string; gateway: string }; result: null };
+  "generate_report": { args: { includeXml: boolean }; result: string };
+  "get_connection_state": { args: Record<string, never>; result: ConnectionState };
+  "get_current_model": { args: Record<string, never>; result: ParseXmlResponse | null };
+  "get_network_config": { args: Record<string, never>; result: NetworkConfig };
+  "get_sfnc_groups": { args: Record<string, never>; result: Array<SfncGroup> };
+  "list_discovered_devices": { args: Record<string, never>; result: Array<DeviceInfo> };
+  "list_fixtures": { args: Record<string, never>; result: Array<string> };
+  "load_fixture": { args: { name: string }; result: ParseXmlResponse };
+  "parse_xml": { args: { xml: string }; result: ParseXmlResponse };
+  "ping": { args: Record<string, never>; result: string };
+  "query_feature_states_bulk": { args: { names: Array<string> }; result: Record<string, FeatureState> };
+  "set_persistent_ip": { args: { ip: string; subnet: string; gateway: string }; result: null };
+  "start_acquisition": { args: { packetSize?: number | null }; result: StreamerInfo };
+  "stop_acquisition": { args: Record<string, never>; result: null };
+  "write_node": { args: { nodeName: string; value: JsonValue }; result: FeatureState };
+};

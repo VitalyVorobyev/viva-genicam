@@ -25,7 +25,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/sfnc-groups.json"
+      "resources/sfnc-groups.json",
+      "resources/THIRD_PARTY_NOTICES.txt"
     ],
     "shortDescription": "Reference viewer for GenICam cameras",
     "macOS": {

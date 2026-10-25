@@ -75,10 +75,16 @@ fn invoked_by_ui() -> BTreeSet<String> {
             }
             let name = path.file_name().unwrap().to_string_lossy();
             let source = name.ends_with(".ts") || name.ends_with(".tsx");
-            if !source || name.contains(".test.") {
+            if !source || name.contains(".test.") || name.contains(".typecheck.") {
                 continue;
             }
-            names.extend(invoke_literals(&read(&path)));
+            let source = read(&path);
+            assert!(
+                name == "commands.ts" || !source.contains("@tauri-apps/api/core"),
+                "{} bypasses the generated command contract",
+                path.display()
+            );
+            names.extend(invoke_literals(&source));
         }
     }
     names
@@ -90,7 +96,7 @@ fn invoke_literals(source: &str) -> Vec<String> {
     let mut rest = source;
     while let Some(at) = rest.find("invoke") {
         rest = &rest[at + "invoke".len()..];
-        let mut call = rest;
+        let mut call = rest.strip_prefix("Command").unwrap_or(rest);
         if call.starts_with('<') {
             let Some(close) = call.find(">(") else {
                 continue;
@@ -172,4 +178,14 @@ fn tauri_refuses_what_no_permission_allows() {
     let refused = call("in_no_permission").expect_err("the ACL lets anything through");
     assert!(refused.to_string().contains("not allowed"), "{refused}");
     call("generate_report").expect("generate_report is refused");
+}
+
+#[test]
+fn the_ui_scan_finds_typed_command_calls() {
+    assert_eq!(
+        invoke_literals(
+            r#"invokeCommand("write_node", { nodeName: "Width", value: 640 }); invoke("ping")"#
+        ),
+        ["write_node", "ping"]
+    );
 }

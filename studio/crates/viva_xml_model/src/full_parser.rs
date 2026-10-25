@@ -300,7 +300,11 @@ fn node_decl_to_ui_node(decl: &NodeDecl, nodemap: Option<&NodeMap>) -> UiNode {
             ..described(&name, UiNodeKind::Boolean, meta)
         },
         NodeDecl::Command { meta, pvalue, .. } => UiNode {
-            access_mode: Some("WO".to_string()),
+            access_mode: Some(
+                AccessMode::WO
+                    .capped_by(meta.imposed_access)
+                    .map_or_else(|| "NA".to_string(), access_mode_str),
+            ),
             representation: None,
             dependencies: pvalue.iter().cloned().collect(),
             ..described(&name, UiNodeKind::Command, meta)
@@ -627,6 +631,25 @@ mod tests {
             graph.nodes_by_name["Reset"].access_mode.as_deref(),
             Some("NA")
         );
+    }
+
+    /// Even when the NodeMap cannot be built, a read-only command is unavailable.
+    #[test]
+    fn fallback_commands_obey_the_imposed_access_ceiling() {
+        for (ceiling, expected) in [("RO", "NA"), ("WO", "WO"), ("RW", "WO")] {
+            let xml = format!(
+                r#"<RegisterDescription>
+                <Command Name="Reset"><ImposedAccessMode>{ceiling}</ImposedAccessMode>
+                    <Address>0x104</Address><Length>4</Length><CommandValue>1</CommandValue>
+                </Command></RegisterDescription>"#
+            );
+            let model = viva_genapi_xml::parse(&xml).expect("XML");
+            let graph = build_from_xml_model(&model).expect("fallback graph");
+            assert_eq!(
+                graph.nodes_by_name["Reset"].access_mode.as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     /// A feature takes the ceiling of the register it delegates to, as the

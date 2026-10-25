@@ -37,6 +37,8 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **Remote padded images.** Services retain each row's padding and send its stride in image header v2 (API 7), so Studio preview and native capture use the correct rows. Odd packed and subsampled images retain their final pixel group. Update services and Studio together ([#221](https://github.com/VitalyVorobyev/viva-genicam/pull/221)).
+
 - **A refused resend packet no longer cancels its neighbours.** A packet-specific unavailable answer previously closed the whole missing range, suppressing recovery and counting its neighbours as unavailable. Only the named packet now stops retrying; an all-previous answer preserves higher ids, with request history and budgets unchanged ([#219](https://github.com/VitalyVorobyev/viva-genicam/pull/219)).
 
 - **GigE session recovery.** The service replaces the complete served handle after control loss or address/interface changes, refreshing XML and connection metadata together ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).

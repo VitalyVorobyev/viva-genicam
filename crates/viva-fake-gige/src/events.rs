@@ -115,6 +115,7 @@ pub(crate) async fn run(
     mut occurred: mpsc::UnboundedReceiver<Occurred>,
     regs: Arc<Mutex<RegisterMap>>,
     counters: Arc<Counters>,
+    link_down: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut queue: VecDeque<Occurred> = VecDeque::new();
     let mut outstanding: Option<Outstanding> = None;
@@ -158,7 +159,9 @@ pub(crate) async fn run(
                     } else {
                         waiting.retries += 1;
                         waiting.sent_at = Instant::now();
-                        let _ = socket.send_to(&waiting.bytes, waiting.dest).await;
+                        if !link_down.load(Ordering::Relaxed) {
+                            let _ = socket.send_to(&waiting.bytes, waiting.dest).await;
+                        }
                         counters.transmissions.fetch_add(1, Ordering::Relaxed);
                         trace!(request_id = waiting.request_id, retry = waiting.retries, "event resent");
                     }
@@ -168,7 +171,9 @@ pub(crate) async fn run(
         if outstanding.is_none()
             && let Some(message) = next_message(&mut queue, &mut request_id)
         {
-            let _ = socket.send_to(&message.bytes, message.dest).await;
+            if !link_down.load(Ordering::Relaxed) {
+                let _ = socket.send_to(&message.bytes, message.dest).await;
+            }
             counters.messages.fetch_add(1, Ordering::Relaxed);
             counters.transmissions.fetch_add(1, Ordering::Relaxed);
             counters

@@ -1,3 +1,4 @@
+import { invokeCommand } from "./commands";
 import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "../tauri";
 import { listenTo } from "./events";
@@ -18,15 +19,13 @@ export function useDevice() {
     const unlisteners: Array<() => void> = [];
 
     async function init() {
-      const { invoke } = await import("@tauri-apps/api/core");
-
       if (cancelled) return;
 
       // Load initial state
       try {
         const [deviceList, connState] = await Promise.all([
-          invoke<DeviceInfo[]>("list_discovered_devices"),
-          invoke<ConnectionState>("get_connection_state"),
+          invokeCommand("list_discovered_devices"),
+          invokeCommand("get_connection_state"),
         ]);
         if (!cancelled) {
           setDevices(deviceList);
@@ -74,13 +73,11 @@ export function useDevice() {
 
   const connect = useCallback(async (deviceId: string): Promise<ParseXmlResponse> => {
     setDisconnectReason(null);
-    const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<ParseXmlResponse>("connect_device", { deviceId });
+    return await invokeCommand("connect_device", { deviceId });
   }, []);
 
   const disconnect = useCallback(async () => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("disconnect_device");
+    await invokeCommand("disconnect_device");
   }, []);
 
   return { devices, connectionState, disconnectReason, connect, disconnect };

@@ -10,7 +10,11 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - 'studio/apps/viva-studio-tauri/src-tauri/tauri.conf.json'
+      - 'studio/apps/viva-studio-tauri/src-tauri/Info.plist'
       - 'studio/apps/viva-studio-tauri/src-tauri/icons/**'
+      - 'scripts/dependency-notices.py'
+      - 'scripts/check-distribution.py'
+      - 'docs/third-party/**'
   workflow_dispatch:
 
 permissions:
@@ -61,6 +65,17 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p viva-camctl -p viva-service
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Collect dependency license texts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/dependency-notices.py --artifact cli --target ${{ matrix.target }} --out target/legal/THIRD_PARTY_NOTICES.txt
+          python scripts/dependency-notices.py --artifact gentl --target ${{ matrix.target }} --out viva_gentl-${{ matrix.target }}-THIRD_PARTY_NOTICES.txt
+
       # The GenTL producer (ADR-0031): a .cti beside the archive, named for
       # its target, since a consumer loads it from any directory it is told.
       - name: Build the GenTL producer
@@ -89,6 +104,7 @@ jobs:
           # on a tag publish-crates.yml fails unless the two agree.
           SERIES="$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"$/\1/p' Cargo.toml | head -1)"
           cp README.md LICENSE CHANGELOG.md "$STAGE/"
+          cp target/legal/THIRD_PARTY_NOTICES.txt "$STAGE/"
           cp "changelog/${SERIES}.md" "$STAGE/CHANGELOG-${SERIES}.md"
           if [ "$ARCHIVE" = "zip" ]; then
             cp "target/${TARGET}/release/viva-camctl.exe" "$STAGE/"
@@ -101,6 +117,7 @@ jobs:
             tar -czf "${STAGE}.tar.gz" "$STAGE"
             echo "ARCHIVE_FILE=${STAGE}.tar.gz" >> "$GITHUB_ENV"
           fi
+          python scripts/check-distribution.py "${STAGE}.${ARCHIVE}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -109,6 +126,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE_FILE }}
             ${{ env.CTI_FILE }}
+            viva_gentl-${{ matrix.target }}-THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
 
   # Viva Studio as unsigned desktop bundles, versioned with the library
@@ -163,6 +181,15 @@ jobs:
       - name: Install UI dependencies
         working-directory: studio/ui/viva-studio-ui
         run: bun install --frozen-lockfile
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Collect Studio dependency license texts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/dependency-notices.py --artifact studio --target ${{ matrix.target }} --out studio/apps/viva-studio-tauri/src-tauri/resources/THIRD_PARTY_NOTICES.txt
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version '^2' --locked
@@ -228,4 +255,5 @@ jobs:
             dist/*.deb
             dist/*.msi
             dist/*.cti
+            dist/*THIRD_PARTY_NOTICES.txt
             dist/SHA256SUMS.txt

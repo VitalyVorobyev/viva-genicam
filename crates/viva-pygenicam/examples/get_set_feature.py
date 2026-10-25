@@ -52,7 +52,7 @@ def main() -> None:
     if args.exposure is not None:
         print(f"\nSetting ExposureTime = {args.exposure} µs ...")
         cam.set_exposure_time(args.exposure)
-        print(f"  readback: {cam.get('ExposureTime')}")
+        print(f"  readback: {cam.exposure_time()}")
 
     if args.gain is not None:
         print(f"\nSetting Gain = {args.gain} dB ...")

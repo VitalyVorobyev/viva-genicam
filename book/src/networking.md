@@ -566,3 +566,26 @@ For protocol-level details and tuning options exposed by this project:
 - See [`viva-gige`](./crates/viva-gige.md) for transport internals.
 - See the [Streaming tutorial](./tutorials/streaming.md) for concrete CLI and
   Rust examples.
+
+
+## Reopening a GigE Vision camera
+
+A camera that disappears must be opened in a new session. Drop its old stream
+and camera, retain its discovery `DeviceInfo`, and call `reopen_gige` with
+`Reopen` options. It looks at the old address first, then discovers the known
+MAC on the selected interface if the camera moved. A record made with
+`DeviceInfo::from_ip` has no MAC and can only identify whatever answers at that
+address.
+
+`Reopen::patience` bounds discovery, connecting and retry delays. The new
+session fetches XML again. An optional configuration captured with
+`Camera::save_features` is then restored with ordinary register timeouts;
+inspect `Reopened::restored` for per-feature failures. Restoration does not
+restart acquisition. Open a new stream and start acquisition explicitly.
+Cancellation releases any control already claimed, on a best-effort basis.
+
+The GigE service retires and recreates its served camera when control is lost,
+the camera disappears from discovery, or its address or selected interface
+changes. This refreshes its XML and connection metadata together. Configuration
+replay is explicit in the library helper; the service does not silently restore
+an application's saved settings or restart acquisition.

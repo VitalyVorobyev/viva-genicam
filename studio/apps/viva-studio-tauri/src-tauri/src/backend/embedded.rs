@@ -1064,6 +1064,23 @@ mod tests {
     use super::{camera_stream_info, fake_camera};
     use crate::backend::DeviceBackend;
 
+    /// Teardown releases UDP 3956 before another test can acquire the guard.
+    #[test]
+    fn fake_shutdown_allows_immediate_rebind() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            for _ in 0..8 {
+                let fake = viva_fake_gige::FakeCamera::builder()
+                    .bind_ip([127, 0, 0, 1].into())
+                    .port(3956)
+                    .build()
+                    .await
+                    .expect("previous fake released UDP 3956");
+                fake.stop().await;
+            }
+        });
+    }
+
     /// Disconnecting must leave the camera free for the next client: not
     /// still streaming into a closed socket, and not still claimed until its
     /// heartbeat runs out.
@@ -1077,6 +1094,7 @@ mod tests {
             backend.disconnect().await.expect("disconnect");
 
             fake_camera::assert_released(&fake).await;
+            fake.stop().await;
         });
     }
 
@@ -1131,6 +1149,7 @@ mod tests {
             assert_eq!(exposure.access_mode, "RO");
 
             backend.disconnect().await.expect("disconnect");
+            _fake.stop().await;
         });
     }
 
@@ -1153,6 +1172,7 @@ mod tests {
 
             backend.stop_acquisition().await.expect("stop");
             backend.disconnect().await.expect("disconnect");
+            _fake.stop().await;
         });
     }
 
@@ -1184,6 +1204,7 @@ mod tests {
 
             backend.stop_acquisition().await.expect("stop");
             backend.disconnect().await.expect("disconnect");
+            _fake.stop().await;
         });
     }
 
@@ -1239,6 +1260,7 @@ mod tests {
                 "the stopped status carries the final counters: {last}"
             );
             backend.disconnect().await.expect("disconnect");
+            _fake.stop().await;
         });
     }
 
@@ -1285,6 +1307,7 @@ mod tests {
             assert_eq!(config.persistent_ip, "192.168.1.100");
 
             backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
         });
     }
 
@@ -1586,6 +1609,7 @@ mod tests {
                 .expect("start");
             assert_ne!(packet_size_on(&fake).await, 1000);
             backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
         });
     }
 
@@ -1613,6 +1637,7 @@ mod tests {
             // With nothing connected, the report still covers the host.
             let report = backend.report(false).await.expect("report");
             assert!(report.contains("No camera selected"), "{report}");
+            _fake.stop().await;
         });
     }
 

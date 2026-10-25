@@ -39,6 +39,7 @@
 
 - [FAQ & Troubleshooting](faq.md)
 - [Reporting a camera we can't open](reporting.md)
+- [Tested cameras](tested-cameras.md)
 
 # Reference
 

@@ -55,3 +55,5 @@ Documentation = "https://vitalyvorobyev.github.io/viva-genicam/"
 module-name = "viva_genicam._native"
 python-source = "python"
 features = ["pyo3/extension-module"]
+# Generated for the build target before packaging (see docs/legal-review.md).
+include = [{ path = "viva_genicam/THIRD_PARTY_NOTICES.txt", format = ["wheel", "sdist"] }]

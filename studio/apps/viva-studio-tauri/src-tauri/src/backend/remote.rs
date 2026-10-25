@@ -909,6 +909,7 @@ mod tests {
 
             backend.disconnect().await.expect("disconnect");
             assert!(backend.get_feature_state("Width").await.is_err());
+            fake.stop().await;
         });
     }
 }

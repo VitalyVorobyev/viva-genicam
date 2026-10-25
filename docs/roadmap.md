@@ -11,9 +11,9 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 - **Found on this camera**: TC-41.
 - **Control channel**: TC-38.
 - **GenApi**: TC-39, API-19.
-- **Repeatable**: CI-22 runs the GigE hardware suite nightly.
-- **Endurance**: SR-27 and API-21, decided by the plan's area L.
-- **Surfaces it needs**: GT-08; then DOC-19 records what ran.
+- **Local validation**: run the opt-in hardware suite while a camera is available. CI-22 is deferred: no self-hosted runner or hardware workflow is planned.
+- **Endurance**: SR-27, decided by the plan's area L.
+- **Evidence**: the [tested-camera page](../book/src/tested-cameras.md) records completed hardware runs.
 
 ## Waiting on hardware
 
@@ -42,7 +42,7 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 
 Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); a change to a type it consumes updates it in the same PR.
 
-- **Foundations**: ST-45, ST-46, ST-47.
+- **Found on the bench**: ST-59, the native macOS debug-bundle connection failure.
 - **Viewer parity**: ST-39, ST-51, ST-52, ST-56, ST-49.
 - **Distribution**: ST-07.
 - **Later**: ST-50, ST-53, ST-54, ST-55, ST-57, ST-58, ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.

@@ -1264,3 +1264,73 @@ async fn persistent_settings_take_their_own_value_back() {
     };
     assert!(persistent, "the persistent IP reads back");
 }
+
+/// API-21: a new session re-fetches XML, restores a saved configuration and
+/// streams. This needs no cable pull and writes no non-volatile settings.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
+async fn reopen_restores_configuration_and_streams_in_a_new_session() {
+    let previous = device().await;
+    let (mut camera, xml) = connect_gige_as(&previous, Access::Control)
+        .await
+        .expect("open");
+    let mut bytes = Vec::new();
+    let configuration = camera.save_features(&mut bytes).expect("save");
+    let old_addr = camera
+        .transport()
+        .lock_device()
+        .expect("device")
+        .local_addr()
+        .expect("old local endpoint");
+    drop(camera);
+    let mut reopened = viva_genicam::reopen_gige(
+        &previous,
+        &viva_genicam::Reopen::new()
+            .interface(iface().name())
+            .configuration(configuration),
+    )
+    .await
+    .expect("reopen");
+    assert_eq!(reopened.device.mac, previous.mac);
+    assert_eq!(reopened.xml, xml, "the camera serves the same XML again");
+    let restored = reopened.restored.expect("restored configuration");
+    assert!(restored.is_complete(), "{:?}", restored.failures);
+    assert_eq!(
+        reopened.camera.transport().control_state(),
+        ControlState::Held
+    );
+    let after = snapshot(&mut reopened.camera);
+    assert_eq!(
+        values(std::str::from_utf8(&bytes).expect("saved UTF-8")),
+        values(&after)
+    );
+    let mut stream = reopened
+        .camera
+        .open_stream(StreamOptions::new().iface(iface()))
+        .expect("open new stream");
+    reopened.camera.acquisition_start().expect("start");
+    let frame = tokio::time::timeout(Duration::from_secs(5), stream.next_frame())
+        .await
+        .expect("frame timeout")
+        .expect("frame")
+        .expect("stream open");
+    reopened.camera.acquisition_stop().expect("stop");
+    assert!(frame.status.is_complete(), "{:?}", frame.status);
+    let new_addr = reopened
+        .camera
+        .transport()
+        .lock_device()
+        .expect("device")
+        .local_addr()
+        .expect("new local endpoint");
+    println!(
+        "reopened MAC {}, {} -> {}; {} restored values, {} attempts, complete {}x{} frame",
+        reopened.device.mac_string(),
+        old_addr,
+        new_addr,
+        restored.written,
+        reopened.attempts,
+        frame.width,
+        frame.height
+    );
+}

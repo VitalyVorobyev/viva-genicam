@@ -1,3 +1,4 @@
+import { invokeCommand } from "./commands";
 import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "../tauri";
 import { NO_ACQUISITION, followAcquisition } from "./acquisitionStatus";
@@ -45,15 +46,13 @@ export function useAcquisition() {
 
   /** Start streaming; `packetSize` is the user's, or `null` to negotiate. */
   const start = useCallback(async (packetSize: number | null = null): Promise<StreamerInfo> => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const info = await invoke<StreamerInfo>("start_acquisition", { packetSize });
+    const info = await invokeCommand("start_acquisition", { packetSize });
     setStreamerInfo(info);
     return info;
   }, []);
 
   const stop = useCallback(async () => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("stop_acquisition");
+    await invokeCommand("stop_acquisition");
   }, []);
 
   return { status: acquisition.status, stats: acquisition.stats, streamerInfo, start, stop };

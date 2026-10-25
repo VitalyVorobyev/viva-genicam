@@ -795,3 +795,183 @@ async fn e2e_event_blocks_are_published_on_their_own_topic() {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 }
+
+/// A camera whose link went down long enough for its heartbeat to run out
+/// comes back with nobody in control (an Allied Vision Manta G-125B did,
+/// backlog API-21). The served session is then lost, so `run_discovery`
+/// retires it and serves the camera afresh, rather than keeping a session
+/// that the camera no longer streams to or takes writes from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_a_session_the_camera_dropped_is_lost() {
+    let cam = TestCamera::start_with(|b| b.enforce_heartbeat(true).heartbeat_timeout_ms(600)).await;
+    let fake = cam.camera.as_ref().expect("fake");
+    let info = viva_genicam::gige::discover_ip(Ipv4Addr::LOCALHOST, Duration::from_millis(500))
+        .await
+        .expect("discovery")
+        .expect("the fake answers");
+    let handle = DeviceHandle::connect(&info, Some(loopback_iface()))
+        .await
+        .expect("connect");
+    assert!(!handle.is_lost());
+
+    fake.unplug();
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+    assert!(!handle.is_lost(), "silence alone is not a loss");
+    fake.plug_in();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !handle.is_lost() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the session was not reported lost"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(fake.controller().await, None);
+}
+
+/// A refresh performed before serving replaces all session metadata, not
+/// only the camera mutex. In particular a firmware change's XML and a new
+/// Discovery ACK belong to the replacement session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_refresh_replaces_identity_xml_control_and_stream() {
+    let mut cam = TestCamera::start_with(|b| b.enforce_heartbeat(true)).await;
+    let info = viva_genicam::gige::discover_ip(Ipv4Addr::LOCALHOST, Duration::from_millis(500))
+        .await
+        .expect("discovery")
+        .expect("the fake answers");
+    let mut handle = DeviceHandle::connect(&info, Some(loopback_iface()))
+        .await
+        .expect("connect");
+    let original_xml = handle.raw_xml().to_string();
+    cam.camera.take().expect("old fake").stop().await;
+    cam.camera = Some(
+        FakeCamera::builder()
+            .bind_ip(Ipv4Addr::LOCALHOST)
+            .model("ReplacementFirmware")
+            .profile(viva_fake_gige::XmlProfile::Legacy)
+            .enforce_heartbeat(true)
+            .width(320)
+            .height(240)
+            .build()
+            .await
+            .expect("replacement fake"),
+    );
+    handle.refresh_connection().await.expect("refresh");
+    assert_eq!(handle.info().model.as_deref(), Some("ReplacementFirmware"));
+    assert_ne!(handle.raw_xml(), original_xml);
+    assert!(handle.raw_xml().contains("ExposureTimeAbs"));
+    assert!(!handle.is_lost());
+    handle
+        .set_feature("ExposureTimeAbs", "200")
+        .await
+        .expect("the replacement nodemap is used");
+    assert_eq!(
+        handle
+            .get_feature("ExposureTimeAbs")
+            .await
+            .expect("exposure"),
+        "200"
+    );
+    let mut frames = viva_service::StreamSource::open_stream(&handle, Some(1500))
+        .await
+        .expect("open the replacement stream");
+    handle.acquisition_start().await.expect("start");
+    let frame = tokio::time::timeout(Duration::from_secs(3), frames.next_block())
+        .await
+        .expect("frame timeout")
+        .expect("frame")
+        .expect("the stream is open");
+    let viva_genicam::StreamBlock::Image(frame) = frame else {
+        panic!("expected an image");
+    };
+    assert_eq!((frame.width, frame.height), (320, 240));
+    handle.acquisition_stop().await.expect("stop");
+}
+
+/// Retirement replaces the served XML queryable as well as its camera. A
+/// reboot between two discovery passes can retain a MAC while changing XML.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_discovery_replaces_a_rebooted_camera_and_resumes_acquisition() {
+    let mut cam = TestCamera::start_with(|b| b.enforce_heartbeat(true)).await;
+    let session = Arc::new(
+        zenoh::open(zenoh::Config::default())
+            .await
+            .expect("session"),
+    );
+    let id = viva_zenoh_api::gige_device_id(&viva_fake_gige::FAKE_MAC);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let discovery = viva_service::GigeDiscovery::new(
+        Duration::from_millis(100),
+        Some(viva_genicam::gige::IfaceSelector::Name(
+            loopback_iface().name().to_owned(),
+        )),
+    );
+    let service = tokio::spawn(viva_service::run_discovery(
+        session.clone(),
+        discovery,
+        Duration::from_millis(100),
+        shutdown_rx,
+    ));
+
+    async fn wait_for_xml(session: &zenoh::Session, id: &str, feature: &str) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let replies = session
+                    .get(keys::xml(id))
+                    .timeout(Duration::from_millis(200))
+                    .await
+                    .expect("XML query");
+                while let Ok(reply) = replies.recv_async().await {
+                    if let Ok(sample) = reply.result()
+                        && let Ok(response) = serde_json::from_slice::<
+                            viva_zenoh_api::DeviceXmlResponse,
+                        >(&sample.payload().to_bytes())
+                        && response.xml.contains(feature)
+                    {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the expected XML is served");
+    }
+    wait_for_xml(&session, &id, "Name=\"ExposureTime\"").await;
+    cam.camera.take().expect("old fake").stop().await;
+    // Let a discovery pass observe the absence before the rebooted camera
+    // returns with the same MAC. Its replacement then serves a fresh XML.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    cam.camera = Some(
+        FakeCamera::builder()
+            .bind_ip(Ipv4Addr::LOCALHOST)
+            .enforce_heartbeat(true)
+            .profile(viva_fake_gige::XmlProfile::Legacy)
+            .width(320)
+            .height(240)
+            .build()
+            .await
+            .expect("rebooted fake"),
+    );
+    wait_for_xml(&session, &id, "Name=\"ExposureTimeAbs\"").await;
+    let subscriber = session
+        .declare_subscriber(keys::image(&id))
+        .await
+        .expect("subscriber");
+    let response = send_acq_command(&session, &id, AcquisitionCommand::Start).await;
+    assert!(response.ok, "{:?}", response.error);
+    let sample = tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async())
+        .await
+        .expect("new frame timeout")
+        .expect("new frame");
+    let payload = sample.payload().to_bytes();
+    let (header, _) = FrameHeader::decode(&payload).expect("frame header");
+    assert_eq!((header.width, header.height), (320, 240));
+    let response = send_acq_command(&session, &id, AcquisitionCommand::Stop).await;
+    assert!(response.ok, "{:?}", response.error);
+    shutdown_tx.send(true).expect("stop service");
+    tokio::time::timeout(Duration::from_secs(15), service)
+        .await
+        .expect("service shutdown")
+        .expect("service task");
+}

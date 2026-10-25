@@ -170,5 +170,7 @@ state.
 
 ## Results
 
+The [2026-10-25 bench record](hardware-2026-10-25.md) separates completed checks from unavailable or pending cases.
+
 A run's evidence (logs, captures, values) goes into the backlog rows it
 settles, and a defect it finds becomes a new row marked *Seen on hardware*.

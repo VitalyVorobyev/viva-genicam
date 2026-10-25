@@ -28,6 +28,9 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/python.yml'
+      - 'scripts/dependency-notices.py'
+      - 'scripts/check-distribution.py'
+      - 'docs/third-party/**'
   workflow_dispatch:
 
 permissions:
@@ -86,6 +89,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Collect wheel dependency license texts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/dependency-notices.py --artifact python --target ${{ matrix.target }} --out crates/viva-pygenicam/python/viva_genicam/THIRD_PARTY_NOTICES.txt
+
       # USB3 Vision goes through nusb, pure Rust: no system USB library is
       # needed on any platform.
       # For Linux we specify `manylinux` + `container` as action inputs so
@@ -100,6 +110,10 @@ jobs:
           container: ${{ startsWith(matrix.os, 'ubuntu') && 'quay.io/pypa/manylinux_2_28_x86_64' || '' }}
           args: --release --out dist
 
+      - name: Inspect wheel contents
+        shell: bash
+        run: python scripts/check-distribution.py crates/viva-pygenicam/dist/*.whl
+
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
@@ -113,12 +127,20 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Collect source distribution dependency notices
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/dependency-notices.py --artifact python --out crates/viva-pygenicam/python/viva_genicam/THIRD_PARTY_NOTICES.txt
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/viva-pygenicam
           command: sdist
           args: --out dist
+      - name: Inspect source distribution contents
+        shell: bash
+        run: python scripts/check-distribution.py crates/viva-pygenicam/dist/*.tar.gz
       - uses: actions/upload-artifact@v7
         with:
           name: sdist

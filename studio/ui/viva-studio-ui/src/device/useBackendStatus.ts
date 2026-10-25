@@ -1,3 +1,4 @@
+import { invokeCommand } from "./commands";
 import { useEffect, useState } from "react";
 import { isTauri } from "../tauri";
 import type { BackendStatus } from "./backendStatus";
@@ -19,8 +20,7 @@ export function useBackendStatus(): BackendStatus | null {
 
     async function load() {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const result = await invoke<BackendStatus>("backend_status");
+        const result = await invokeCommand("backend_status");
         if (!cancelled) setStatus(result);
       } catch (e) {
         console.error("Failed to query backend status:", e);

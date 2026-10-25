@@ -75,6 +75,12 @@ fn render() -> String {
         out.push_str(&format!("  \"{name}\": {ty};\n"));
     }
     out.push_str("};\n");
+    out.push_str("\n/** Registered Tauri commands: wire arguments and successful response. */\n");
+    out.push_str("export type StudioCommands = {\n");
+    for (name, signature) in crate::command_bindings::all(&cfg) {
+        out.push_str(&format!("  \"{name}\": {signature};\n"));
+    }
+    out.push_str("};\n");
     // ts-rs leaves a space before each line break.
     out.lines()
         .map(str::trim_end)

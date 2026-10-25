@@ -33,6 +33,16 @@ pub trait Discovery: Send + Sync + 'static {
     /// and must not change from pass to pass while the camera is present.
     fn announce(&self, found: &Self::Found) -> DeviceAnnounce;
 
+    /// Whether the served session still reaches the camera this pass found.
+    ///
+    /// A stable device id need not imply a stable endpoint: GigE cameras keep
+    /// their MAC when their IP or the chosen host interface changes. Returning
+    /// `false` retires the whole served session before opening the new one.
+    /// Transports whose endpoint cannot change may keep the default.
+    fn connection_matches(&self, _device: &Self::Device, _found: &Self::Found) -> bool {
+        true
+    }
+
     /// Open a camera a pass found.
     async fn connect(&self, found: &Self::Found) -> Result<Self::Device, GenicamError>;
 }
@@ -109,11 +119,19 @@ pub async fn run_discovery<D: Discovery>(
 
         // Lost cameras: those a successful pass did not find, and those the
         // transport reports gone — a camera unplugged and plugged back in
-        // within one interval keeps its id, but not its connection.
+        // within one interval keeps its id, but not its connection. The same
+        // applies when its endpoint or selected host interface changed.
         let mut lost = lost_cameras(pass.is_ok().then_some(&present), active.keys());
         let gone: Vec<String> = active
             .iter()
-            .filter(|(id, served)| !lost.contains(id) && served.device.is_lost())
+            .filter(|(id, served)| {
+                !lost.contains(id)
+                    && (served.device.is_lost()
+                        || found.iter().any(|(announce, found)| {
+                            announce.id == **id
+                                && !discovery.connection_matches(&served.device, found)
+                        }))
+            })
             .map(|(id, _)| id.clone())
             .collect();
         lost.extend(gone);

@@ -143,6 +143,32 @@ how you saw it fail.
   and logged rather than failing the document; a document-level failure is a
   bug worth reporting with the XML attached.
 
+### macOS app fails while the CLI works
+
+On macOS 15 or later, local-network privacy applies to outgoing UDP unicast,
+multicast and broadcast, and to connected UDP sockets. Terminal/SSH tools and
+their children have different access rules, so a working CLI does not establish
+that the app has permission. See Apple's [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+
+- Check System Settings → Privacy & Security → Local Network for the exact
+  Viva Studio installation under test, and restart the app after changing it.
+  Do not disable privacy protections globally to work around a connection error.
+- Use a Tauri-built bundle, whose merged `Info.plist` contains
+  `NSLocalNetworkUsageDescription`. [Tauri documents the merge](https://v2.tauri.app/distribute/macos-application-bundle/#native-configuration).
+  A hand-assembled debug bundle is not a release-package test.
+- Preserve the app log from `~/.viva-studio/logs/`. For a subsequent controlled
+  reproduction, start the app with `RUST_LOG=viva_studio_tauri=info,viva_genicam=debug,viva_gige=debug,warn`
+  and record its mode, exact app path, OS version, and interface.
+- Treat `Broken pipe` and `No route to host` as observed errors, not proof of a
+  privacy denial. Check addressing and compare the app's log with the CLI's
+  before changing transport retries. Apple's guide also discusses identity
+  problems with multiple app versions and recommends an Apple-issued signing
+  identity for reliable permission tracking.
+
+The [bench record](../hardware-2026-10-25.md) distinguishes the observed Studio
+failure from these hypotheses. Adding the usage description alone does not
+validate a connection fix.
+
 ### No frames during acquisition
 - Check the service log for `first frame received` and
   `published first stream block to Zenoh`.

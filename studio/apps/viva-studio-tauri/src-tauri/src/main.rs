@@ -3,6 +3,8 @@
 mod backend;
 #[cfg(test)]
 mod bindings;
+#[cfg(test)]
+mod command_bindings;
 mod commands;
 mod error;
 #[cfg(test)]
@@ -252,7 +254,10 @@ mod tests {
         let backend: BackendState = Arc::new(backend);
         on_run_event(&tauri::RunEvent::Exit, &backend);
 
-        tauri::async_runtime::block_on(fake_camera::assert_released(&fake));
+        tauri::async_runtime::block_on(async {
+            fake_camera::assert_released(&fake).await;
+            fake.stop().await;
+        });
     }
 
     /// A release that blocks without yielding — on the camera mutex, or

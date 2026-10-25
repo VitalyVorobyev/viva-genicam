@@ -58,9 +58,12 @@ each module's XML must use. What they fix that this decision relies on:
   cannot know the consumer's node map and two caches of one device disagree.
 
 `GenTL.h` is published "under the license of the EMVA GenICam Standard
-Group"; the GenICam License (v1.0, ch. 4) lets its headers be redistributed
-*without modification* only, and says nothing that covers a copy in another
-project's source tree. The independent consumer we test against is Harvesters
+Group". It is fetched for the independent test consumer, rather than copied
+into the MIT source tree. **Licensing clarification (2026-10-25):** the currently
+reviewed [v1.6 terms](https://www.emva.org/wp-content/uploads/GenICam_License_20180629.pdf)
+separate the reference runtime, development access, and standard documents;
+fetching a header does not remove its original terms or license a Rust
+transcription. See the [provenance review](../legal-review.md). The independent consumer we test against is Harvesters
 1.4.3 with EMVA's reference GenApi (`genicam` 1.6.0 on PyPI).
 
 ## Decision

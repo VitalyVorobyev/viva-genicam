@@ -66,6 +66,20 @@ to connect.
 Studio talks to the camera directly. It can also run against cameras that
 `viva-service` exposes over the network ([remote mode](#remote-mode)).
 
+### macOS local-network access
+
+On macOS 15 or later, allow Viva Studio access to the local network when macOS
+asks. This permission is separate from opening an unsigned download. To check
+it later, open System Settings → Privacy & Security → Local Network and find
+Viva Studio. Close and reopen Studio after changing the permission.
+
+Check this setting when Studio cannot contact a GigE camera or a remote service,
+even if `viva-camctl` works from Terminal: macOS treats command-line tools and
+apps differently. A network error such as `Broken pipe` alone does not prove
+that permission is the cause; [report it](reporting.md) if access is allowed and
+the connection still fails. Apple's [local-network privacy guide](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+describes the distinction.
+
 ## Features
 
 The **Features** tab shows the camera's feature tree as its GenApi XML

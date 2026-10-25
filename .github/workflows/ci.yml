@@ -31,6 +31,9 @@ jobs:
       - name: Cargo fmt
         run: cargo fmt --all --check
 
+      - name: Distribution boundary regressions
+        run: python3 scripts/test-distribution.py
+
       - name: Install cargo-deny
         if: ${{ !cancelled() }}
         uses: taiki-e/install-action@v2

@@ -27,6 +27,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zenoh = "1"
 
 [dev-dependencies]
+# Parse the registered Rust command signatures for the generated IPC contract.
+syn = { version = "2", features = ["full"] }
 futures-util = "0.3"
 # The UI's TypeScript types are generated from the Rust ones (`src/bindings.rs`,
 # backlog ST-28); test builds turn on the `ts` derives below.

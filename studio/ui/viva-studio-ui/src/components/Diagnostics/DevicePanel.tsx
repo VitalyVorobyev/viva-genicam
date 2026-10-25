@@ -1,3 +1,4 @@
+import { invokeCommand } from "../../device/commands";
 import { useEffect, useState } from "react";
 import { useToast } from "../../context/ToastContext";
 import { formatErrorMessage } from "../../device/errorMessage";
@@ -14,11 +15,6 @@ const IDENTITY: ReadonlyArray<readonly [label: string, feature: string]> = [
   ["Version", "DeviceVersion"],
   ["User ID", "DeviceUserID"],
 ];
-
-async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, args);
-}
 
 /**
  * The connected camera: who it is and where it is on the network — what a
@@ -65,7 +61,7 @@ function NetworkSection() {
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
-    invoke<NetworkConfig>("get_network_config").then(
+    invokeCommand("get_network_config").then(
       (config) => !cancelled && setNetwork({ kind: "ready", config }),
       (error) => !cancelled && setNetwork({ kind: "unavailable", reason: formatErrorMessage(error) }),
     );
@@ -110,7 +106,7 @@ function PersistentIpForm({ config }: { config: NetworkConfig }) {
   const save = async () => {
     setBusy(true);
     try {
-      await invoke("set_persistent_ip", { ip, subnet, gateway });
+      await invokeCommand("set_persistent_ip", { ip, subnet, gateway });
       addToast("success", `Saved ${ip}: the camera uses it from its next restart`);
     } catch (error) {
       addToast("error", `Setting the persistent IP failed: ${formatErrorMessage(error)}`);

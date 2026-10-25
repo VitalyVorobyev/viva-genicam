@@ -48,8 +48,10 @@
 //!
 //! Without a row stride, pixels are read as one continuous run from the
 //! first line to the last — PFNC 2.4 §6.7's *image padding*. A bit-packed
-//! payload (`…p`, `…Packed`) must hold every pixel's bits,
-//! ⌈pixels × bits / 8⌉, and any other at least
+//! payload must hold the bytes up to its last pixel's: ⌈pixels × bits / 8⌉
+//! for an lsb-packed one (`…p`), and for GigE Vision's `…Packed`, two pixels
+//! in three bytes whatever their bits, every whole group and a lone last
+//! pixel's first two bytes. Any other must hold at least
 //! [`PixelFormat::image_bytes`]; bytes past that are ignored. §6.7 completes
 //! the packing group the image ends inside, but an Allied Vision Manta
 //! G-125B does not: at 1291 × 963 in `Mono12Packed`, an odd pixel count, it
@@ -504,15 +506,26 @@ fn geometry(
     // Every format with a layout declares a size; `None` here is overflow.
     let completed = format.image_bytes(width, height).ok_or(too_large.clone())?;
     let expected = match layout(format) {
-        // A bit-packed run needs only its pixels' bits: a camera may stop
-        // inside the last packing group (the module's *Geometry*).
+        // A bit-packed run needs only the bytes up to its last pixel's: a
+        // camera may stop inside the last packing group (the module's
+        // *Geometry*). An lsb bit stream holds a pixel's bits end to end.
         Some(Layout::Mono(single) | Layout::Bayer(single, _))
-            if matches!(single.packing, Packing::Lsb | Packing::Gige) =>
+            if matches!(single.packing, Packing::Lsb) =>
         {
             pixels
                 .checked_mul(usize::from(single.bits))
                 .ok_or(too_large)?
                 .div_ceil(8)
+        }
+        // GigE Vision's two pixels in three bytes, whatever their bits: the
+        // whole groups, and a lone last pixel's first two bytes.
+        Some(Layout::Mono(single) | Layout::Bayer(single, _))
+            if matches!(single.packing, Packing::Gige) =>
+        {
+            (pixels / 2)
+                .checked_mul(3)
+                .and_then(|whole| whole.checked_add(if pixels % 2 == 1 { 2 } else { 0 }))
+                .ok_or(too_large)?
         }
         _ => completed,
     };
@@ -953,6 +966,50 @@ mod tests {
             Ok(1_243_233)
         );
         assert!(to_rgb8(P::Mono12Packed, width, height, None, &src).is_ok());
+    }
+
+    /// GigE Vision's `10Packed` puts two 10-bit pixels in three bytes, four
+    /// bits unused, so a pixel count's bits are not its bytes: 4 pixels take
+    /// 6 bytes, not ⌈4 × 10 / 8⌉ = 5. Five bytes are short (backlog PX-07:
+    /// three samples came back, and a Bayer conversion read past the end
+    /// and panicked); the last pixel of an odd count needs its group's first
+    /// two bytes, as the Manta's `Mono12Packed` frame has.
+    #[test]
+    fn a_gige_packed_group_is_counted_whole_up_to_its_last_pixel() {
+        assert_eq!(
+            unpack_u16(P::Mono10Packed, 4, 1, None, &[0; 5]),
+            Err(ConvertError::ShortPayload {
+                format: P::Mono10Packed,
+                expected: 6,
+                actual: 5
+            })
+        );
+        assert_eq!(unpack(P::Mono10Packed, 4, 1, &[0; 6]).len(), 4);
+        // An odd count: one group and the first two bytes of the next.
+        assert_eq!(unpack(P::Mono10Packed, 3, 1, &[0; 5]).len(), 3);
+        assert_eq!(
+            unpack_u16(P::Mono10Packed, 3, 1, None, &[0; 4]),
+            Err(ConvertError::ShortPayload {
+                format: P::Mono10Packed,
+                expected: 5,
+                actual: 4
+            })
+        );
+    }
+
+    /// The same short `10Packed` payload through a Bayer conversion, which
+    /// indexed past its end and panicked (PX-07).
+    #[test]
+    fn a_short_gige_packed_bayer_image_is_refused_not_read_past() {
+        assert_eq!(
+            to_rgb8(P::BayerRG10Packed, 2, 2, None, &[0; 5]),
+            Err(ConvertError::ShortPayload {
+                format: P::BayerRG10Packed,
+                expected: 6,
+                actual: 5
+            })
+        );
+        assert!(to_rgb8(P::BayerRG10Packed, 2, 2, None, &[0; 6]).is_ok());
     }
 
     /// A GVSP image leader declares `padding_x` bytes after every line

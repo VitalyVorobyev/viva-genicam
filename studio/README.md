@@ -107,6 +107,14 @@ workflow (`.github/workflows/release.yml`) does the same on macOS, Ubuntu and
 Windows for every `v*` tag, and on any pull request that changes the
 packaging.
 
+On macOS, Tauri merges `src-tauri/Info.plist` into the generated bundle and
+embeds it in debug executables. Its local-network usage description covers
+camera discovery/control/streaming and connections to camera services. Use the
+Tauri-built bundle for distribution and permission tests; assembling an app
+directory by hand can omit metadata and signing information. The
+[testing cookbook](../docs/studio/testing-cookbook.md#macos-app-fails-while-the-cli-works)
+describes how to investigate app-only network failures.
+
 ---
 
 ## Using `viva_xml_model` as a library

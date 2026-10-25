@@ -101,24 +101,24 @@ export function computeHistogram(bmpBytes: Uint8Array): HistogramData | null {
   return null;
 }
 
-/** Summary of an 8-bit histogram, for the numbers under the plot. */
+/** Summary of a histogram at its source bit depth. */
 export interface HistogramStats {
   min: number;
   max: number;
   mean: number;
-  /** Share of samples at 255, which may have clipped. */
+  /** Share of samples at the highest representable level, which may have clipped. */
   saturated: number;
 }
 
 /**
- * Range, mean and saturated share of a histogram (backlog ST-39). A colour
+ * Range, mean and saturated share of a histogram. A colour
  * image pools the samples of its three channels. `null` when it is empty.
  */
 export function histogramStats(data: HistogramData): HistogramStats | null {
   const channels = data.kind === "mono" ? [data.values] : [data.r, data.g, data.b];
   let count = 0;
   let sum = 0;
-  let min = 256;
+  let min = Number.POSITIVE_INFINITY;
   let max = -1;
   for (const bins of channels) {
     bins.forEach((n, level) => {
@@ -130,14 +130,14 @@ export function histogramStats(data: HistogramData): HistogramStats | null {
     });
   }
   if (count === 0) return null;
-  const saturated = channels.reduce((total, bins) => total + bins[255], 0) / count;
+  const saturated = channels.reduce((total, bins) => total + bins[bins.length - 1], 0) / count;
   return { min, max, mean: sum / count, saturated };
 }
 
 /** One line of histogram numbers; the clipped share only when some clipped. */
-export function formatHistogramStats({ min, max, mean, saturated }: HistogramStats): string {
+export function formatHistogramStats({ min, max, mean, saturated }: HistogramStats, maximum = 255): string {
   const line = `min ${min} · max ${max} · mean ${mean.toFixed(1)}`;
-  return saturated > 0 ? `${line} · ${(saturated * 100).toFixed(1)}% at 255` : line;
+  return saturated > 0 ? `${line} · ${(saturated * 100).toFixed(1)}% at ${maximum}` : line;
 }
 
 /**
@@ -160,12 +160,13 @@ export function renderHistogram(
 ): void {
   ctx.clearRect(0, 0, w, h);
 
-  const binW = w / 256;
+  const bins = data.kind === "mono" ? data.values.length : data.r.length;
+  const binW = w / bins;
 
   if (data.kind === "mono") {
     const peak = Math.max(arrayMax(data.values), 1);
     ctx.fillStyle = "rgba(230, 237, 243, 0.85)";
-    for (let i = 0; i < 256; i++) {
+    for (let i = 0; i < bins; i++) {
       const barH = (data.values[i]! / peak) * h;
       ctx.fillRect(i * binW, h - barH, Math.max(binW, 1), barH);
     }
@@ -183,7 +184,7 @@ export function renderHistogram(
 
   for (const [channel, color] of channels) {
     ctx.fillStyle = color;
-    for (let i = 0; i < 256; i++) {
+    for (let i = 0; i < bins; i++) {
       const barH = (channel[i]! / peak) * h;
       ctx.fillRect(i * binW, h - barH, Math.max(binW, 1), barH);
     }

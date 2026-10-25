@@ -98,10 +98,24 @@ packet size of a GigE stream.
 
 The **Image** tab shows the live stream once you press **Start Acq**. The
 toolbar zooms to fit or to exactly one screen pixel per camera pixel, and
-opens a histogram, a line profile and an ROI tool. **Save snapshot** saves the
-image as shown, as an 8-bit PNG. The header shows the frame rate and, once any
+opens a histogram, a line profile and an ROI tool. **Freeze for native pixel
+analysis** holds one frame for the pixel inspector, histogram and line profile.
+They use the camera's original sample values, including 10-, 12- and 16-bit
+formats. **Resume live preview** returns to the stream; freezing the viewer
+does not stop acquisition. The header shows the frame rate and, once any
 are lost, how many frames were lost — the first sign of a network that
 cannot keep up.
+
+**Save snapshot** saves a PNG at the source bit depth. While frozen, it saves
+the frame being inspected; while live, it requests one recent frame. Bayer
+inspection measures the sensor mosaic, while the PNG contains demosaiced
+colour. Formats without a supported native conversion report an error and
+leave the live preview available.
+
+Native capture supports images up to 16 Mi pixels. In remote mode, it also
+requires complete, tightly packed rows with no extra payload bytes: the
+service's current image message does not describe row stride. Use embedded
+mode for padded images or ambiguous odd-width packed formats.
 
 The **Statistics** section of the Image tab counts every frame the camera
 sent: received complete, incomplete, missed, dropped by the host, and for GigE
@@ -198,5 +212,3 @@ The services and their wire protocol are described in the repository's
 - Signed and notarised bundles, and automatic updates.
 - Recording and playback.
 - More than one camera at a time.
-- The camera's own 10-, 12- and 16-bit pixel values: the inspector, histogram
-  and snapshots work on the 8-bit image shown.

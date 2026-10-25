@@ -41,5 +41,6 @@ zenoh = "1"
 # the library's `Frame::to_rgb8` uses too, so the viewer draws the same pixels.
 viva-genapi = { path = "../crates/viva-genapi" }
 viva-pfnc = { path = "../crates/viva-pfnc" }
+viva-genicam = { path = "../crates/viva-genicam", features = ["image-io"] }
 viva-genapi-xml = { path = "../crates/viva-genapi-xml", default-features = false }
 viva-zenoh-api = { path = "../crates/viva-zenoh-api" }

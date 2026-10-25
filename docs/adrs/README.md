@@ -45,6 +45,7 @@ of the record.
 | [0031](adr0031-gentl-producer.md) | A GenTL producer over the facade | Accepted; buffer info amended in 0.9 |
 | [0032](adr0032-usb3-vision-transport.md) | The USB3 Vision transport: nusb, transfers in flight, recovery and identity | Accepted |
 | [0033](adr0033-event-channel-acknowledges-on-arrival.md) | The GVCP message channel acknowledges on arrival | Accepted |
+| [0034](adr0034-native-frame-analysis.md) | Native frame analysis from one immutable capture | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

@@ -569,6 +569,7 @@ impl DeviceBackend for RemoteBackend {
         let image_key = keys::image(&device_id);
         let meta_key = meta::derive_meta_key(&image_key);
         let (frame_tx, _) = watch::channel(Bytes::new());
+        let native = viva_streamer::native::NativeCapture::default();
         let info_tx = watch::channel(viva_streamer::ws::StreamInfo::from_image_meta(
             &meta::default_image_meta(width, height),
         ))
@@ -597,6 +598,7 @@ impl DeviceBackend for RemoteBackend {
         };
         let source = tauri::async_runtime::spawn({
             let frame_tx = frame_tx.clone();
+            let native = native.clone();
             let info_tx = info_tx.clone();
             let shutdown_rx = shutdown_rx.clone();
             async move {
@@ -605,6 +607,7 @@ impl DeviceBackend for RemoteBackend {
                     source_config,
                     shared_meta,
                     frame_tx,
+                    native,
                     info_tx,
                     shutdown_rx,
                 )
@@ -615,7 +618,11 @@ impl DeviceBackend for RemoteBackend {
             }
         });
         let server = tauri::async_runtime::spawn({
-            let state = viva_streamer::ws::AppState { frame_tx, info_tx };
+            let state = viva_streamer::ws::AppState {
+                frame_tx,
+                info_tx,
+                native,
+            };
             async move {
                 if let Err(e) = viva_streamer::ws::run_server_with_listener(
                     listener,

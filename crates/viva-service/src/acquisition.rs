@@ -342,7 +342,32 @@ impl BlockPublisher {
             self.logged_first_gvsp_frame = true;
         }
 
-        let expected = expected_payload_len(frame.pixel_format, frame.width, frame.height);
+        // Reject impossible sized geometry rather than treating overflow as an
+        // unknown format and publishing an unchecked image.
+        if let Some(bpp) = frame.pixel_format.bytes_per_pixel() {
+            (frame.width as usize)
+                .checked_mul(frame.height as usize)?
+                .checked_mul(bpp)?;
+        }
+        // Padding belongs to every image row, including the final one. Never
+        // trim a padded image using its tightly packed geometry.
+        let row_stride = if frame.padding_x == 0 {
+            None
+        } else {
+            let stride = frame
+                .pixel_format
+                .line_bytes(frame.width)?
+                .checked_add(usize::from(frame.padding_x))?;
+            Some(u32::try_from(stride).ok()?)
+        };
+        let expected = match row_stride {
+            Some(stride) => Some(
+                usize::try_from(stride)
+                    .ok()?
+                    .checked_mul(usize::try_from(frame.height).ok()?)?,
+            ),
+            None => expected_payload_len(frame.pixel_format, frame.width, frame.height),
+        };
 
         if expected.is_none() && !self.logged_unsized_format {
             warn!(
@@ -387,6 +412,7 @@ impl BlockPublisher {
             width: frame.width,
             height: frame.height,
             seq: self.image_seq,
+            row_stride,
         };
         self.image_seq = self.image_seq.wrapping_add(1);
         Some((
@@ -543,6 +569,69 @@ pub(crate) fn image_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_image_preserves_padded_rows_and_trims_only_trailing_bytes() {
+        let mut publisher = BlockPublisher::new("test");
+        let mut frame = Frame::new(
+            vec![1, 2, 99, 98, 3, 4, 97, 96, 55].into(),
+            2,
+            2,
+            pfnc::PixelFormat::Mono8,
+        );
+        frame.padding_x = 2;
+        let (_, wire) = publisher.frame_image(&frame).unwrap();
+        let (header, pixels) = FrameHeader::decode(&wire).unwrap();
+        assert_eq!(header.row_stride, Some(4));
+        assert_eq!(pixels, &[1, 2, 99, 98, 3, 4, 97, 96]);
+        frame.payload = vec![1, 2, 99, 98, 3, 4, 97].into();
+        assert!(publisher.frame_image(&frame).is_none());
+    }
+
+    #[test]
+    fn frame_image_continuous_packed_partial_group_is_not_trimmed() {
+        let mut publisher = BlockPublisher::new("test");
+        let frame = Frame::new(
+            vec![1, 0x42, 3, 5, 6].into(),
+            3,
+            1,
+            pfnc::PixelFormat::Mono12Packed,
+        );
+        let (_, wire) = publisher.frame_image(&frame).unwrap();
+        let (header, pixels) = FrameHeader::decode(&wire).unwrap();
+        assert_eq!(header.row_stride, None);
+        assert_eq!(pixels, frame.payload.as_ref());
+    }
+
+    #[test]
+    fn frame_image_keeps_the_final_yuv422_pair_at_an_odd_image_boundary() {
+        let mut publisher = BlockPublisher::new("test");
+        let frame = Frame::new(
+            vec![128, 10, 128, 20, 128, 30, 128, 0].into(),
+            3,
+            1,
+            pfnc::PixelFormat::YUV422_8_UYVY,
+        );
+        let (_, wire) = publisher.frame_image(&frame).unwrap();
+        let (header, pixels) = FrameHeader::decode(&wire).unwrap();
+        assert_eq!(header.row_stride, None);
+        assert_eq!(pixels, frame.payload.as_ref());
+        assert_eq!(
+            viva_genicam::pfnc::convert::to_rgb8(header.pixel_format, 3, 1, None, pixels).unwrap(),
+            frame.to_rgb8().unwrap()
+        );
+    }
+
+    #[test]
+    fn frame_image_rejects_unrepresentable_stride_and_overflow_geometry() {
+        let mut publisher = BlockPublisher::new("test");
+        let mut frame = Frame::new(vec![0].into(), u32::MAX, 2, pfnc::PixelFormat::Mono16);
+        frame.padding_x = 1;
+        assert!(publisher.frame_image(&frame).is_none());
+        frame.padding_x = 0;
+        frame.height = u32::MAX;
+        assert!(publisher.frame_image(&frame).is_none());
+    }
 
     /// The `PixelFormat` entry names cameras report (vendor corpus:
     /// `Mono12Packed` in 28 of 38 documents, `YUV422Packed` and `RGB8Packed`

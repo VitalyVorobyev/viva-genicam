@@ -26,7 +26,7 @@ opaque string without `/`).
     "name": "Left",
     "model": "SPC-3000",
     "serial": "SN12345678",
-    "api_version": 6,
+    "api_version": 7,
     "ip": "192.168.1.10",
     "mac": "00:0C:DF:06:5B:2F",
     "user_name": "Left",
@@ -48,7 +48,7 @@ opaque string without `/`).
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional. The app compares this against
-  `viva_zenoh_api::API_VERSION` (currently `6`). On mismatch or absence, the app emits
+  `viva_zenoh_api::API_VERSION` (currently `7`). On mismatch or absence, the app emits
   an `api-version-mismatch` Tauri event (see below) and still discovers the device — no
   hard rejection.
 
@@ -292,23 +292,37 @@ opaque string without `/`).
 
 - **Direction:** Service → Streamer (NOT consumed by Tauri directly)
 - **Mechanism:** `put` per frame
-- **Payload:** 16-byte binary [`FrameHeader`] immediately followed by raw pixel data (row-major,
+- **Payload:** 20-byte binary [`FrameHeader`] immediately followed by raw pixel data (row-major,
   no further encoding). The header makes every frame self-describing — consumers do not need to
   rely on a prior `image/meta` subscription.
 - **Consumer:** the Tauri app's remote backend runs `viva_streamer`'s Zenoh source
   in-process while acquiring: it subscribes to this key and broadcasts BMP-encoded
   frames to the viewer over a local WebSocket.
 
-#### Binary frame header layout (16 bytes, all fields little-endian)
+#### Binary frame header layout (20 bytes, all fields little-endian)
 
 | Offset | Size | Field    | Description                                              |
 |--------|------|----------|----------------------------------------------------------|
 | 0      | 2    | `magic`  | `0x4746` LE (`[0x46, 0x47]`) — frame marker             |
-| 2      | 1    | `version`| Header layout version; currently `1`                    |
+| 2      | 1    | `version`| Header layout version; currently `2`                    |
 | 3      | 1    | `format` | Pixel format discriminant (see table below)              |
 | 4      | 4    | `width`  | Image width in pixels, `u32` LE                          |
 | 8      | 4    | `height` | Image height in pixels, `u32` LE                         |
 | 12     | 4    | `seq`    | Monotonically increasing frame counter, `u32` LE         |
+| 16     | 4    | `stride` | Row stride in bytes, `u32` LE; `0` means continuous packing |
+
+The stride belongs to this frame, not the separately published metadata. A
+nonzero stride includes the pixel packing group and padding after each row,
+including the final row; the payload contains at least `stride × height`
+bytes. Services preserve those bytes and trim only data beyond the image. A
+zero stride means pixels run continuously across row boundaries; PFNC owns
+the packing rules, including supported partial final groups. Consumers pass
+the declared stride to the shared PFNC converter instead of treating padding
+as pixels.
+
+This is API version 7 and binary frame-header version 2. Version 1 image
+headers are rejected; update services and Studio together. The one-byte pixel
+format codes retain their existing meanings. Event-vision framing is unchanged.
 
 #### Pixel format discriminant table
 
@@ -422,7 +436,7 @@ travels as `0`, which decodes as `viva_pfnc::PixelFormat::Unknown(0)`.
 | Offset | Size | Field         | Description                                            |
 |--------|------|---------------|--------------------------------------------------------|
 | 0      | 2    | `magic`       | `0x5645` LE (`[0x45, 0x56]`, `"EV"`) — event marker    |
-| 2      | 1    | `version`     | Header layout version; currently `1`                   |
+| 2      | 1    | `version`     | Header layout version; currently `2`                   |
 | 3      | 1    | `format`      | `0` Unknown, `1` EVT 3.0, `2` EVT 2.1; codes only appended |
 | 4      | 4    | `seq`         | Event-block counter, from `0` per acquisition, `u32` LE |
 | 8      | 8    | `timestamp`   | Device timestamp, `u64` LE; valid only if flag bit 0   |

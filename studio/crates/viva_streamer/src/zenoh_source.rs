@@ -4,7 +4,7 @@
 //!
 //! - **meta subscriber** — listens on `image/meta`, updates the shared
 //!   `Arc<RwLock<ImageMeta>>` and the stream info the viewer reads.
-//! - **frame subscriber** — receives framed payloads (`16-byte FrameHeader + raw
+//! - **frame subscriber** — receives framed payloads (`20-byte FrameHeader + raw
 //!   pixels`), decodes the inline header, and draws the pixels with
 //!   [`FrameEncoder`] — the same encoder embedded mode uses — in the frame's
 //!   PFNC format, as often as [`FramePacer`] allows.
@@ -195,7 +195,14 @@ async fn run_inner(
                     }
                     continue;
                 }
-                let frame = match encoder.encode(format, header.width, header.height, None, pixel_data) {
+                let row_stride = match header.row_stride.map(usize::try_from).transpose() {
+                    Ok(stride) => stride,
+                    Err(err) => {
+                        warn!("Dropped frame seq={}: row stride is not representable: {err}", header.seq);
+                        continue;
+                    }
+                };
+                let frame = match encoder.encode(format, header.width, header.height, row_stride, pixel_data) {
                     Ok(frame) => frame,
                     Err(err) => {
                         warn!("Dropped frame seq={}: {err}", header.seq);
@@ -204,7 +211,7 @@ async fn run_inner(
                 };
 
                 let bmp_len = frame.len();
-                native.replace_remote(format, header.width, header.height, pixel_data, frame.clone());
+                native.replace_remote(format, header.width, header.height, row_stride, pixel_data, frame.clone());
                 // Stored even with no viewer: the next one to connect is sent it.
                 frame_tx.send_replace(frame);
                 pacer.sent(Instant::now());
@@ -228,41 +235,40 @@ async fn run_inner(
 mod tests {
     use super::*;
 
-    /// A frame that arrives while no viewer is connected is kept for the one
-    /// that connects next. In SingleFrame mode it is the only frame, and the
-    /// viewer connects after the acquisition starts (Codex review of #173).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_frame_nobody_watches_is_kept_for_the_next_viewer() {
+    async fn retained_remote_frame(
+        header: FrameHeader,
+        pixels: &[u8],
+    ) -> (Bytes, crate::native::SourceFrame) {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
-        let key = format!("viva-streamer-test/{}/image", std::process::id());
+        let key = format!("viva-streamer-test/{}/{id}/image", std::process::id());
         let source = ZenohSourceConfig {
             key_expr: key.clone(),
             meta_key: format!("{key}/meta"),
             fps_limit: None,
         };
-        let meta = ImageMeta::new(PixelFormat::Mono8, 2, 2, 4);
+        let meta = ImageMeta::new(
+            header.pixel_format,
+            header.width,
+            header.height,
+            pixels.len() as u64,
+        );
         let (frame_tx, _) = watch::channel(Bytes::new());
         let (info_tx, _) = watch::channel(crate::ws::StreamInfo::from_image_meta(&meta));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let native = crate::native::NativeCapture::default();
         let source_task = tokio::spawn(run_with_session(
             session.clone(),
             source,
             Arc::new(RwLock::new(meta)),
             frame_tx.clone(),
-            Default::default(),
+            native.clone(),
             info_tx,
             shutdown_rx,
         ));
-
-        let header = FrameHeader {
-            pixel_format: PixelFormat::Mono8,
-            width: 2,
-            height: 2,
-            seq: 1,
-        };
         let mut payload = header.encode();
-        payload.extend_from_slice(&[0, 64, 128, 255]);
-
+        payload.extend_from_slice(pixels);
         // Publish until the source has subscribed and stored a frame.
         let deadline = Instant::now() + Duration::from_secs(5);
         while frame_tx.borrow().is_empty() && Instant::now() < deadline {
@@ -272,10 +278,68 @@ mod tests {
         let stored = frame_tx.borrow().clone();
         shutdown_tx.send(true).unwrap();
         source_task.await.unwrap().unwrap();
-
         assert!(
             stored.starts_with(b"BM"),
             "no frame was kept for a later viewer"
         );
+        (stored, native.latest().unwrap().unwrap())
+    }
+
+    /// SingleFrame mode must retain the first frame for a later viewer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_nobody_watches_is_kept_for_the_next_viewer() {
+        retained_remote_frame(
+            FrameHeader {
+                pixel_format: PixelFormat::Mono8,
+                width: 2,
+                height: 2,
+                seq: 1,
+                row_stride: None,
+            },
+            &[0, 64, 128, 255],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn v2_padded_and_partial_packed_images_reach_preview_and_capture() {
+        for (format, width, height, stride, pixels, expected_pixels) in [
+            (
+                PixelFormat::Mono8,
+                2,
+                2,
+                Some(4),
+                vec![1, 2, 99, 98, 3, 4, 97, 96],
+                vec![1, 2, 3, 4],
+            ),
+            (
+                PixelFormat::Mono12Packed,
+                3,
+                1,
+                None,
+                vec![1, 0x42, 3, 5, 6],
+                vec![1, 0x42, 3, 5, 6],
+            ),
+        ] {
+            let (bmp, native) = retained_remote_frame(
+                FrameHeader {
+                    pixel_format: format,
+                    width,
+                    height,
+                    seq: 2,
+                    row_stride: stride,
+                },
+                &pixels,
+            )
+            .await;
+            let expected_bmp = FrameEncoder::new()
+                .encode(format, width, height, None, &expected_pixels)
+                .unwrap();
+            assert_eq!(bmp, expected_bmp);
+            assert_eq!(native.bmp, bmp);
+            assert_eq!(native.row_stride, stride.map(|s| s as usize));
+            assert_eq!(native.pixels.as_ref(), pixels);
+            assert!(crate::native::encode(&native).is_ok());
+        }
     }
 }

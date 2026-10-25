@@ -54,3 +54,14 @@ whereas the inspector measures sensor samples. Remote padding requires a future
 versioned per-frame layout contract (SR-26, alongside ST-52), rather than inference from
 payload size. Real camera validation remains a separate gate after the ongoing
 endurance run; pure synthetic captures do not establish hardware coverage.
+
+## 2026-10-25 amendment: explicit remote row layout (SR-26)
+
+API 7 carries a version-2, 20-byte image header with a per-frame row stride.
+Zero means continuous packing; nonzero stride includes padding after every
+row, including the final row. Services preserve the padded image, and both
+preview and native capture use the declared stride through the shared PFNC
+converter. This replaces the initial remote tight-row restriction above.
+Version-1 image headers are rejected, so services and clients update together.
+The wire layout is specified in [the Zenoh contract](../studio/zenoh-api.md).
+Frame timestamps and decoded chunks remain separate ST-52 work.

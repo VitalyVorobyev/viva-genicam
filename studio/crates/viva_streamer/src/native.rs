@@ -54,26 +54,27 @@ impl NativeCapture {
         self.store(result);
     }
 
-    /// Zenoh's existing image wire has no line stride or chunk layout. Only
-    /// accept unambiguous tightly packed rows; do not guess native values.
+    /// Retain the explicit Zenoh image layout after preview conversion.
+    /// Continuous packing and partial final groups are decoded by PFNC.
     pub fn replace_remote(
         &self,
         format: PixelFormat,
         width: u32,
         height: u32,
+        row_stride: Option<usize>,
         pixels: &[u8],
         bmp: Bytes,
     ) {
         // Validate before allocating a copy of a remote payload: a tiny
         // declared image may carry arbitrarily large trailing bytes.
         let result = source_lengths(width, height, pixels.len(), bmp.len())
-            .and_then(|_| remote_layout(format, width, height, pixels.len()))
+            .and_then(|_| remote_layout(format, width, height, row_stride, pixels.len()))
             .map(|()| {
                 Some(SourceFrame {
                     format,
                     width,
                     height,
-                    row_stride: None,
+                    row_stride,
                     pixels: Bytes::copy_from_slice(pixels),
                     bmp,
                 })
@@ -108,15 +109,24 @@ fn remote_layout(
     format: PixelFormat,
     width: u32,
     height: u32,
+    row_stride: Option<usize>,
     payload_len: usize,
 ) -> Result<(), String> {
-    let line_size = format
-        .line_bytes(width)
-        .and_then(|line| line.checked_mul(height as usize));
-    let image_size = format.image_bytes(width, height);
-    if line_size.is_none() || line_size != image_size || image_size != Some(payload_len) {
-        return Err("Native capture cannot infer this remote image's row layout; use embedded mode for packed odd widths, padding or chunks".to_string());
+    if let Some(stride) = row_stride {
+        let line = format
+            .line_bytes(width)
+            .ok_or_else(|| "Native capture cannot size this pixel format".to_string())?;
+        let expected = stride
+            .checked_mul(height as usize)
+            .ok_or_else(|| "Native capture row layout overflows".to_string())?;
+        if stride < line || payload_len < expected {
+            return Err(
+                "Native capture has an invalid row stride or incomplete padded rows".to_string(),
+            );
+        }
     }
+    // No stride means one continuous packed image. The preview and native
+    // converters own its minimum length, including partial final groups.
     Ok(())
 }
 
@@ -328,36 +338,79 @@ mod tests {
         assert!(encode(&unsupported).is_err());
     }
 
+    fn samples(encoded: &[u8]) -> &[u8] {
+        let len = u32::from_le_bytes(encoded[4..8].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&encoded[8..8 + len]).unwrap();
+        let start = 8 + len + header["bmp_bytes"].as_u64().unwrap() as usize;
+        let length = header["sample_bytes"].as_u64().unwrap() as usize;
+        &encoded[start..start + length]
+    }
+
     #[test]
-    fn remote_analysis_refuses_ambiguous_rows_without_changing_the_preview() {
+    fn remote_padded_rows_preserve_preview_and_native_values() {
+        let pixels = [1, 2, 99, 98, 3, 4, 97, 96];
         let cache = NativeCapture::default();
-        let aligned = source(PixelFormat::Mono12, 2, 1, &[1, 0, 2, 0]);
+        let bmp = FrameEncoder::new()
+            .encode(PixelFormat::Mono8, 2, 2, Some(4), &pixels)
+            .unwrap();
+        let expected = source(PixelFormat::Mono8, 2, 2, &[1, 2, 3, 4]);
+        assert_eq!(bmp, expected.bmp);
+        assert_ne!(
+            bmp,
+            FrameEncoder::new()
+                .encode(PixelFormat::Mono8, 2, 2, None, &pixels)
+                .unwrap()
+        );
+        cache.replace_remote(PixelFormat::Mono8, 2, 2, Some(4), &pixels, bmp.clone());
+        let retained = cache.latest().unwrap().unwrap();
+        assert_eq!(retained.bmp, bmp);
+        assert_eq!(samples(&encode(&retained).unwrap()), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn remote_continuous_packed_partial_group_preserves_native_values() {
+        // Mono12Packed pairs: high byte, shared low nibbles, high byte.
+        let odd = source(PixelFormat::Mono12Packed, 3, 1, &[1, 0x42, 3, 5, 6]);
+        let cache = NativeCapture::default();
         cache.replace_remote(
-            aligned.format,
-            aligned.width,
-            aligned.height,
-            &aligned.pixels,
-            aligned.bmp,
+            odd.format,
+            odd.width,
+            odd.height,
+            None,
+            &odd.pixels,
+            odd.bmp.clone(),
         );
-        assert!(cache.latest().unwrap().is_some());
-        // Three 12Packed pixels are a valid five-byte run on the Manta, but
-        // the wire does not tell us whether a row's final group was padded.
-        let odd = source(PixelFormat::Mono12Packed, 3, 1, &[1, 0, 2, 3, 0]);
-        assert!(
-            encode(&odd).is_ok(),
-            "embedded mode knows the source layout"
+        let retained = cache.latest().unwrap().unwrap();
+        assert_eq!(retained.bmp, odd.bmp);
+        assert_eq!(
+            samples(&encode(&retained).unwrap()),
+            little_endian(&[0x12, 0x34, 0x56])
         );
-        cache.replace_remote(odd.format, odd.width, odd.height, &odd.pixels, odd.bmp);
-        assert!(cache.latest().unwrap_err().contains("embedded mode"));
-        let mut padded = source(PixelFormat::Mono8, 2, 1, &[1, 2]);
-        padded.pixels = Bytes::from_static(&[1, 2, 0, 0]);
+    }
+
+    #[test]
+    fn remote_invalid_strides_clear_previous_capture_without_copying() {
+        let cache = NativeCapture::default();
+        for stride in [Some(1), Some(4), Some(usize::MAX)] {
+            cache.replace(source(PixelFormat::Mono8, 2, 2, &[1, 2, 3, 4]));
+            cache.replace_remote(
+                PixelFormat::Mono8,
+                2,
+                2,
+                stride,
+                &[1, 2, 3, 4],
+                Bytes::new(),
+            );
+            assert!(cache.latest().is_err());
+        }
         cache.replace_remote(
-            padded.format,
-            padded.width,
-            padded.height,
-            &padded.pixels,
-            padded.bmp,
+            PixelFormat::Mono8,
+            1,
+            1,
+            None,
+            &vec![0; MAX_SOURCE_BYTES + 1],
+            Bytes::new(),
         );
-        assert!(cache.latest().is_err());
+        assert!(cache.latest().unwrap_err().contains("128 MiB"));
     }
 }

@@ -1,15 +1,16 @@
 //! Binary frame header prepended to every raw pixel buffer on the Zenoh image key.
 //!
-//! ## Layout (16 bytes, all fields little-endian)
+//! ## Layout (20 bytes, all fields little-endian)
 //!
 //! | Offset | Size | Field   | Value / Notes                          |
 //! |--------|------|---------|----------------------------------------|
 //! | 0      | 2    | magic   | `0x4746` LE (`[0x46, 0x47]`)           |
-//! | 2      | 1    | version | `1`                                    |
+//! | 2      | 1    | version | `2`                                    |
 //! | 3      | 1    | format  | pixel format discriminant (see table)  |
 //! | 4      | 4    | width   | image width in pixels, u32 LE          |
 //! | 8      | 4    | height  | image height in pixels, u32 LE         |
 //! | 12     | 4    | seq     | monotonically increasing frame counter |
+//! | 16     | 4    | stride  | row bytes, or 0 for continuous packing  |
 
 use thiserror::Error;
 
@@ -20,10 +21,10 @@ use viva_pfnc::PixelFormat;
 pub const FRAME_MAGIC: u16 = 0x4746;
 
 /// Fixed size of the binary frame header in bytes.
-pub const HEADER_SIZE: usize = 16;
+pub const HEADER_SIZE: usize = 20;
 
 /// The only supported header version. Bumped when the layout changes.
-pub const SUPPORTED_VERSION: u8 = 1;
+pub const SUPPORTED_VERSION: u8 = 2;
 
 /// Errors returned by [`FrameHeader::decode`].
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub enum FrameHeaderError {
     UnsupportedVersion(u8),
 }
 
-/// 16-byte binary frame header prepended to every image payload.
+/// 20-byte binary frame header prepended to every image payload.
 ///
 /// See module-level documentation for the byte layout and format discriminant table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +60,13 @@ pub struct FrameHeader {
     pub height: u32,
     /// Monotonically increasing frame sequence number (wraps at u32::MAX).
     pub seq: u32,
+    /// Bytes per padded row; `None` means continuous image packing.
+    /// Zero is reserved on the wire for `None`.
+    pub row_stride: Option<u32>,
 }
 
 impl FrameHeader {
-    /// Encode this header into a 16-byte `Vec<u8>`.
+    /// Encode this header into a 20-byte `Vec<u8>`.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(HEADER_SIZE);
         buf.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
@@ -71,13 +75,14 @@ impl FrameHeader {
         buf.extend_from_slice(&self.width.to_le_bytes());
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&self.seq.to_le_bytes());
+        buf.extend_from_slice(&self.row_stride.unwrap_or(0).to_le_bytes());
         buf
     }
 
     /// Decode a header from the front of `buf`.
     ///
     /// On success returns `(header, pixel_data_slice)` where `pixel_data_slice`
-    /// is the remaining bytes after the 16-byte header.
+    /// is the remaining bytes after the 20-byte header.
     pub fn decode(buf: &[u8]) -> Result<(FrameHeader, &[u8]), FrameHeaderError> {
         if buf.len() < HEADER_SIZE {
             return Err(FrameHeaderError::TooShort(buf.len()));
@@ -98,11 +103,15 @@ impl FrameHeader {
         let height = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
         let seq = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
 
+        let stride = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let row_stride = (stride != 0).then_some(stride);
+
         let header = FrameHeader {
             pixel_format,
             width,
             height,
             seq,
+            row_stride,
         };
         Ok((header, &buf[HEADER_SIZE..]))
     }
@@ -200,6 +209,41 @@ mod tests {
             width: 640,
             height: 480,
             seq: 7,
+            row_stride: None,
+        }
+    }
+
+    #[test]
+    fn v2_wire_layout_has_literal_offsets_and_continuous_sentinel() {
+        let header = FrameHeader {
+            pixel_format: PixelFormat::Mono8,
+            width: 0x12345678,
+            height: 2,
+            seq: 0x44332211,
+            row_stride: Some(0x88776655),
+        };
+        let expected = [
+            0x46, 0x47, 2, 1, 0x78, 0x56, 0x34, 0x12, 2, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88,
+        ];
+        assert_eq!(header.encode(), expected);
+        let mut wire = expected.to_vec();
+        wire.extend_from_slice(&[9, 8]);
+        assert_eq!(FrameHeader::decode(&wire).unwrap(), (header, &[9, 8][..]));
+        wire[16..20].fill(0);
+        assert_eq!(FrameHeader::decode(&wire).unwrap().0.row_stride, None);
+        for version in [0, 1, 3, 255] {
+            wire[2] = version;
+            assert_eq!(
+                FrameHeader::decode(&wire),
+                Err(FrameHeaderError::UnsupportedVersion(version))
+            );
+        }
+        for length in 0..20 {
+            assert_eq!(
+                FrameHeader::decode(&wire[..length]),
+                Err(FrameHeaderError::TooShort(length))
+            );
         }
     }
 
@@ -229,9 +273,9 @@ mod tests {
 
     #[test]
     fn test_decode_buffer_too_short() {
-        let buf = [0u8; 15];
+        let buf = [0u8; 19];
         let err = FrameHeader::decode(&buf).unwrap_err();
-        assert_eq!(err, FrameHeaderError::TooShort(15));
+        assert_eq!(err, FrameHeaderError::TooShort(19));
     }
 
     #[test]
@@ -246,9 +290,9 @@ mod tests {
     #[test]
     fn test_decode_unsupported_version() {
         let mut buf = make_header(PixelFormat::Mono8).encode();
-        buf[2] = 2;
+        buf[2] = 1;
         let err = FrameHeader::decode(&buf).unwrap_err();
-        assert_eq!(err, FrameHeaderError::UnsupportedVersion(2));
+        assert_eq!(err, FrameHeaderError::UnsupportedVersion(1));
     }
 
     /// The published codes keep their meaning, written out as literals

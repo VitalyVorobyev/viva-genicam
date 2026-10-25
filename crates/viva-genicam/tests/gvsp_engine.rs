@@ -137,41 +137,58 @@ async fn extended_ids_place_each_packet_at_its_own_stride() {
 /// 0.8 rule) drops one that takes longer than the timeout, and every such
 /// frame is lost.
 ///
-/// The gap is a tenth of the block timeout and the transfer four times it, so
-/// a loaded runner can oversleep a gap ninefold (a macOS runner overslept the
-/// 8 ms gap this test once paced at 100 ms) and the frame still has to
-/// complete, while the count-from-leader rule still fails it.
+/// A loaded runner can oversleep even a 50 ms gap past a 500 ms timeout. Such
+/// a send schedule tests inactivity, not a slow healthy transfer. Qualify the
+/// measured schedule first, with at most three increasingly tolerant fixtures;
+/// the first valid fixture must complete, with no retry of an engine failure.
+/// Every fixture spans over three block timeouts and more than a second, so
+/// the count-from-leader rule still fails it.
 #[tokio::test]
 async fn a_slow_transfer_with_small_gaps_completes() {
-    const BLOCK_TIMEOUT: Duration = Duration::from_millis(500);
-    let mut h = Harness::new(576);
-    h.stream.set_block_timeout(BLOCK_TIMEOUT);
     // 40 payload packets at a 540-byte stride.
     let spec = BlockSpec::image(1, 216, 100, MONO8, 576);
     let img = image(216 * 100, 2);
     let datagrams = block_datagrams(&spec, &img);
     assert_eq!(datagrams.len(), 42);
-    let sender = h.send_paced(datagrams, BLOCK_TIMEOUT / 10);
-
-    let frame = tokio::time::timeout(Duration::from_secs(20), h.stream.next_frame())
-        .await
-        .expect("a frame whose packets keep arriving must complete")
-        .expect("stream error")
-        .expect("stream ended");
-    let paced = sender.join().unwrap();
-    assert!(
-        paced.longest_gap < BLOCK_TIMEOUT,
-        "the sender's longest gap, {:?}, outlasted the block timeout: the test \
-         judged the runner, not the engine",
-        paced.longest_gap
-    );
-    assert!(
-        paced.total > BLOCK_TIMEOUT * 3,
-        "the transfer took {:?}, too short to tell the rules apart",
-        paced.total
-    );
-    assert!(frame.payload.as_ref() == img.as_slice());
-    assert_eq!(frame.status, FrameStatus::Complete);
+    let mut rejected = Vec::new();
+    for block_timeout in [
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    ] {
+        let mut h = Harness::new(576);
+        h.stream.set_block_timeout(block_timeout);
+        // The receiver runs on its own OS thread. Finish measuring the sends
+        // before judging its queued result, so a scheduler-invalid fixture
+        // cannot turn into an engine timeout assertion first.
+        let paced = h
+            .send_paced(datagrams.clone(), block_timeout / 10)
+            .join()
+            .expect("sender");
+        if paced.longest_gap >= block_timeout {
+            eprintln!(
+                "scheduler-invalid fixture: longest gap {:?}, timeout {:?}, total {:?}",
+                paced.longest_gap, block_timeout, paced.total
+            );
+            rejected.push((block_timeout, paced.longest_gap, paced.total));
+            continue;
+        }
+        assert!(
+            paced.total > block_timeout * 3 && paced.total > Duration::from_secs(1),
+            "the transfer took {:?} against {:?}, too short to tell the rules apart",
+            paced.total,
+            block_timeout
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(20), h.stream.next_frame())
+            .await
+            .expect("a frame whose packets keep arriving must complete")
+            .expect("stream error")
+            .expect("stream ended");
+        assert!(frame.payload.as_ref() == img.as_slice());
+        assert_eq!(frame.status, FrameStatus::Complete);
+        return;
+    }
+    panic!("all three sender schedules exceeded their inactivity timeout: {rejected:?}");
 }
 
 /// A trailer can overtake the last data packet. It says how many packets the

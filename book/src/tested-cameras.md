@@ -13,6 +13,20 @@ your camera is missing here, or does something this page does not say,
 
 ## GigE Vision
 
+### QUISS RTVision_6L_DCAM_v2
+
+Firmware 2.0.0.0, GigE Vision 1.2; maintainer test on macOS/Apple silicon,
+1 Gb/s Ethernet, MTU 1500. One stream contains six side-by-side Mono8 images.
+The initial run exposed reversed controller IP/port register contents;
+the transport accepts that layout only when both values match its socket.
+Short runs delivered six full 720 × 540 images at 30 FPS without reported loss.
+Each sensor's test pattern was checked in its own image tile. C GenTL and
+Harvesters each received 1000 complete frames. Faster minimum-ROI runs and
+Python delivery showed host backpressure drops; this is not a loss-free
+maximum-FPS or endurance claim. Events, chunks and metric 3D are not
+advertised by this interface. Detailed scope and restoration are in the
+[bench record](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/hardware-rtvision-2026-10-26.md).
+
 ### Allied Vision Manta G-125B
 
 Firmware 00.01.44.28514, GigE Vision 1.2; macOS on Apple silicon, through a

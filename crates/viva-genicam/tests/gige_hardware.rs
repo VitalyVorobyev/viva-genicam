@@ -310,19 +310,28 @@ async fn exclusive_access_is_granted() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a GigE Vision camera: VIVA_GIGE_IP"]
 async fn a_second_application_is_refused_while_one_holds_control() {
-    let mut first = open(Access::Control).await;
+    let first = open(Access::Control).await;
+    let heartbeat = first
+        .transport()
+        .read(0x0938, 4)
+        .expect("heartbeat timeout");
+    let heartbeat_ms = u32::from_be_bytes(heartbeat.as_slice().try_into().expect("one register"));
     let second = connect_gige_as(&device().await, Access::Control).await;
     let refusal = second.err().expect("a second controller is refused");
     println!("second application: {refusal}");
     let mut other = bystander().await;
-    let write = other.write_register(0x0938, 3000).await;
+    let write = other.write_register(0x0938, heartbeat_ms).await;
     println!("its raw write of GevHeartbeatTimeout: {write:?}");
     assert!(write.is_err(), "a write without control is refused");
-    let width = first.get("Width").expect("Width");
-    first.set("Width", &width).expect("the first still writes");
+    // Width is read-only on the six-sensor QUISS device. Check the same
+    // bootstrap register for both applications, retaining its original value.
+    first
+        .transport()
+        .write(0x0938, &heartbeat)
+        .expect("the first still writes");
     assert_eq!(first.transport().control_state(), ControlState::Held);
     drop(first);
-    let unclaimed = other.write_register(0x0938, 3000).await;
+    let unclaimed = other.write_register(0x0938, heartbeat_ms).await;
     println!("a write while nobody holds control: {unclaimed:?}");
 }
 
@@ -380,6 +389,19 @@ async fn every_writable_feature_takes_its_own_value_back() {
             && state.access == Some(viva_genicam::genapi::AccessMode::RW)
             && state.value != FeatureValue::None;
         if !writable || matches!(camera.nodemap().node(&name), Some(Node::Command(_))) {
+            continue;
+        }
+        if matches!(camera.nodemap().node(&name), Some(Node::Register(_))) {
+            // FileAccessBuffer on QUISS is a byte register, not text.
+            let before = camera.get_register(&name).expect("read register bytes");
+            match camera
+                .set_register(&name, &before)
+                .and_then(|()| camera.get_register(&name))
+            {
+                Ok(after) if after == before => written += 1,
+                Ok(_) => failed.push(format!("{name}: register bytes changed")),
+                Err(error) => failed.push(format!("{name}: {error}")),
+            }
             continue;
         }
         let before = camera.get(&name).expect("read");
@@ -735,12 +757,13 @@ async fn a_stream_survives_acquisition_restarts() {
     let stats = stream.stats();
     println!("first block of each round: {firsts:?}");
     println!(
-        "{} frames; complete {}, incomplete {}, missed {}, resend requested {}, \
+        "{} frames; complete {}, incomplete {}, missed {}, backpressure {}, resend requested {}, \
          recovered {}, unavailable {}",
         all.len(),
         stats.frames_complete,
         stats.frames_incomplete,
         stats.frames_missed,
+        stats.frames_backpressure,
         stats.resend_requested,
         stats.resend_recovered,
         stats.resend_unavailable

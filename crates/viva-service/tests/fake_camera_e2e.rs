@@ -632,6 +632,97 @@ async fn e2e_report_describes_the_served_camera() {
     }
 }
 
+/// The reserved bulk-state endpoint must not also introspect a feature named
+/// `bulk`, even when the client explicitly queries every matching handler.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_bulk_state_has_one_reply_and_single_node_state_still_works() {
+    use std::collections::HashMap;
+    use viva_zenoh_api::{BulkReadRequest, FeatureState};
+    use zenoh::query::{ConsolidationMode, QueryTarget};
+
+    let mut cam = TestCamera::start().await;
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .expect("discovery");
+    let info = devices
+        .iter()
+        .find(|device| device.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera");
+    let handle = Arc::new(
+        DeviceHandle::connect(info, Some(loopback_iface()))
+            .await
+            .expect("connect"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Target all matching queryables and disable consolidation, so an extra
+    // reply from `nodes/*/state` cannot be hidden by query routing or merging.
+    let bulk_key = keys::nodes_bulk_state(&device_id);
+    let replies = session
+        .get(&bulk_key)
+        .target(QueryTarget::All)
+        .consolidation(ConsolidationMode::None)
+        .payload(
+            serde_json::to_vec(&BulkReadRequest::new(vec!["Width".into(), "Height".into()]))
+                .expect("request JSON"),
+        )
+        .timeout(Duration::from_secs(2))
+        .await
+        .expect("bulk query");
+    let mut bulk_replies = 0;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(reply) = replies.recv_async().await {
+            bulk_replies += 1;
+            let sample = reply.result().expect("bulk query must not return errors");
+            assert_eq!(sample.key_expr().as_str(), bulk_key);
+            let states: HashMap<String, FeatureState> =
+                serde_json::from_slice(&sample.payload().to_bytes()).expect("bulk states");
+            assert_eq!(states.len(), 2);
+            assert_eq!(states["Width"].value, serde_json::json!(640));
+            assert_eq!(states["Height"].value, serde_json::json!(480));
+        }
+    })
+    .await
+    .expect("bulk replies deadline");
+    assert_eq!(bulk_replies, 1, "exactly the bulk handler must reply");
+
+    let replies = session
+        .get(keys::node_introspect(&device_id, "Width"))
+        .target(QueryTarget::All)
+        .consolidation(ConsolidationMode::None)
+        .timeout(Duration::from_secs(2))
+        .await
+        .expect("single-node query");
+    let mut single_replies = 0;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(reply) = replies.recv_async().await {
+            single_replies += 1;
+            let sample = reply.result().expect("single-node reply");
+            let state: FeatureState =
+                serde_json::from_slice(&sample.payload().to_bytes()).expect("single state");
+            assert_eq!(state.value, serde_json::json!(640));
+        }
+    })
+    .await
+    .expect("single-node replies deadline");
+    assert_eq!(single_replies, 1);
+
+    shutdown_tx.send(true).expect("shutdown");
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("service shutdown deadline")
+            .expect("service task");
+    }
+    drop(handle);
+    drop(session);
+    cam.camera.take().expect("running fake").stop().await;
+}
+
 /// A feature snapshot of every node the fake declares succeeds, write-only and
 /// command nodes included, and none of them is read on the wire (SVC-08,
 /// ST-21).
@@ -888,8 +979,8 @@ async fn e2e_refresh_replaces_identity_xml_control_and_stream() {
     handle.acquisition_stop().await.expect("stop");
 }
 
-/// Retirement replaces the served XML queryable as well as its camera. A
-/// reboot between two discovery passes can retain a MAC while changing XML.
+/// Retirement stops an active stream and replaces the served XML queryable as
+/// well as its camera. A reboot can retain a MAC while changing XML.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_discovery_replaces_a_rebooted_camera_and_resumes_acquisition() {
     let mut cam = TestCamera::start_with(|b| b.enforce_heartbeat(true)).await;
@@ -938,6 +1029,22 @@ async fn e2e_discovery_replaces_a_rebooted_camera_and_resumes_acquisition() {
         .expect("the expected XML is served");
     }
     wait_for_xml(&session, &id, "Name=\"ExposureTime\"").await;
+    let old_subscriber = session
+        .declare_subscriber(keys::image(&id))
+        .await
+        .expect("old-session subscriber");
+    let response = send_acq_command(&session, &id, AcquisitionCommand::Start).await;
+    assert!(response.ok, "old-session start: {:?}", response.error);
+    let old_frame = tokio::time::timeout(Duration::from_secs(5), old_subscriber.recv_async())
+        .await
+        .expect("old-session frame deadline")
+        .expect("old-session frame");
+    let old_payload = old_frame.payload().to_bytes();
+    let (header, _) = FrameHeader::decode(&old_payload).expect("old frame header");
+    assert_eq!((header.width, header.height), (640, 480));
+    drop(old_subscriber);
+    // Reboot while streaming: no AcquisitionStop is sent to the old camera.
+    // Retirement must release its frame loop before the new session is served.
     cam.camera.take().expect("old fake").stop().await;
     // Let a discovery pass observe the absence before the rebooted camera
     // returns with the same MAC. Its replacement then serves a fresh XML.
@@ -974,4 +1081,5 @@ async fn e2e_discovery_replaces_a_rebooted_camera_and_resumes_acquisition() {
         .await
         .expect("service shutdown")
         .expect("service task");
+    cam.camera.take().expect("rebooted fake").stop().await;
 }

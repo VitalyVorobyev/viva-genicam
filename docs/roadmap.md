@@ -6,9 +6,9 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 ## Hardware validation
 
-One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-plan.md); its areas settle these rows of the next section, in this order:
+The Manta and [QUISS six-sensor bench](hardware-rtvision-2026-10-26.md) run the [hardware test plan](hardware-test-plan.md). Hardware availability promotes these rows:
 
-- **Found on this camera**: TC-41.
+- **Found on hardware**: TC-41; **SR-28**, complete-frame delivery under high-rate acquisition. Resolve measured delivery drops before another endurance run.
 - **Control channel**: TC-38.
 - **GenApi**: TC-39, API-19.
 - **Local validation**: run the opt-in hardware suite while a camera is available. CI-22 is deferred: no self-hosted runner or hardware workflow is planned.
@@ -42,7 +42,7 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 
 Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); a change to a type it consumes updates it in the same PR.
 
-- **Found on the bench**: ST-59, the earlier hand-assembled macOS bundle failure; the proper-bundle [native follow-up](hardware-2026-10-25.md#native-studio-follow-up-2026-10-26) passes.
+- **Found on the bench**: **ST-61**, remote control-panel refresh after replacement; ST-59, the earlier hand-assembled macOS bundle failure; the proper-bundle [native follow-up](hardware-2026-10-25.md#native-studio-follow-up-2026-10-26) passes.
 - **Viewer parity**: ST-51, ST-52, ST-56, ST-49; preview cadence ST-60. Native sample inspection and PNG snapshots use an explicit frozen capture ([ADR-0034](adrs/adr0034-native-frame-analysis.md)).
 - **Distribution**: ST-07.
 - **Later**: ST-50, ST-53, ST-54, ST-55, ST-57, ST-58, ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.

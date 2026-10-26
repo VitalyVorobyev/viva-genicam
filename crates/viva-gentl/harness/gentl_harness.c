@@ -142,7 +142,8 @@ static GC_ERROR port_info(void *ctx, int32_t cmd, INFO_DATATYPE *t, void *b,
 }
 
 /* Read a port's first XML (GenTL §4.1.3's example) and write it to
- * <dir>/<name>.xml. */
+ * <dir>/<name>.xml, or .zip for a Local: ZIP container. Validate ZIP members,
+ * CRCs and the extracted XML externally; this harness has no ZIP dependency. */
 static void save_port_xml(PORT_HANDLE port, const char *dir,
                           const char *name) {
   uint32_t urls = 0;
@@ -153,29 +154,67 @@ static void save_port_xml(PORT_HANDLE port, const char *dir,
   char url[2048] = {0};
   size_t size = sizeof url;
   INFO_DATATYPE type = 0;
-  GC(pGCGetPortURLInfo(port, 0, URL_INFO_URL, &type, url, &size));
+  GC_ERROR rc = pGCGetPortURLInfo(port, 0, URL_INFO_URL, &type, url, &size);
+  CHECK(rc == GC_ERR_SUCCESS && size >= 7 && size <= sizeof url &&
+            url[size - 1] == '\0',
+        "%s: invalid port URL", name);
+  if (rc != GC_ERR_SUCCESS || size < 7 || size > sizeof url ||
+      url[size - 1] != '\0')
+    return;
+  CHECK(memcmp(url, "local:", 6) == 0 || memcmp(url, "Local:", 6) == 0,
+        "%s: not a local URL: %s", name, url);
+  if (memcmp(url, "local:", 6) != 0 && memcmp(url, "Local:", 6) != 0)
+    return;
   char file[512] = {0};
   unsigned long long address = 0, length = 0;
   /* local:[///]file;address;length[?SchemaVersion=...] */
   const char *body = url + 6; /* after "local:" or "Local:" */
   while (*body == '/')
     body++;
-  CHECK(sscanf(body, "%511[^;];%llx;%llx", file, &address, &length) == 3,
+  int fields = sscanf(body, "%511[^;];%llx;%llx", file, &address, &length);
+  CHECK(fields == 3,
         "%s: not a local URL: %s", name, url);
-  char *xml = malloc(length + 1);
+  if (fields != 3)
+    return;
+  CHECK(length > 0 && length <= 16ULL * 1024ULL * 1024ULL,
+        "%s: unreasonable XML container length %llu", name, length);
+  if (length == 0 || length > 16ULL * 1024ULL * 1024ULL)
+    return;
+  char *xml = malloc((size_t)length + 1);
+  CHECK(xml != NULL, "%s: cannot allocate %llu bytes", name, length);
+  if (!xml)
+    return;
   size_t got = (size_t)length;
-  GC(pGCReadPort(port, address, xml, &got));
-  CHECK(got == length, "%s: read %zu of %llu bytes", name, got, length);
-  xml[length] = '\0';
-  CHECK(strstr(xml, "<RegisterDescription") != NULL, "%s: not GenApi XML",
+  rc = pGCReadPort(port, address, xml, &got);
+  CHECK(rc == GC_ERR_SUCCESS && got == length,
+        "%s: read %zu of %llu bytes (status %d)", name, got, length, (int)rc);
+  if (rc != GC_ERR_SUCCESS || got != length) {
+    free(xml);
+    return;
+  }
+  xml[got] = '\0';
+  int zipped = got >= 30 && memcmp(xml, "PK\003\004", 4) == 0;
+  CHECK(zipped || strstr(xml, "<RegisterDescription") != NULL,
+        "%s: not GenApi XML or a Local: ZIP container",
         name);
+  if (!zipped && strstr(xml, "<RegisterDescription") == NULL) {
+    free(xml);
+    return;
+  }
   char path[1024];
-  snprintf(path, sizeof path, "%s/%s.xml", dir, name);
+  int path_size = snprintf(path, sizeof path, "%s/%s.%s", dir, name,
+                           zipped ? "zip" : "xml");
+  CHECK(path_size >= 0 && (size_t)path_size < sizeof path,
+        "%s: output path is too long", name);
+  if (path_size < 0 || (size_t)path_size >= sizeof path) {
+    free(xml);
+    return;
+  }
   FILE *out = fopen(path, "wb");
   CHECK(out != NULL, "cannot write %s", path);
   if (out) {
-    fwrite(xml, 1, strlen(xml), out);
-    fclose(out);
+    CHECK(fwrite(xml, 1, got, out) == got, "cannot write all of %s", path);
+    CHECK(fclose(out) == 0, "cannot close %s", path);
   }
   printf("  %-10s %s (%llu bytes) -> %s\n", name, url, length, path);
   free(xml);

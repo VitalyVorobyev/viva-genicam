@@ -1410,9 +1410,17 @@ impl GigeDevice {
         let SocketAddr::V4(us) = self.socket.local_addr()? else {
             return Ok(true);
         };
-        let port = self.read_u32(consts::PRIMARY_APPLICATION_PORT).await? & 0xFFFF;
-        let ip = Ipv4Addr::from(self.read_u32(consts::PRIMARY_APPLICATION_IP).await?);
-        Ok(port == u32::from(us.port()) && ip == *us.ip())
+        let port_register = self.read_u32(consts::PRIMARY_APPLICATION_PORT).await?;
+        let ip_register = self.read_u32(consts::PRIMARY_APPLICATION_IP).await?;
+        let our_port = u32::from(us.port());
+        let our_ip = u32::from(*us.ip());
+        let standard = port_register & 0xFFFF == our_port && ip_register == our_ip;
+        // QUISS RTVision_6L_DCAM_v2 firmware 2.0.0.0 reports the complete
+        // controller IP at 0x0A04 and port at 0x0A14 (observed on hardware).
+        // Accept that layout only when both full values name this socket;
+        // in particular, do not truncate a malformed swapped port to 16 bits.
+        let swapped = port_register == our_ip && ip_register == our_port;
+        Ok(standard || swapped)
     }
 
     /// Return the remote GVCP socket address associated with this device.
@@ -2199,6 +2207,107 @@ impl GigeDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answer literal bootstrap addresses independently of the client's
+    /// constants, so swapping those constants cannot make this test pass.
+    async fn primary_application_probe(
+        registers: impl FnOnce(std::net::SocketAddrV4) -> (u32, u32),
+        names_owner: bool,
+    ) -> bool {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("peer");
+        let mut device = GigeDevice::open(peer.local_addr().expect("peer address"))
+            .await
+            .expect("open");
+        let SocketAddr::V4(local) = device.local_addr().expect("local address") else {
+            panic!("IPv4 probe");
+        };
+        let (at_a04, at_a14) = registers(local);
+        let server = tokio::spawn(async move {
+            let expected: &[(u32, u32)] = if names_owner {
+                &[
+                    (0x0a00, 2),
+                    (0x0934, 0x0800_0000),
+                    (0x0a04, at_a04),
+                    (0x0a14, at_a14),
+                ]
+            } else {
+                &[(0x0a00, 2), (0x0934, 0)]
+            };
+            let mut bytes = [0; 128];
+            for &(address, value) in expected {
+                let (length, source) =
+                    time::timeout(Duration::from_secs(1), peer.recv_from(&mut bytes))
+                        .await
+                        .expect("request deadline")
+                        .expect("request");
+                assert_eq!(length, 12);
+                assert_eq!(&bytes[..6], &[0x42, 1, 0, 0x80, 0, 4]);
+                assert_eq!(
+                    u32::from_be_bytes(bytes[8..12].try_into().unwrap()),
+                    address
+                );
+                assert_eq!(source, SocketAddr::V4(local));
+                let mut reply = vec![0, 0, 0, 0x81, 0, 4, bytes[6], bytes[7]];
+                reply.extend_from_slice(&value.to_be_bytes());
+                peer.send_to(&reply, source).await.expect("reply");
+            }
+        });
+        let held = time::timeout(Duration::from_secs(2), device.ping_control_channel())
+            .await
+            .expect("probe deadline")
+            .expect("probe");
+        server.await.expect("server");
+        held
+    }
+
+    #[tokio::test]
+    async fn primary_application_standard_layout_matches_the_complete_endpoint() {
+        assert!(
+            primary_application_probe(|us| (u32::from(us.port()), u32::from(*us.ip())), true).await
+        );
+        // The standard port occupies the low half of its register.
+        assert!(
+            primary_application_probe(
+                |us| (0x1234_0000 | u32::from(us.port()), u32::from(*us.ip())),
+                true
+            )
+            .await
+        );
+        assert!(!primary_application_probe(|us| (u32::from(us.port()), 0x7f00_0002), true).await);
+        assert!(
+            !primary_application_probe(|us| (u32::from(us.port()) ^ 1, u32::from(*us.ip())), true)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn primary_application_swapped_layout_matches_the_complete_endpoint() {
+        // Two separately opened source sockets must each match their own port.
+        for _ in 0..2 {
+            assert!(
+                primary_application_probe(|us| (u32::from(*us.ip()), u32::from(us.port())), true)
+                    .await
+            );
+        }
+        assert!(!primary_application_probe(|us| (0x7f00_0002, u32::from(us.port())), true).await);
+        assert!(
+            !primary_application_probe(|us| (u32::from(*us.ip()), u32::from(us.port()) ^ 1), true)
+                .await
+        );
+        assert!(
+            !primary_application_probe(
+                |us| (u32::from(*us.ip()), 0x0001_0000 | u32::from(us.port())),
+                true
+            )
+            .await,
+            "a swapped port with nonzero upper bits must not alias this socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn primary_application_without_owner_capability_does_not_read_owner_registers() {
+        assert!(primary_application_probe(|_| (0, 0), false).await);
+    }
 
     #[tokio::test]
     async fn refreshing_a_stale_route_preserves_the_control_endpoint_and_request_id() {

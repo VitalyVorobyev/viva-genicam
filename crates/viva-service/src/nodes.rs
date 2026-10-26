@@ -163,6 +163,7 @@ pub(crate) async fn run_introspect_queryable<D: DeviceOps>(
 ) {
     let device_id = device.device_id().to_string();
     let key = keys::node_introspect(&device_id, "*");
+    let bulk_state_key = keys::nodes_bulk_state(&device_id);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -178,6 +179,12 @@ pub(crate) async fn run_introspect_queryable<D: DeviceOps>(
                 match query {
                     Ok(query) => {
                         let key_expr = query.key_expr().as_str();
+                        // `nodes/bulk/state` is a reserved endpoint covered
+                        // by this wildcard too. Only the bulk handler replies
+                        // there; `bulk` is not a feature to introspect.
+                        if key_expr == bulk_state_key {
+                            continue;
+                        }
                         let node_name = keys::extract_node_name(key_expr)
                             .unwrap_or_default()
                             .to_string();

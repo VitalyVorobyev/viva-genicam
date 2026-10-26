@@ -111,6 +111,11 @@ are put back as they were. A feature that is not available, or locked,
 is left out with a comment saying why; save while the camera is not acquiring,
 or what acquisition locks (`Width`, `PixelFormat`) is left out.
 
+Check the reported saved-value count. Some devices mark no features streamable
+and produce a successful save with zero values; that file cannot restore their
+settings. Record the features and selector states you intend to change explicitly
+on such a device.
+
 A load writes in the order the camera needs, whatever the order of the file:
 a selector before what it selects, `ExposureAuto` before the `ExposureTime` it
 locks, `BinningHorizontal` before the `Width` it rescales. A write that fails

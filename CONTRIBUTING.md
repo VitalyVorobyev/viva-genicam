@@ -201,6 +201,15 @@ they can still disagree about what lives at an address
 ([ADR-0030](docs/adrs/adr0030-errors-and-public-surface.md)).
 A fix starts with a test that fails without it.
 
+### Acquisition performance
+
+`stream_perf` measures frame acquisition and delivery with separate loopback
+sender and receiver processes. Build it in release mode; keep builds, test
+suites and profilers separate from timed runs. The
+[measurement record](docs/performance-2026-10-26.md) gives commands, hardware
+results and failure counters. Average FPS alone does not establish loss-free
+throughput: check integrity and backpressure too.
+
 ### Vendor XML corpus
 
 Three further tests parse, evaluate and use real vendor GenApi documents. The

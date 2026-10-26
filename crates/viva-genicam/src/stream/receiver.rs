@@ -36,6 +36,48 @@ use viva_gige::GVSP_HEADER_SIZE;
 /// request to stop.
 pub(crate) const TICK: Duration = Duration::from_millis(5);
 
+#[derive(Clone, Copy)]
+enum ReceiveWait {
+    #[cfg(unix)]
+    SocketTimeout,
+    Readiness,
+}
+
+impl ReceiveWait {
+    fn recv(self, socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        match self {
+            #[cfg(unix)]
+            Self::SocketTimeout => socket.recv_from(buf),
+            Self::Readiness => match viva_gige::wait_readable(socket, TICK) {
+                Ok(true) => socket.recv_from(buf),
+                Ok(false) => Err(ErrorKind::WouldBlock.into()),
+                Err(err) => Err(err),
+            },
+        }
+    }
+}
+
+fn configure_receive_wait(socket: &UdpSocket) -> std::io::Result<ReceiveWait> {
+    // POSIX receive timeouts let one recv both wait and read. Winsock's
+    // SO_RCVTIMEO contract instead calls an expired socket indeterminate, so
+    // Windows keeps the readiness wait and nonblocking receive.
+    #[cfg(unix)]
+    {
+        socket.set_nonblocking(false)?;
+        // Resend requests use this socket too: changing it to blocking must
+        // also bound sends, so send-buffer pressure cannot stall shutdown.
+        match socket
+            .set_read_timeout(Some(TICK))
+            .and_then(|()| socket.set_write_timeout(Some(TICK)))
+        {
+            Ok(()) => return Ok(ReceiveWait::SocketTimeout),
+            Err(error) => debug!(%error, "receive timeout unavailable; using readiness polling"),
+        }
+    }
+    socket.set_nonblocking(true)?;
+    Ok(ReceiveWait::Readiness)
+}
+
 /// Frames waiting for the application before the oldest is dropped.
 pub(crate) const DELIVERY_CAPACITY: usize = 4;
 
@@ -425,13 +467,19 @@ pub(crate) fn spawn(
     shared: Arc<Shared>,
     explicit_rcvbuf: Option<usize>,
 ) -> std::io::Result<JoinHandle<()>> {
-    // Wait for readiness, then read without blocking: not a receive timeout,
-    // whose expiry Windows documents as leaving the socket indeterminate —
-    // a datagram arriving as it fires can be lost (`viva_gige::wait_readable`).
-    socket.set_nonblocking(true)?;
+    let receive_wait = configure_receive_wait(&socket)?;
     thread::Builder::new()
         .name("viva-gvsp-rx".into())
-        .spawn(move || run(socket, packet_size, stats, shared, explicit_rcvbuf))
+        .spawn(move || {
+            run(
+                socket,
+                packet_size,
+                stats,
+                shared,
+                explicit_rcvbuf,
+                receive_wait,
+            )
+        })
 }
 
 fn run(
@@ -440,6 +488,7 @@ fn run(
     stats: StreamStatsAccumulator,
     shared: Arc<Shared>,
     explicit_rcvbuf: Option<usize>,
+    receive_wait: ReceiveWait,
 ) {
     let _finish = FinishOnExit(shared.clone());
     let mut config = AssemblyConfig::new(packet_size);
@@ -457,11 +506,7 @@ fn run(
     let mut chunk_layout_warned = false;
 
     while !shared.stop.load(Ordering::Acquire) {
-        let received = match viva_gige::wait_readable(&socket, TICK) {
-            Ok(true) => socket.recv_from(&mut buf),
-            Ok(false) => Err(ErrorKind::WouldBlock.into()),
-            Err(err) => Err(err),
-        };
+        let received = receive_wait.recv(&socket, &mut buf);
         // Settings are read after the wait, so one changed while the thread
         // was blocked in the read applies to the datagram that ended it.
         let wanted = AssemblyConfig {
@@ -775,6 +820,154 @@ impl SilenceWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_receive_wait(socket: &UdpSocket, readiness: bool) -> ReceiveWait {
+        if readiness {
+            socket.set_nonblocking(true).unwrap();
+            ReceiveWait::Readiness
+        } else {
+            configure_receive_wait(socket).unwrap()
+        }
+    }
+
+    #[test]
+    fn receive_wait_survives_repeated_idle_timeouts_then_reads_a_datagram() {
+        for readiness in [false, true] {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let receive_wait = test_receive_wait(&socket, readiness);
+            let mut buffer = [0; 128];
+            for _ in 0..4 {
+                let error = receive_wait.recv(&socket, &mut buffer).unwrap_err();
+                assert!(
+                    matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+                    "idle receive failed: {error}; readiness={readiness}"
+                );
+            }
+
+            let spec = viva_fake_gige::BlockSpec::image(1, 1, 1, viva_fake_gige::MONO8, 576);
+            let packets = viva_fake_gige::block_datagrams(&spec, &[42]);
+            sender
+                .send_to(&packets[0].bytes, socket.local_addr().unwrap())
+                .unwrap();
+            let (length, from) = receive_wait.recv(&socket, &mut buffer).unwrap();
+            assert_eq!(&buffer[..length], packets[0].bytes.as_slice());
+            assert_eq!(from, sender.local_addr().unwrap());
+        }
+    }
+
+    /// Stop the sender before joining the receiver even on assertion failure:
+    /// a broken drain loop must not leave a foreign-traffic thread running.
+    struct ReceiveTestThreads {
+        shared: Arc<Shared>,
+        flood_stop: Arc<AtomicBool>,
+        receiver: Option<JoinHandle<()>>,
+        flood: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for ReceiveTestThreads {
+        fn drop(&mut self) {
+            self.shared.stop.store(true, Ordering::Release);
+            self.flood_stop.store(true, Ordering::Release);
+            if let Some(flood) = self.flood.take() {
+                let _ = flood.join();
+            }
+            if let Some(receiver) = self.receiver.take() {
+                let _ = receiver.join();
+            }
+        }
+    }
+
+    fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
+    #[test]
+    fn expiry_and_stop_remain_responsive_under_filtered_foreign_traffic() {
+        for readiness in [false, true] {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let destination = socket.local_addr().unwrap();
+            let receive_wait = test_receive_wait(&socket, readiness);
+            let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let shared = Arc::new(Shared::new());
+            shared.set_block_timeout(Duration::from_secs(30));
+            shared.set_deliver_incomplete(true);
+            let stats = StreamStatsAccumulator::new();
+            let receiver_shared = shared.clone();
+            let receiver_stats = stats.clone();
+            let receiver = thread::spawn(move || {
+                run(
+                    socket,
+                    576,
+                    receiver_stats,
+                    receiver_shared,
+                    None,
+                    receive_wait,
+                );
+            });
+            let mut threads = ReceiveTestThreads {
+                shared: shared.clone(),
+                flood_stop: Arc::new(AtomicBool::new(false)),
+                receiver: Some(receiver),
+                flood: None,
+            };
+
+            let spec = viva_fake_gige::BlockSpec::image(7, 8, 8, viva_fake_gige::MONO8, 576);
+            let packets = viva_fake_gige::block_datagrams(&spec, &[42; 64]);
+            let initial = &packets[..packets.len() - 1]; // Omit the trailer.
+            for packet in initial {
+                sender.send_to(&packet.bytes, destination).unwrap();
+            }
+            assert!(wait_until(|| {
+                stats.snapshot().packets_received == initial.len() as u64
+            }));
+            // The initial block is accepted; every subsequent loopback sender
+            // is foreign. No second loopback address is needed on Windows.
+            shared.set_source_filter(Some(Ipv4Addr::new(192, 0, 2, 1)));
+            let flood_stop = threads.flood_stop.clone();
+            threads.flood = Some(thread::spawn(move || {
+                sender.set_nonblocking(true).unwrap();
+                while !flood_stop.load(Ordering::Acquire) {
+                    for _ in 0..64 {
+                        let _ = sender.send_to(b"foreign", destination);
+                    }
+                    thread::yield_now();
+                }
+            }));
+            assert!(wait_until(|| {
+                stats.snapshot().packets_ignored_foreign >= 100
+            }));
+
+            // Expire an already accepted block while foreign packets keep the
+            // socket readable, then request stop with that traffic still live.
+            shared.set_block_timeout(Duration::from_millis(20));
+            let expired = shared.queue.pop_blocking(Duration::from_secs(5));
+            shared.stop.store(true, Ordering::Release);
+            let stopped = shared.queue.pop_blocking(Duration::from_secs(5));
+            let snapshot = stats.snapshot();
+            // Join before checking outcomes so a failure also cleans up.
+            drop(threads);
+            let Popped::Item(block) = expired else {
+                panic!("block did not expire during foreign traffic; readiness={readiness}");
+            };
+            assert_eq!(block.block_id(), 7);
+            assert_eq!(block.status(), crate::frame::FrameStatus::TrailerMissing);
+            assert!(
+                matches!(stopped, Popped::Finished),
+                "receiver did not stop; readiness={readiness}"
+            );
+            assert_eq!(snapshot.packets_missing, 1); // The omitted trailer.
+            assert!(snapshot.packets_ignored_foreign >= 100);
+            assert_eq!(snapshot.packets_ignored_malformed, 0);
+        }
+    }
 
     #[test]
     fn silence_watch_stays_quiet_inside_the_grace_period() {

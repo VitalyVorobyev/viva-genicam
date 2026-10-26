@@ -396,9 +396,27 @@ A multicast stream never asks, nor does one built with
 `FrameStream::from_socket` on a camera another application controls; only
 the controlling application should.
 
-Resend has been tested against the [fake camera](./fake-camera.md) only, so far.
+Resend has been exercised on the Allied Vision Manta G-125B; other vendors and
+stream channels still need hardware coverage (see [tested cameras](../tested-cameras.md)).
 If a camera of yours misbehaves with it on, `--no-resend` is the workaround, and
 [the report bundle](../reporting.md) is how we fix it.
+
+---
+
+### 4.7. Frame rate and processing overhead
+
+Use a release build when measuring throughput. A smaller ROI and shorter
+exposure can raise the camera's frame-rate limit; read that limit after changing
+geometry, and verify the resulting rate with `viva-camctl bench`. Mono8 avoids
+colour conversion when grayscale is sufficient. Binning changes the sampling
+and does not necessarily increase FPS.
+
+Keep taking frames promptly and move expensive processing or saving off the
+acquisition loop. The receive thread continues independently, but its delivery
+queue holds four frames: if your application falls behind, the oldest waiting
+frame is dropped and counted as `backpressure`. Packet resend cannot recover
+an application-side queue eviction. Compare complete frames and loss counters
+alongside FPS.
 
 ---
 

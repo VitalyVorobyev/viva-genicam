@@ -91,6 +91,32 @@ fn loopback_iface() -> gige::Iface {
 // Phase 1: Discovery & Connection
 // ---------------------------------------------------------------------------
 
+/// The next fixture must hear its own single discovery request, even when it
+/// starts immediately after the previous fixture stops on the same UDP port.
+#[tokio::test]
+async fn test_awaited_fake_shutdown_allows_repeated_rebind_and_discovery() {
+    for generation in 1..=8 {
+        let mac = [0x02, 0, 0, 0, 0, generation];
+        let fake = common::TestCamera::start_with(|builder| builder.mac(mac)).await;
+
+        // A second fixture cannot acquire the shared port while this one lives.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), common::TestCamera::start())
+                .await
+                .is_err(),
+            "the active fixture must retain the shared port guard"
+        );
+        let found = gige::discover_ip(std::net::Ipv4Addr::LOCALHOST, Duration::from_secs(2))
+            .await
+            .expect("unicast discovery")
+            .expect("the newly bound fake answered its single discovery request");
+        assert_eq!(found.mac, mac, "discovery reached a previous fixture");
+        assert_eq!(fake.fake().discovery_requests().len(), 1);
+
+        fake.stop().await;
+    }
+}
+
 #[tokio::test]
 async fn test_discovery_finds_fake_camera() {
     let _cam = common::TestCamera::start().await;
@@ -122,6 +148,8 @@ async fn test_discovery_finds_fake_camera() {
         fake.user_name.as_deref(),
         Some(viva_fake_gige::FAKE_USER_NAME)
     );
+
+    _cam.stop().await;
 }
 
 /// A fake configured with its own identity reports it, so two fakes can stand
@@ -150,6 +178,9 @@ async fn test_discovery_reports_a_configured_identity() {
     let high = blocking_read_register(&camera, 0x0008, 4).await;
     let low = blocking_read_register(&camera, 0x000C, 4).await;
     assert_eq!([high[2], high[3], low[0], low[1], low[2], low[3]], mac);
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// Discovery records the host address each camera answered at. A broadcast
@@ -163,6 +194,8 @@ async fn test_discovery_records_the_host_address_a_camera_answered_at() {
 
     let fake = discover_fake().await;
     assert_eq!(fake.local_ip, Some(std::net::Ipv4Addr::LOCALHOST));
+
+    _cam.stop().await;
 }
 
 /// Check the fake's Discovery ACK **bytes** against the specification's field
@@ -230,6 +263,8 @@ async fn test_fake_discovery_ack_matches_spec_layout() {
     // Bytes 8..10 are the padding half of the MAC-high register. If a future
     // change reintroduces the old 4-byte skip, the MAC slides here.
     assert_eq!(&p[8..10], &[0, 0], "reserved MAC-high padding at offset 8");
+
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -258,6 +293,9 @@ async fn test_connect_and_fetch_xml() {
         nodemap.node("Height").is_some(),
         "NodeMap should contain Height"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// A register whose address is `<Address>` + `<pIndex>` must resolve to the
@@ -290,6 +328,9 @@ async fn test_summed_address_resolves_over_the_wire() {
         channel1, "9000",
         "the <pIndex> term did not move the address"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// `<StructReg>` bits addressed through `<pAddress>` + `<Address>` read the
@@ -308,6 +349,9 @@ async fn test_struct_reg_inquiry_bits_over_the_wire() {
         let value = blocking_get(&camera, bit).await.expect("read inquiry bit");
         assert_eq!(value, expected, "{bit} read as {value}");
     }
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -332,6 +376,9 @@ async fn test_connect_with_zipped_xml() {
         nodemap.node("Width").is_some(),
         "NodeMap should contain Width"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -355,6 +402,9 @@ async fn test_connect_with_cdata_tooltip() {
         tooltip.contains("0 < gain & gain < 48"),
         "CDATA tooltip should be preserved verbatim, got: {tooltip}"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -383,6 +433,9 @@ async fn test_claim_control_visible_via_register_read() {
     );
 
     device.release_control().await.expect("release CCP");
+
+    drop(device);
+    _cam.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +454,9 @@ async fn test_read_width_height() {
     let h: i64 = height.parse().expect("Height should be an integer");
     assert!(w > 0, "Width should be positive, got {w}");
     assert!(h > 0, "Height should be positive, got {h}");
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -415,6 +471,9 @@ async fn test_read_pixel_format() {
         !pf.is_empty(),
         "PixelFormat should return a non-empty string"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -434,6 +493,9 @@ async fn test_read_exposure_time() {
         (v - 5000.0).abs() < 1.0,
         "ExposureTime should be ≈ 5000.0 µs, got {v}"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -454,6 +516,9 @@ async fn test_read_acquisition_frame_rate() {
         (v - 30.0).abs() < 1e-3,
         "AcquisitionFrameRate should be ≈ 30.0 fps, got {v}"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -474,6 +539,9 @@ async fn test_exposure_time_roundtrip() {
     blocking_set(&camera, "ExposureTime", "5000.0")
         .await
         .expect("restore ExposureTime");
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -504,6 +572,9 @@ async fn test_set_and_readback_width() {
     blocking_set(&camera, "Width", &original)
         .await
         .expect("restore Width");
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -519,6 +590,9 @@ async fn test_exec_acquisition_commands() {
     })
     .await
     .unwrap();
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -528,6 +602,9 @@ async fn test_read_nonexistent_node() {
 
     let result = blocking_get(&camera, "NonExistentNode12345").await;
     assert!(result.is_err(), "reading nonexistent node should fail");
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +781,10 @@ async fn test_clamped_packet_size_is_followed_not_assumed() {
     })
     .await
     .unwrap();
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// ADR-0021 / SR-14: default StreamBuilder must not rewrite GevSCPSPacketSize.
@@ -740,6 +821,10 @@ async fn test_default_preserves_camera_packet_size() {
         .await
         .expect("read back after preserve build");
     assert_eq!(held, PRESET, "preserve must not write the camera register");
+
+    drop(stream);
+    drop(device);
+    _cam.stop().await;
 }
 
 /// The probe borrows `GevSCPSPacketSize`'s do-not-fragment bit and gives it
@@ -787,6 +872,8 @@ async fn the_probe_leaves_the_do_not_fragment_bit_as_it_found_it() {
         );
         device.release_control().await.expect("release");
     }
+
+    cam.stop().await;
 }
 
 /// Accumulates every `WARN` this test binary emits.
@@ -901,6 +988,10 @@ async fn test_probe_finds_a_path_ceiling_the_device_does_not_report() {
     })
     .await
     .unwrap();
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// Open a device, claim it, and build a stream, handing back the device so the
@@ -973,6 +1064,10 @@ async fn test_probe_leaves_the_device_holding_the_negotiated_size() {
         held, PATH_CEILING,
         "the device must be left holding the negotiated size, not the last one probed"
     );
+
+    drop(stream);
+    drop(device);
+    cam.stop().await;
 }
 
 /// A device that answers no test packet must be left as it was found.
@@ -1003,6 +1098,10 @@ async fn test_probe_restores_the_requested_size_when_no_test_packet_returns() {
         held, REQUESTED,
         "a silent device must keep the requested size, not the probe's control size"
     );
+
+    drop(stream);
+    drop(device);
+    _cam.stop().await;
 }
 
 /// When no test packet comes back at all, the requested size stands.
@@ -1030,6 +1129,10 @@ async fn test_probe_leaves_the_size_alone_when_no_test_packet_returns() {
         9000,
         "a device that answers no test packet must keep the requested size"
     );
+
+    drop(frame_stream);
+    drop(_camera);
+    _cam.stop().await;
 }
 
 /// Check the fake's GVSP **bytes** against the specification's field tables,
@@ -1282,6 +1385,9 @@ async fn test_fake_gvsp_packets_match_spec_layout() {
         "payload type at offset 10, not offset 2 — the TC-17 defect"
     );
     assert_eq!(be32(&trailer, 12), HEIGHT, "size_y at offset 12");
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// The DX-09 warning must actually reach the log.
@@ -1321,6 +1427,10 @@ async fn test_silent_stream_warns_and_names_the_candidates() {
             "the warning must name '{candidate}'; captured log was:\n{log}"
         );
     }
+
+    drop(frame_stream);
+    drop(_camera);
+    _cam.stop().await;
 }
 
 /// An explicitly configured packet size must be bounded like the probed one.
@@ -1355,6 +1465,9 @@ async fn test_oversized_packet_size_is_refused_not_truncated() {
         message.contains("70000") && message.contains("65535"),
         "the error must name both the value and the bound, got: {message}"
     );
+
+    drop(device);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -1407,6 +1520,10 @@ async fn test_stream_receives_frames() {
     })
     .await
     .unwrap();
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// A stream whose time sync has no samples has no device-to-host mapping, so
@@ -1439,6 +1556,10 @@ async fn an_uncalibrated_stream_reports_no_host_time() {
         "an unmapped device time became {:?}",
         frame.ts_host
     );
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// Once calibrated, a frame's host time is its device time mapped through the
@@ -1483,6 +1604,10 @@ async fn a_calibrated_stream_maps_device_time_to_host_time() {
         skew < Duration::from_secs(5),
         "host time {host:?} is {skew:?} from now"
     );
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// EVT data uses an IMAGE leader on the TRT009S-E, but its Size X/Size Y
@@ -1550,6 +1675,11 @@ async fn test_evt30_stream_is_classified_without_breaking_next_frame() {
     })
     .await
     .unwrap();
+
+    drop(events);
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// Chunk features read through GenApi from a streamed frame (GA-12, TC-06):
@@ -1671,6 +1801,10 @@ async fn test_chunk_features_read_through_genapi_from_a_streamed_frame() {
     })
     .await
     .unwrap();
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// A camera that sends chunk-mode frames as GigE Vision 1.x's extended chunk
@@ -1712,6 +1846,10 @@ async fn test_gige_vision_1_extended_chunk_data_is_an_image_with_chunks() {
         chunks.ids().collect::<Vec<_>>(),
         vec![0x0000_0001, 0x0000_0002]
     );
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// With chunk mode off, the frame is a plain image (`0x0001`) with no chunks.
@@ -1750,6 +1888,10 @@ async fn test_no_chunks_when_chunk_mode_is_off() {
     })
     .await
     .unwrap();
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -1800,6 +1942,10 @@ async fn test_frame_dimensions_match() {
     })
     .await
     .unwrap();
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 #[tokio::test]
@@ -1843,6 +1989,8 @@ async fn test_full_lifecycle() {
 
     drop(frame_stream);
     drop(camera);
+
+    _cam.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,6 +2039,9 @@ async fn test_persistent_ip_roundtrip() {
         .expect("enable_persistent_ip");
 
     device.release_control().await.expect("release control");
+
+    drop(device);
+    _cam.stop().await;
 }
 
 // NOTE: FORCEIP integration test removed -- UDP broadcast from a loopback-bound
@@ -1937,6 +2088,8 @@ async fn test_action_command_is_acknowledged() {
         summary.acks, 0,
         "camera answered an action addressed to another group"
     );
+
+    _cam.stop().await;
 }
 
 /// The fake emits `GEV_EVENT_START_OF_TRANSFER` per frame; the client decodes
@@ -1993,6 +2146,11 @@ async fn test_event_stream_receives_start_of_transfer() {
     })
     .await
     .unwrap();
+
+    drop(events);
+    drop(_frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// TC-42: an application that reads its events late costs the camera no
@@ -2059,6 +2217,11 @@ async fn a_late_event_reader_costs_the_camera_no_retransmission() {
     );
     assert_eq!(sent.acknowledged, sent.messages);
     assert_eq!(events.stats().retransmissions, 0);
+
+    drop(events);
+    drop(frame_stream);
+    drop(camera);
+    cam.stop().await;
 }
 
 /// An event feature read from a received event (GA-39): the fake sends an
@@ -2150,6 +2313,11 @@ async fn test_event_features_read_from_a_received_event() {
     })
     .await
     .unwrap();
+
+    drop(events);
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// A camera with no `EventSelector`/`EventNotification` gets a clear error
@@ -2169,6 +2337,9 @@ async fn test_enabling_unknown_event_fails_loudly() {
         text.contains("NoSuchEvent"),
         "error should name the event: {text}"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// Issue #140 / #112: an 8-byte register declared `<Sign>Unsigned</Sign>` whose
@@ -2197,6 +2368,9 @@ async fn test_full_width_unsigned_register_is_readable() {
         .await
         .expect("read latched PTP offset");
     assert_eq!(value, "-1234567");
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// GA-28: a plain `<IntReg>` declaring `<Endianess>LittleEndian</Endianess>`.
@@ -2231,6 +2405,9 @@ async fn test_little_endian_registers_are_not_byte_swapped() {
         ticks, "305419896",
         "little-endian 8-byte register was byte-swapped"
     );
+
+    drop(camera);
+    _cam.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2277,6 +2454,10 @@ async fn test_extended_id_stream_assembles_at_its_own_stride() {
     assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
     assert_eq!(frame.payload.len(), (frame.width * frame.height) as usize);
     assert!(frame.block_id >= 1);
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// `GevSCPD` paces packets in timestamp ticks (1 GHz on the fake, from
@@ -2310,6 +2491,10 @@ async fn test_a_paced_frame_longer_than_the_block_timeout_completes() {
         took >= Duration::from_millis(200),
         "pacing was not applied: the first frame took {took:?}"
     );
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// Every block the fake sends is complete, incomplete, missed or dropped to
@@ -2378,6 +2563,10 @@ async fn test_every_block_the_fake_sends_is_accounted_for() {
         "block 4 was dropped whole: {stats:?}"
     );
     assert!(stats.packets_duplicate >= 2, "{stats:?}");
+
+    drop(frame_stream);
+    drop(camera);
+    cam.stop().await;
 }
 
 /// A packed format is sized by bit depth end to end: `Mono12Packed` is 1.5
@@ -2396,6 +2585,10 @@ async fn test_a_packed_frame_arrives_whole() {
         (frame.width * frame.height * 3 / 2) as usize
     );
     assert_eq!(frame.status, viva_genicam::FrameStatus::Complete);
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// TC-05: a camera announcing `0x4001` delivers images whose payload type
@@ -2409,6 +2602,10 @@ async fn test_an_extended_chunk_payload_type_reaches_the_frame() {
     let frame = next_frame_within(&mut frame_stream, "an 0x4001 frame").await;
     stop_acquisition(&camera).await;
     assert_eq!(frame.payload_type, 0x4001);
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2491,6 +2688,10 @@ async fn test_resend_recovers_every_scripted_drop() {
     // One request per range: block 2's packet, block 3's two, block 4's run.
     assert!(device.requests >= 4, "{device:?}");
     assert!(device.packets_resent >= 6, "{device:?}");
+
+    drop(frame_stream);
+    drop(camera);
+    cam.stop().await;
 }
 
 /// Chunks survive a resend: the fake's retention ring holds the packets that
@@ -2556,6 +2757,10 @@ async fn test_resend_recovers_the_packets_that_carry_chunks() {
         values.get("ChunkImageLength").map(String::as_str),
         Some("307200")
     );
+
+    drop(frame_stream);
+    drop(camera);
+    _cam.stop().await;
 }
 
 /// A camera whose capability register lacks packet resend is never asked,
@@ -2582,6 +2787,10 @@ async fn test_without_the_capability_nothing_is_asked() {
     assert_eq!(stats.frames_incomplete, 1, "{stats:?}");
     assert_eq!(stats.resend_requested, 0, "{stats:?}");
     assert_eq!(cam.fake().resends().requests, 0);
+
+    drop(frame_stream);
+    drop(camera);
+    cam.stop().await;
 }
 
 /// The identity holds with resend at work: every block the fake produced is
@@ -2658,6 +2867,10 @@ async fn test_every_block_is_accounted_for_under_resend() {
         (4, 4),
         "{stats:?}"
     );
+
+    drop(frame_stream);
+    drop(camera);
+    cam.stop().await;
 }
 
 /// SR-03: two streams on one host each get their own camera's frames. Both
@@ -2703,6 +2916,12 @@ async fn test_two_streams_on_one_host_receive_their_own_frames() {
     stop_acquisition(&camera_a).await;
     stop_acquisition(&camera_b).await;
     second.stop().await;
+
+    drop(stream_a);
+    drop(stream_b);
+    drop(camera_a);
+    drop(camera_b);
+    _first.stop().await;
 }
 
 /// SR-03: valid GVSP from an address that is not the camera's is ignored and
@@ -2733,6 +2952,10 @@ async fn test_gvsp_from_another_address_is_ignored() {
         0,
         "{stats:?}"
     );
+
+    drop(frame_stream);
+    drop(camera);
+    cam.stop().await;
 }
 
 /// An address of this host other than 127.0.0.1: 127.0.0.2 where the whole of
@@ -2771,6 +2994,10 @@ async fn test_gevscpd_is_left_alone_unless_asked() {
     let (_frame_stream, _camera) = setup_stream(&device_info).await;
     let scpd = cam.fake().peek(0x0d08, 4).await;
     assert_eq!(u32::from_be_bytes(scpd.try_into().unwrap()), 777);
+
+    drop(_frame_stream);
+    drop(_camera);
+    cam.stop().await;
 }
 
 /// SR-19: a delay asked for in time is written in timestamp ticks, at the
@@ -2786,6 +3013,10 @@ async fn test_a_packet_delay_is_written_in_ticks() {
     let scpd = cam.fake().peek(0x0d08, 4).await;
     assert_eq!(u32::from_be_bytes(scpd.try_into().unwrap()), 1250);
     assert_eq!(frame_stream.params().packet_delay, Some(1250));
+
+    drop(frame_stream);
+    drop(_camera);
+    cam.stop().await;
 }
 
 /// SR-19: without a tick frequency a delay cannot be converted, and guessing
@@ -2803,6 +3034,8 @@ async fn test_a_packet_delay_without_a_tick_frequency_is_refused() {
     assert!(err.to_string().contains("tick frequency"), "{err}");
     let scpd = cam.fake().peek(0x0d08, 4).await;
     assert_eq!(scpd, vec![0, 0, 0, 0], "nothing written");
+
+    cam.stop().await;
 }
 
 /// SR-21: the fake has one stream channel; configuring channel 1 is refused
@@ -2817,4 +3050,6 @@ async fn test_a_stream_channel_the_camera_lacks_is_refused() {
     assert!(err.to_string().contains("stream channel"), "{err}");
     // Channel 1's host port stays unwritten.
     assert_eq!(cam.fake().peek(0x0d40, 4).await, vec![0, 0, 0, 0]);
+
+    cam.stop().await;
 }

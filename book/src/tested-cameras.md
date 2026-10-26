@@ -24,7 +24,8 @@ Each sensor's test pattern was checked in its own image tile. C GenTL and
 Harvesters each received 1000 complete frames. Faster minimum-ROI runs and
 Python delivery showed host backpressure drops; this is not a loss-free
 maximum-FPS or endurance claim. Events, chunks and metric 3D are not
-advertised by this interface. Detailed scope and restoration are in the
+advertised by this interface. The fixes and tests are recorded in [#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224).
+Detailed scope and restoration are in the
 [bench record](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/hardware-rtvision-2026-10-26.md).
 
 ### Allied Vision Manta G-125B

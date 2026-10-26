@@ -39,9 +39,9 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
-- **Remote feature-state queries.** The single-feature wildcard handler no longer replies to the reserved bulk-state endpoint, avoiding duplicate error replies and repeated `bulk`-is-not-a-node warnings during Studio polling.
+- **Remote feature-state queries.** The single-feature wildcard handler no longer replies to the reserved bulk-state endpoint, avoiding duplicate error replies and repeated `bulk`-is-not-a-node warnings during Studio polling ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
 
-- **QUISS six-sensor control ownership.** RTVision_6L_DCAM_v2 reverses its primary-application IP/port register contents. Ownership now also accepts that layout when both complete values identify our socket, preventing false control loss during acquisition. The real-camera GenTL consumer also preserves compressed XML as a ZIP container. See the [hardware record](docs/hardware-rtvision-2026-10-26.md).
+- **QUISS six-sensor control ownership.** RTVision_6L_DCAM_v2 reverses its primary-application IP/port register contents. Ownership now also accepts that layout when both complete values identify our socket, preventing false control loss during acquisition. The real-camera GenTL consumer also preserves compressed XML as a ZIP container. See the [hardware record](docs/hardware-rtvision-2026-10-26.md) ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
 
 - **Remote padded images.** Services retain each row's padding and send its stride in image header v2 (API 7), so Studio preview and native capture use the correct rows. Odd packed and subsampled images retain their final pixel group. Update services and Studio together ([#221](https://github.com/VitalyVorobyev/viva-genicam/pull/221)).
 

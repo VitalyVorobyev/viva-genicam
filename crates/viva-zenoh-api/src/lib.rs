@@ -47,7 +47,10 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 ///   [`StreamCounters`], in `stats`, where version 5 had one `dropped` count;
 ///   it is sent every second while acquiring, frames or not, and a final
 ///   [`AcquisitionStatus::stopped`] snapshot follows the stream's end.
-pub const API_VERSION: u32 = 6;
+/// - `7` — [`FrameHeader`] version 2 carries the row stride, so padded images
+///   retain their row layout in remote consumers. The header is 20 bytes;
+///   version-1 image headers are rejected.
+pub const API_VERSION: u32 = 7;
 
 /// Periodic announcement published by the camera service.
 ///

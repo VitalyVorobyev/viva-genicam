@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! [JSON header (null-terminated)]
-//! [Frame 0: 16-byte FrameHeader + raw pixel data]
-//! [Frame 1: 16-byte FrameHeader + raw pixel data]
+//! [Frame 0: 20-byte FrameHeader + raw pixel data]
+//! [Frame 1: 20-byte FrameHeader + raw pixel data]
 //! ...
 //! [Frame index JSON (appended on stop)]
 //! ```

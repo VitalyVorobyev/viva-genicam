@@ -13,7 +13,8 @@ use viva_genicam::pfnc;
 /// twelfth of itself and be trimmed to that (backlog `DC-01`).
 ///
 /// `None` means the frame cannot be length-checked at all — a packed format, or
-/// an event stream whose leader fields are not image geometry. Callers must
+/// an event stream whose leader fields are not image geometry, or an overflowing
+/// geometry (which callers must reject). For unsized formats, callers must
 /// publish such a payload unmodified: an expected length we cannot compute must
 /// not become a length we enforce.
 pub(crate) fn expected_payload_len(
@@ -27,8 +28,10 @@ pub(crate) fn expected_payload_len(
     ) {
         return None;
     }
-    pf.bytes_per_pixel()
-        .map(|bpp| width as usize * height as usize * bpp)
+    // Integral bytes per pixel can still describe a multi-pixel group:
+    // 4:2:2 needs a complete four-byte pair at an odd image boundary.
+    pf.bytes_per_pixel()?;
+    pf.image_bytes(width, height)
 }
 
 #[cfg(test)]
@@ -42,6 +45,14 @@ mod tests {
         let pf = pfnc::PixelFormat::Coord3DABC32f;
         assert_eq!(viva_zenoh_api::frame_header::pixel_format_to_u8(pf), 0);
         assert_eq!(expected_payload_len(pf, 1280, 1), Some(15_360));
+    }
+
+    #[test]
+    fn overflowing_image_geometry_cannot_be_sized() {
+        assert_eq!(
+            expected_payload_len(pfnc::PixelFormat::Mono16, u32::MAX, u32::MAX),
+            None
+        );
     }
 
     #[test]

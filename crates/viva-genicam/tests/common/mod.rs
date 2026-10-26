@@ -11,9 +11,10 @@ fn camera_lock() -> Arc<Mutex<()>> {
     CAMERA_LOCK.get_or_init(|| Arc::new(Mutex::new(()))).clone()
 }
 
-/// Guard that starts a fake GigE Vision camera and stops it on drop.
+/// Guard that starts a fake GigE Vision camera and serializes its lifetime.
 ///
-/// Holds a global mutex to prevent port conflicts when tests run in parallel.
+/// Call `stop().await` before leaving a successful test. Drop only provides
+/// best-effort cleanup when a test panics.
 pub(crate) struct TestCamera {
     camera: Option<FakeCamera>,
     _guard: OwnedMutexGuard<()>,
@@ -62,8 +63,17 @@ impl TestCamera {
     /// The running fake, for tests that inspect what reached it on the wire.
     #[allow(dead_code)]
     pub(crate) fn fake(&self) -> &FakeCamera {
-        // `camera` is only taken in `drop`, so it is always present here.
+        // `stop` consumes self, so a borrowed fixture always has its camera.
         self.camera.as_ref().expect("fake camera is running")
+    }
+
+    /// Release every fake-camera socket before allowing the next fixture in.
+    #[allow(dead_code)]
+    pub(crate) async fn stop(mut self) {
+        if let Some(camera) = self.camera.take() {
+            camera.stop().await;
+        }
+        // `_guard` remains held until all background tasks have exited.
     }
 }
 

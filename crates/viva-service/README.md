@@ -14,7 +14,7 @@ Client applications connect to the service for camera discovery, feature control
 - **GenICam XML** -- serves the device description XML via Zenoh queryable
 - **Node read/write** -- live node value updates and feature control
 - **Acquisition** -- start/stop image acquisition from client applications
-- **Frame streaming** -- raw image data with a 16-byte binary header over Zenoh pub/sub; event-vision blocks on a topic of their own
+- **Frame streaming** -- raw image data with a 20-byte version-2 binary header with per-frame row stride over Zenoh pub/sub; event-vision blocks on a topic of their own
 - **Device lifecycle** -- connection/disconnection tracking with status announcements
 
 ## Usage

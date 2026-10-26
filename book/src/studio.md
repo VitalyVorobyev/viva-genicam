@@ -112,10 +112,11 @@ inspection measures the sensor mosaic, while the PNG contains demosaiced
 colour. Formats without a supported native conversion report an error and
 leave the live preview available.
 
-Native capture supports images up to 16 Mi pixels. In remote mode, it also
-requires complete, tightly packed rows with no extra payload bytes: the
-service's current image message does not describe row stride. Use embedded
-mode for padded images or ambiguous odd-width packed formats.
+Native capture supports images up to 16 Mi pixels. Remote mode carries each
+frame's row stride, so padded rows and supported odd-width packed images use
+the same conversion as embedded mode. Update the service and Studio together:
+this requires service API version 7 and frame-header version 2; older frame
+headers are rejected.
 
 The **Statistics** section of the Image tab counts every frame the camera
 sent: received complete, incomplete, missed, dropped by the host, and for GigE

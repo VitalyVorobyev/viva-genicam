@@ -37,12 +37,18 @@ loopback port — the old Windows path compiled on macOS for the truncation.
 **One receive engine, the same on every OS**, in `viva-genicam`'s `stream`
 module:
 
-- **Thread model.** Each `FrameStream` owns one `std::thread`. It waits up to
-  **5 ms** for the socket to be readable (`poll`, `WSAPoll` on Windows) and
-  then reads it without blocking; every wake-up, a datagram or the
-  timeout, feeds the assembler and lets its timers fire, so blocks close on time
-  whether or not the application is asking for frames. Dropping the stream sets
-  a stop flag and joins the thread, within one tick. A socket error that only
+- **Thread model.** Each `FrameStream` owns one `std::thread`. On Unix,
+  receive and resend writes use **5 ms** socket timeouts, avoiding a separate
+  readiness syscall per datagram. If timeout setup fails, and on other
+  platforms, it waits for readiness then reads without blocking (`WSAPoll` on
+  Windows). This October 2026 amendment follows the
+  [acquisition measurements](../performance-2026-10-26.md); Windows retains its
+  existing strategy because Winsock documents an expired blocking receive as
+  leaving the socket indeterminate. Every wake-up, a datagram or the timeout,
+  feeds the assembler and lets its timers fire, whether or not the application
+  asks for frames. Dropping the stream sets a stop flag and joins; timeout
+  resolution is subject to OS rounding, scheduling and current per-packet work,
+  including individually bounded resend writes. A socket error that only
   reflects an ICMP reply (`WSAECONNRESET` on Windows, `ECONNREFUSED` elsewhere)
   is transient (SR-22); any other error ends the stream, reported once.
 - **Delivery.** Finished frames go into a `DeliveryQueue`: a

@@ -12,7 +12,7 @@ One GigE Vision camera on the bench runs the [hardware test plan](hardware-test-
 - **Control channel**: TC-38.
 - **GenApi**: TC-39, API-19.
 - **Local validation**: run the opt-in hardware suite while a camera is available. CI-22 is deferred: no self-hosted runner or hardware workflow is planned.
-- **Endurance**: SR-27, decided by the plan's area L.
+- **Endurance**: SR-27, decided by the plan's area L and the [acquisition profile](performance-2026-10-26.md). Repeat endurance with resource and restoration evidence when hardware is available; a buffer pool needs a measured bottleneck.
 - **Evidence**: the [tested-camera page](../book/src/tested-cameras.md) records completed hardware runs.
 
 ## Waiting on hardware

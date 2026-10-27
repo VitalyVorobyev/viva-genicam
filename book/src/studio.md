@@ -79,10 +79,11 @@ press **Start Acq** when ready. **Cancel reconnect** abandons the search, and
 connecting another camera also cancels it. If recovery expires, reconnect
 from the device menu.
 
-If another application takes control while the camera is still reachable,
+When the transport reports lost control while the camera is still reachable,
 Studio keeps the session read-only and displays **Camera control lost**. It
 does not repeatedly try to reclaim control. Use **Reconnect with control**
-when the other controller has finished. A disconnected USB3 Vision camera
+when the other controller has finished. On a camera that does not identify its
+controller, a takeover may become visible only after a refused write. A disconnected USB3 Vision camera
 requires manual reconnection from the device menu.
 
 ### macOS local-network access

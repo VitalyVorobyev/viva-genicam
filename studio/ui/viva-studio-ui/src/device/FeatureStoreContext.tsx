@@ -4,7 +4,7 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useState,
+  useMemo,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
@@ -45,13 +45,16 @@ async function fetchStates(names: string[]): Promise<Record<string, FeatureState
  */
 export function FeatureStoreProvider({
   connected,
+  sessionKey,
   children,
 }: {
   connected: boolean;
+  /** A fresh parsed camera model starts an isolated live-state cache. */
+  sessionKey?: unknown;
   children: ReactNode;
 }) {
   const { addToast } = useToast();
-  const [store] = useState(() => new FeatureStore(fetchStates));
+  const { store } = useMemo(() => ({ sessionKey, store: new FeatureStore(fetchStates) }), [sessionKey]);
 
   useEffect(() => {
     store.setErrorHandler((error) => {
@@ -61,6 +64,7 @@ export function FeatureStoreProvider({
 
   useEffect(() => {
     store.setEnabled(connected);
+    return () => store.setEnabled(false);
   }, [store, connected]);
 
   useEffect(() => {

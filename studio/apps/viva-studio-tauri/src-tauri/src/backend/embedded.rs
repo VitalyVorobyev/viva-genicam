@@ -666,7 +666,7 @@ fn gige_of(
 // ── Streaming ───────────────────────────────────────────────────────────────
 
 /// Read frames until shutdown, sending the viewer a BMP of each as often as
-/// [`FramePacer`] allows: at most [`DISPLAY_FPS`] a second, and once a second
+/// [`FramePacer`] allows: a cadence of [`DISPLAY_FPS`] a second, and once a second
 /// while no viewer is connected, so one that connects later has a frame.
 /// Every [`STATUS_INTERVAL`] it also reports the stream's frame rate and
 /// counters, whether or not frames arrive, and on the way out the final
@@ -735,7 +735,8 @@ async fn run_frame_reader(
             let _ = info_tx.send(changed);
         }
         frames_since_status += 1;
-        if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
+        let admitted_at = Instant::now();
+        if !pacer.is_due(frame_tx.receiver_count() > 0, admitted_at) {
             continue;
         }
         if !FrameEncoder::can_draw(frame.pixel_format) {
@@ -763,7 +764,7 @@ async fn run_frame_reader(
                 });
                 // Stored even with no viewer: the next one to connect is sent it.
                 frame_tx.send_replace(bmp);
-                pacer.sent(Instant::now());
+                pacer.sent(admitted_at);
             }
             Err(e) => warn!("Frame not drawn: {e}"),
         }

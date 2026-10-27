@@ -12,6 +12,10 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **A compact image preview while configuring a camera.** Expand **Image preview** in Studio's Features tab and start acquisition to check settings without leaving the tab. It shares the existing preview connection and remembers whether it is folded ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
+
+- **Image-tab fast controls for older cameras.** Exposure, gain and frame rate resolve their legacy standard names and retain the camera's own units, ranges and access restrictions. Acquisition and exposure/gain appear above statistics ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
+
 - **Native camera values in Studio.** Freeze one frame to inspect its original sample values, histogram and line profile, then save a PNG that preserves its bit depth. Bayer inspection uses the sensor mosaic; snapshots contain demosaiced colour. Remote capture requires unambiguous tight rows ([#220](https://github.com/VitalyVorobyev/viva-genicam/pull/220)).
 
 - **Reopening a GigE camera.** `reopen_gige` rediscovers a camera by MAC, opens a fresh session and XML, and optionally restores a saved configuration with per-feature results. Cancelling an open releases any control already claimed ([#218](https://github.com/VitalyVorobyev/viva-genicam/pull/218)).
@@ -38,6 +42,10 @@ release opens with what to read before upgrading.
 - **A camera's reported tick frequency is its clock's slope.** `Camera::time_calibrate` (and `TimeSync::fit` given a frequency) now fits only the offset, as the median over the samples, and takes the slope from `GevTimestampTickFrequency`. Sixteen samples taken over GVCP fitted an Allied Vision Manta G-125B's 48 MHz clock at 48.46 MHz in one calibration and 47.76 MHz in the next, and frames mapped through `map_dev_ts` after the first drifted 9.5 ms a second from their arrival (14.3 s in 25 minutes); with the reported frequency they drifted 31 ms in 20 minutes, the camera's clock running about 26 ppm ahead of the host's ([#217](https://github.com/VitalyVorobyev/viva-genicam/pull/217)).
 
 ### Fixed
+
+- **Studio controls after remote recovery (ST-61).** A replacement session refreshes both the backend model and the UI's feature cache, restoring controls without a manual reconnect. A delayed replacement cannot undo a user disconnect ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
+
+- **Studio preview cadence near its display limit (ST-60).** Deadline pacing avoids taking every second frame from a camera just above the preview rate; a long pause starts a fresh cadence. Encoding time no longer shifts each deadline ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
 - **Remote feature-state queries.** The single-feature wildcard handler no longer replies to the reserved bulk-state endpoint, avoiding duplicate error replies and repeated `bulk`-is-not-a-node warnings during Studio polling ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
 

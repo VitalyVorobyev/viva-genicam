@@ -94,7 +94,20 @@ exposure and gain, image format, trigger, user sets, transport layer, auto
 functions and colour processing — showing only those your camera has, and the
 packet size of a GigE stream.
 
+Expand **Image preview** in the Features tab for a compact, fit-to-view canvas
+while changing settings. It starts collapsed and remembers your preference.
+Acquisition still starts from **Start Acq**; with the preview expanded, Start
+keeps the Features tab visible. The canvas shares the Image tab's preview
+connection, and only the visible canvas decodes frames.
+
 ## Images
+
+The Image sidebar puts acquisition rate, exposure and gain above the statistics
+for quick adjustment. Controls use the camera's declared limits, units and
+access restrictions, including older names such as `ExposureTimeAbs` and
+`AcquisitionFrameRateAbs`. A raw gain or exposure value keeps its camera units;
+it is not converted to dB or microseconds. After automatic remote reconnection,
+Studio refreshes the feature graph and controls from the replacement session.
 
 The **Image** tab shows the live stream once you press **Start Acq**. The
 toolbar zooms to fit or to exactly one screen pixel per camera pixel, and
@@ -121,8 +134,9 @@ headers are rejected.
 The **Statistics** section of the Image tab counts every frame the camera
 sent: received complete, incomplete, missed, dropped by the host, and for GigE
 Vision the packets and resends behind them, or for USB3 Vision the transfers.
-These are frames *received*. The viewer *displays* at most 30 a second (15 in
-remote mode), and none while another tab is shown, so the status bar's
+These are frames *received*. Live preview targets 30 frames a second (15 in
+remote mode), decoding only in the visible Image tab or expanded Features
+preview, so the Image status bar's
 "display" rate and the **Displayed** count stay low at a high camera rate; that
 is the preview, not a loss. The counters keep their last values after **Stop**.
 

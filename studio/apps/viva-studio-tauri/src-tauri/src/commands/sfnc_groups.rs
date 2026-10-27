@@ -4,9 +4,13 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(optional_fields))]
 pub struct SfncFeature {
     pub node: String,
     pub widget: String,
+    /// Legacy standard names, in the facade's resolution order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -32,9 +36,31 @@ pub type SfncGroupsState = Arc<RwLock<Option<Vec<SfncGroup>>>>;
 /// Extracted as a pure function (no I/O, no async) so it can be unit-tested
 /// without a Tauri app handle.
 pub fn parse_sfnc_groups(bytes: &[u8]) -> Result<Vec<SfncGroup>, String> {
-    serde_json::from_slice::<SfncGroupsFile>(bytes)
-        .map(|f| f.groups)
-        .map_err(|e| format!("Failed to parse sfnc-groups.json: {e}"))
+    let mut groups = serde_json::from_slice::<SfncGroupsFile>(bytes)
+        .map_err(|e| format!("Failed to parse sfnc-groups.json: {e}"))?
+        .groups;
+    for feature in groups.iter_mut().flat_map(|group| &mut group.features) {
+        use viva_genicam::StandardFeature;
+        let standard = match feature.node.as_str() {
+            "ExposureTime" => Some(StandardFeature::ExposureTime),
+            "Gain" => Some(StandardFeature::Gain),
+            "AcquisitionFrameRate" => Some(StandardFeature::FrameRate),
+            _ => None,
+        };
+        if feature.aliases.is_none()
+            && let Some(standard) = standard
+        {
+            feature.aliases = Some(
+                standard
+                    .names()
+                    .iter()
+                    .filter(|&&name| name != feature.node)
+                    .map(|&name| name.to_string())
+                    .collect(),
+            );
+        }
+    }
+    Ok(groups)
 }
 
 /// Return the SFNC group configuration, loading from the bundled resource on
@@ -101,6 +127,34 @@ mod tests {
         assert_eq!(group.features[0].widget, "enum_select");
         assert_eq!(group.features[1].node, "AcquisitionStart");
         assert_eq!(group.features[1].widget, "command_button");
+    }
+
+    #[test]
+    fn numeric_control_aliases_follow_the_facade_resolution_table() {
+        let groups = parse_sfnc_groups(include_bytes!("../../resources/sfnc-groups.json")).unwrap();
+        for (canonical, standard) in [
+            ("ExposureTime", viva_genicam::StandardFeature::ExposureTime),
+            ("Gain", viva_genicam::StandardFeature::Gain),
+            (
+                "AcquisitionFrameRate",
+                viva_genicam::StandardFeature::FrameRate,
+            ),
+        ] {
+            let feature = groups
+                .iter()
+                .flat_map(|group| &group.features)
+                .find(|feature| feature.node == canonical)
+                .unwrap();
+            assert_eq!(
+                feature.aliases.as_deref().unwrap(),
+                standard
+                    .names()
+                    .iter()
+                    .filter(|&&name| name != canonical)
+                    .copied()
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

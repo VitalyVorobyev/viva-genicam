@@ -1,12 +1,11 @@
-use crate::state::{Diag, ModelState};
+use crate::state::Diag;
 use serde::Serialize;
 use tauri::State;
-use tokio::sync::RwLock;
 use viva_xml_model::{UiGraph, parse_genicam_xml};
 
 // Keep the response payload aligned with the WASM/TS UiGraph contract so the UI
 // can swap providers without changing how it renders.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ModelSummary {
     pub node_count: usize,
@@ -14,7 +13,7 @@ pub struct ModelSummary {
     pub root_category: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ParseXmlResponse {
     pub graph: UiGraph,
@@ -79,6 +78,14 @@ fn build_response(graph: UiGraph, xml: String, diags: Vec<Diag>) -> ParseXmlResp
     }
 }
 
+/// Parse the current camera XML for both explicit connections and replacements.
+pub(crate) fn parse_camera_model(xml: String) -> Result<ParseXmlResponse, String> {
+    let graph = parse_genicam_xml(&xml)
+        .map_err(|e| format!("The camera's GenICam XML could not be read: {e}"))?;
+    let diags = Diag::for_graph(&graph);
+    Ok(build_response(graph, xml, diags))
+}
+
 #[tauri::command]
 pub async fn list_fixtures() -> Vec<String> {
     FIXTURES
@@ -90,7 +97,7 @@ pub async fn list_fixtures() -> Vec<String> {
 #[tauri::command]
 pub async fn parse_xml(
     xml: String,
-    state: State<'_, RwLock<ModelState>>,
+    state: State<'_, crate::state::SharedModelState>,
 ) -> Result<ParseXmlResponse, CommandError> {
     println!("parse_xml (native)");
     let graph = parse_genicam_xml(&xml)?;
@@ -110,7 +117,7 @@ pub async fn parse_xml(
 #[tauri::command]
 pub async fn load_fixture(
     name: String,
-    state: State<'_, RwLock<ModelState>>,
+    state: State<'_, crate::state::SharedModelState>,
 ) -> Result<ParseXmlResponse, CommandError> {
     let fixture = FIXTURES
         .iter()
@@ -135,7 +142,7 @@ pub async fn load_fixture(
 
 #[tauri::command]
 pub async fn get_current_model(
-    state: State<'_, RwLock<ModelState>>,
+    state: State<'_, crate::state::SharedModelState>,
 ) -> Result<Option<ParseXmlResponse>, CommandError> {
     let state = state.read().await;
     let (graph, xml) = match (&state.graph, &state.xml) {

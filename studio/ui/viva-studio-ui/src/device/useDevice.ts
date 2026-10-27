@@ -1,5 +1,5 @@
 import { invokeCommand } from "./commands";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "../tauri";
 import { listenTo } from "./events";
 import type { ConnectionState, DeviceInfo, DisconnectReason } from "./types";
@@ -10,6 +10,10 @@ export function useDevice() {
   const [connectionState, setConnectionState] = useState<ConnectionState>({
     kind: "disconnected",
   });
+  const [replacementModel, setReplacementModel] = useState<ParseXmlResponse | null>(null);
+  const currentConnection = useRef<ConnectionState>({ kind: "disconnected" });
+  const operation = useRef(0);
+  const manualTransition = useRef(false);
   const [disconnectReason, setDisconnectReason] = useState<DisconnectReason | null>(null);
 
   useEffect(() => {
@@ -17,11 +21,13 @@ export function useDevice() {
 
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
+    const keep = (fn: () => void) => cancelled ? fn() : unlisteners.push(fn);
 
     async function init() {
       if (cancelled) return;
 
-      // Load initial state
+      // Load initial state without overwriting a user operation begun meanwhile.
+      const initialOperation = operation.current;
       try {
         const [deviceList, connState] = await Promise.all([
           invokeCommand("list_discovered_devices"),
@@ -29,7 +35,10 @@ export function useDevice() {
         ]);
         if (!cancelled) {
           setDevices(deviceList);
-          setConnectionState(connState);
+          if (operation.current === initialOperation) {
+            currentConnection.current = connState;
+            setConnectionState(connState);
+          }
         }
       } catch (e) {
         console.error("Failed to load initial device state:", e);
@@ -48,19 +57,32 @@ export function useDevice() {
         );
       });
 
+      keep(u1);
       const u2 = await listenTo("device-lost", (lost) => {
         setDevices((prev) => prev.filter((d) => d.id !== lost.device_id));
       });
 
+      keep(u2);
       const u3 = await listenTo("connection-state-changed", (state) => {
+        currentConnection.current = state;
         setConnectionState(state);
       });
 
+      keep(u3);
       const u4 = await listenTo("disconnect-reason", (reason) => {
         setDisconnectReason(reason);
       });
 
-      unlisteners.push(u1, u2, u3, u4);
+      keep(u4);
+      const u5 = await listenTo("device-reconnected", ({ device_id, model }) => {
+        const current = currentConnection.current;
+        if (manualTransition.current) return;
+        if ((current.kind === "connected" || current.kind === "reconnecting") && current.device_id === device_id) {
+          setReplacementModel(model);
+        }
+      });
+
+      keep(u5);
     }
 
     init();
@@ -72,13 +94,31 @@ export function useDevice() {
   }, []);
 
   const connect = useCallback(async (deviceId: string): Promise<ParseXmlResponse> => {
+    const ticket = ++operation.current;
+    manualTransition.current = true;
+    currentConnection.current = { kind: "connecting", device_id: deviceId };
     setDisconnectReason(null);
-    return await invokeCommand("connect_device", { deviceId });
+    setReplacementModel(null);
+    try {
+      const model = await invokeCommand("connect_device", { deviceId });
+      if (ticket !== operation.current) throw new DOMException("Connection superseded", "AbortError");
+      return model;
+    } finally {
+      if (ticket === operation.current) manualTransition.current = false;
+    }
   }, []);
 
   const disconnect = useCallback(async () => {
-    await invokeCommand("disconnect_device");
+    const ticket = ++operation.current;
+    manualTransition.current = true;
+    currentConnection.current = { kind: "disconnected" };
+    setReplacementModel(null);
+    try {
+      await invokeCommand("disconnect_device");
+    } finally {
+      if (ticket === operation.current) manualTransition.current = false;
+    }
   }, []);
 
-  return { devices, connectionState, disconnectReason, connect, disconnect };
+  return { devices, connectionState, disconnectReason, connect, disconnect, replacementModel };
 }

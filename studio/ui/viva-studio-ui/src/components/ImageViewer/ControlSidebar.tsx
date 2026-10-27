@@ -27,7 +27,7 @@ interface ControlSidebarProps {
 const NO_NODES = {};
 
 /**
- * The Statistics section, which the UI adds after Acquisition Control (or
+ * The Statistics section, which the UI adds after the fast acquisition/exposure controls (or
  * first, for a camera without one): it shows the stream, not features.
  */
 const STATISTICS = { id: "statistics", title: "Statistics", icon: "activity", defaultOpen: true };
@@ -87,6 +87,7 @@ export function ControlSidebar({
           isConnected={isConnected}
           isAcquiring={isAcquiring}
           nodes={nodesById}
+          rateFeature={group.features.find((f) => f.node === "AcquisitionFrameRate")}
           deviceId={deviceId}
         />
       );
@@ -94,9 +95,13 @@ export function ControlSidebar({
     return <FeatureGroupSection group={group} nodes={nodesById} isConnected={isConnected} />;
   }
 
-  // Statistics goes after Acquisition Control, or first.
-  const statsAfter = visibleGroups.findIndex((g) => g.id === "acquisition_control") + 1;
-  const sections: Array<{ id: string; title: string; icon: string }> = [...visibleGroups];
+  // Keep exposure/gain immediately after acquisition settings, ahead of the
+  // taller statistics section. Both remain the same camera-aware controls.
+  const fastGroups = visibleGroups.filter((g) => g.id === "acquisition_control" || g.id === "exposure_gain");
+  const otherGroups = visibleGroups.filter((g) => !fastGroups.includes(g));
+  const orderedGroups = [...fastGroups, ...otherGroups];
+  const statsAfter = fastGroups.length;
+  const sections: Array<{ id: string; title: string; icon: string }> = [...orderedGroups];
   sections.splice(statsAfter, 0, STATISTICS);
   const groupsById = new Map(visibleGroups.map((g) => [g.id, g]));
 

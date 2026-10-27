@@ -1,7 +1,7 @@
 import { memo } from "react";
 import type { SfncGroup } from "../../device/types";
 import type { UiNode } from "../../xml_model/uigraph";
-import { FeatureControl } from "../controls/FeatureControl";
+import { SfncFeatureControl } from "./SfncFeatureControl";
 
 interface FeatureGroupSectionProps {
   group: SfncGroup;
@@ -26,9 +26,9 @@ export const FeatureGroupSection = memo(function FeatureGroupSection({
   return (
     <div className="feature-group">
       {group.features
-        .filter((f) => nodes[f.node])
+        .filter((f) => [f.node, ...(f.aliases ?? [])].some((name) => nodes[name]))
         .map((f) => (
-          <FeatureControl key={f.node} node={nodes[f.node]} widget={f.widget} />
+          <SfncFeatureControl key={f.node} feature={f} nodes={nodes} />
         ))}
     </div>
   );

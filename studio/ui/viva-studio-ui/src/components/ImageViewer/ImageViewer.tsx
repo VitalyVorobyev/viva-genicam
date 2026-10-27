@@ -263,6 +263,8 @@ export function ImageViewer({
             : "Live preview · Freeze for native pixel values, histogram and line profile"}
         </div>
         <ViewerCanvas
+          key={`${deviceId}:${streamerInfo.ws_url}`}
+          streamKey={deviceId ?? undefined}
           active={isActive}
           nativeFrame={nativeFrame}
           onNativePreviewReady={handleNativePreviewReady}

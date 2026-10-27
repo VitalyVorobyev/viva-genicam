@@ -54,6 +54,8 @@ pub struct DeviceLost {
 pub struct DeviceReconnected {
     pub device_id: String,
     pub node_count: usize,
+    /// Freshly parsed replacement XML; the frontend must not reuse its old graph.
+    pub model: crate::commands::xml_model::ParseXmlResponse,
 }
 
 /// The Zenoh session stopped answering (remote mode).

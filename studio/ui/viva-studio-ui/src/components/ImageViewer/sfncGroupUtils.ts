@@ -6,5 +6,5 @@ export function isSectionApplicable(
 ): boolean {
   if (Object.keys(nodesById).length === 0) return true;
   if (group.features.length === 0) return false;
-  return group.features.some((f) => f.node in nodesById);
+  return group.features.some((f) => [f.node, ...(f.aliases ?? [])].some((name) => name in nodesById));
 }

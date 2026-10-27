@@ -16,7 +16,6 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, OnceCell, watch};
 use viva_streamer::meta;
-use viva_xml_model::parse_genicam_xml;
 use viva_zenoh_api::{
     AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, BulkReadRequest,
     DeviceAnnounce, DeviceReportRequest, DeviceReportResponse, DeviceStatus, DeviceXmlResponse,
@@ -24,6 +23,8 @@ use viva_zenoh_api::{
 };
 use zenoh::Session;
 
+use crate::commands::xml_model::parse_camera_model;
+use crate::state::SharedModelState;
 use crate::state::connection::Connection;
 use crate::state::device_state::{
     ApiVersionMismatch, ConnectionState, DeviceInfo, DeviceRegistry, DisconnectReason, StreamerInfo,
@@ -31,6 +32,7 @@ use crate::state::device_state::{
 use crate::state::events::{
     DeviceLost, DeviceReconnected, Events, StudioEvent, ZenohSessionLost, ZenohSessionRestored,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{BackendMode, ConnectResult, DeviceBackend, StartOptions};
 
@@ -61,6 +63,10 @@ pub struct RemoteBackend {
     me: Weak<Self>,
     events: Arc<Events>,
     connection: Arc<Connection>,
+    model: SharedModelState,
+    /// Serialises publishing a replacement with a user disconnect/switch.
+    transition: Mutex<()>,
+    epoch: AtomicU64,
     session: OnceCell<Arc<Session>>,
     registry: Mutex<DeviceRegistry>,
     /// The connected device's id.
@@ -71,11 +77,18 @@ pub struct RemoteBackend {
 }
 
 impl RemoteBackend {
-    pub fn new(events: Arc<Events>, connection: Arc<Connection>) -> Arc<Self> {
+    pub fn new(
+        events: Arc<Events>,
+        connection: Arc<Connection>,
+        model: SharedModelState,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             events,
             connection,
+            model,
+            transition: Mutex::new(()),
+            epoch: AtomicU64::new(0),
             session: OnceCell::new(),
             registry: Mutex::new(DeviceRegistry::default()),
             device: Mutex::new(None),
@@ -216,17 +229,20 @@ impl RemoteBackend {
 
     // ── Per-device subscriptions ────────────────────────────────────────────
 
-    async fn subscribe(self: &Arc<Self>, session: &Arc<Session>, device_id: &str) {
+    async fn subscribe(self: &Arc<Self>, session: &Arc<Session>, device_id: &str, epoch: u64) {
         self.unsubscribe().await;
         let tasks = vec![
             self.clone()
-                .follow_states(session.clone(), device_id.to_string()),
+                .follow_states(session.clone(), device_id.to_string(), epoch),
             self.clone()
-                .follow_status(session.clone(), device_id.to_string()),
+                .follow_status(session.clone(), device_id.to_string(), epoch),
+            self.clone().follow::<AcquisitionStatus>(
+                session.clone(),
+                keys::acquisition_status(device_id),
+                epoch,
+            ),
             self.clone()
-                .follow::<AcquisitionStatus>(session.clone(), keys::acquisition_status(device_id)),
-            self.clone()
-                .follow::<ImageMeta>(session.clone(), keys::image_meta(device_id)),
+                .follow::<ImageMeta>(session.clone(), keys::image_meta(device_id), epoch),
         ];
         self.subscriptions.lock().await.extend(tasks);
     }
@@ -243,6 +259,7 @@ impl RemoteBackend {
         self: Arc<Self>,
         session: Arc<Session>,
         device_id: String,
+        epoch: u64,
     ) -> tauri::async_runtime::JoinHandle<()> {
         tauri::async_runtime::spawn(async move {
             let key = keys::node_state_wildcard(&device_id);
@@ -260,6 +277,10 @@ impl RemoteBackend {
                 if let Ok(state) =
                     serde_json::from_slice::<FeatureState>(&sample.payload().to_bytes())
                 {
+                    let _transition = self.transition.lock().await;
+                    if self.epoch.load(Ordering::Acquire) != epoch {
+                        break;
+                    }
                     self.events.node_state(name, &state);
                 }
             }
@@ -271,6 +292,7 @@ impl RemoteBackend {
         self: Arc<Self>,
         session: Arc<Session>,
         key: String,
+        epoch: u64,
     ) -> tauri::async_runtime::JoinHandle<()> {
         tauri::async_runtime::spawn(async move {
             let sub = match session.declare_subscriber(&key).await {
@@ -282,6 +304,10 @@ impl RemoteBackend {
             };
             while let Ok(sample) = sub.recv_async().await {
                 if let Ok(payload) = serde_json::from_slice::<T>(&sample.payload().to_bytes()) {
+                    let _transition = self.transition.lock().await;
+                    if self.epoch.load(Ordering::Acquire) != epoch {
+                        break;
+                    }
                     self.events.send(&payload);
                 }
             }
@@ -294,6 +320,7 @@ impl RemoteBackend {
         self: Arc<Self>,
         session: Arc<Session>,
         device_id: String,
+        epoch: u64,
     ) -> tauri::async_runtime::JoinHandle<()> {
         tauri::async_runtime::spawn(async move {
             let sub = match session.declare_subscriber(keys::status(&device_id)).await {
@@ -319,33 +346,41 @@ impl RemoteBackend {
                 // replaces, so the loop runs on its own task.
                 let backend = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    backend.lose_device(device_id, message).await;
+                    backend.lose_device(device_id, message, epoch).await;
                 });
                 return;
             }
         })
     }
 
-    async fn lose_device(self: Arc<Self>, device_id: String, message: String) {
-        self.unsubscribe().await;
-        self.stop_streamer().await;
-        self.connection
-            .set(ConnectionState::Reconnecting {
+    async fn lose_device(self: Arc<Self>, device_id: String, message: String, expected_epoch: u64) {
+        let epoch;
+        {
+            let _transition = self.transition.lock().await;
+            if self.epoch.load(Ordering::Acquire) != expected_epoch {
+                return;
+            }
+            epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.unsubscribe().await;
+            self.stop_streamer().await;
+            self.connection
+                .set(ConnectionState::Reconnecting {
+                    device_id: device_id.clone(),
+                    attempt: 0,
+                    max_attempts: MAX_RECONNECT_ATTEMPTS,
+                    reason: message.clone(),
+                })
+                .await;
+            self.events.send(&DisconnectReason {
+                message,
                 device_id: device_id.clone(),
-                attempt: 0,
-                max_attempts: MAX_RECONNECT_ATTEMPTS,
-                reason: message.clone(),
-            })
-            .await;
-        self.events.send(&DisconnectReason {
-            message,
-            device_id: device_id.clone(),
-        });
-        self.reconnect(device_id).await;
+            });
+        }
+        self.reconnect(device_id, epoch).await;
     }
 
     /// Wait for the device to be announced again, then resubscribe.
-    async fn reconnect(self: Arc<Self>, device_id: String) {
+    async fn reconnect(self: Arc<Self>, device_id: String, epoch: u64) {
         let backoff_secs = [1, 2, 4, 8, 15];
         for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
             let delay = backoff_secs
@@ -355,20 +390,36 @@ impl RemoteBackend {
             tokio::time::sleep(Duration::from_secs(delay)).await;
 
             // The user disconnected or connected elsewhere meanwhile.
-            if !matches!(
-                self.connection.get().await,
-                ConnectionState::Reconnecting { .. }
-            ) {
+            if self.epoch.load(Ordering::Acquire) != epoch
+                || !matches!(
+                    self.connection.get().await,
+                    ConnectionState::Reconnecting { .. }
+                )
+            {
                 return;
             }
             let reason = if !self.registry.lock().await.contains(&device_id) {
                 "Waiting for device to reappear".to_string()
             } else {
-                match self.attach(&device_id).await {
+                match self.attach(&device_id, epoch).await {
                     Ok(result) => {
-                        let node_count = parse_genicam_xml(&result.xml)
-                            .map(|g| g.nodes_by_name.len())
-                            .unwrap_or_default();
+                        let _transition = self.transition.lock().await;
+                        if self.epoch.load(Ordering::Acquire) != epoch {
+                            return;
+                        }
+                        let model = match parse_camera_model(result.xml) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                tracing::warn!(%error, "Replacement XML could not be parsed");
+                                continue;
+                            }
+                        };
+                        self.model.write().await.update(
+                            model.xml.clone(),
+                            model.graph.clone(),
+                            model.diags.clone(),
+                            Some(device_id.clone()),
+                        );
                         self.connection
                             .set(ConnectionState::Connected {
                                 device_id: device_id.clone(),
@@ -378,7 +429,8 @@ impl RemoteBackend {
                             .await;
                         self.events.send(&DeviceReconnected {
                             device_id: device_id.clone(),
-                            node_count,
+                            node_count: model.summary.node_count,
+                            model,
                         });
                         tracing::info!("Reconnected to {device_id}");
                         return;
@@ -386,6 +438,10 @@ impl RemoteBackend {
                     Err(e) => format!("Reconnect failed: {e}"),
                 }
             };
+            let _transition = self.transition.lock().await;
+            if self.epoch.load(Ordering::Acquire) != epoch {
+                return;
+            }
             tracing::info!("Reconnect attempt {attempt}/{MAX_RECONNECT_ATTEMPTS}: {reason}");
             self.connection
                 .set(ConnectionState::Reconnecting {
@@ -396,9 +452,15 @@ impl RemoteBackend {
                 })
                 .await;
         }
+        let _transition = self.transition.lock().await;
+        if self.epoch.load(Ordering::Acquire) != epoch {
+            return;
+        }
         tracing::warn!(
             "Reconnection to {device_id} failed after {MAX_RECONNECT_ATTEMPTS} attempts"
         );
+        self.unsubscribe().await;
+        *self.device.lock().await = None;
         self.connection
             .set(ConnectionState::Error {
                 message: format!(
@@ -410,10 +472,18 @@ impl RemoteBackend {
 
     /// Fetch the device's XML and follow its topics; the shared half of
     /// connecting and reconnecting.
-    async fn attach(self: &Arc<Self>, device_id: &str) -> Result<ConnectResult, String> {
+    async fn attach(
+        self: &Arc<Self>,
+        device_id: &str,
+        epoch: u64,
+    ) -> Result<ConnectResult, String> {
         let session = self.session()?;
         let response: DeviceXmlResponse = query(&session, &keys::xml(device_id), None).await?;
-        self.subscribe(&session, device_id).await;
+        let _transition = self.transition.lock().await;
+        if self.epoch.load(Ordering::Acquire) != epoch {
+            return Err("Connection changed while reading XML".into());
+        }
+        self.subscribe(&session, device_id, epoch).await;
         *self.device.lock().await = Some(device_id.to_string());
         let (device_name, model) = {
             let registry = self.registry.lock().await;
@@ -491,10 +561,16 @@ impl DeviceBackend for RemoteBackend {
         self.disconnect().await?;
         // `attach` hands an `Arc` of this backend to its subscriptions.
         let this = self.self_arc()?;
-        this.attach(device_id).await
+        let epoch = {
+            let _transition = self.transition.lock().await;
+            self.epoch.fetch_add(1, Ordering::AcqRel) + 1
+        };
+        this.attach(device_id, epoch).await
     }
 
     async fn disconnect(&self) -> Result<(), String> {
+        let _transition = self.transition.lock().await;
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         self.unsubscribe().await;
         // Stop what this app started: a camera left streaming would go on
         // sending frames nobody watches.
@@ -770,6 +846,140 @@ mod tests {
     use crate::state::connection::Connection;
     use crate::state::events::Recorder;
 
+    const REPLACEMENT_XML: &str = r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+        <Category Name="Root"><pFeature>ExposureTimeAbs</pFeature><pFeature>GainRaw</pFeature><pFeature>AcquisitionFrameRateAbs</pFeature></Category>
+        <Float Name="ExposureTimeAbs"><Value>2000</Value><Min>10</Min><Max>5000</Max><Unit>us</Unit></Float>
+        <Integer Name="GainRaw"><Value>12</Value><Min>0</Min><Max>255</Max><Unit>counts</Unit></Integer>
+        <Float Name="AcquisitionFrameRateAbs"><Value>50</Value><Min>1</Min><Max>1000</Max><Unit>Hz</Unit></Float>
+    </RegisterDescription>"#;
+
+    #[test]
+    fn reconnect_replaces_the_model_and_emits_the_fresh_control_graph() {
+        tauri::async_runtime::block_on(async {
+            let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+            let (events, recorder) = Recorder::events();
+            let connection = Arc::new(Connection::new(events.clone()));
+            let model = Arc::new(tokio::sync::RwLock::new(crate::state::ModelState::default()));
+            let backend = RemoteBackend::new(events, connection.clone(), model.clone());
+            assert!(backend.session.set(session.clone()).is_ok());
+            let id = "st61-replacement";
+            backend
+                .on_announce(viva_zenoh_api::DeviceAnnounce::new(
+                    id,
+                    "Replacement",
+                    "New model",
+                    "serial",
+                ))
+                .await;
+            connection
+                .set(crate::state::device_state::ConnectionState::Reconnecting {
+                    device_id: id.into(),
+                    attempt: 0,
+                    max_attempts: 5,
+                    reason: "reboot".into(),
+                })
+                .await;
+            let key = viva_zenoh_api::keys::xml(id);
+            let queryable = session.declare_queryable(&key).await.unwrap();
+            let answer = tauri::async_runtime::spawn(async move {
+                let query = queryable.recv_async().await.unwrap();
+                query
+                    .reply(
+                        &key,
+                        serde_json::to_vec(&viva_zenoh_api::DeviceXmlResponse::new(
+                            REPLACEMENT_XML,
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                backend.clone().reconnect(id.into(), 0),
+            )
+            .await
+            .unwrap();
+            answer.await.unwrap();
+            let updated = model.read().await;
+            assert_eq!(updated.xml.as_deref(), Some(REPLACEMENT_XML));
+            assert_eq!(updated.loaded_from.as_deref(), Some(id));
+            assert!(
+                updated
+                    .graph
+                    .as_ref()
+                    .unwrap()
+                    .nodes_by_name
+                    .contains_key("ExposureTimeAbs")
+            );
+            drop(updated);
+            let emitted = recorder.of("device-reconnected");
+            assert_eq!(emitted.len(), 1);
+            assert_eq!(emitted[0]["model"]["xml"], REPLACEMENT_XML);
+            for name in ["ExposureTimeAbs", "GainRaw", "AcquisitionFrameRateAbs"] {
+                assert!(emitted[0]["model"]["graph"]["nodes_by_name"][name].is_object());
+            }
+            assert!(
+                matches!(connection.get().await, crate::state::device_state::ConnectionState::Connected { device_id, .. } if device_id == id)
+            );
+            backend.disconnect().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn delayed_attach_cannot_restore_a_session_after_user_disconnect() {
+        tauri::async_runtime::block_on(async {
+            let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+            let (events, recorder) = Recorder::events();
+            let connection = Arc::new(Connection::new(events.clone()));
+            let model = Arc::new(tokio::sync::RwLock::new(crate::state::ModelState::default()));
+            let backend = RemoteBackend::new(events, connection.clone(), model.clone());
+            assert!(backend.session.set(session.clone()).is_ok());
+            let key = viva_zenoh_api::keys::xml("st61-cancelled");
+            let queryable = session.declare_queryable(&key).await.unwrap();
+            let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let answer = tauri::async_runtime::spawn(async move {
+                let query = queryable.recv_async().await.unwrap();
+                received_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                query
+                    .reply(
+                        &key,
+                        serde_json::to_vec(&viva_zenoh_api::DeviceXmlResponse::new(
+                            REPLACEMENT_XML,
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let attaching = backend.clone();
+            let pending =
+                tauri::async_runtime::spawn(
+                    async move { attaching.attach("st61-cancelled", 0).await },
+                );
+            tokio::time::timeout(Duration::from_secs(3), received_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            backend.disconnect().await.unwrap();
+            connection
+                .set(crate::state::device_state::ConnectionState::Disconnected)
+                .await;
+            release_tx.send(()).unwrap();
+            assert!(pending.await.unwrap().is_err());
+            answer.await.unwrap();
+            assert!(backend.device.lock().await.is_none());
+            assert!(model.read().await.graph.is_none());
+            assert!(recorder.of("device-reconnected").is_empty());
+            assert!(matches!(
+                connection.get().await,
+                crate::state::device_state::ConnectionState::Disconnected
+            ));
+        });
+    }
+
     /// Remote mode end to end: `viva-service` serves the fake camera in
     /// process, and the backend discovers it, reads `viva-genapi`'s feature
     /// state through the service, writes, streams and lets go — the path ST-27
@@ -799,7 +1009,11 @@ mod tests {
 
             // The app.
             let (events, recorder) = Recorder::events();
-            let backend = RemoteBackend::new(events.clone(), Arc::new(Connection::new(events)));
+            let backend = RemoteBackend::new(
+                events.clone(),
+                Arc::new(Connection::new(events)),
+                Arc::new(tokio::sync::RwLock::new(crate::state::ModelState::default())),
+            );
             backend.start_with_session(session.clone());
             let device_id = derive_device_id(&info);
             let discovered = async {

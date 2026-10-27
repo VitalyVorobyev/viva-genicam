@@ -309,7 +309,11 @@ export type SfncGroup = { id: string, title: string,
  */
 icon: string, default_open: boolean, features: Array<SfncFeature>, };
 
-export type SfncFeature = { node: string, widget: string, };
+export type SfncFeature = { node: string, widget: string,
+/**
+ * Legacy standard names, in the facade's resolution order.
+ */
+aliases?: Array<string>, };
 
 export type DisconnectReason = { message: string, device_id: string, };
 
@@ -333,7 +337,11 @@ cause: string, names: Array<string>, };
 
 export type DeviceLost = { device_id: string, };
 
-export type DeviceReconnected = { device_id: string, node_count: number, };
+export type DeviceReconnected = { device_id: string, node_count: number,
+/**
+ * Freshly parsed replacement XML; the frontend must not reuse its old graph.
+ */
+model: ParseXmlResponse, };
 
 export type ZenohSessionLost = { message: string, };
 

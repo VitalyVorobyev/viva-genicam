@@ -14,6 +14,7 @@ import { buildTransform } from "./zoomPanUtils";
 import { formatPixelSample } from "./pixelInspectorUtils";
 import type { PixelHoverInfo } from "./pixelInspectorUtils";
 import { sampleNativePixel, type NativeFrame } from "./nativeFrame";
+import { followPreview } from "../../device/previewStream";
 import { CrosshairOverlay } from "./CrosshairOverlay";
 import { RoiOverlay } from "./RoiOverlay";
 import { buildImageRect, clampRoiToImage } from "./roiUtils";
@@ -33,6 +34,8 @@ export interface StreamInfoFrame {
 
 interface ViewerCanvasProps {
   wsUrl: string;
+  /** Identifies the camera/session owning a reusable endpoint. */
+  streamKey?: string;
   onFrameStats: (fps: number) => void;
   onFrame?: () => void;
   onZoomPanChange?: (state: ZoomPanState) => void;
@@ -55,6 +58,7 @@ interface ViewerCanvasProps {
 
 export function ViewerCanvas({
   wsUrl,
+  streamKey,
   onFrameStats,
   onFrame,
   onZoomPanChange,
@@ -74,7 +78,7 @@ export function ViewerCanvas({
 }: ViewerCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const lastFrameRef = useRef<Uint8Array | null>(null);
+  const lastFrameRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   // Whether a frame has been drawn; shown as "Acquisition stopped" once the
   // stream ends.
   const [hasRenderedFrame, setHasRenderedFrame] = useState(false);
@@ -126,9 +130,9 @@ export function ViewerCanvas({
   });
 
   useEffect(() => {
-    if (!nativeFrame) return;
+    if (!nativeFrame || !active) return;
     let disposed = false;
-    void drawPreview(nativeFrame.bmp, () => !disposed).then((drawn) => {
+    void drawPreview(nativeFrame.bmp, () => !disposed && isActive()).then((drawn) => {
       if (drawn && !disposed) {
         nativeHover.current = nativeFrame;
         emitNativeReady(nativeFrame);
@@ -137,7 +141,7 @@ export function ViewerCanvas({
       if (!disposed) emitNativeReady(null, String(error));
     });
     return () => { disposed = true; };
-  }, [nativeFrame]);
+  }, [nativeFrame, active]);
 
   // ── ROI drag state ───────────────────────────────────────────────────────────
   const roiDragRef = useRef<{ active: boolean; start: Point }>({
@@ -253,98 +257,91 @@ export function ViewerCanvas({
     onStreamInfoChange?.(info);
   });
 
+  // A SingleFrame can arrive while the Image tab is hidden. Paint its latest
+  // bytes when that tab becomes visible, without reconnecting or requesting a
+  // second camera frame. Run before the subscription effect to avoid decoding
+  // a shared cached frame twice on a new canvas's first mount.
+  useEffect(() => {
+    if (!active || frozen() || !lastFrameRef.current) return;
+    let disposed = false;
+    const frame = lastFrameRef.current;
+    void drawPreview(frame, () => !disposed && lastFrameRef.current === frame && isActive() && !frozen())
+      .then((drawn) => { if (drawn) emitFrame(); })
+      .catch(() => { /* A malformed cached preview must not break tab switching. */ });
+    return () => { disposed = true; };
+  }, [active]);
+
   // WebSocket + render loop
   useEffect(() => {
-    const ws = new WebSocket(wsUrl);
-    ws.binaryType = "arraybuffer";
-
     const frameTimes: number[] = [];
     let firstInfoLogged = false;
     let firstBinaryLogged = false;
     let disposed = false;
 
-    ws.onopen = () => {
-      console.info("[ViewerCanvas] WebSocket opened", { wsUrl });
-    };
+    const unsubscribe = followPreview(wsUrl, {
+      error: () => { if (!disposed) emitFrameStats(0); },
+      close: () => { if (!disposed) emitFrameStats(0); },
+      message: (data) => {
+        if (typeof data === "string") {
+          if (!firstInfoLogged) {
+            console.info("[ViewerCanvas] First stream info frame", {
+              wsUrl,
+              payload: data,
+            });
+            firstInfoLogged = true;
+          }
+          try {
+            const parsed = JSON.parse(data) as StreamInfoFrame;
+            if (parsed.type === "info") {
+              emitStreamInfoChange(parsed);
+            }
+          } catch {
+            // ignore malformed text messages
+          }
+          return;
+        }
 
-    ws.onerror = (event) => {
-      console.error("[ViewerCanvas] WebSocket error", { wsUrl, event });
-      if (!disposed) {
-        emitFrameStats(0);
-      }
-    };
+        // Store raw bytes for pixel sampling before decoding
+        const frame = new Uint8Array(data);
+        lastFrameRef.current = frame;
+        if (snapshotRef) snapshotRef.current = frame;
 
-    ws.onclose = (event) => {
-      console.info("[ViewerCanvas] WebSocket closed", {
-        wsUrl,
-        code: event.code,
-        reason: event.reason,
-        wasClean: event.wasClean,
-      });
-      if (!disposed) {
-        emitFrameStats(0);
-      }
-    };
-
-    ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        if (!firstInfoLogged) {
-          console.info("[ViewerCanvas] First stream info frame", {
+        if (!firstBinaryLogged) {
+          console.info("[ViewerCanvas] First binary frame received", {
             wsUrl,
-            payload: event.data,
+            bytes: lastFrameRef.current.length,
           });
-          firstInfoLogged = true;
+          firstBinaryLogged = true;
         }
-        try {
-          const parsed = JSON.parse(event.data) as StreamInfoFrame;
-          if (parsed.type === "info") {
-            emitStreamInfoChange(parsed);
-          }
-        } catch {
-          // ignore malformed text messages
-        }
-        return;
-      }
 
-      // Store raw bytes for pixel sampling before decoding
-      lastFrameRef.current = new Uint8Array(event.data);
-      if (snapshotRef) snapshotRef.current = lastFrameRef.current;
+        // Hidden behind another tab: keep the frame for the analysis tools, but
+        // decoding and drawing it would be wasted.
+        if (!isActive()) return;
 
-      if (!firstBinaryLogged) {
-        console.info("[ViewerCanvas] First binary frame received", {
-          wsUrl,
-          bytes: lastFrameRef.current.length,
-        });
-        firstBinaryLogged = true;
-      }
-
-      // Hidden behind another tab: keep the frame for the analysis tools, but
-      // decoding and drawing it would be wasted.
-      if (!isActive()) return;
-
-      if (frozen()) return;
-      drawPreview(new Uint8Array(event.data), () => !disposed && !frozen())
-        .then((drawn) => {
-          if (!drawn) return;
-          // Rolling 1-second FPS window
-          const now = performance.now();
-          frameTimes.push(now);
-          while (frameTimes.length > 0 && now - frameTimes[0] > 1000) {
-            frameTimes.shift();
-          }
-          emitFrameStats(frameTimes.length);
-          emitFrame();
-        })
-        .catch(() => {
-          // Ignore individual frame decode errors
-        });
-    };
+        if (frozen()) return;
+        drawPreview(frame, () => !disposed && lastFrameRef.current === frame && isActive() && !frozen())
+          .then((drawn) => {
+            if (!drawn) return;
+            // Rolling 1-second FPS window
+            const now = performance.now();
+            frameTimes.push(now);
+            while (frameTimes.length > 0 && now - frameTimes[0] > 1000) {
+              frameTimes.shift();
+            }
+            emitFrameStats(frameTimes.length);
+            emitFrame();
+          })
+          .catch(() => {
+            // Ignore individual frame decode errors
+          });
+      },
+    }, streamKey);
 
     return () => {
       disposed = true;
-      ws.close();
+      unsubscribe();
     };
-  }, [wsUrl, snapshotRef]);
+  }, [wsUrl, streamKey, snapshotRef]);
 
   // rAF-throttled mouse move handler to avoid 60Hz React re-renders
   const rafPendingRef = useRef(false);

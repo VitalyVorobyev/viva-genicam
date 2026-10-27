@@ -13,8 +13,10 @@ No asyncio required — the stream's receive engine runs on a thread of its own 
 
 Only complete frames come out of the iterator, unless you ask for the others
 (see [Incomplete frames](#incomplete-frames)). A frame that lost packets on the
-network is counted by the stream and skipped, so a gap in the frames you
-receive is frames the network lost, not frames the library mangled.
+network is counted by the stream and skipped. Gaps can also come from host
+backpressure: the bounded delivery queue drops
+old pending frames if the application falls behind. Check the stream counters
+to distinguish those cases.
 
 ## The `Frame` object
 
@@ -37,6 +39,12 @@ needs a fit of the two clocks first. On a GigE camera, call
 `None`. `cam.map_dev_ts(ticks)` maps any device timestamp the same way.
 
 ### `to_numpy()` — the camera's values
+
+For high-rate acquisition, import NumPy (`import numpy`) before opening the
+stream. Otherwise its first import happens during conversion and can pause the
+consumer long enough to overflow the delivery queue. Keep file I/O and heavy
+processing out of the acquisition loop, and check host-drop counters as well as
+network loss.
 
 ```python
 arr = frame.to_numpy()

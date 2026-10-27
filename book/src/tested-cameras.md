@@ -25,6 +25,10 @@ Harvesters each received 1000 complete frames. Faster minimum-ROI runs and
 Python delivery showed host backpressure drops; this is not a loss-free
 maximum-FPS or endurance claim. Events, chunks and metric 3D are not
 advertised by this interface. The fixes and tests are recorded in [#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224).
+The 2026-10-27 follow-up also verified Studio quick controls, compact preview,
+near-cap display pacing and remote controls after a software reset. Preloading
+NumPy avoided the measured Python startup drops; a private larger-queue probe
+addressed minimum-ROI drops, with production handling still open.
 Detailed scope and restoration are in the
 [bench record](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/hardware-rtvision-2026-10-26.md).
 

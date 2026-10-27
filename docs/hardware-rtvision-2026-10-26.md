@@ -146,7 +146,7 @@ The old session's unsuccessful stop/control probes during reboot are retained
 as expected failure-path evidence; they are not clean-stop successes. The
 service subsequently shut down with exit 0.
 
-**ST-61 remains open:** after automatic replacement, the remote image controls
+**Finding at the end of the 2026-10-26 run (resolved in the follow-up below):** after automatic replacement, the remote image controls
 for acquisition mode/rate, exposure and gain disappeared, although streaming
 and native freeze continued to work. Disconnecting and reconnecting the viewer
 restored all those controls. Do not call this full Studio recovery parity.
@@ -169,3 +169,98 @@ The independent fake-camera C/Harvesters GenTL harness and this device's XML
 parser/evaluator corpus checks also passed. Studio debug bundles were built and
 exercised on hardware; no Studio public types or UI source changed in this PR.
 Release packaging, notarization and distribution were not exercised here.
+
+
+## Studio and delivery follow-up, 2026-10-27
+
+The same MAC, firmware, host address and 1 Gb/s / MTU 1500 link were used.
+Studio was built from merged commit `f77be9e` (#225) as proper Tauri debug
+bundles, with embedded and remote variants. The service was rebuilt from that
+checkout. Private manifests record binary hashes. This was a series of short
+functional and five-second delivery checks, not an endurance or release-bundle
+qualification. No physical cable pull or power cycle was performed.
+
+### Native controls and preview
+
+**Passed (ST-60):** Image-tab controls wrote and read back 31 FPS, 200 µs and
+6 dB. During acquisition, exposure and gain accepted 300 µs / 7 dB; frame rate
+correctly became read-only under the camera's access rules. Expanding the
+Features-tab preview and pressing Start retained that tab and displayed the
+live image. Switching to Image settled at **30 displayed FPS while acquisition
+remained at 31 FPS**, rather than the earlier near-cap halving. The stopped
+counter snapshot contained **1,633 complete frames** at UI elapsed 0:52,
+with zero incomplete, missed, host-dropped, missing-packet or resend counters.
+The single preview connection and hidden-canvas decode rules also have the
+component regressions shipped in #225; no hardware socket-count claim is made.
+
+**Passed (ST-61):** remote Studio executed `DeviceReset` during acquisition,
+then showed Reconnecting. The camera returned at its persistent 192.168.0.25
+address; a volatile FORCEIP restored test address 192.168.2.27. The service
+published disconnected status at 07:36:10.016 UTC and a fresh connected status
+at 07:36:22.143 UTC. No manual viewer disconnect/reconnect was used. The
+replacement controls showed reset values (1000 FPS / 100 µs / 5 dB), accepted
+500 FPS / 150 µs / 6 dB, and started acquisition. The final snapshot showed
+**13,914 complete frames** at UI elapsed 0:27, zero incomplete/missed/host-drop/
+missing/resend counters, and a steady remote display rate of 15 FPS. Temporary
+network assistance is part of this result; it is not proof that Studio can
+recover an unreachable subnet without it. Legacy-name controls remain covered
+by XML/UI regressions and the earlier Manta helper tests, not a new Manta run.
+
+### High-rate delivery
+
+Only one consumer ran at a time, with all builds finished and both Studio and
+the service stopped before timing. Two private release diagnostic binaries
+used the same receive engine as #225, differing only in fixed queue capacity
+4 versus 16. Production source/defaults were not changed. Each trial lasted
+about 5.01 s; run order alternated. Mono8 aggregate ROI was **24 × 16** (six
+4 × 16 sensors), simultaneous mode, 5 µs exposure, requested 5000 FPS; actual
+delivery was about **2675 FPS**. Payload geometry/completeness checks and all
+missing/incomplete/missed/resend counters passed in every trial. This is not
+an observed 5000-FPS result.
+
+| Queue capacity | Consumer pause | Complete frames, three runs | Host drops, three runs |
+|---|---|---|---|
+| 4 | none | 13,392 / 13,393 / 13,392 | 8 / 8 / 9 |
+| 16 | none | 13,401 / 13,401 / 13,400 | 0 / 0 / 0 |
+| 4 | one 3 ms pause at frame 100 | 13,387 / 13,386 / 13,387 | 14 / 14 / 14 |
+| 16 | one 3 ms pause at frame 100 | 13,400 / 13,400 / 13,401 | 0 / 0 / 0 |
+
+A second diagnostic batch recorded counters immediately after
+`acquisition_start()` returned. In both unpaused capacity-4 trials, **eight
+frames were already evicted at that point**, the first delivered block was 9,
+and the drop count remained eight through frame 100 and the final five-second
+snapshot. The whole start call took 31.17–31.40 ms. Capacity 16 delivered block
+1 without loss in both trials. Two additional 3 ms pause trials added five and
+seven drops at capacity 4; capacity 16 retained every frame. This identifies a
+startup buffering gap in these cases, plus limited tolerance for a paused
+consumer. It does not establish the maximum steady throughput or justify a
+CPU-speedup claim. SR-28 remains open to implement and validate bounded startup
+and high-rate delivery handling, including memory and latency tradeoffs.
+
+Fresh Python processes separately converted the original **1944 × 56** stream
+at about 762 FPS, without an additional `payload()` copy. Three cold runs lost
+40 / 17 / 19 host frames; first conversion took 46.63 / 24.60 / 25.93 ms.
+Importing NumPy before opening the stream produced **3812 / 3812 / 3811
+complete frames, zero host drops**, with first conversions of 0.131 / 0.137 /
+0.133 ms. All six runs had correct uint8 geometry and zero incomplete, missed,
+missing-packet or resend counters. These measurements explain a startup cost
+in the earlier Python run; they do not establish loss-free operation for every
+Python consumer or format.
+
+Raw diagnostic sources, binary hashes, per-run JSON, logs, fresh baselines and
+restoration reports remain in ignored `.local-evidence/rtvision-2026-10-27/`.
+
+
+### Restoration and limits
+
+**Passed:** after each diagnostic batch, all **50 explicitly saved feature
+values** read back identically. Current IP-configuration flags and the three
+persistent address/mask/gateway registers matched their baselines. Standard
+save files were byte-identical, but contain zero Streamable values on this
+camera; the explicit inventory, not that empty file, supplies the feature
+restoration evidence. This does not verify every selector bank in the device.
+Both returns to 192.168.0.25 reported a FORCEIP acknowledgement timeout (command
+exit 1); subsequent broadcast-ack discovery confirmed the original MAC,
+192.168.0.25 / 255.255.255.0 and gateway 0.0.0.0. The host NIC's before/after
+`ifconfig` text was byte-identical. All viewer, service and diagnostic processes
+were stopped. No long run was started.

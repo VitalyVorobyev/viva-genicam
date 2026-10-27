@@ -12,6 +12,8 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **QUISS hardware follow-up.** Native Studio quick controls, compact preview, corrected near-cap cadence and controls after a software reset passed short checks. Instrumented delivery probes locate small-ROI loss before the first consumer read; preloading NumPy avoided cold-import drops. Production startup handling remains open; see the [bench record](docs/hardware-rtvision-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27) ([#226](https://github.com/VitalyVorobyev/viva-genicam/pull/226)).
+
 - **A compact image preview while configuring a camera.** Expand **Image preview** in Studio's Features tab and start acquisition to check settings without leaving the tab. It shares the existing preview connection and remembers whether it is folded ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
 - **Image-tab fast controls for older cameras.** Exposure, gain and frame rate resolve their legacy standard names and retain the camera's own units, ranges and access restrictions. Acquisition and exposure/gain appear above statistics ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).

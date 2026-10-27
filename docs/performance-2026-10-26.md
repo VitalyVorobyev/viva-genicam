@@ -176,7 +176,7 @@ variants dropped four frames, while capacities 16 and 32 dropped none. This
 supports a scheduling-budget explanation: four frames span about 1.48 ms at
 that rate. It does not establish higher sustainable throughput or a lower CPU
 cost. The fast path was discarded; production capacity stays four. SR-28 stays
-open for a capacity comparison over the actual camera NIC.
+open for production startup/high-rate handling; the later [hardware follow-up](hardware-rtvision-2026-10-26.md#high-rate-delivery) completes that NIC comparison.
 
 The previous hardware Python loop first imported NumPy during acquisition.
 Three fresh-process conversion probes with a synthetic 1944 × 56 frame measured
@@ -187,7 +187,8 @@ not acquisition. Warm NumPy before starting a timed stream, measure conversion
 separately from a duplicate payload copy, and repeat on hardware before
 attributing its earlier drops to steady Python overhead.
 
-The follow-up hardware comparison and new native Studio checks remain untested:
-on 2026-10-27 the prior `en10` camera adapter was absent and all remaining wired
-interfaces were inactive. No camera or NIC configuration was changed, and no
-long test was started.
+The adapter was absent at the start of 2026-10-27; that software-only batch
+changed no camera/NIC configuration and started no long test. The adapter
+returned later that day. The [hardware follow-up](hardware-rtvision-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27)
+records the completed short native Studio checks, actual-NIC queue comparison,
+Python cold/warm conversion and configuration restoration.

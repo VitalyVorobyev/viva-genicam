@@ -79,7 +79,11 @@ fn configure_receive_wait(socket: &UdpSocket) -> std::io::Result<ReceiveWait> {
 }
 
 /// Frames waiting for the application before the oldest is dropped.
-pub(crate) const DELIVERY_CAPACITY: usize = 4;
+/// The measured QUISS startup burst completes twelve frames before the
+/// acquisition-start call returns and its consumer can begin reading. Four
+/// additional slots provide headroom; sustained slower consumption still drops
+/// the oldest frame, so this bounded default is not a loss-free guarantee.
+pub(crate) const DELIVERY_CAPACITY: usize = 16;
 
 /// Largest UDP payload, so no datagram is ever truncated by our buffer.
 const DATAGRAM_MAX: usize = 65_536;
@@ -1030,6 +1034,105 @@ mod tests {
         assert!(matches!(queue.try_pop(), Popped::Item(2)));
         assert!(matches!(queue.try_pop(), Popped::Item(3)));
         assert!(matches!(queue.try_pop(), Popped::Empty));
+    }
+
+    /// An idle frame receiver has the real default handoff but no socket or
+    /// receive thread, so startup bursts can be delivered deterministically.
+    fn idle_frame_receiver() -> super::super::FrameStream {
+        super::super::FrameStream::idle(
+            StreamStatsAccumulator::new(),
+            viva_gige::StreamParams {
+                packet_size: 1500,
+                packet_delay: None,
+                mtu: 1500,
+                host: Ipv4Addr::LOCALHOST,
+                port: 0,
+                channel: 0,
+                camera: None,
+            },
+            None,
+            None,
+        )
+    }
+
+    fn deliver_startup_burst(frames: &super::super::FrameStream, count: u64) {
+        let mut silence = SilenceWatch::new(1500);
+        let mut chunk_layout_warned = false;
+        let started = Instant::now();
+        for block_id in 1..=count {
+            deliver(
+                AssembledBlock {
+                    block_id,
+                    status: crate::FrameStatus::Complete,
+                    leader: Some(super::super::assembly::LeaderInfo {
+                        timestamp: block_id * 37_000,
+                        pixel_format: viva_pfnc::PixelFormat::Mono8.code(),
+                        width: 24,
+                        height: 16,
+                        padding_x: 0,
+                    }),
+                    payload_type: 0x0001,
+                    payload: bytes::Bytes::from(vec![block_id as u8; 24 * 16]),
+                    trailer_size_y: Some(16),
+                    expected_size: Some(24 * 16),
+                    last_packet: started + Duration::from_micros(block_id * 370),
+                },
+                false,
+                &frames.shared,
+                &frames.stats,
+                &mut silence,
+                &mut chunk_layout_warned,
+            );
+        }
+        frames.shared.queue.finish();
+    }
+
+    #[test]
+    fn default_frame_delivery_keeps_the_startup_burst_until_first_read() {
+        let mut frames = idle_frame_receiver();
+        // Hardware produced twelve complete frames before AcquisitionStart
+        // returned. With the old default the first delivered block was 9.
+        deliver_startup_burst(&frames, 12);
+        assert_eq!(frames.stats().frames_backpressure, 0);
+        assert_eq!(frames.stats().frames_complete, 0, "still awaiting delivery");
+        for block_id in 1..=12 {
+            let frame = frames
+                .next_frame_blocking(Duration::ZERO)
+                .expect("queued frame")
+                .expect("startup burst");
+            assert_eq!(frame.block_id, block_id);
+            assert_eq!((frame.width, frame.height), (24, 16));
+            assert!(frame.is_complete());
+            assert!(frame.payload.iter().all(|&byte| byte == block_id as u8));
+        }
+        assert!(
+            frames
+                .next_frame_blocking(Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        let stats = frames.stats();
+        assert_eq!(stats.frames_complete, 12);
+        assert_eq!(stats.frames_lost(), 0);
+        assert_eq!(stats.bytes, 12 * 24 * 16);
+    }
+
+    #[test]
+    fn default_frame_delivery_remains_bounded_and_accounts_for_overflow() {
+        let mut frames = idle_frame_receiver();
+        deliver_startup_burst(&frames, 20);
+        assert_eq!(frames.stats().frames_backpressure, 4);
+        assert_eq!(frames.stats().frames_complete, 0, "still awaiting delivery");
+        let mut delivered = Vec::new();
+        while let Some(frame) = frames.next_frame_blocking(Duration::ZERO).unwrap() {
+            delivered.push(frame.block_id);
+        }
+        assert_eq!(delivered, (5..=20).collect::<Vec<_>>());
+        let stats = frames.stats();
+        assert_eq!(stats.frames_complete, 16);
+        assert_eq!(stats.frames_backpressure, 4);
+        assert_eq!(stats.frames_complete + stats.frames_lost(), 20);
+        assert_eq!((stats.frames_incomplete, stats.frames_missed), (0, 0));
     }
 
     #[test]

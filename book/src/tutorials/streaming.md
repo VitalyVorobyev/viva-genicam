@@ -332,7 +332,7 @@ fate is decided:
 | `frames_complete` | Delivered to you with every packet present. |
 | `frames_incomplete` | Closed with packets missing, without a trailer, or with an error status from the camera. |
 | `frames_missed` | Never seen at all: gaps in the block-id sequence. |
-| `frames_backpressure` | Assembled, then discarded because your code did not take them in time. The stream keeps the four newest frames. |
+| `frames_backpressure` | Assembled, then discarded because your code did not take them in time. The stream keeps the sixteen newest frames. |
 | `resend_requested` | Lost packets asked for again ([§4.6](#46-packet-resend)), each counted once. |
 | `resend_recovered` | Of those, the ones that arrived. |
 | `resend_unavailable` | Of those, the ones the camera said it no longer has. |
@@ -413,10 +413,17 @@ and does not necessarily increase FPS.
 
 Keep taking frames promptly and move expensive processing or saving off the
 acquisition loop. The receive thread continues independently, but its delivery
-queue holds four frames: if your application falls behind, the oldest waiting
-frame is dropped and counted as `backpressure`. Packet resend cannot recover
+queue holds up to sixteen completed frames: if your application falls behind,
+the oldest waiting frame is dropped and counted as `backpressure`. Packet resend cannot recover
 an application-side queue eviction. Compare complete frames and loss counters
 alongside FPS.
+
+The queue absorbs short startup or scheduling pauses; it cannot compensate for
+a consumer that is consistently slower than the camera. It can retain up to
+16 frame payloads, in addition to assembly buffers and frames your code holds.
+A larger pending queue also permits older frames to wait longer; keep reading
+promptly when image freshness matters. Frame allocation and payload copying
+are unchanged.
 
 ---
 

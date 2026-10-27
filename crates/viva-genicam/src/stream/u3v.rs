@@ -37,6 +37,22 @@ struct Shared {
     deliver_incomplete: AtomicBool,
 }
 
+impl Shared {
+    fn new() -> Self {
+        Self {
+            queue: DeliveryQueue::new(DELIVERY_CAPACITY),
+            stop: AtomicBool::new(false),
+            deliver_incomplete: AtomicBool::new(false),
+        }
+    }
+
+    fn enqueue(&self, frame: Frame, stats: &StreamStatsAccumulator) {
+        if self.queue.push(frame).is_some() {
+            stats.record_backpressure_drop();
+        }
+    }
+}
+
 /// Frames from a USB3 Vision camera, read on a thread of its own.
 ///
 /// [`next_frame`](Self::next_frame) waits asynchronously,
@@ -79,11 +95,7 @@ impl U3vFrameStream {
         disable: Option<DisableStream>,
         lost: Option<Arc<AtomicBool>>,
     ) -> Self {
-        let shared = Arc::new(Shared {
-            queue: DeliveryQueue::new(DELIVERY_CAPACITY),
-            stop: AtomicBool::new(false),
-            deliver_incomplete: AtomicBool::new(false),
-        });
+        let shared = Arc::new(Shared::new());
         let stats = StreamStatsAccumulator::new();
         let reader = {
             let (shared, stats) = (Arc::clone(&shared), stats.clone());
@@ -310,9 +322,7 @@ fn deliver(raw: RawFrame, shared: &Shared, stats: &StreamStatsAccumulator, warne
         stats.record_incomplete_frame();
         return;
     }
-    if shared.queue.push(frame).is_some() {
-        stats.record_backpressure_drop();
-    }
+    shared.enqueue(frame, stats);
 }
 
 /// An image, with or without chunks (USB3 Vision `0x0001`, `0x4001`).
@@ -550,6 +560,72 @@ fn payload_size_is_absent(error: &GenicamError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn idle_frame_receiver() -> U3vFrameStream {
+        U3vFrameStream {
+            shared: Arc::new(Shared::new()),
+            reader: None,
+            stats: StreamStatsAccumulator::new(),
+            time_sync: None,
+            disable: None,
+        }
+    }
+
+    fn enqueue_burst(frames: &U3vFrameStream, count: u64) {
+        for block_id in 1..=count {
+            let mut frame = Frame::new(
+                bytes::Bytes::from(vec![block_id as u8; 24 * 16]),
+                24,
+                16,
+                PixelFormat::Mono8,
+            );
+            frame.block_id = block_id;
+            frames.shared.enqueue(frame, &frames.stats);
+        }
+        frames.shared.queue.finish();
+    }
+
+    #[test]
+    fn default_u3v_delivery_keeps_startup_frames_until_first_read() {
+        let mut frames = idle_frame_receiver();
+        enqueue_burst(&frames, 12);
+        assert_eq!(frames.stats().frames_backpressure, 0);
+        assert_eq!(frames.stats().frames_complete, 0);
+        for block_id in 1..=12 {
+            let frame = frames.next_frame_blocking(Duration::ZERO).unwrap().unwrap();
+            assert_eq!(frame.block_id, block_id);
+            assert!(frame.is_complete());
+            assert!(frame.payload.iter().all(|&byte| byte == block_id as u8));
+        }
+        assert!(
+            frames
+                .next_frame_blocking(Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        let stats = frames.stats();
+        assert_eq!(stats.frames_complete, 12);
+        assert_eq!(stats.frames_lost(), 0);
+        assert_eq!(stats.bytes, 12 * 24 * 16);
+    }
+
+    #[test]
+    fn default_u3v_delivery_is_bounded_and_counts_overflow_once() {
+        let mut frames = idle_frame_receiver();
+        enqueue_burst(&frames, 20);
+        assert_eq!(frames.stats().frames_backpressure, 4);
+        assert_eq!(frames.stats().frames_complete, 0);
+        let mut delivered = Vec::new();
+        while let Some(frame) = frames.next_frame_blocking(Duration::ZERO).unwrap() {
+            delivered.push(frame.block_id);
+        }
+        assert_eq!(delivered, (5..=20).collect::<Vec<_>>());
+        let stats = frames.stats();
+        assert_eq!(stats.frames_complete, 16);
+        assert_eq!(stats.frames_backpressure, 4);
+        assert_eq!(stats.frames_complete + stats.frames_lost(), 20);
+        assert_eq!((stats.frames_incomplete, stats.frames_missed), (0, 0));
+    }
 
     /// Only a missing `PayloadSize` may be replaced by a computed size (Codex
     /// review of #180).

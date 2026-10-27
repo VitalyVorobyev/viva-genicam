@@ -12,9 +12,9 @@ release opens with what to read before upgrading.
 
 ### Added
 
-- **A compact image preview while configuring a camera.** Expand **Image preview** in Studio's Features tab and start acquisition to check settings without leaving the tab. It shares the existing preview connection and remembers whether it is folded.
+- **A compact image preview while configuring a camera.** Expand **Image preview** in Studio's Features tab and start acquisition to check settings without leaving the tab. It shares the existing preview connection and remembers whether it is folded ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
-- **Image-tab fast controls for older cameras.** Exposure, gain and frame rate resolve their legacy standard names and retain the camera's own units, ranges and access restrictions. Acquisition and exposure/gain appear above statistics.
+- **Image-tab fast controls for older cameras.** Exposure, gain and frame rate resolve their legacy standard names and retain the camera's own units, ranges and access restrictions. Acquisition and exposure/gain appear above statistics ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
 - **Native camera values in Studio.** Freeze one frame to inspect its original sample values, histogram and line profile, then save a PNG that preserves its bit depth. Bayer inspection uses the sensor mosaic; snapshots contain demosaiced colour. Remote capture requires unambiguous tight rows ([#220](https://github.com/VitalyVorobyev/viva-genicam/pull/220)).
 
@@ -43,9 +43,9 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
-- **Studio controls after remote recovery (ST-61).** A replacement session refreshes both the backend model and the UI's feature cache, restoring controls without a manual reconnect. A delayed replacement cannot undo a user disconnect.
+- **Studio controls after remote recovery (ST-61).** A replacement session refreshes both the backend model and the UI's feature cache, restoring controls without a manual reconnect. A delayed replacement cannot undo a user disconnect ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
-- **Studio preview cadence near its display limit (ST-60).** Deadline pacing avoids taking every second frame from a camera just above the preview rate; a long pause starts a fresh cadence. Encoding time no longer shifts each deadline.
+- **Studio preview cadence near its display limit (ST-60).** Deadline pacing avoids taking every second frame from a camera just above the preview rate; a long pause starts a fresh cadence. Encoding time no longer shifts each deadline ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
 - **Remote feature-state queries.** The single-feature wildcard handler no longer replies to the reserved bulk-state endpoint, avoiding duplicate error replies and repeated `bulk`-is-not-a-node warnings during Studio polling ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
 

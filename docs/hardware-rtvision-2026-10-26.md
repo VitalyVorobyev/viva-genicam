@@ -284,8 +284,9 @@ The rebuilt release CLI then ran two additional five-second QUISS cases:
 | 24 × 16 (six 4 × 16) | 13,401 | 2675.18 | 8.22 | 0 / 0 / 0 / 0 / 0 |
 | 4320 × 540 (six 720 × 540) | 253 | 50.57 | 943.72 | 0 / 0 / 0 / 0 / 0 |
 
-Both used simultaneous mode, 5 µs exposure and requested 5000 FPS; the actual
-rates above are camera/link limited. The CLI process's maximum RSS was
+Both used simultaneous mode, 5 µs exposure and requested 5000 FPS. The table
+reports observed rates; these short runs do not establish an absolute frame-rate
+ceiling. The CLI process's maximum RSS was
 11,911,168 and 16,613,376 bytes respectively, measured by macOS `time -lp`,
 including XML/control setup and shutdown. These short peaks are not an
 endurance trend or a baseline CPU comparison. The queue can retain up to

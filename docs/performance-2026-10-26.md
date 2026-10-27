@@ -1,5 +1,10 @@
 # Acquisition and frame-delivery measurements, 2026-10-26
 
+This report describes the socket optimization in #222 with its original
+four-frame queue. The subsequent [delivery follow-up](hardware-rtvision-2026-10-26.md#production-delivery-default-2026-10-27)
+validates the later sixteen-frame default; it does not change the measurements
+below.
+
 The target is Mono8 at 720 × 540 over 1 Gb/s Ethernet, plus maximum frame rate
 with a small ROI. The receiver change reduces socket-wait overhead on Unix;
 frame allocation, assembly rules and the four-frame delivery queue stay as they are.
@@ -175,8 +180,9 @@ controlled 3 ms consumer-pause trial per variant at 2,700 FPS, both capacity-4
 variants dropped four frames, while capacities 16 and 32 dropped none. This
 supports a scheduling-budget explanation: four frames span about 1.48 ms at
 that rate. It does not establish higher sustainable throughput or a lower CPU
-cost. The fast path was discarded; production capacity stays four. SR-28 stays
-open for production startup/high-rate handling; the later [hardware follow-up](hardware-rtvision-2026-10-26.md#high-rate-delivery) completes that NIC comparison.
+cost. The fast path was discarded and these initial probes left capacity at four.
+The later [hardware follow-up](hardware-rtvision-2026-10-26.md#high-rate-delivery)
+completes the NIC comparison and the production change (SR-28).
 
 The previous hardware Python loop first imported NumPy during acquisition.
 Three fresh-process conversion probes with a synthetic 1944 × 56 frame measured

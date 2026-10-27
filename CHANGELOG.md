@@ -47,9 +47,9 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
-- **Private bench evidence is anonymous.** Current documentation and code comments omit private device names and identifiers; raw captures and device descriptions remain outside distributed packages.
+- **Private bench evidence is anonymous.** Current documentation and code comments omit private device names and identifiers; raw captures and device descriptions remain outside distributed packages ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
 
-- **Studio detects a lost direct camera.** GigE sessions recover by MAC with fresh XML and controls; acquisition stays stopped until Start. A reachable camera whose control was taken stays read-only instead of silently reclaiming it. Disconnect, switching cameras and exit cancel pending recovery; disconnected USB cameras offer manual reconnection.
+- **Studio detects a lost direct camera.** GigE sessions recover by MAC with fresh XML and controls; acquisition stays stopped until Start. A reachable camera whose control was taken stays read-only instead of silently reclaiming it. Disconnect, switching cameras and exit cancel pending recovery; disconnected USB cameras offer manual reconnection ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
 
 - **Studio controls after remote recovery (ST-61).** A replacement session refreshes both the backend model and the UI's feature cache, restoring controls without a manual reconnect. A delayed replacement cannot undo a user disconnect ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 

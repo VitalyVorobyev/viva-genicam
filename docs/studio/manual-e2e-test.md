@@ -77,6 +77,21 @@ For the debug checkpoints below, give the service
 - [ ] Export State -> the JSON holds every feature with a value, registers
       left out
 
+### 6b. Compact preview and replacement controls
+- [ ] Features tab: **Image preview** starts collapsed. Expanding it does not
+      start acquisition; **Start Acq** keeps this tab visible when expanded
+- [ ] Change exposure/gain with the preview visible; image and readback change.
+      Stop, fold/unfold and switch Image/Features: no second preview socket or
+      decoding in the hidden canvas; the last SingleFrame remains visible
+- [ ] Image sidebar: acquisition, exposure/gain, then statistics. On cameras
+      with legacy names, absolute/raw controls show their declared units and
+      ranges, including read-only/auto restrictions
+- [ ] Remote mode: software-reset the secured test camera, let the service
+      recover, then verify refreshed controls and acquisition without manually
+      disconnecting Studio. Restore every changed feature and network setting
+- [ ] Embedded mode: with a camera near 31 FPS, display approaches its 30 FPS
+      target rather than halving to 15–16 FPS; acquisition counters stay intact
+
 ### 6c. Camera panel, user sets and stream statistics
 - [ ] Diagnostics tab while connected -> "Camera" lists the model, serial and
       firmware, the MAC and the IP address

@@ -151,3 +151,43 @@ byte-identical saved configuration. Raw results are in
 `hardware-final-suite/result.json` and `suite.log` under the local evidence
 link. No endurance test was started for this performance batch; further
 long-duration qualification is deferred.
+
+
+## Delivery-queue follow-up
+
+A separate set of 44 five-second loopback runs compared the current four-frame
+queue with an experimental async-pop fast path at capacities 4, 16 and 32.
+Binaries, source hashes, per-run CPU measurements and JSON remain in ignored
+`.local-evidence/delivery-2026-10-26/`; `pilot-build-manifest.json` identifies
+all four variants. Sender and receiver were separate processes, with no builds
+or other tests during timing. These are scheduling probes, not NIC measurements.
+
+| Case | Baseline CPU s, median of 3 | Fast path at capacity 4, median of 3 |
+|---|---:|---:|
+| 720 × 540, 280 FPS, paced packets | 1.52 | 1.52 |
+| 64 × 64, 10,000 FPS, async | 0.67 | 0.66 |
+| 24 × 16, 2,700 FPS, async | 0.83 | 0.81 |
+| 24 × 16, 2,700 FPS, blocking | 0.81 | 0.82 |
+| 1944 × 56, 762 FPS, blocking | 2.39 | 2.38 |
+
+All ordinary runs at all tested capacities reported no backpressure. In one
+controlled 3 ms consumer-pause trial per variant at 2,700 FPS, both capacity-4
+variants dropped four frames, while capacities 16 and 32 dropped none. This
+supports a scheduling-budget explanation: four frames span about 1.48 ms at
+that rate. It does not establish higher sustainable throughput or a lower CPU
+cost. The fast path was discarded; production capacity stays four. SR-28 stays
+open for a capacity comparison over the actual camera NIC.
+
+The previous hardware Python loop first imported NumPy during acquisition.
+Three fresh-process conversion probes with a synthetic 1944 × 56 frame measured
+16.5–31.8 ms for the first cold `to_numpy()`, versus 3.7–4.6 µs after importing
+NumPy before conversion. Steady conversions took about 1.2 µs; a separate
+`payload()` copy took about 1.0 µs. These probes isolate startup and conversion,
+not acquisition. Warm NumPy before starting a timed stream, measure conversion
+separately from a duplicate payload copy, and repeat on hardware before
+attributing its earlier drops to steady Python overhead.
+
+The follow-up hardware comparison and new native Studio checks remain untested:
+on 2026-10-27 the prior `en10` camera adapter was absent and all remaining wired
+interfaces were inactive. No camera or NIC configuration was changed, and no
+long test was started.

@@ -4,11 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::State;
-use tokio::sync::RwLock;
 
 use crate::backend::BackendState;
 use crate::error::HumanizeExt;
-use crate::state::ModelState;
 use crate::state::events::Events;
 use viva_xml_model::{UiNode, UiNodeKind};
 use viva_zenoh_api::{CommandResult, FeatureState};
@@ -172,7 +170,7 @@ fn validate_numeric_constraints(
 pub async fn write_node(
     node_name: String,
     value: serde_json::Value,
-    model: State<'_, RwLock<ModelState>>,
+    model: State<'_, crate::state::SharedModelState>,
     backend: State<'_, BackendState>,
     events: State<'_, Arc<Events>>,
 ) -> Result<FeatureState, String> {

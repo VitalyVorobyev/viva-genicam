@@ -1082,4 +1082,29 @@ mod tests {
         assert!(matches!(popped, Ok(Popped::Item(5))));
         pusher.join().unwrap();
     }
+
+    #[tokio::test]
+    async fn async_delivery_drains_a_burst_and_survives_a_cancelled_wait() {
+        let queue: DeliveryQueue<i32> = DeliveryQueue::new(4);
+        for item in 0..4 {
+            assert!(queue.push(item).is_none());
+        }
+        for item in 0..4 {
+            assert!(matches!(queue.pop().await, Popped::Item(value) if value == item));
+        }
+        // Cancelling an empty wait must neither consume the next item nor
+        // leave its subsequent wait unable to observe a push.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), queue.pop())
+                .await
+                .is_err()
+        );
+        queue.push(42);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), queue.pop()).await,
+            Ok(Popped::Item(42))
+        ));
+        queue.finish();
+        assert!(matches!(queue.pop().await, Popped::Finished));
+    }
 }

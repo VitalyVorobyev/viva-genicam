@@ -1,6 +1,6 @@
 //! Two-process acquisition benchmark, without camera control or conversion.
 //! Run receive first, then send to its printed ephemeral loopback address.
-//! receive BIND WIDTH HEIGHT FRAMES TIMEOUT_S OUTPUT.json
+//! receive BIND WIDTH HEIGHT FRAMES TIMEOUT_S OUTPUT.json [async|blocking [PAUSE_AT_FRAME PAUSE_US]]
 //! send DEST WIDTH HEIGHT FPS FRAMES PACKET_GAP_US
 //! Run each receiver under the OS time/profiler tool; sender CPU is separate.
 use std::{
@@ -85,34 +85,85 @@ async fn main() -> Result<()> {
             if expected == 0 || !timeout_s.is_finite() || timeout_s <= 0.0 {
                 return Err("invalid count/timeout".into());
             }
+            let blocking = match args.get(8).map(String::as_str) {
+                None | Some("async") => false,
+                Some("blocking") => true,
+                _ => return Err("expected async or blocking delivery".into()),
+            };
+            let pause_at: u64 = args.get(9).map_or(Ok(0), |s| s.parse())?;
+            let pause_us: u64 = args.get(10).map_or(Ok(0), |s| s.parse())?;
             let socket = UdpSocket::bind(bind)?;
             let address = socket.local_addr()?;
             let mut stream = FrameStream::from_socket(socket, 1500)?;
             stream.set_payload_size(Some(size));
             println!("READY {address}");
             std::io::stdout().flush()?;
-            let deadline = tokio::time::sleep(Duration::from_secs_f64(timeout_s));
+            let timeout = Duration::from_secs_f64(timeout_s);
+            let stop = Instant::now() + timeout;
+            let deadline = tokio::time::sleep(timeout);
             tokio::pin!(deadline);
             let mut received = 0u64;
             let mut bad = 0u64;
             let mut first = None;
             let mut last = None;
+            let mut max_delivery_gap = Duration::ZERO;
+            let mut last_block_id = None;
             loop {
-                tokio::select! {
-                    _ = &mut deadline => break,
-                    frame = stream.next_frame() => match frame? {
-                        Some(frame) => {
-                            let now = Instant::now();
-                            first.get_or_insert(now);
-                            last = Some(now);
-                            received += 1;
-                            let bytes = std::hint::black_box(frame.payload.as_ref());
-                            if frame.width != width || frame.height != height || bytes.len() != size || !frame.is_complete()
-                                || [0,size/2,size-1].into_iter().any(|at| bytes.get(at).copied() != Some((at % 251) as u8)) { bad += 1; }
-                            if received >= expected { break; }
-                        }
-                        None => break,
+                let frame = if blocking {
+                    let remaining = stop.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
                     }
+                    match stream.next_frame_blocking(remaining) {
+                        Err(viva_genicam::GenicamError::Timeout(_)) => break,
+                        other => other?,
+                    }
+                } else {
+                    tokio::select! {
+                        _ = &mut deadline => break,
+                        frame = stream.next_frame() => frame?,
+                    }
+                };
+                let Some(frame) = frame else {
+                    break;
+                };
+                let now = Instant::now();
+                first.get_or_insert(now);
+                if let Some(previous) = last.replace(now) {
+                    max_delivery_gap = max_delivery_gap.max(now.duration_since(previous));
+                }
+                received += 1;
+                last_block_id = Some(frame.block_id);
+                let bytes = std::hint::black_box(frame.payload.as_ref());
+                if frame.width != width
+                    || frame.height != height
+                    || bytes.len() != size
+                    || !frame.is_complete()
+                    || [0, size / 2, size - 1]
+                        .into_iter()
+                        .any(|at| bytes.get(at).copied() != Some((at % 251) as u8))
+                {
+                    bad += 1;
+                }
+                if received >= expected {
+                    break;
+                }
+                // A loss case must not include a post-sender idle timeout in
+                // its CPU window. Check resolved blocks only at a possible
+                // final ID, including when the 16-bit ID has wrapped.
+                if frame.block_id == (expected - 1) % 65535 + 1 {
+                    let stats = stream.stats();
+                    let resolved = stats.frames_complete
+                        + stats.frames_incomplete
+                        + stats.frames_missed
+                        + stats.frames_backpressure
+                        + stats.frames_unsupported;
+                    if resolved >= expected {
+                        break;
+                    }
+                }
+                if received == pause_at && pause_us > 0 {
+                    std::thread::sleep(Duration::from_micros(pause_us));
                 }
             }
             let elapsed = first.zip(last).map_or(0.0, |(first, last)| {
@@ -124,7 +175,7 @@ async fn main() -> Result<()> {
                 && stats.frames_incomplete == 0
                 && stats.frames_missed == 0
                 && stats.frames_backpressure == 0;
-            let result = serde_json::json!({"passed":passed,"pid":std::process::id(),"width":width,"height":height,"expected":expected,"received":received,"bad_frames":bad,"elapsed_s":elapsed,"fps":received.saturating_sub(1) as f64 / elapsed,"complete":stats.frames_complete,"incomplete":stats.frames_incomplete,"missed":stats.frames_missed,"backpressure":stats.frames_backpressure,"packets_received":stats.packets_received,"packets_missing":stats.packets_missing,"resend_requested":stats.resend_requested,"resend_recovered":stats.resend_recovered});
+            let result = serde_json::json!({"delivery_mode":if blocking {"blocking"} else {"async"},"pause_at_frame":pause_at,"pause_us":pause_us,"max_delivery_gap_ms":max_delivery_gap.as_secs_f64()*1000.0,"last_block_id":last_block_id,"passed":passed,"pid":std::process::id(),"width":width,"height":height,"expected":expected,"received":received,"bad_frames":bad,"elapsed_s":elapsed,"fps":received.saturating_sub(1) as f64 / elapsed,"complete":stats.frames_complete,"incomplete":stats.frames_incomplete,"missed":stats.frames_missed,"backpressure":stats.frames_backpressure,"packets_received":stats.packets_received,"packets_missing":stats.packets_missing,"resend_requested":stats.resend_requested,"resend_recovered":stats.resend_recovered});
             std::fs::write(output, serde_json::to_vec_pretty(&result)?)?;
             println!("{result}");
             if !passed {

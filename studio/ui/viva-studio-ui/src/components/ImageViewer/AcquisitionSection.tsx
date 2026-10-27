@@ -1,4 +1,6 @@
 import { useState } from "react";
+import type { SfncGroup } from "../../device/types";
+import { SfncFeatureControl } from "./SfncFeatureControl";
 import type { UiNode } from "../../xml_model/uigraph";
 import {
   PACKET_SIZE_MAX,
@@ -14,6 +16,7 @@ interface AcquisitionSectionProps {
   isAcquiring: boolean;
   nodes: Record<string, UiNode>;
   deviceId: string | null;
+  rateFeature?: SfncGroup["features"][number];
 }
 
 /**
@@ -27,11 +30,13 @@ export function AcquisitionSection({
   isAcquiring,
   nodes,
   deviceId,
+  rateFeature,
 }: AcquisitionSectionProps) {
   if (!isConnected) {
     return <p className="sidebar-placeholder">No device connected.</p>;
   }
-  const rate = nodes["AcquisitionFrameRate"];
+  const rate = rateFeature ?? { node: "AcquisitionFrameRate", widget: "float_input" };
+  const hasRate = [rate.node, ...(rate.aliases ?? [])].some((name) => nodes[name]);
   const rateEnable = nodes["AcquisitionFrameRateEnable"];
 
   return (
@@ -41,10 +46,10 @@ export function AcquisitionSection({
         disabledReason={isAcquiring ? "Stop acquisition to change the mode" : undefined}
       />
       {/* The switch that enables the frame rate sits before its field. */}
-      {rate ? (
-        <FeatureControl
-          node={rate}
-          widget="float_input"
+      {hasRate ? (
+        <SfncFeatureControl
+          feature={rate}
+          nodes={nodes}
           leading={<FeatureCheckbox node={rateEnable} />}
         />
       ) : (

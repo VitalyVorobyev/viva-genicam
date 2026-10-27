@@ -121,7 +121,7 @@ fn main() {
     } = detect_zenoh_config();
 
     // ModelState: holds the last parsed UiGraph (used by xml_model commands).
-    let model_state = RwLock::new(state::ModelState::default());
+    let model_state = Arc::new(RwLock::new(state::ModelState::default()));
 
     // SfncGroupsState: cached SFNC group config loaded once from the bundled JSON.
     let sfnc_groups_state: commands::sfnc_groups::SfncGroupsState =
@@ -136,7 +136,11 @@ fn main() {
     let backend_state: BackendState = match zenoh_config {
         Some(config) => {
             tracing::info!("Starting in REMOTE mode (Zenoh service)");
-            let remote = backend::remote::RemoteBackend::new(events.clone(), connection.clone());
+            let remote = backend::remote::RemoteBackend::new(
+                events.clone(),
+                connection.clone(),
+                model_state.clone(),
+            );
             let starter = remote.clone();
             start = Box::new(move || starter.start(config));
             remote

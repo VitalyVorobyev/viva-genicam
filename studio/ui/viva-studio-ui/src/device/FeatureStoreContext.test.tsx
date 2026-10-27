@@ -73,3 +73,20 @@ describe("FeatureStoreProvider", () => {
     await waitFor(() => expect(screen.getByTestId("Gain").textContent).toBe("6"));
   });
 });
+
+it("isolates a replacement session even if connected never renders false", async () => {
+  let finishOld!: (states: Record<string, FeatureState>) => void;
+  const old = new Promise<Record<string, FeatureState>>((resolve) => { finishOld = resolve; });
+  let reads = 0;
+  mockIPC((cmd) => {
+    if (cmd === "query_feature_states_bulk") return ++reads === 1 ? old : { Gain: state(6) };
+    return undefined;
+  });
+  const tree = (session: number) => <ToastProvider><FeatureStoreProvider connected sessionKey={session}><Value name="Gain" /></FeatureStoreProvider></ToastProvider>;
+  const view = render(tree(1));
+  await waitFor(() => expect(reads).toBe(1));
+  view.rerender(tree(2));
+  await waitFor(() => expect(screen.getByTestId("Gain").textContent).toBe("6"));
+  await act(async () => finishOld({ Gain: state(777) }));
+  expect(screen.getByTestId("Gain").textContent).toBe("6");
+});

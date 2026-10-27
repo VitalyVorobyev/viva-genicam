@@ -12,6 +12,7 @@ import { AppLogProvider, useAppLog } from "../../context/AppLogContext";
 import { ToastProvider, useToast } from "../../context/ToastContext";
 import { DeviceDropdown } from "../DeviceSidebar/DeviceDropdown";
 import { FeatureBrowserPage } from "../FeatureBrowser/FeatureBrowserPage";
+import { ConfigurationPreview } from "../FeatureBrowser/ConfigurationPreview";
 import { ImageViewer } from "../ImageViewer/ImageViewer";
 import { DiagnosticsTab } from "../Diagnostics/DiagnosticsTab";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -35,9 +36,10 @@ export function AppLayout() {
 
 function AppLayoutInner() {
   const [activeTab, setActiveTab] = useState<MainTab>("features");
+  const [configurationPreviewExpanded, setConfigurationPreviewExpanded] = useState(false);
   const [externalModel, setExternalModel] = useState<ParseXmlResponse | null>(null);
 
-  const { devices, connectionState, disconnectReason, connect, disconnect } = useDevice();
+  const { devices, connectionState, disconnectReason, connect, disconnect, replacementModel } = useDevice();
   const [lastConnectedDeviceId, setLastConnectedDeviceId] = useState<string | null>(
     () => {
       try { return localStorage.getItem("viva-studio:last-device"); } catch { return null; }
@@ -68,6 +70,14 @@ function AppLayoutInner() {
     devices.find((d) => d.id === connectedId),
     connectedId ?? "",
   );
+
+  // Replacement XML is parsed by Rust and arrives with the restored session.
+  // Keep the active tab; only the graph and its live feature cache change.
+  const [previousReplacement, setPreviousReplacement] = useState(replacementModel);
+  if (replacementModel !== previousReplacement) {
+    setPreviousReplacement(replacementModel);
+    if (replacementModel) setExternalModel(replacementModel);
+  }
 
   // T7.7 — keep document.title in sync with connection state
   useEffect(() => {
@@ -127,6 +137,7 @@ function AppLayoutInner() {
         log("success", `Connected`, deviceId);
         addToast("success", "Connected to device");
       } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
         const msg =
           typeof e === "object" && e !== null && "message" in e
             ? String((e as { message?: unknown }).message)
@@ -153,7 +164,9 @@ function AppLayoutInner() {
   const handleStartAcquisition = useCallback(async () => {
     log("info", "Starting acquisition\u2026");
     try {
-      setActiveTab("image");
+      if (activeTab !== "features" || !configurationPreviewExpanded) {
+        setActiveTab("image");
+      }
       await startAcq(
         connectionState.kind === "connected" ? loadPacketSize(connectionState.device_id) : null,
       );
@@ -163,7 +176,7 @@ function AppLayoutInner() {
       log("error", `Acquisition start failed: ${String(e)}`);
       addToast("error", `Acquisition start failed: ${String(e)}`);
     }
-  }, [startAcq, connectionState, log, addToast]);
+  }, [startAcq, connectionState, activeTab, configurationPreviewExpanded, log, addToast]);
 
   const handleStopAcquisition = useCallback(async () => {
     log("info", "Stopping acquisition\u2026");
@@ -178,7 +191,7 @@ function AppLayoutInner() {
   }, [stopAcq, log, addToast]);
 
   return (
-    <FeatureStoreProvider connected={isConnected}>
+    <FeatureStoreProvider connected={isConnected} sessionKey={externalModel}>
     <div className="app-layout">
       <header className="app-header">
         {/* Left: brand wordmark + backend mode (reference info, not an action) */}
@@ -284,6 +297,16 @@ function AppLayoutInner() {
                 externalModel={externalModel}
                 isConnected={isConnected}
                 isActive={activeTab === "features"}
+                preview={
+                  <ConfigurationPreview
+                    streamerInfo={streamerInfo}
+                    deviceId={connectedId}
+                    isConnected={isConnected}
+                    isAcquiring={acqStatus.active}
+                    isActive={activeTab === "features"}
+                    onExpandedChange={setConfigurationPreviewExpanded}
+                  />
+                }
               />
             </div>
             {/* The viewer stays mounted too, keeping its stream and zoom */}

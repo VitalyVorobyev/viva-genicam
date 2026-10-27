@@ -158,7 +158,8 @@ async fn run_inner(
                     }
                 };
 
-                if !pacer.is_due(frame_tx.receiver_count() > 0, Instant::now()) {
+                let admitted_at = Instant::now();
+                if !pacer.is_due(frame_tx.receiver_count() > 0, admitted_at) {
                     continue;
                 }
 
@@ -214,7 +215,7 @@ async fn run_inner(
                 native.replace_remote(format, header.width, header.height, row_stride, pixel_data, frame.clone());
                 // Stored even with no viewer: the next one to connect is sent it.
                 frame_tx.send_replace(frame);
-                pacer.sent(Instant::now());
+                pacer.sent(admitted_at);
                 if !logged_first_bmp {
                     info!(
                         seq = header.seq,

@@ -86,7 +86,9 @@ impl FrameEncoder {
 
 /// When to draw the next frame for the viewer; both modes ask it.
 ///
-/// With a viewer connected, a frame is drawn at most once per `interval`.
+/// With a viewer connected, frames follow a deadline cadence of `interval`.
+/// Camera arrivals may fall either side of that cadence; each accepted frame
+/// advances its deadline rather than restarting the interval at its arrival.
 /// With none, still once per [`Self::UNWATCHED_INTERVAL`]: the stored frame is
 /// the first thing a viewer that connects later is sent, and in SingleFrame
 /// mode it is the only frame there will be — the viewer connects after the
@@ -95,6 +97,7 @@ impl FrameEncoder {
 pub struct FramePacer {
     interval: Duration,
     last: Option<Instant>,
+    next: Option<Instant>,
 }
 
 impl FramePacer {
@@ -105,11 +108,15 @@ impl FramePacer {
         Self {
             interval,
             last: None,
+            next: None,
         }
     }
 
     /// Whether a frame arriving at `now` should be drawn.
     pub fn is_due(&self, watched: bool, now: Instant) -> bool {
+        if watched && let Some(next) = self.next {
+            return now >= next;
+        }
         let interval = if watched {
             self.interval
         } else {
@@ -119,8 +126,17 @@ impl FramePacer {
             .is_none_or(|last| now.saturating_duration_since(last) >= interval)
     }
 
-    /// A frame was drawn at `now`.
+    /// A frame admitted at `now` was drawn successfully.
+    ///
+    /// Use the arrival/admission time, before encoding, so encoder work does
+    /// not shift the cadence. After a whole missed interval, start a fresh
+    /// cadence instead of drawing a burst to catch up with old deadlines.
     pub fn sent(&mut self, now: Instant) {
+        self.next = self
+            .next
+            .filter(|&next| now >= next && now.duration_since(next) < self.interval)
+            .and_then(|next| next.checked_add(self.interval))
+            .or_else(|| now.checked_add(self.interval));
         self.last = Some(now);
     }
 }
@@ -149,6 +165,97 @@ mod tests {
         assert!(pacer.is_due(true, later), "a viewer gets the display rate");
         assert!(!pacer.is_due(false, later), "nobody watching: not yet");
         assert!(pacer.is_due(false, t0 + FramePacer::UNWATCHED_INTERVAL));
+    }
+
+    #[test]
+    fn near_cap_arrivals_follow_the_display_cadence_instead_of_halving_it() {
+        let mut pacer = FramePacer::new(Duration::from_secs(1) / 30);
+        let start = Instant::now();
+        // Manta G-125B device timestamp interval measured on the bench.
+        let camera_interval = Duration::from_nanos(32_378_500);
+        let mut drawn = 0;
+        for index in 0..310 {
+            let at = start + camera_interval * index;
+            if at.duration_since(start) >= Duration::from_secs(10) {
+                break;
+            }
+            if pacer.is_due(true, at) {
+                pacer.sent(at);
+                drawn += 1;
+            }
+        }
+        assert!((299..=301).contains(&drawn), "drawn {drawn} in ten seconds");
+    }
+
+    #[test]
+    fn exact_and_below_cap_camera_rates_draw_every_frame() {
+        let interval = Duration::from_secs(1) / 30;
+        for camera_interval in [interval, Duration::from_millis(40)] {
+            let mut pacer = FramePacer::new(interval);
+            let start = Instant::now();
+            for index in 0..300 {
+                let at = start + camera_interval * index;
+                assert!(
+                    pacer.is_due(true, at),
+                    "frame {index} at {camera_interval:?}"
+                );
+                pacer.sent(at);
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_pause_rebases_without_a_catch_up_burst() {
+        let interval = Duration::from_millis(33);
+        let mut pacer = FramePacer::new(interval);
+        let start = Instant::now();
+        pacer.sent(start);
+        let resumed = start + Duration::from_secs(10);
+        assert!(pacer.is_due(true, resumed));
+        pacer.sent(resumed);
+        for millis in 0..33 {
+            assert!(!pacer.is_due(true, resumed + Duration::from_millis(millis)));
+        }
+        assert!(pacer.is_due(true, resumed + interval));
+    }
+
+    #[test]
+    fn viewer_transitions_keep_the_unwatched_cache_refresh() {
+        let interval = Duration::from_millis(33);
+        let mut pacer = FramePacer::new(interval);
+        let start = Instant::now();
+        assert!(pacer.is_due(false, start));
+        pacer.sent(start);
+        let refreshed = start + Duration::from_secs(1);
+        assert!(pacer.is_due(false, refreshed));
+        pacer.sent(refreshed);
+        assert!(!pacer.is_due(true, refreshed + Duration::from_millis(1)));
+        let watched_frame = refreshed + interval;
+        assert!(pacer.is_due(true, watched_frame));
+        pacer.sent(watched_frame);
+        assert!(!pacer.is_due(false, watched_frame + Duration::from_millis(999)));
+        assert!(pacer.is_due(false, watched_frame + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn zero_interval_is_unlimited_but_unwatched_still_refreshes_slowly() {
+        let mut pacer = FramePacer::new(Duration::ZERO);
+        let start = Instant::now();
+        pacer.sent(start);
+        assert!(pacer.is_due(true, start));
+        assert!(pacer.is_due(true, start + Duration::from_millis(1)));
+        assert!(!pacer.is_due(false, start + Duration::from_millis(999)));
+        assert!(pacer.is_due(false, start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn an_unrepresentable_deadline_does_not_panic_or_disable_the_limit() {
+        let mut pacer = FramePacer::new(Duration::MAX);
+        let start = Instant::now();
+        assert!(pacer.is_due(true, start));
+        pacer.sent(start);
+        assert!(!pacer.is_due(true, start + Duration::from_secs(1)));
+        assert!(!pacer.is_due(false, start + Duration::from_secs(1)));
     }
 
     /// Pixel data offset and first pixel's bytes of a BMP.

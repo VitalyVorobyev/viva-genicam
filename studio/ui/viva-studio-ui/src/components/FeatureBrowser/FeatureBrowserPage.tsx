@@ -55,6 +55,8 @@ type ParseStatus =
 
 interface FeatureBrowserPageProps {
   externalModel?: ParseXmlResponse | null;
+  /** Optional compact live preview, below the configuration controls. */
+  preview?: React.ReactNode;
   isConnected?: boolean;
   /**
    * Whether the Feature Browser is the visible tab. The page stays mounted
@@ -65,6 +67,7 @@ interface FeatureBrowserPageProps {
 
 export function FeatureBrowserPage({
   externalModel,
+  preview,
   isConnected = false,
   isActive = true,
 }: FeatureBrowserPageProps = {}) {
@@ -737,6 +740,8 @@ export function FeatureBrowserPage({
           />
         </section>
       </div>
+
+      {preview}
 
       {/* Breadcrumb status bar */}
       <div className="browser-breadcrumb">

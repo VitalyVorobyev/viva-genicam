@@ -90,6 +90,12 @@ pub enum ConnectionState {
         device_name: String,
         model: String,
     },
+    ControlLost {
+        device_id: String,
+        device_name: String,
+        model: String,
+        reason: String,
+    },
     Reconnecting {
         device_id: String,
         attempt: u32,

@@ -1257,6 +1257,50 @@ impl GigeRegisterIo {
         self.control.subscribe()
     }
 
+    /// Check an owned control session now, using only reads of the control
+    /// channel and, where supported, the primary application's address.
+    ///
+    /// A revoked privilege or `ACCESS_DENIED` while reading that channel marks
+    /// the session [`ControlState::Lost`], notifies [`Self::watch_control`], and
+    /// stops its keepalive. Dropping it then sends no control release to another
+    /// application's camera. A network failure is returned with its cause and
+    /// does not by itself establish lost ownership.
+    ///
+    /// This never claims control. A monitor, released session or already-lost
+    /// session is returned unchanged, without I/O. On cameras that do not name
+    /// their primary application, a successful controlled CCP read cannot
+    /// distinguish the current holder from another controller (TC-38).
+    pub fn refresh_control_state(&self) -> Result<ControlState, GenicamError> {
+        let stopped = {
+            let mut device = self.lock_device()?;
+            if self.control_state() != ControlState::Held {
+                return Ok(self.control_state());
+            }
+            let held = match self.block_on(device.ping_control_channel())? {
+                Ok(held) => held,
+                Err(gige::GigeError::Status(gige::GigeStatus::Common(
+                    gencp::StatusCode::AccessDenied,
+                ))) => false,
+                Err(source) => return Err(error::gige("read the control channel")(source)),
+            };
+            if held {
+                return Ok(self.control_state());
+            }
+            self.control.send_replace(ControlState::Lost);
+            // Take only the old keepalive while its device is still locked.
+            // A concurrent explicit reclaim may start a new one afterward.
+            let stopped = self.keepalive.lock().ok().and_then(|mut k| k.take());
+            if let Some(keepalive) = &stopped {
+                let _ = keepalive.stop.send(true);
+            }
+            stopped
+        };
+        if let Some(stopped) = stopped {
+            self.drain_keepalive(stopped);
+        }
+        Ok(self.control_state())
+    }
+
     /// Ask for control privilege again — after it was lost or released, or
     /// to turn a monitor into a controller — and keep it alive.
     ///
@@ -1352,10 +1396,13 @@ impl GigeRegisterIo {
 
     /// Stop the keepalive and wait for its I/O to drain.
     fn stop_keepalive(&self) {
-        let Some(Keepalive { stop, task }) = self.keepalive.lock().ok().and_then(|mut k| k.take())
-        else {
+        let Some(keepalive) = self.keepalive.lock().ok().and_then(|mut k| k.take()) else {
             return;
         };
+        self.drain_keepalive(keepalive);
+    }
+
+    fn drain_keepalive(&self, Keepalive { stop, task }: Keepalive) {
         let _ = stop.send(true);
         if self.handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
             // This task cannot progress while its runtime thread is in Drop.

@@ -5,8 +5,25 @@ import { expect, it } from "vitest";
 import { makeModel } from "../test/model";
 import { useDevice } from "./useDevice";
 
-function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; }
+function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void; const promise = new Promise<T>((r, j) => { resolve = r; reject = j; }); return { promise, resolve, reject }; }
 const connected = (id: string) => ({ kind: "connected", device_id: id, device_name: id, model: "bench" });
+
+it("treats a stale backend rejection as cancellation after an explicit disconnect", async () => {
+  const opening = deferred<ReturnType<typeof makeModel>>();
+  mockIPC((cmd) => {
+    if (cmd === "list_discovered_devices") return [];
+    if (cmd === "get_connection_state") return { kind: "disconnected" };
+    if (cmd === "connect_device") return opening.promise;
+    return undefined;
+  }, { shouldMockEvents: true });
+  const { result } = renderHook(useDevice);
+  await act(async () => {});
+  let old!: Promise<unknown>;
+  act(() => { old = result.current.connect("old").catch((error: DOMException) => error.name); });
+  await act(async () => result.current.disconnect());
+  await act(async () => opening.reject("Connection superseded"));
+  expect(await old).toBe("AbortError");
+});
 
 it("ignores a reconnect payload for an old device or a user disconnect in progress", async () => {
   const closing = deferred<void>();

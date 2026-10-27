@@ -22,6 +22,10 @@ describe("truncateDeviceName", () => {
 });
 
 describe("formatDeviceChip", () => {
+  it("identifies a reachable camera that lost control as read-only", () => {
+    expect(formatDeviceChip({ kind: "control_lost", device_id: "cam0", device_name: "Bench", model: "M", reason: "taken" }))
+      .toEqual({ label: "Bench (read-only)", state: "disconnected" });
+  });
   it("test_format_chip_connected — returns label with truncated device name and connected state", () => {
     const result = formatDeviceChip({
       kind: "connected",

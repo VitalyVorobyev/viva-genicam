@@ -1,4 +1,4 @@
-# QUISS RTVision six-sensor bench, 2026-10-26
+# Anonymous six-sensor GigE bench, 2026-10-26
 
 Maintainer-operated hardware on macOS/Apple silicon, through `en10` at
 1000baseT full duplex, MTU 1500. The user confirmed an isolated bench,
@@ -7,8 +7,9 @@ short functional measurements, not certification or an endurance run.
 
 ## Device and preservation
 
-Discovery identified QUISS `RTVision_6L_DCAM_v2`, firmware `2.0.0.0`,
-serial `SN64501926`, MAC `8C:1F:64:50:19:26`, GigE Vision 1.2.
+The maintainer tested a private six-sensor GigE Vision 1.2 device.
+Its manufacturer, model, firmware and unique identifiers are intentionally
+omitted from this public record.
 The device exposes one stream channel containing six side-by-side Mono8
 images. At its original settings each sensor contributes 324 × 56 pixels,
 producing a 1944 × 56 frame and 108,864-byte payload. Full sensor geometry
@@ -17,11 +18,11 @@ the other names in its PixelFormat enumeration are unavailable. No
 `Coord3D`, `Scan3d`, chunk controls or event message channel are advertised.
 This device does not establish the pending metric 3D wire-format cases.
 
-Original volatile and persistent address: `192.168.0.25/24`, gateway zero.
-The host remained `192.168.2.10/24`; normal discovery missed the device, but
-`list --allow-broadcast-ack` found it. Testing used volatile FORCEIP to
-`192.168.2.27/24`, with the same gateway. No persistent network settings,
-user sets, firmware or host NIC settings were written. The timestamp-reset
+The original camera address was outside the host subnet. Normal discovery
+missed the device, but `list --allow-broadcast-ack` found it. Testing used
+volatile FORCEIP to a temporary address in the host subnet, retaining the
+gateway. Exact addresses remain in private local evidence. No persistent network
+settings, user sets, firmware or host NIC settings were written. The timestamp-reset
 case intentionally resets the free-running device clock; configuration equality
 does not imply restoration of that clock or other counters.
 
@@ -45,19 +46,19 @@ ACK, although subsequent broadcast discovery found the **same MAC at the
 original IP, mask and gateway**. Record the command failure and the successful
 state verification separately; do not call the ACK successful.
 
-Raw evidence, vendor XML and images are ignored local files under
-`.local-evidence/rtvision-2026-10-26/` (initial failures and protocol probe)
-and `.local-evidence/rtvision-fixed-2026-10-26/` (patched binaries and reruns).
-No vendor XML or private images are published with this record.
+Raw evidence, vendor XML and images remain in ignored local evidence storage,
+including the initial failures, protocol probe, patched binaries and reruns.
+No vendor XML, private images or identifying artifact paths are published
+with this record.
 
 ## Control ownership correction
 
 Initial streaming delivered complete frames but the library declared control
 lost and could not send AcquisitionStop. A raw GVCP probe then claimed CCP
 and read its value plus both primary-application registers every 450 ms for
-12 samples. With local port 51383, CCP stayed 2 while `0x0A04` contained
-`0xC0A8020A` (our IP) and `0x0A14` contained 51383. A second session used
-port 63644 and read the corresponding new value. Reads kept control alive;
+12 samples. CCP stayed 2 while `0x0A04` contained our complete IPv4 value
+and `0x0A14` contained our controller port. A second session used a different
+port and read the corresponding new value. Reads kept control alive;
 this is not evidence that a write heartbeat is required.
 
 The device reverses the primary-application IP/port contents relative to the
@@ -120,7 +121,7 @@ observed acquisition. It was not used as a physical frame-rate limit.
 | Studio embedded | Passed short acquisition: 59,695 complete frames in UI elapsed 1:18; zero incomplete/missed/backpressure/missing/resend counters. Freeze/histogram and PNG export worked; PNG verified 1944 × 56, 8-bit grayscale. Histogram range 0–2 describes a nearly black scene, not optical calibration. |
 | Service + Studio remote | Passed short acquisition: 12,957 complete frames in UI elapsed 0:17, zero reported loss counters; remote native freeze/histogram worked. Duplicate bulk-state replies/warnings exposed overlapping queryables; exact endpoint ownership is corrected and regression-tested. |
 | Software reboot and service replacement | See recovery details below. This is distinct from physical power/cable tests. |
-| Induced-loss stress, hour-scale drift, physical disconnect/power-cycle, hardware trigger wiring, vendor configuration import, persistent user-set/file operations | Untested on RTVision in this batch. The Manta's results do not substitute for these device-specific cases. |
+| Induced-loss stress, hour-scale drift, physical disconnect/power-cycle, hardware trigger wiring, vendor configuration import, persistent user-set/file operations | Untested on this device in this batch. The Manta's results do not substitute for these device-specific cases. |
 | Endurance | Untested; no long test launched. |
 
 The generic hardware suite was run selectively because its streamable-feature
@@ -194,8 +195,8 @@ The single preview connection and hidden-canvas decode rules also have the
 component regressions shipped in #225; no hardware socket-count claim is made.
 
 **Passed (ST-61):** remote Studio executed `DeviceReset` during acquisition,
-then showed Reconnecting. The camera returned at its original 192.168.0.25
-address; a volatile FORCEIP restored test address 192.168.2.27. The service
+then showed Reconnecting. The camera returned at its original address;
+a volatile FORCEIP restored the temporary test address. The service
 published disconnected status at 07:36:10.016 UTC and a fresh connected status
 at 07:36:22.143 UTC. No manual viewer disconnect/reconnect was used. The
 replacement controls showed reset values (1000 FPS / 100 µs / 5 dB), accepted
@@ -248,7 +249,7 @@ in the earlier Python run; they do not establish loss-free operation for every
 Python consumer or format.
 
 Raw diagnostic sources, binary hashes, per-run JSON, logs, fresh baselines and
-restoration reports remain in ignored `.local-evidence/rtvision-2026-10-27/`.
+restoration reports remain in ignored local evidence storage.
 
 
 ### Restoration and limits
@@ -259,9 +260,9 @@ persistent address/mask/gateway registers matched their baselines. Standard
 save files were byte-identical, but contain zero Streamable values on this
 camera; the explicit inventory, not that empty file, supplies the feature
 restoration evidence. This does not verify every selector bank in the device.
-Both returns to 192.168.0.25 reported a FORCEIP acknowledgement timeout (command
-exit 1); subsequent broadcast-ack discovery confirmed the original MAC,
-192.168.0.25 / 255.255.255.0 and gateway 0.0.0.0. The host NIC's before/after
+Both returns to the original address reported a FORCEIP acknowledgement timeout
+(command exit 1); subsequent broadcast-ack discovery confirmed the original MAC,
+address, subnet mask and gateway. The host NIC's before/after
 `ifconfig` text was byte-identical. All viewer, service and diagnostic processes
 were stopped. No long run was started.
 
@@ -277,7 +278,7 @@ and counts exactly sixteen deliveries plus four host evictions. USB3 hardware
 was not available; its queue behavior is covered by those regressions and the
 fake-camera suite, not a new USB hardware measurement.
 
-The rebuilt release CLI then ran two additional five-second QUISS cases:
+The rebuilt release CLI then ran two additional five-second hardware cases:
 
 | Aggregate Mono8 ROI | Complete frames | Measured FPS | Image payload Mb/s | Incomplete / missed / host drops / missing / resends |
 |---|---:|---:|---:|---|
@@ -316,3 +317,19 @@ buffer-only change.
 The independent GenTL harness also passed ten strict pixel-pattern frames each
 through its C consumer and Harvesters; all five served-port XML documents
 validated against the schema. No harness step was skipped.
+
+## Subsequent embedded recovery development check, 2026-10-27
+
+A later native Studio development build recovered after an idle software reset
+with temporary network assistance. Its controls reloaded the device's current
+values rather than replaying the pre-reset setting, and acquisition remained
+stopped with Start available. A FORCEIP attempt while control was held timed
+out and discovery found the address unchanged; it did not induce a recovery
+case. No physical cable pull, power cycle or host-NIC transition was performed.
+
+Hardware access ended before final configuration/network restoration could be
+attempted or verified. A fresh 50-feature inventory, network-register baseline
+and raw evidence remain in ignored local storage. This later check does not
+inherit the restoration results of the completed runs above. Streaming recovery,
+ownership takeover and native multicast monitoring remain untested in this
+development batch; ST-62 retains those hardware cases.

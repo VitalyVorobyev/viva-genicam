@@ -1,5 +1,5 @@
 import { invokeCommand } from "./commands";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "../tauri";
 import { NO_ACQUISITION, followAcquisition } from "./acquisitionStatus";
 import { listenTo } from "./events";
@@ -12,6 +12,7 @@ import type { StreamerInfo } from "./types";
 export function useAcquisition() {
   const [acquisition, setAcquisition] = useState(NO_ACQUISITION);
   const [streamerInfo, setStreamerInfo] = useState<StreamerInfo | null>(null);
+  const generation = useRef(0);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -28,7 +29,8 @@ export function useAcquisition() {
     });
 
     listenTo("connection-state-changed", (state) => {
-      if (state.kind === "disconnected" || state.kind === "error") {
+      if (state.kind !== "connected") {
+        generation.current++;
         setStreamerInfo(null);
         setAcquisition(NO_ACQUISITION);
       }
@@ -46,12 +48,21 @@ export function useAcquisition() {
 
   /** Start streaming; `packetSize` is the user's, or `null` to negotiate. */
   const start = useCallback(async (packetSize: number | null = null): Promise<StreamerInfo> => {
-    const info = await invokeCommand("start_acquisition", { packetSize });
+    const ticket = ++generation.current;
+    let info: StreamerInfo;
+    try {
+      info = await invokeCommand("start_acquisition", { packetSize });
+    } catch (error) {
+      if (ticket !== generation.current) throw new DOMException("Acquisition superseded", "AbortError");
+      throw error;
+    }
+    if (ticket !== generation.current) throw new DOMException("Acquisition superseded", "AbortError");
     setStreamerInfo(info);
     return info;
   }, []);
 
   const stop = useCallback(async () => {
+    generation.current++;
     await invokeCommand("stop_acquisition");
   }, []);
 

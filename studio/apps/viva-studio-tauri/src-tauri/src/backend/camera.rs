@@ -10,8 +10,8 @@ use std::time::Duration;
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::u3v::UsbTransfer;
 use viva_genicam::{
-    COMMAND_TIMEOUT, Camera, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
-    StreamStats, U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
+    COMMAND_TIMEOUT, Camera, ControlState, Frame, FrameStream, GenicamError, GigeRegisterIo,
+    StreamOptions, StreamStats, U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
 };
 use viva_zenoh_api::FeatureState;
 
@@ -20,6 +20,13 @@ use super::StartOptions;
 /// What the backend asks of a connected camera. Every method blocks on the
 /// camera's I/O, so the backend calls them on the blocking pool.
 pub(crate) trait Device: Send {
+    /// A transport health read; never a claim or a write. Runs on the blocking pool.
+    fn health(&mut self) -> Result<ControlState, String>;
+
+    fn watch_control(&self) -> Option<tokio::sync::watch::Receiver<ControlState>> {
+        None
+    }
+
     /// One feature's live state, as `viva-service` computes it (ST-26).
     fn feature_state(&self, name: &str) -> Result<FeatureState, String>;
 
@@ -101,6 +108,43 @@ fn image_format_of<R: RegisterIo>(camera: &Camera<R>) -> (u32, u32, String) {
 }
 
 impl Device for Camera<GigeRegisterIo> {
+    fn health(&mut self) -> Result<ControlState, String> {
+        let state = self.transport().control_state();
+        let timeout = {
+            let mut device = self.transport().lock_device().map_err(|e| e.to_string())?;
+            let timeout = device.control_timeout();
+            device.set_control_timeout(Duration::from_millis(250));
+            timeout
+        };
+        let result = if state == ControlState::Held {
+            // This shared facade probe records an exclusive takeover as Lost,
+            // stops its keepalive, and prevents Drop from releasing its owner.
+            self.transport()
+                .refresh_control_state()
+                .map_err(|e| e.to_string())
+        } else {
+            let mut device = self.transport().lock_device().map_err(|e| e.to_string())?;
+            match tokio::runtime::Handle::current().block_on(device.read_register_or_mem(0, 4)) {
+                Ok(_) => Ok(state),
+                Err(viva_genicam::gige::GigeError::Status(
+                    viva_genicam::gige::GigeStatus::Common(
+                        viva_genicam::gencp::StatusCode::AccessDenied,
+                    ),
+                )) => Ok(state),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        self.transport()
+            .lock_device()
+            .map_err(|e| e.to_string())?
+            .set_control_timeout(timeout);
+        result
+    }
+
+    fn watch_control(&self) -> Option<tokio::sync::watch::Receiver<ControlState>> {
+        Some(self.transport().watch_control())
+    }
+
     fn feature_state(&self, name: &str) -> Result<FeatureState, String> {
         feature_state_of(self, name)
     }
@@ -118,6 +162,9 @@ impl Device for Camera<GigeRegisterIo> {
     }
 
     fn start(&mut self, options: &StartOptions) -> Result<Frames, String> {
+        if self.transport().control_state() != ControlState::Held {
+            return Err("Control lost: reconnect explicitly before starting acquisition".into());
+        }
         // The library's one stream-open recipe: claim control again (a
         // release gave it up), route to the camera's interface, negotiate the
         // packet size — a size the user measured for their link is a ceiling
@@ -141,6 +188,9 @@ impl Device for Camera<GigeRegisterIo> {
     }
 
     fn release(&mut self, ack_timeout: Duration) {
+        if self.transport().control_state() != ControlState::Held {
+            return;
+        }
         if let Ok(mut device) = self.transport().lock_device() {
             device.set_control_timeout(ack_timeout);
         }
@@ -161,6 +211,16 @@ impl Device for Camera<GigeRegisterIo> {
 }
 
 impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
+    fn health(&mut self) -> Result<ControlState, String> {
+        // GenCP version is the first mandatory ABRM word. This uncached read
+        // also detects an idle unplug, unlike the cached is_lost flag alone.
+        if self.transport().is_lost() {
+            return Err("USB3 Vision camera disconnected".into());
+        }
+        self.transport().read(0, 4).map_err(|e| e.to_string())?;
+        Ok(ControlState::Held)
+    }
+
     fn feature_state(&self, name: &str) -> Result<FeatureState, String> {
         feature_state_of(self, name)
     }
@@ -203,6 +263,8 @@ impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
 pub(crate) enum Frames {
     Gige(Box<FrameStream>),
     U3v(U3vFrameStream),
+    #[cfg(test)]
+    Ended,
 }
 
 impl Frames {
@@ -210,6 +272,8 @@ impl Frames {
         match self {
             Frames::Gige(stream) => stream.next_frame().await,
             Frames::U3v(stream) => stream.next_frame().await,
+            #[cfg(test)]
+            Frames::Ended => Ok(None),
         }
     }
 
@@ -220,6 +284,8 @@ impl Frames {
         match self {
             Frames::Gige(stream) => drop(stream),
             Frames::U3v(stream) => stream.shutdown().await,
+            #[cfg(test)]
+            Frames::Ended => {}
         }
     }
 
@@ -229,6 +295,8 @@ impl Frames {
         match self {
             Frames::Gige(stream) => stream.stats(),
             Frames::U3v(stream) => stream.stats(),
+            #[cfg(test)]
+            Frames::Ended => StreamStats::default(),
         }
     }
 }

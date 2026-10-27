@@ -54,16 +54,25 @@ function camera(network: NetworkConfig | string) {
   return writes;
 }
 
-function show() {
+function show(readOnly = false) {
   return render(
     <ToastProvider>
-      <FeatureStoreProvider connected={true}>
+      <FeatureStoreProvider connected={true} readOnly={readOnly}>
         <DevicePanel connected={true} />
       </FeatureStoreProvider>
       <ToastContainer />
     </ToastProvider>,
   );
 }
+
+it("keeps network identity visible but hides persistent writes for a read-only session", async () => {
+  const writes = camera(NETWORK);
+  show(true);
+  expect(await screen.findByText(NETWORK.current_ip)).toBeTruthy();
+  expect(screen.getByText(/Read-only session/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Save to camera" })).toBeNull();
+  expect(writes).toEqual([]);
+});
 
 describe("DevicePanel", () => {
   // What a user reads out when filing a report (backlog ST-37).

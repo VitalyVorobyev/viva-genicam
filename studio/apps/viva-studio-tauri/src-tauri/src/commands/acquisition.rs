@@ -3,20 +3,11 @@
 use std::sync::Arc;
 
 use tauri::State;
-use viva_zenoh_api::AcquisitionStatus;
 
 use crate::backend::{BackendState, StartOptions};
 use crate::error::HumanizeExt;
 use crate::state::device_state::StreamerInfo;
 use crate::state::events::Events;
-
-fn status(active: bool) -> AcquisitionStatus {
-    if active {
-        AcquisitionStatus::active(None, None)
-    } else {
-        AcquisitionStatus::inactive()
-    }
-}
 
 /// Start streaming. `packet_size` is the GVSP packet size the user set for
 /// this camera's link, a ceiling the path probe stays under; absent, it is
@@ -31,7 +22,7 @@ pub async fn start_acquisition(
         .start_acquisition(StartOptions { packet_size })
         .await
         .humanize()?;
-    events.send(&status(true));
+    backend.publish_acquisition_status(true, &events).await;
     Ok(info)
 }
 
@@ -41,6 +32,6 @@ pub async fn stop_acquisition(
     events: State<'_, Arc<Events>>,
 ) -> Result<(), String> {
     let result = backend.stop_acquisition().await;
-    events.send(&status(false));
+    backend.publish_acquisition_status(false, &events).await;
     result.humanize()
 }

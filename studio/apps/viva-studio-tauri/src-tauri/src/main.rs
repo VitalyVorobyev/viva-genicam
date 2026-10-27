@@ -147,7 +147,11 @@ fn main() {
         }
         None => {
             tracing::info!("Starting in EMBEDDED mode (direct camera access)");
-            let embedded = Arc::new(backend::embedded::EmbeddedBackend::new(events.clone()));
+            let embedded = Arc::new(backend::embedded::EmbeddedBackend::with_state(
+                events.clone(),
+                connection.clone(),
+                model_state.clone(),
+            ));
             let starter = embedded.clone();
             start =
                 Box::new(move || starter.start_discovery_task(std::time::Duration::from_secs(3)));

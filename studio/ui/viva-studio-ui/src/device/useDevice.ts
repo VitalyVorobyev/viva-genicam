@@ -103,6 +103,9 @@ export function useDevice() {
       const model = await invokeCommand("connect_device", { deviceId });
       if (ticket !== operation.current) throw new DOMException("Connection superseded", "AbortError");
       return model;
+    } catch (error) {
+      if (ticket !== operation.current) throw new DOMException("Connection superseded", "AbortError");
+      throw error;
     } finally {
       if (ticket === operation.current) manualTransition.current = false;
     }

@@ -71,6 +71,76 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// MAC-derived `viva_zenoh_api::gige_device_id`, in both modes.
     async fn connect(&self, device_id: &str) -> Result<ConnectResult, String>;
 
+    /// Open and publish one camera model. Embedded sessions override this to
+    /// keep the complete transition under their cancellation/generation guard.
+    async fn connect_model(
+        &self,
+        device_id: &str,
+        connection: &std::sync::Arc<crate::state::connection::Connection>,
+        model: &crate::state::SharedModelState,
+    ) -> Result<crate::commands::xml_model::ParseXmlResponse, String> {
+        use crate::commands::xml_model::parse_camera_model;
+        use crate::state::device_state::ConnectionState;
+        connection
+            .set(ConnectionState::Connecting {
+                device_id: device_id.into(),
+            })
+            .await;
+        let result: Result<crate::commands::xml_model::ParseXmlResponse, String> = async {
+            let result = self.connect(device_id).await?;
+            let response = parse_camera_model(result.xml)?;
+            model.write().await.update(
+                response.xml.clone(),
+                response.graph.clone(),
+                response.diags.clone(),
+                Some(device_id.into()),
+            );
+            connection
+                .set(ConnectionState::Connected {
+                    device_id: device_id.into(),
+                    device_name: result.device_name,
+                    model: result.model,
+                })
+                .await;
+            Ok(response)
+        }
+        .await;
+        if let Err(message) = &result {
+            self.disconnect().await.ok();
+            connection
+                .set(ConnectionState::Error {
+                    message: message.clone(),
+                })
+                .await;
+        }
+        result
+    }
+
+    /// Finish the UI disconnect transition; embedded mode serializes publication.
+    async fn disconnect_model(
+        &self,
+        connection: &std::sync::Arc<crate::state::connection::Connection>,
+    ) -> Result<(), String> {
+        let result = self.disconnect().await;
+        connection
+            .set(crate::state::device_state::ConnectionState::Disconnected)
+            .await;
+        result
+    }
+
+    /// Publish a command's immediate status without reviving an obsolete stream.
+    async fn publish_acquisition_status(
+        &self,
+        active: bool,
+        events: &crate::state::events::Events,
+    ) {
+        events.send(&if active {
+            viva_zenoh_api::AcquisitionStatus::active(None, None)
+        } else {
+            viva_zenoh_api::AcquisitionStatus::inactive()
+        });
+    }
+
     /// Let go of the connected device, if any.
     async fn disconnect(&self) -> Result<(), String>;
 

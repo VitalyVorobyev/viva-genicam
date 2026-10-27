@@ -16,6 +16,12 @@ import { FeatureStore } from "./featureStore";
 import type { FeatureState, JsonValue } from "./types";
 
 const FeatureStoreContext = createContext<FeatureStore | null>(null);
+const ReadOnlyContext = createContext(false);
+
+/** Session-wide ceiling, including controls that do not write a GenApi node. */
+export function useCameraReadOnly(): boolean {
+  return useContext(ReadOnlyContext);
+}
 
 /**
  * NaN and the infinities cannot travel as JSON numbers; the backend sends
@@ -46,11 +52,14 @@ async function fetchStates(names: string[]): Promise<Record<string, FeatureState
 export function FeatureStoreProvider({
   connected,
   sessionKey,
+  readOnly = false,
   children,
 }: {
   connected: boolean;
   /** A fresh parsed camera model starts an isolated live-state cache. */
   sessionKey?: unknown;
+  /** A lost control session or monitor connection cannot change the camera. */
+  readOnly?: boolean;
   children: ReactNode;
 }) {
   const { addToast } = useToast();
@@ -84,7 +93,7 @@ export function FeatureStoreProvider({
     };
   }, [store]);
 
-  return <FeatureStoreContext.Provider value={store}>{children}</FeatureStoreContext.Provider>;
+  return <FeatureStoreContext.Provider value={store}><ReadOnlyContext.Provider value={readOnly}>{children}</ReadOnlyContext.Provider></FeatureStoreContext.Provider>;
 }
 
 export function useFeatureStore(): FeatureStore {
@@ -104,7 +113,12 @@ export function useFeature(name: string | null | undefined): FeatureState | unde
     [store, name],
   );
   const read = useCallback(() => (name ? store.get(name) : undefined), [store, name]);
-  return useSyncExternalStore(subscribe, read);
+  const state = useSyncExternalStore(subscribe, read);
+  const readOnly = useContext(ReadOnlyContext);
+  return useMemo(() => {
+    if (!readOnly || !state) return state;
+    return { ...state, access_mode: state.access_mode === "RW" ? "RO" : state.access_mode === "WO" ? "NA" : state.access_mode };
+  }, [state, readOnly]);
 }
 
 /**
@@ -116,10 +130,11 @@ export function useFeature(name: string | null | undefined): FeatureState | unde
  */
 export function useFeatureWriter(): (name: string, value: JsonValue) => Promise<boolean> {
   const store = useFeatureStore();
+  const readOnly = useContext(ReadOnlyContext);
   const { addToast } = useToast();
   return useCallback(
     async (name, value) => {
-      if (!isTauri()) return false;
+      if (!isTauri() || readOnly) return false;
       try {
         const state = await invokeCommand("write_node", { nodeName: name, value });
         store.set(name, sanitize(state));
@@ -129,17 +144,18 @@ export function useFeatureWriter(): (name: string, value: JsonValue) => Promise<
         return false;
       }
     },
-    [store, addToast],
+    [store, addToast, readOnly],
   );
 }
 
 /** Execute a command; a refusal reaches the user as a toast. */
 export function useCommandRunner(): (name: string) => Promise<boolean> {
   const store = useFeatureStore();
+  const readOnly = useContext(ReadOnlyContext);
   const { addToast } = useToast();
   return useCallback(
     async (name) => {
-      if (!isTauri()) return false;
+      if (!isTauri() || readOnly) return false;
       try {
         const result = await invokeCommand("execute_command", { nodeName: name });
         if (!result.ok) {
@@ -153,6 +169,6 @@ export function useCommandRunner(): (name: string) => Promise<boolean> {
         return false;
       }
     },
-    [store, addToast],
+    [store, addToast, readOnly],
   );
 }

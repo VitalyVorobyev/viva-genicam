@@ -79,7 +79,7 @@ fn configure_receive_wait(socket: &UdpSocket) -> std::io::Result<ReceiveWait> {
 }
 
 /// Frames waiting for the application before the oldest is dropped.
-/// The measured QUISS startup burst completes twelve frames before the
+/// The measured hardware startup burst completes twelve frames before the
 /// acquisition-start call returns and its consumer can begin reading. Four
 /// additional slots provide headroom; sustained slower consumption still drops
 /// the oldest frame, so this bounded default is not a loss-free guarantee.

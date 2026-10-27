@@ -65,6 +65,26 @@ beforeEach(() => {
 });
 
 describe("FeatureBrowserPage, connected", () => {
+  it.each([false, true])("disables commands without live state when disconnected or read-only (%s)", async (readOnly) => {
+    const sent: string[] = [];
+    const commandModel = makeModel({ DeviceReset: { kind: "Command" } }, {
+      Root: { name: "Root", display_name: "Root", features: ["DeviceControl"] },
+      DeviceControl: { name: "DeviceControl", display_name: "Device Control", features: ["DeviceReset"] },
+    });
+    mockIPC((cmd) => {
+      if (cmd === "execute_command") sent.push(cmd);
+      if (cmd === "query_feature_states_bulk") return {};
+      return undefined;
+    });
+    render(<ToastProvider><FeatureStoreProvider connected={readOnly} readOnly={readOnly}>
+      <FeatureBrowserPage externalModel={commandModel} isConnected={readOnly} />
+    </FeatureStoreProvider></ToastProvider>);
+    await userEvent.click(await screen.findByRole("option", { name: /DeviceReset/ }));
+    const execute = screen.getByRole("button", { name: "Execute" }) as HTMLButtonElement;
+    expect(execute.disabled).toBe(true);
+    await userEvent.click(execute);
+    expect(sent).toEqual([]);
+  });
   it("does not turn a feature the user only looked at into a pending write", async () => {
     renderPage();
     await userEvent.click(await screen.findByRole("option", { name: /Width/ }));

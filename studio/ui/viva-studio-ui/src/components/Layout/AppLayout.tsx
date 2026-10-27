@@ -61,11 +61,13 @@ function AppLayoutInner() {
   const { addToast } = useToast();
 
   const isConnected = connectionState.kind === "connected";
+  const controlLost = connectionState.kind === "control_lost";
+  const hasSession = isConnected || controlLost;
   const connectedDeviceName =
-    connectionState.kind === "connected" ? connectionState.device_name : null;
+    hasSession ? connectionState.device_name : null;
   const connectedModel =
-    connectionState.kind === "connected" ? connectionState.model : null;
-  const connectedId = connectionState.kind === "connected" ? connectionState.device_id : null;
+    hasSession ? connectionState.model : null;
+  const connectedId = hasSession ? connectionState.device_id : null;
   const transport = streamTransport(
     devices.find((d) => d.id === connectedId),
     connectedId ?? "",
@@ -124,7 +126,7 @@ function AppLayoutInner() {
   const [prevDisconnectReason, setPrevDisconnectReason] = useState(disconnectReason);
   if (disconnectReason !== prevDisconnectReason) {
     setPrevDisconnectReason(disconnectReason);
-    if (disconnectReason !== null) setExternalModel(null);
+    if (disconnectReason !== null && !controlLost) setExternalModel(null);
   }
 
   const handleConnect = useCallback(
@@ -173,6 +175,7 @@ function AppLayoutInner() {
       log("success", "Acquisition started");
       addToast("success", "Acquisition started");
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
       log("error", `Acquisition start failed: ${String(e)}`);
       addToast("error", `Acquisition start failed: ${String(e)}`);
     }
@@ -191,7 +194,7 @@ function AppLayoutInner() {
   }, [stopAcq, log, addToast]);
 
   return (
-    <FeatureStoreProvider connected={isConnected} sessionKey={externalModel}>
+    <FeatureStoreProvider connected={hasSession} readOnly={controlLost} sessionKey={externalModel}>
     <div className="app-layout">
       <header className="app-header">
         {/* Left: brand wordmark + backend mode (reference info, not an action) */}
@@ -288,6 +291,22 @@ function AppLayoutInner() {
 
       <ToastContainer />
 
+      {connectionState.kind === "reconnecting" && (
+        <div className="status status--info" role="status">
+          Camera connection lost: {connectionState.reason}. Reconnecting; acquisition will remain stopped.
+          <button type="button" className="btn--secondary btn--sm" onClick={handleDisconnect}>Cancel reconnect</button>
+        </div>
+      )}
+      {connectionState.kind === "control_lost" && (
+        <div className="status status--error" role="alert" aria-label="Camera control lost">
+          Camera control lost: {connectionState.reason}. Features are read-only.
+          <button type="button" className="btn--secondary btn--sm" onClick={() => handleConnect(connectionState.device_id)}>Reconnect with control</button>
+        </div>
+      )}
+      {connectionState.kind === "error" && disconnectReason && (
+        <div className="status status--error" role="alert">{disconnectReason.message} Reconnect from the device menu.</div>
+      )}
+
       <div className="app-body">
         <main className="main-area">
           <div className="main-content">
@@ -295,7 +314,7 @@ function AppLayoutInner() {
             <div style={{ display: activeTab === "features" ? "contents" : "none" }}>
               <FeatureBrowserPage
                 externalModel={externalModel}
-                isConnected={isConnected}
+                isConnected={hasSession}
                 isActive={activeTab === "features"}
                 preview={
                   <ConfigurationPreview
@@ -313,7 +332,7 @@ function AppLayoutInner() {
             <div style={{ display: activeTab === "image" ? "contents" : "none" }}>
               <ImageViewer
                 streamerInfo={streamerInfo}
-                isConnected={isConnected}
+                isConnected={hasSession}
                 isAcquiring={acqStatus.active}
                 externalModel={externalModel}
                 deviceId={connectedId}
@@ -326,7 +345,7 @@ function AppLayoutInner() {
                 isActive={activeTab === "image"}
               />
             </div>
-            {activeTab === "diagnostics" && <DiagnosticsTab connected={isConnected} />}
+            {activeTab === "diagnostics" && <DiagnosticsTab connected={hasSession} />}
           </div>
         </main>
       </div>

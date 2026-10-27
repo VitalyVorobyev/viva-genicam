@@ -31,6 +31,8 @@ export function formatDeviceChip(cs: ConnectionState): DeviceChipData {
         label: truncateDeviceName(cs.device_name),
         state: "connected",
       };
+    case "control_lost":
+      return { label: `${truncateDeviceName(cs.device_name)} (read-only)`, state: "disconnected" };
     case "connecting":
       return { label: "Connecting\u2026", state: "connecting" };
     case "reconnecting":

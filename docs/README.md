@@ -14,7 +14,7 @@ pull requests.
 | [`roadmap.md`](roadmap.md) | The order of the open work, by backlog ID |
 | [`backlog.md`](backlog.md) | Actionable tasks, each with its evidence |
 | [`performance-2026-10-26.md`](performance-2026-10-26.md) | Acquisition and frame-delivery CPU measurements, synthetic stress limits and Manta ROI tests |
-| [`hardware-rtvision-2026-10-26.md`](hardware-rtvision-2026-10-26.md) | Six-sensor QUISS hardware results, controller-layout correction and remaining delivery losses |
+| [`hardware-six-sensor-2026-10-26.md`](hardware-six-sensor-2026-10-26.md) | Anonymous six-sensor hardware results, controller-layout correction and remaining delivery losses |
 | [`hardware-test-plan.md`](hardware-test-plan.md) | Exercising every feature against a real GigE Vision camera, and which backlog rows each area settles |
 | [`studio/zenoh-api.md`](studio/zenoh-api.md) | The Zenoh contract between the services and Viva Studio, and any other client |
 | [`studio/testing-cookbook.md`](studio/testing-cookbook.md) | Running and testing Viva Studio without a camera |

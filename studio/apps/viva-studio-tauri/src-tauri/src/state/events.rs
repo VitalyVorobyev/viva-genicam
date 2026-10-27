@@ -41,14 +41,14 @@ pub struct FeaturesInvalidated {
     pub names: Vec<String>,
 }
 
-/// A device stopped announcing itself (remote mode).
+/// A device stopped announcing itself (remote discovery).
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DeviceLost {
     pub device_id: String,
 }
 
-/// Remote mode found a lost device again and resubscribed.
+/// A lost camera was reopened or its remote service was resubscribed.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DeviceReconnected {

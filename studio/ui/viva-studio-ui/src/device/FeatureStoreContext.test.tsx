@@ -1,9 +1,10 @@
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { ToastProvider } from "../context/ToastContext";
-import { FeatureStoreProvider, useFeature } from "./FeatureStoreContext";
+import { FeatureStoreProvider, useFeature, useFeatureWriter, useCommandRunner } from "./FeatureStoreContext";
 import type { FeatureState, FeaturesInvalidated, FeatureStateChanged } from "./types";
 
 function state(value: number): FeatureState {
@@ -45,6 +46,28 @@ function app(...names: string[]) {
 }
 
 describe("FeatureStoreProvider", () => {
+  it("immediately clamps cached states and refuses writes and commands after control loss", async () => {
+    const writes: string[] = [];
+    mockIPC((cmd) => {
+      if (cmd === "query_feature_states_bulk") return { Gain: state(6) };
+      if (cmd === "write_node" || cmd === "execute_command") writes.push(cmd);
+      return undefined;
+    }, { shouldMockEvents: true });
+    function Controls() {
+      const s = useFeature("Gain");
+      const write = useFeatureWriter();
+      const run = useCommandRunner();
+      return <><span data-testid="access">{s?.access_mode}</span><button onClick={() => write("Gain", 10)}>Write</button><button onClick={() => run("DeviceReset")}>Execute</button></>;
+    }
+    const tree = (readOnly: boolean) => <ToastProvider><FeatureStoreProvider connected readOnly={readOnly}><Controls /></FeatureStoreProvider></ToastProvider>;
+    const view = render(tree(false));
+    await waitFor(() => expect(screen.getByTestId("access").textContent).toBe("RW"));
+    view.rerender(tree(true));
+    expect(screen.getByTestId("access").textContent).toBe("RO");
+    await userEvent.click(screen.getByRole("button", { name: "Write" }));
+    await userEvent.click(screen.getByRole("button", { name: "Execute" }));
+    expect(writes).toEqual([]);
+  });
   // ST-30: writing BalanceRatioSelector changes what BalanceRatio reads.
   it("re-reads the invalidated features on screen, and only those", async () => {
     const values = { BalanceRatio: 1.0, Gamma: 2.2 };

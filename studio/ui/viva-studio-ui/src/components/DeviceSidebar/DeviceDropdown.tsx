@@ -54,7 +54,7 @@ export function DeviceDropdown({
     [onConnect],
   );
 
-  const isConnected = connectionState.kind === "connected";
+  const isConnected = connectionState.kind === "connected" || connectionState.kind === "control_lost";
   const isConnecting = connectionState.kind === "connecting";
   const isReconnecting = connectionState.kind === "reconnecting";
   const isBusy = isConnecting || isConnected || isReconnecting;
@@ -85,7 +85,7 @@ export function DeviceDropdown({
       : "";
 
   const label = isConnected
-    ? connectedName
+    ? connectionState.kind === "control_lost" ? `${connectedName} (read-only)` : connectedName
     : isConnecting
       ? "Connecting\u2026"
       : isReconnecting
@@ -127,6 +127,9 @@ export function DeviceDropdown({
                 Disconnect
               </button>
             </div>
+          )}
+          {isReconnecting && (
+            <button type="button" className="btn--secondary btn--sm" onClick={onDisconnect}>Cancel reconnect</button>
           )}
 
           {/* Available devices */}

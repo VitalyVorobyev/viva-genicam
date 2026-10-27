@@ -13,9 +13,10 @@ your camera is missing here, or does something this page does not say,
 
 ## GigE Vision
 
-### QUISS RTVision_6L_DCAM_v2
+### Anonymous six-sensor GigE device
 
-Firmware 2.0.0.0, GigE Vision 1.2; maintainer test on macOS/Apple silicon,
+GigE Vision 1.2; the manufacturer, model and unique identifiers are private.
+Maintainer test on macOS/Apple silicon,
 1 Gb/s Ethernet, MTU 1500. One stream contains six side-by-side Mono8 images.
 The initial run exposed reversed controller IP/port register contents;
 the transport accepts that layout only when both values match its socket.
@@ -31,7 +32,7 @@ NumPy avoided the measured Python startup drops. A larger delivery queue then
 passed short production CLI checks at the minimum ROI and full six-sensor ROI;
 this is not endurance qualification.
 Detailed scope and restoration are in the
-[bench record](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/hardware-rtvision-2026-10-26.md).
+[bench record](https://github.com/VitalyVorobyev/viva-genicam/blob/main/docs/hardware-six-sensor-2026-10-26.md).
 
 ### Allied Vision Manta G-125B
 

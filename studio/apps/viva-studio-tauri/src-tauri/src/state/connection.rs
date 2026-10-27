@@ -25,6 +25,15 @@ impl Connection {
         self.state.lock().await.clone()
     }
 
+    /// Publish only while the owner still considers this transition current.
+    pub async fn set_when(&self, state: ConnectionState, current: impl FnOnce() -> bool) {
+        let mut slot = self.state.lock().await;
+        if current() {
+            *slot = state.clone();
+            self.events.send(&state);
+        }
+    }
+
     /// Record `state` and tell the UI.
     pub async fn set(&self, state: ConnectionState) {
         let mut current = self.state.lock().await;

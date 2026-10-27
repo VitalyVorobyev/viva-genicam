@@ -323,7 +323,7 @@ async fn a_second_application_is_refused_while_one_holds_control() {
     let write = other.write_register(0x0938, heartbeat_ms).await;
     println!("its raw write of GevHeartbeatTimeout: {write:?}");
     assert!(write.is_err(), "a write without control is refused");
-    // Width is read-only on the six-sensor QUISS device. Check the same
+    // Width is read-only on the six-sensor device. Check the same
     // bootstrap register for both applications, retaining its original value.
     first
         .transport()
@@ -392,7 +392,7 @@ async fn every_writable_feature_takes_its_own_value_back() {
             continue;
         }
         if matches!(camera.nodemap().node(&name), Some(Node::Register(_))) {
-            // FileAccessBuffer on QUISS is a byte register, not text.
+            // FileAccessBuffer on the six-sensor camera is a byte register, not text.
             let before = camera.get_register(&name).expect("read register bytes");
             match camera
                 .set_register(&name, &before)

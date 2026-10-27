@@ -53,7 +53,7 @@ module:
   is transient (SR-22); any other error ends the stream, reported once.
 - **Delivery.** Finished frames go into a `DeliveryQueue`: a
   `Mutex<VecDeque>` with a `Condvar` for the blocking side and a
-  `tokio::sync::Notify` for the async side. **Capacity 4**; when it is full the
+  `tokio::sync::Notify` for the async side. **Capacity 16** (originally 4; see the 2026-10-27 amendment); when it is full the
   oldest frame is dropped and counted as backpressure. Two front ends:
   `next_block().await` (cancel-safe, for `select!`) and
   `next_block_blocking(timeout)`, which needs no runtime and reports silence as
@@ -262,3 +262,23 @@ An unsolicited single-packet refusal does not suppress an unrequested gap.
 The public API, retry limits and request budget are unchanged. No new camera
 claim is made: this is covered by pure state tests and ephemeral-loopback
 receive-engine tests using the Manta’s already-recorded per-packet layout.
+
+
+**2026-10-27 amendment (SR-28):** raise the completed-frame handoff from four
+to sixteen frames. On the QUISS six-sensor device at about 2675 FPS, eight
+complete frames were already evicted when `acquisition_start()` returned;
+the first consumer read received block 9. In the instrumented unpaused runs,
+the counter stayed unchanged afterward. Capacity 16 retained block 1 and
+absorbed a controlled 3 ms consumer pause in the short hardware trials. The
+[hardware record](../hardware-rtvision-2026-10-26.md#high-rate-delivery) describes
+the measurements and the subsequent production CLI checks.
+
+The sixteen-frame bound provides headroom above the observed twelve-frame
+startup burst. It does not promise loss-free delivery through arbitrary
+startup delays or slow consumers. The cost is up to four times the queued
+payload memory and greater pending-frame age during a pause. Per-frame
+allocation, payload copying, assembly limits, event-queue capacity, wake-up
+rules and stop behavior do not change. Keep the default shared with the U3V
+frame handoff (ADR-0032); its constructor/enqueue/consumer regressions and fake
+suite pass, while only GigE hardware was measured for this amendment. No buffer
+pool, public configuration surface or CPU-speedup claim is introduced.

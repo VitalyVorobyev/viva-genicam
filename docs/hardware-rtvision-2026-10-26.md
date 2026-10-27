@@ -158,7 +158,7 @@ usage description, not release/notarization tests. Preparation manifests record
 source patches and binary/signature hashes; no clean-commit build is asserted.
 All viewers and service processes were stopped before final restoration.
 
-## Code validation
+## Code validation (original #224 batch)
 
 Final root formatting, clippy (all targets, warnings denied), all-feature
 Rustdoc with warnings denied, both wasm checks and **1,070 workspace tests**
@@ -194,7 +194,7 @@ The single preview connection and hidden-canvas decode rules also have the
 component regressions shipped in #225; no hardware socket-count claim is made.
 
 **Passed (ST-61):** remote Studio executed `DeviceReset` during acquisition,
-then showed Reconnecting. The camera returned at its persistent 192.168.0.25
+then showed Reconnecting. The camera returned at its original 192.168.0.25
 address; a volatile FORCEIP restored test address 192.168.2.27. The service
 published disconnected status at 07:36:10.016 UTC and a fresh connected status
 at 07:36:22.143 UTC. No manual viewer disconnect/reconnect was used. The
@@ -234,8 +234,8 @@ snapshot. The whole start call took 31.17–31.40 ms. Capacity 16 delivered bloc
 seven drops at capacity 4; capacity 16 retained every frame. This identifies a
 startup buffering gap in these cases, plus limited tolerance for a paused
 consumer. It does not establish the maximum steady throughput or justify a
-CPU-speedup claim. SR-28 remains open to implement and validate bounded startup
-and high-rate delivery handling, including memory and latency tradeoffs.
+CPU-speedup claim. These probes motivated the bounded startup/high-rate
+delivery change validated in the production follow-up below (SR-28).
 
 Fresh Python processes separately converted the original **1944 × 56** stream
 at about 762 FPS, without an additional `payload()` copy. Three cold runs lost
@@ -264,3 +264,55 @@ exit 1); subsequent broadcast-ack discovery confirmed the original MAC,
 192.168.0.25 / 255.255.255.0 and gateway 0.0.0.0. The host NIC's before/after
 `ifconfig` text was byte-identical. All viewer, service and diagnostic processes
 were stopped. No long run was started.
+
+
+### Production delivery default, 2026-10-27
+
+Commit `d50bce7` raises the shared GigE/USB3 completed-frame queue from 4 to 16,
+without changing assembly, per-frame allocation, payload copying or event
+queue behavior. Four deterministic regressions exercise the actual default
+queue constructors and enqueue/consume paths: preserve the observed twelve-
+frame startup burst from block 1; a twenty-frame burst retains blocks 5–20
+and counts exactly sixteen deliveries plus four host evictions. USB3 hardware
+was not available; its queue behavior is covered by those regressions and the
+fake-camera suite, not a new USB hardware measurement.
+
+The rebuilt release CLI then ran two additional five-second QUISS cases:
+
+| Aggregate Mono8 ROI | Complete frames | Measured FPS | Image payload Mb/s | Incomplete / missed / host drops / missing / resends |
+|---|---:|---:|---:|---|
+| 24 × 16 (six 4 × 16) | 13,401 | 2675.18 | 8.22 | 0 / 0 / 0 / 0 / 0 |
+| 4320 × 540 (six 720 × 540) | 253 | 50.57 | 943.72 | 0 / 0 / 0 / 0 / 0 |
+
+Both used simultaneous mode, 5 µs exposure and requested 5000 FPS. The table
+reports observed rates; these short runs do not establish an absolute frame-rate
+ceiling. The CLI process's maximum RSS was
+11,911,168 and 16,613,376 bytes respectively, measured by macOS `time -lp`,
+including XML/control setup and shutdown. These short peaks are not an
+endurance trend or a baseline CPU comparison. The queue can retain up to
+16 payloads, versus 4 before: at the full aggregate ROI that is 37,324,800
+bytes of pending payloads, plus assembly buffers and application-held frames.
+It can also retain older frames longer if a consumer falls behind. Normal
+prompt consumption does not preallocate sixteen payloads; arbitrary consumer
+stalls can still overflow the bounded queue.
+
+After this final batch, all 50 explicit baseline values and persistent network
+registers again matched. Discovery verified the original camera address/mask/
+gateway despite the expected return-to-subnet FORCEIP acknowledgement timeout;
+the host NIC text was unchanged. All hardware processes stopped before the
+software suites. Evidence is under `production-check/` in the same ignored
+local record. No long test or release was performed.
+
+
+Production-change software validation passed root formatting, all-target clippy
+with denied warnings, all-feature warning-free Rustdoc and both WebAssembly
+checks. The final root suite passed **1,075 tests** (41 opt-in cases ignored);
+Studio passed **67 tests** and the separate Tauri workspace **78**, with both
+workspaces' formatting/clippy checks passing. The scripted UDP overflow test
+now sends 22 frames so it still verifies six oldest-frame evictions and exactly
+sixteen deliveries. UI code and generated IPC types are unchanged by this
+buffer-only change.
+
+The independent GenTL harness also passed ten strict pixel-pattern frames each
+through its C consumer and Harvesters; all five served-port XML documents
+validated against the schema. No harness step was skipped.

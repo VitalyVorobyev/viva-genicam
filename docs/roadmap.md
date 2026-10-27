@@ -8,7 +8,7 @@ The order of the work ahead. **This file only looks forward**: shipped work live
 
 The Manta and [QUISS six-sensor bench](hardware-rtvision-2026-10-26.md) run the [hardware test plan](hardware-test-plan.md). Hardware availability promotes these rows:
 
-- **Found on hardware**: TC-41; **SR-28**, complete-frame delivery under high-rate acquisition. Resolve measured delivery drops before another endurance run.
+- **Found on hardware**: TC-41.
 - **Control channel**: TC-38.
 - **GenApi**: TC-39, API-19.
 - **Local validation**: run the opt-in hardware suite while a camera is available. CI-22 is deferred: no self-hosted runner or hardware workflow is planned.

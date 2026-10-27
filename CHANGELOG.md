@@ -12,7 +12,7 @@ release opens with what to read before upgrading.
 
 ### Added
 
-- **QUISS hardware follow-up.** Native Studio quick controls, compact preview, corrected near-cap cadence and controls after a software reset passed short checks. Instrumented delivery probes locate small-ROI loss before the first consumer read; preloading NumPy avoided cold-import drops. Production startup handling remains open; see the [bench record](docs/hardware-rtvision-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27) ([#226](https://github.com/VitalyVorobyev/viva-genicam/pull/226)).
+- **QUISS hardware follow-up.** Native Studio quick controls, compact preview, corrected near-cap cadence and controls after a software reset passed short checks. Instrumented delivery probes locate small-ROI loss before the first consumer read; preloading NumPy avoided cold-import drops. See the [bench record](docs/hardware-rtvision-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27) ([#226](https://github.com/VitalyVorobyev/viva-genicam/pull/226)).
 
 - **A compact image preview while configuring a camera.** Expand **Image preview** in Studio's Features tab and start acquisition to check settings without leaving the tab. It shares the existing preview connection and remembers whether it is folded ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
@@ -29,6 +29,8 @@ release opens with what to read before upgrading.
 - **A GigE Vision hardware smoke suite.** `crates/viva-genicam/tests/gige_hardware.rs`, `#[ignore]`d and selected by `VIVA_GIGE_IP`, runs the parts of the hardware test plan a test can judge against a real camera; see [CONTRIBUTING → Tests](CONTRIBUTING.md#tests). All 19 tests pass on the Manta G-125B ([#216](https://github.com/VitalyVorobyev/viva-genicam/pull/216)).
 
 ### Changed
+
+- **More startup headroom for frame delivery (SR-28).** The bounded GigE Vision and USB3 Vision delivery queue holds 16 completed frames instead of 4. QUISS hardware had already evicted eight frames while acquisition start returned; a 16-frame queue retained frame 1 in the short probes and tolerated a 3 ms consumer pause. It permits up to four times the queued payload memory and a longer pending-frame age; per-frame allocation and copying stay unchanged. GigE hardware was measured; USB3 behavior is covered by fake/queue regressions ([#227](https://github.com/VitalyVorobyev/viva-genicam/pull/227)).
 
 - **Lower acquisition overhead on Unix.** The GVSP receiver uses bounded socket reads and resend writes instead of polling before every packet; Windows retains readiness polling. Focused timeout and cancellation tests, a reproducible two-process benchmark, and Manta ROI measurements accompany the change. Frame allocation and the four-frame delivery queue are unchanged ([#222](https://github.com/VitalyVorobyev/viva-genicam/pull/222)).
 

@@ -162,7 +162,7 @@ GigE side is the GVSP receive engine
 ([ADR-0025](adrs/adr0025-gvsp-receive-engine.md)): one thread per stream reads
 the socket, accepting only the camera as a source, a socket-free assembler
 builds blocks in place and finds the gaps to ask the camera for again, and
-frames reach the application through a four-frame drop-oldest queue, async or
+frames reach the application through a sixteen-frame drop-oldest queue, async or
 blocking; opened by `Camera::open_stream`. The U3V side
 ([ADR-0032](adrs/adr0032-usb3-vision-transport.md)) is the same shape: one
 thread per stream keeps several bulk transfers queued on the endpoint

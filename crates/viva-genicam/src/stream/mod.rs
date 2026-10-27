@@ -1319,7 +1319,7 @@ impl<'a> From<&'a mut GigeDevice> for StreamBuilder<'a> {
 /// The thread starts when the stream is created and stops, joined within a
 /// few milliseconds, when it is dropped. It reads every datagram as it
 /// arrives, whether or not anything is waiting for a frame, and keeps up to
-/// four finished frames for [`next_block`](Self::next_block) or
+/// sixteen finished frames for [`next_block`](Self::next_block) or
 /// [`next_block_blocking`](Self::next_block_blocking); when the application
 /// falls behind, the oldest is dropped and counted in
 /// [`StreamStats::frames_backpressure`].

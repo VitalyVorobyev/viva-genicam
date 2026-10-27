@@ -468,11 +468,11 @@ async fn incomplete_frames_are_delivered_only_when_asked() {
 #[test]
 fn a_slow_consumer_loses_the_oldest_frames_and_counts_them() {
     let mut h = Harness::new(576);
-    let datagrams: Vec<Datagram> = (1..=10).flat_map(small_block).collect();
+    let datagrams: Vec<Datagram> = (1..=22).flat_map(small_block).collect();
     h.send(&datagrams);
     let stats = h.settle(|s| s.frames_backpressure == 6);
     assert_eq!(stats.frames_backpressure, 6, "{stats:?}");
-    let ids: Vec<u64> = (0..4)
+    let ids: Vec<u64> = (0..16)
         .map(|_| {
             h.stream
                 .next_block_blocking(WAIT)
@@ -481,9 +481,9 @@ fn a_slow_consumer_loses_the_oldest_frames_and_counts_them() {
                 .block_id()
         })
         .collect();
-    assert_eq!(ids, vec![7, 8, 9, 10]);
+    assert_eq!(ids, (7..=22).collect::<Vec<_>>());
     let stats = h.stream.stats();
-    assert_eq!(stats.frames_complete + stats.frames_backpressure, 10);
+    assert_eq!(stats.frames_complete + stats.frames_backpressure, 22);
     assert!(matches!(
         h.stream.next_block_blocking(Duration::from_millis(20)),
         Err(GenicamError::Timeout(_))

@@ -78,6 +78,17 @@
       ]
     },
     {
+      "id": "chunk_data",
+      "title": "Chunk Data",
+      "icon": "bookmark",
+      "default_open": false,
+      "features": [
+        { "node": "ChunkModeActive", "widget": "bool_toggle" },
+        { "node": "ChunkSelector", "widget": "enum_select" },
+        { "node": "ChunkEnable", "widget": "bool_toggle" }
+      ]
+    },
+    {
       "id": "color_processing",
       "title": "Color Processing",
       "icon": "palette",

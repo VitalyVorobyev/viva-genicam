@@ -41,6 +41,11 @@ pub(crate) trait Device: Send {
     /// The image size and pixel format a stream would start with.
     fn image_format(&self) -> (u32, u32, String);
 
+    /// Decode this frame's attached chunk ports without device register I/O.
+    fn chunk_features(&mut self, _frame: &Frame) -> Vec<(String, Result<String, String>)> {
+        Vec::new()
+    }
+
     /// Open the stream and start acquiring.
     fn start(&mut self, options: &StartOptions) -> Result<Frames, String>;
 
@@ -161,6 +166,13 @@ impl Device for Camera<GigeRegisterIo> {
         image_format_of(self)
     }
 
+    fn chunk_features(&mut self, frame: &Frame) -> Vec<(String, Result<String, String>)> {
+        Camera::chunk_features(self, frame)
+            .into_iter()
+            .map(|(name, value)| (name, value.map_err(|error| error.to_string())))
+            .collect()
+    }
+
     fn start(&mut self, options: &StartOptions) -> Result<Frames, String> {
         let monitor = self.transport().control_state() == ControlState::Monitor;
         if !monitor && self.transport().control_state() != ControlState::Held {
@@ -259,6 +271,13 @@ impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
 
     fn image_format(&self) -> (u32, u32, String) {
         image_format_of(self)
+    }
+
+    fn chunk_features(&mut self, frame: &Frame) -> Vec<(String, Result<String, String>)> {
+        Camera::chunk_features(self, frame)
+            .into_iter()
+            .map(|(name, value)| (name, value.map_err(|error| error.to_string())))
+            .collect()
     }
 
     fn start(&mut self, _options: &StartOptions) -> Result<Frames, String> {

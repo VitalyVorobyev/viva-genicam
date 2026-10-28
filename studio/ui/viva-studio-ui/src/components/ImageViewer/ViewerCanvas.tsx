@@ -14,6 +14,8 @@ import { buildTransform } from "./zoomPanUtils";
 import { formatPixelSample } from "./pixelInspectorUtils";
 import type { PixelHoverInfo } from "./pixelInspectorUtils";
 import { sampleNativePixel, type NativeFrame } from "./nativeFrame";
+import { parsePreviewFrame } from "../../device/frameMetadata";
+import type { FrameMetadata } from "../../device/types";
 import { followPreview } from "../../device/previewStream";
 import { CrosshairOverlay } from "./CrosshairOverlay";
 import { RoiOverlay } from "./RoiOverlay";
@@ -38,6 +40,7 @@ interface ViewerCanvasProps {
   streamKey?: string;
   onFrameStats: (fps: number) => void;
   onFrame?: () => void;
+  onFrameMetadata?: (metadata: FrameMetadata | null) => void;
   onZoomPanChange?: (state: ZoomPanState) => void;
   pixelFormat?: string;
   onPixelHover?: (info: PixelHoverInfo | null) => void;
@@ -61,6 +64,7 @@ export function ViewerCanvas({
   streamKey,
   onFrameStats,
   onFrame,
+  onFrameMetadata,
   onZoomPanChange,
   onPixelHover,
   resetZoomRef,
@@ -79,6 +83,7 @@ export function ViewerCanvas({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const lastFrameRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const lastMetadataRef = useRef<FrameMetadata | null>(null);
   // Whether a frame has been drawn; shown as "Acquisition stopped" once the
   // stream ends.
   const [hasRenderedFrame, setHasRenderedFrame] = useState(false);
@@ -249,6 +254,8 @@ export function ViewerCanvas({
     onFrameStats(fps);
   });
 
+  const emitFrameMetadata = useEffectEvent((metadata: FrameMetadata | null) => onFrameMetadata?.(metadata));
+
   const emitFrame = useEffectEvent(() => {
     onFrame?.();
   });
@@ -265,8 +272,9 @@ export function ViewerCanvas({
     if (!active || frozen() || !lastFrameRef.current) return;
     let disposed = false;
     const frame = lastFrameRef.current;
+    const metadata = lastMetadataRef.current;
     void drawPreview(frame, () => !disposed && lastFrameRef.current === frame && isActive() && !frozen())
-      .then((drawn) => { if (drawn) emitFrame(); })
+      .then((drawn) => { if (drawn) { emitFrameMetadata(metadata); emitFrame(); } })
       .catch(() => { /* A malformed cached preview must not break tab switching. */ });
     return () => { disposed = true; };
   }, [active]);
@@ -278,9 +286,18 @@ export function ViewerCanvas({
     let firstBinaryLogged = false;
     let disposed = false;
 
+    lastFrameRef.current = null;
+    lastMetadataRef.current = null;
+    emitFrameMetadata(null);
     const unsubscribe = followPreview(wsUrl, {
       error: () => { if (!disposed) emitFrameStats(0); },
-      close: () => { if (!disposed) emitFrameStats(0); },
+      close: () => {
+        if (disposed) return;
+        emitFrameStats(0);
+        lastFrameRef.current = null;
+        lastMetadataRef.current = null;
+        if (!frozen()) emitFrameMetadata(null);
+      },
       message: (data) => {
         if (typeof data === "string") {
           if (!firstInfoLogged) {
@@ -301,9 +318,12 @@ export function ViewerCanvas({
           return;
         }
 
-        // Store raw bytes for pixel sampling before decoding
-        const frame = new Uint8Array(data);
+        // Keep metadata with the exact image it describes, including cached frames.
+        let preview;
+        try { preview = parsePreviewFrame(data); } catch { return; }
+        const { bmp: frame, metadata } = preview;
         lastFrameRef.current = frame;
+        lastMetadataRef.current = metadata;
         if (snapshotRef) snapshotRef.current = frame;
 
         if (!firstBinaryLogged) {
@@ -322,6 +342,7 @@ export function ViewerCanvas({
         drawPreview(frame, () => !disposed && lastFrameRef.current === frame && isActive() && !frozen())
           .then((drawn) => {
             if (!drawn) return;
+            emitFrameMetadata(metadata);
             // Rolling 1-second FPS window
             const now = performance.now();
             frameTimes.push(now);

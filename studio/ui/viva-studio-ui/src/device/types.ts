@@ -25,6 +25,7 @@ export type {
   FeatureStateChanged,
   FeaturesInvalidated,
   ImageMeta,
+  FrameMetadata,
   JsonValue,
   NetworkConfig,
   NumericRange,

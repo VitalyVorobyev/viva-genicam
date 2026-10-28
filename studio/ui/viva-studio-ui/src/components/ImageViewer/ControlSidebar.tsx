@@ -1,13 +1,14 @@
 import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
-import type { SfncGroup } from "../../device/types";
+import type { FrameMetadata, SfncGroup } from "../../device/types";
 import { useSfncGroups } from "../../device/useSfncGroups";
 import { useSplitter } from "../Layout/useSplitter";
 import { isSectionApplicable } from "./sfncGroupUtils";
 import { SidebarSection } from "./SidebarSection";
 import { SectionIcon } from "./sectionIcons";
 import { useSectionPersistence } from "./useSectionPersistence";
+import { FrameMetadataSection } from "./FrameMetadataSection";
 import { AcquisitionSection } from "./AcquisitionSection";
 import { FeatureGroupSection } from "./FeatureGroupSection";
 import { StatisticsSection, type StatisticsSectionProps } from "./StatisticsSection";
@@ -22,6 +23,8 @@ interface ControlSidebarProps {
   deviceId: string | null;
   /** The stream's counters, for the Statistics section. */
   statistics: Omit<StatisticsSectionProps, "isConnected">;
+  frameMetadata?: FrameMetadata | null;
+  frozen?: boolean;
 }
 
 const NO_NODES = {};
@@ -30,6 +33,7 @@ const NO_NODES = {};
  * The Statistics section, which the UI adds after the fast acquisition/exposure controls (or
  * first, for a camera without one): it shows the stream, not features.
  */
+const FRAME_METADATA = { id: "frame_metadata", title: "Frame metadata", icon: "activity", defaultOpen: false };
 const STATISTICS = { id: "statistics", title: "Statistics", icon: "activity", defaultOpen: true };
 
 /**
@@ -47,6 +51,8 @@ export function ControlSidebar({
   cameraModel,
   deviceId,
   statistics,
+  frameMetadata = null,
+  frozen = false,
 }: ControlSidebarProps) {
   const groups = useSfncGroups();
   const sectionPersistence = useSectionPersistence(cameraModel);
@@ -102,10 +108,16 @@ export function ControlSidebar({
   const orderedGroups = [...fastGroups, ...otherGroups];
   const statsAfter = fastGroups.length;
   const sections: Array<{ id: string; title: string; icon: string }> = [...orderedGroups];
-  sections.splice(statsAfter, 0, STATISTICS);
+  sections.splice(statsAfter, 0, STATISTICS, FRAME_METADATA);
   const groupsById = new Map(visibleGroups.map((g) => [g.id, g]));
 
   function renderSection(id: string): ReactNode {
+    if (id === FRAME_METADATA.id) {
+      return <SidebarSection key={id} id={id} title={FRAME_METADATA.title} icon={FRAME_METADATA.icon}
+        open={sectionPersistence.isOpen(id, FRAME_METADATA.defaultOpen)} onToggle={(open) => sectionPersistence.setOpen(id, open)}>
+        <FrameMetadataSection metadata={frameMetadata} frozen={frozen} />
+      </SidebarSection>;
+    }
     if (id === STATISTICS.id) {
       return (
         <SidebarSection

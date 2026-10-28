@@ -12,13 +12,14 @@ use viva_genicam::{EvsBlock, EvsFormat, Frame, StreamBlock};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
     AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, EvsFormat as ZenohEvsFormat,
-    EvsHeader, ImageMeta, NodeOpResponse, StreamCounters, keys,
+    EvsHeader, FrameMetadata, ImageMeta, NodeOpResponse, StreamCounters, keys,
 };
 use zenoh::Session;
 
-use crate::device::DeviceOps;
+use crate::device::{DeviceOps, SharedCamera};
 use crate::pixel_format::expected_payload_len;
 use crate::source::{BlockStream, StreamSource};
+use viva_genicam::genapi::RegisterIo;
 
 /// Run the acquisition control queryable and frame streaming loop.
 pub(crate) async fn run<D: StreamSource>(
@@ -148,6 +149,7 @@ async fn handle_start<D: StreamSource>(
         device_id.to_string(),
         blocks,
         stop_rx,
+        Some(device.camera().clone()),
     ));
 
     // Let the spawned task reach its first `next_block()` poll before the
@@ -205,11 +207,12 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 /// the stream's counters on [`keys::acquisition_status`], whether or not
 /// frames arrive, and when it stops, the final counters as
 /// [`AcquisitionStatus::stopped`]. Closes the stream when it stops.
-async fn frame_loop(
+async fn frame_loop<T: RegisterIo + Send + 'static>(
     session: Arc<Session>,
     device_id: String,
     mut blocks: Box<dyn BlockStream>,
     mut stop: watch::Receiver<bool>,
+    metadata_camera: Option<SharedCamera<T>>,
 ) {
     let status_key = keys::acquisition_status(&device_id);
     let mut publisher = BlockPublisher::new(&device_id);
@@ -224,7 +227,11 @@ async fn frame_loop(
             result = blocks.next_block() => {
                 match result {
                     Ok(Some(block)) => {
-                        let Some((key, payload)) = publisher.frame(block) else {
+                        let metadata = match &block {
+                            StreamBlock::Image(frame) => Some(frame_metadata(metadata_camera.as_ref(), frame).await),
+                            _ => None,
+                        };
+                        let Some((key, payload)) = publisher.frame(block, metadata) else {
                             continue;
                         };
                         publisher.put(&session, &key, payload).await;
@@ -272,6 +279,32 @@ async fn frame_loop(
     info!(device_id, frames_acquired, "frame loop exited");
 }
 
+/// Plain images map without a camera lock or register access. Chunk mode
+/// is opt-in on the camera: only frames carrying decoded chunks take the
+/// blocking camera mutex to evaluate their XML-declared chunk features.
+async fn frame_metadata<T: RegisterIo + Send + 'static>(
+    camera: Option<&SharedCamera<T>>,
+    frame: &Frame,
+) -> FrameMetadata {
+    let mut metadata = FrameMetadata::from(frame);
+    if frame.chunks.is_none() {
+        return metadata;
+    }
+    if let Some(camera) = camera {
+        let frame = frame.clone();
+        match camera
+            .with(move |camera| Ok(camera.chunk_features(&frame)))
+            .await
+        {
+            Ok(features) => metadata = metadata.with_features(features),
+            Err(error) => {
+                metadata.chunk_error = Some(format!("Chunk feature evaluation failed: {error}"))
+            }
+        }
+    }
+    metadata
+}
+
 /// Turns stream blocks into Zenoh `(key, payload)` pairs, one topic per kind
 /// of block, and keeps each topic's sequence counter.
 ///
@@ -309,9 +342,13 @@ impl BlockPublisher {
     }
 
     /// The key and framed payload for one block, or `None` when it is dropped.
-    fn frame(&mut self, block: StreamBlock) -> Option<(String, Vec<u8>)> {
+    fn frame(
+        &mut self,
+        block: StreamBlock,
+        metadata: Option<FrameMetadata>,
+    ) -> Option<(String, Vec<u8>)> {
         match block {
-            StreamBlock::Image(frame) => self.frame_image(&frame),
+            StreamBlock::Image(frame) => self.frame_image(&frame, metadata),
             StreamBlock::Evs(events) => self.frame_evs(&events),
             // `StreamBlock` is `#[non_exhaustive]`. A kind this service does
             // not know is not an image, so it must not go on the image topic.
@@ -328,7 +365,11 @@ impl BlockPublisher {
         }
     }
 
-    fn frame_image(&mut self, frame: &Frame) -> Option<(String, Vec<u8>)> {
+    fn frame_image(
+        &mut self,
+        frame: &Frame,
+        metadata: Option<FrameMetadata>,
+    ) -> Option<(String, Vec<u8>)> {
         let device_id = self.device_id.as_str();
         if !self.logged_first_gvsp_frame {
             info!(
@@ -413,12 +454,17 @@ impl BlockPublisher {
             height: frame.height,
             seq: self.image_seq,
             row_stride,
+            metadata: metadata.or_else(|| Some(FrameMetadata::from(frame))),
         };
         self.image_seq = self.image_seq.wrapping_add(1);
-        Some((
-            self.image_key.clone(),
-            framed(&header.encode(), image_bytes),
-        ))
+        let header = match header.encode() {
+            Ok(header) => header,
+            Err(error) => {
+                warn!(device_id, %error, "could not encode image envelope");
+                return None;
+            }
+        };
+        Some((self.image_key.clone(), framed(&header, image_bytes)))
     }
 
     /// An event-vision block goes on its own topic, never on `image`
@@ -570,6 +616,55 @@ pub(crate) fn image_meta(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn plain_frame_metadata_never_takes_the_camera_lock() {
+        use viva_genicam::{
+            Camera,
+            genapi::{NodeMap, NullIo},
+        };
+        let model = viva_genapi_xml::parse("<RegisterDescription/>").unwrap();
+        let camera = SharedCamera::new(Camera::new(NullIo, NodeMap::try_from_xml(model).unwrap()));
+        // A poisoned camera cannot be locked; plain metadata still succeeds.
+        let _ = camera.with::<(), _>(|_| panic!("poison test camera")).await;
+        let frame = Frame::new(vec![1].into(), 1, 1, pfnc::PixelFormat::Mono8);
+        let metadata = frame_metadata(Some(&camera), &frame).await;
+        assert!(metadata.complete);
+        assert!(metadata.chunk_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn chunk_values_and_errors_are_evaluated_from_the_same_frame() {
+        use viva_genicam::{
+            Camera,
+            genapi::{NodeMap, NullIo},
+        };
+        let xml = r#"<RegisterDescription>
+          <Category Name="Root"><pFeature>ChunkCounter</pFeature><pFeature>ChunkMissing</pFeature></Category>
+          <Integer Name="ChunkCounter"><pValue>CounterReg</pValue></Integer>
+          <IntReg Name="CounterReg"><Address>0</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>ChunkPort</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess></IntReg>
+          <Integer Name="ChunkMissing"><pValue>MissingReg</pValue></Integer>
+          <IntReg Name="MissingReg"><Address>8</Address><Length>4</Length><AccessMode>RO</AccessMode><pPort>ChunkPort</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess></IntReg>
+          <Port Name="ChunkPort"><ChunkID>00000007</ChunkID></Port>
+        </RegisterDescription>"#;
+        let model = viva_genapi_xml::parse(xml).unwrap();
+        let camera = SharedCamera::new(Camera::new(NullIo, NodeMap::try_from_xml(model).unwrap()));
+        let mut frame = Frame::new(vec![1].into(), 1, 1, pfnc::PixelFormat::Mono8);
+        frame.block_id = u64::MAX;
+        frame.chunks = Some([(7, vec![42, 0, 0, 0].into())].into_iter().collect());
+        let metadata = frame_metadata(Some(&camera), &frame).await;
+        assert_eq!(metadata.chunks[0].id, "7");
+        assert_eq!(metadata.features[0].name, "ChunkCounter");
+        assert_eq!(metadata.features[0].value.as_deref(), Some("42"));
+        assert!(metadata.features[1].error.is_some());
+        let mut publisher = BlockPublisher::new("test");
+        let (_, wire) = publisher
+            .frame_image(&frame, Some(metadata.clone()))
+            .unwrap();
+        let (header, pixels) = FrameHeader::decode(&wire).unwrap();
+        assert_eq!(header.metadata, Some(metadata));
+        assert_eq!(pixels, &[1]);
+    }
+
     #[test]
     fn frame_image_preserves_padded_rows_and_trims_only_trailing_bytes() {
         let mut publisher = BlockPublisher::new("test");
@@ -580,12 +675,12 @@ mod tests {
             pfnc::PixelFormat::Mono8,
         );
         frame.padding_x = 2;
-        let (_, wire) = publisher.frame_image(&frame).unwrap();
+        let (_, wire) = publisher.frame_image(&frame, None).unwrap();
         let (header, pixels) = FrameHeader::decode(&wire).unwrap();
         assert_eq!(header.row_stride, Some(4));
         assert_eq!(pixels, &[1, 2, 99, 98, 3, 4, 97, 96]);
         frame.payload = vec![1, 2, 99, 98, 3, 4, 97].into();
-        assert!(publisher.frame_image(&frame).is_none());
+        assert!(publisher.frame_image(&frame, None).is_none());
     }
 
     #[test]
@@ -597,7 +692,7 @@ mod tests {
             1,
             pfnc::PixelFormat::Mono12Packed,
         );
-        let (_, wire) = publisher.frame_image(&frame).unwrap();
+        let (_, wire) = publisher.frame_image(&frame, None).unwrap();
         let (header, pixels) = FrameHeader::decode(&wire).unwrap();
         assert_eq!(header.row_stride, None);
         assert_eq!(pixels, frame.payload.as_ref());
@@ -612,7 +707,7 @@ mod tests {
             1,
             pfnc::PixelFormat::YUV422_8_UYVY,
         );
-        let (_, wire) = publisher.frame_image(&frame).unwrap();
+        let (_, wire) = publisher.frame_image(&frame, None).unwrap();
         let (header, pixels) = FrameHeader::decode(&wire).unwrap();
         assert_eq!(header.row_stride, None);
         assert_eq!(pixels, frame.payload.as_ref());
@@ -627,10 +722,10 @@ mod tests {
         let mut publisher = BlockPublisher::new("test");
         let mut frame = Frame::new(vec![0].into(), u32::MAX, 2, pfnc::PixelFormat::Mono16);
         frame.padding_x = 1;
-        assert!(publisher.frame_image(&frame).is_none());
+        assert!(publisher.frame_image(&frame, None).is_none());
         frame.padding_x = 0;
         frame.height = u32::MAX;
-        assert!(publisher.frame_image(&frame).is_none());
+        assert!(publisher.frame_image(&frame, None).is_none());
     }
 
     /// The `PixelFormat` entry names cameras report (vendor corpus:
@@ -697,11 +792,12 @@ mod tests {
         stats.frames_complete = 7;
         stats.frames_missed = 4;
         let (stop_tx, stop_rx) = watch::channel(false);
-        let task = tokio::spawn(frame_loop(
+        let task = tokio::spawn(frame_loop::<viva_genicam::genapi::NullIo>(
             session.clone(),
             id.clone(),
             Box::new(Stalled(stats)),
             stop_rx,
+            None,
         ));
 
         let status = next().await;

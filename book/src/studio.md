@@ -170,7 +170,7 @@ leave the live preview available.
 Native capture supports images up to 16 Mi pixels. Remote mode carries each
 frame's row stride, so padded rows and supported odd-width packed images use
 the same conversion as embedded mode. Update the service and Studio together:
-this requires service API version 7 and frame-header version 2; older frame
+this requires service API version 8 and frame-header version 3; older frame
 headers are rejected.
 
 The **Statistics** section of the Image tab counts every frame the camera
@@ -193,6 +193,29 @@ log of what Studio did.
 your system, what discovery heard, the camera's identity and, by default, its
 XML. Save it or copy it, and attach it to an issue. It is the most useful thing
 you can send us.
+
+## Frame timestamps and chunks
+
+Expand **Frame metadata** in the Image tab to inspect the displayed frame’s ID,
+raw device ticks, completeness, and any chunk IDs and values decoded from the
+camera’s XML. **Host time (ns)** is available only when the device clock has
+been calibrated; Studio does not substitute the frame’s reception time. IDs
+and timestamps retain their full precision.
+
+**Freeze** keeps these values with the same captured image used for pixel
+inspection, histogram and PNG saving. **Resume** returns to live frames.
+Missing or unreadable chunk data and metadata truncation are shown explicitly.
+
+If the camera exposes standard chunk settings, **Chunk Data** offers
+**ChunkModeActive**, **ChunkSelector** and **ChunkEnable** through the normal
+camera controls. Enable the desired selector explicitly, following the
+camera’s access restrictions; Studio does not enable chunks on connect or
+recovery. Monitor access remains read-only. Chunk values add processing work,
+so leave chunk mode off when it is unnecessary for high-rate acquisition.
+
+In remote mode, update Studio and the camera services together: this feature
+uses image wire version 3 / API 8. A bare preview from an older local streamer
+can still be displayed, but has no per-frame metadata.
 
 ## Remote mode
 

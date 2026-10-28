@@ -12,6 +12,8 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Frame timestamps and chunks in Studio (ST-52).** The Image tab shows exact frame IDs, device ticks, optional calibrated host time and XML-decoded chunk values/errors from the displayed or frozen image. Standard chunk controls remain explicit and respect read-only access. Remote services and Studio must be upgraded together for API 8 / image header 3.
+
 - **Read-only GigE monitoring in Studio (ST-49).** Choose Monitor to inspect features and watch an existing multicast stream while another application controls the camera. Stop watching and reconnect preserve the controller and never start or stop its acquisition. Discovery now requests broadcast acknowledgements and identifies cameras on another subnet, with the existing temporary-IP action available in direct mode ([#229](https://github.com/VitalyVorobyev/viva-genicam/pull/229)).
 
 - **Six-sensor hardware follow-up.** Native Studio quick controls, compact preview, corrected near-cap cadence and controls after a software reset passed short checks. Instrumented delivery probes locate small-ROI loss before the first consumer read; preloading NumPy avoided cold-import drops. See the [bench record](docs/hardware-six-sensor-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27) ([#226](https://github.com/VitalyVorobyev/viva-genicam/pull/226)).

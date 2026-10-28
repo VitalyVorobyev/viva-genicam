@@ -4,7 +4,7 @@
 //!
 //! - **meta subscriber** — listens on `image/meta`, updates the shared
 //!   `Arc<RwLock<ImageMeta>>` and the stream info the viewer reads.
-//! - **frame subscriber** — receives framed payloads (`20-byte FrameHeader + raw
+//! - **frame subscriber** — receives framed payloads (`24-byte frame prefix + bounded metadata + raw
 //!   pixels`), decodes the inline header, and draws the pixels with
 //!   [`FrameEncoder`] — the same encoder embedded mode uses — in the frame's
 //!   PFNC format, as often as [`FramePacer`] allows.
@@ -211,10 +211,17 @@ async fn run_inner(
                     }
                 };
 
+                let preview = match crate::preview::encode(&frame, header.metadata.as_ref()) {
+                    Ok(preview) => preview,
+                    Err(error) => {
+                        warn!(%error, "Dropped frame: invalid preview metadata");
+                        continue;
+                    }
+                };
                 let bmp_len = frame.len();
-                native.replace_remote(format, header.width, header.height, row_stride, pixel_data, frame.clone());
+                native.replace_remote(&header, pixel_data, frame.clone());
                 // Stored even with no viewer: the next one to connect is sent it.
-                frame_tx.send_replace(frame);
+                frame_tx.send_replace(preview);
                 pacer.sent(admitted_at);
                 if !logged_first_bmp {
                     info!(
@@ -268,7 +275,8 @@ mod tests {
             info_tx,
             shutdown_rx,
         ));
-        let mut payload = header.encode();
+        let expected_metadata = header.metadata.clone();
+        let mut payload = header.encode().expect("frame header");
         payload.extend_from_slice(pixels);
         // Publish until the source has subscribed and stored a frame.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -279,11 +287,11 @@ mod tests {
         let stored = frame_tx.borrow().clone();
         shutdown_tx.send(true).unwrap();
         source_task.await.unwrap().unwrap();
-        assert!(
-            stored.starts_with(b"BM"),
-            "no frame was kept for a later viewer"
-        );
-        (stored, native.latest().unwrap().unwrap())
+        let (metadata, bmp) = crate::preview::decode(&stored).expect("retained preview");
+        assert_eq!(metadata, expected_metadata);
+        let retained = native.latest().unwrap().unwrap();
+        assert_eq!(retained.metadata, expected_metadata);
+        (Bytes::copy_from_slice(bmp), retained)
     }
 
     /// SingleFrame mode must retain the first frame for a later viewer.
@@ -296,6 +304,7 @@ mod tests {
                 height: 2,
                 seq: 1,
                 row_stride: None,
+                metadata: None,
             },
             &[0, 64, 128, 255],
         )
@@ -303,7 +312,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn v2_padded_and_partial_packed_images_reach_preview_and_capture() {
+    async fn inline_remote_metadata_survives_preview_and_frozen_capture() {
+        let metadata = serde_json::from_value(serde_json::json!({
+            "block_id": "18446744073709551615", "ts_dev": "9007199254740993",
+            "ts_host_ns": null, "complete": true,
+            "chunks": [{"id": "42", "bytes": 8}],
+            "features": [{"name": "ChunkTimestamp", "value": "9007199254740993", "error": null}],
+            "chunk_error": null, "truncated": false
+        }))
+        .unwrap();
+        let (_, native) = retained_remote_frame(
+            FrameHeader {
+                pixel_format: PixelFormat::Mono8,
+                width: 2,
+                height: 1,
+                seq: 1,
+                row_stride: None,
+                metadata: Some(metadata),
+            },
+            &[7, 9],
+        )
+        .await;
+        let capture = crate::native::encode(&native).unwrap();
+        let size = u32::from_le_bytes(capture[4..8].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&capture[8..8 + size]).unwrap();
+        assert_eq!(header["metadata"]["block_id"], "18446744073709551615");
+        assert_eq!(
+            header["metadata"]["features"][0]["value"],
+            "9007199254740993"
+        );
+        assert_eq!(native.pixels.as_ref(), &[7, 9]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn padded_and_partial_packed_images_reach_preview_and_capture() {
         for (format, width, height, stride, pixels, expected_pixels) in [
             (
                 PixelFormat::Mono8,
@@ -329,6 +371,7 @@ mod tests {
                     height,
                     seq: 2,
                     row_stride: stride,
+                    metadata: None,
                 },
                 &pixels,
             )

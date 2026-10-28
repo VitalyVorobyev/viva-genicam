@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod evs_header;
 pub mod frame_header;
+pub mod frame_metadata;
 pub use evs_header::{EVS_HEADER_SIZE, EVS_MAGIC, EvsFormat, EvsHeader, EvsHeaderError};
 pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
+pub use frame_metadata::{
+    FrameChunk, FrameFeature, FrameMetadata, MAX_FRAME_METADATA_BYTES, MAX_FRAME_METADATA_ITEMS,
+    MAX_FRAME_METADATA_TEXT,
+};
 
 // ── Discovery ────────────────────────────────────────────────────────────────
 
@@ -50,7 +55,9 @@ pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 /// - `7` — [`FrameHeader`] version 2 carries the row stride, so padded images
 ///   retain their row layout in remote consumers. The header is 20 bytes;
 ///   version-1 image headers are rejected.
-pub const API_VERSION: u32 = 7;
+/// - `8` — version-3 image headers carry bounded per-frame metadata inline,
+///   preserving exact identifiers, timestamps and chunk values with the pixels.
+pub const API_VERSION: u32 = 8;
 
 /// Periodic announcement published by the camera service.
 ///

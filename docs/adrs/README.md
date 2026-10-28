@@ -47,6 +47,7 @@ of the record.
 | [0033](adr0033-event-channel-acknowledges-on-arrival.md) | The GVCP message channel acknowledges on arrival | Accepted |
 | [0034](adr0034-native-frame-analysis.md) | Native frame analysis from one immutable capture | Accepted |
 | [0035](adr0035-studio-embedded-recovery.md) | Embedded Studio recovery preserves identity, not acquisition | Accepted |
+| [0036](adr0036-frame-metadata-with-pixels.md) | Frame metadata travels with its pixels | Accepted |
 
 **Template:** `# ADR-NNNN: Title`, `**Status:**`, `**Date:**`, `## Context`,
 `## Decision`, `## Consequences` (Positive/Negative). File name:

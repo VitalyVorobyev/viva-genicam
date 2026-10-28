@@ -242,3 +242,24 @@ coverage does not close ST-62.
 - [ ] After a brief connection interruption, the same MAC reconnects as Monitor;
       its viewer remains stopped, and Watch works again without touching the
       controller's acquisition or settings
+
+
+## Frame metadata and chunks (ST-52)
+
+Hardware qualification is open as ST-63; software fixture results do not settle
+these native-device cases.
+
+- Start a plain GigE or USB camera stream; expand **Frame metadata**. Check
+  frame ID, device ticks (when supplied), completeness and missing calibration.
+- Enable a supported chunk selector explicitly through **Chunk Data**. Check
+  the chunk IDs and XML-derived values against the camera's own data, including
+  visible errors for an unreadable chunk feature. Disable it and verify stale
+  values disappear on the next displayed frame.
+- Freeze while frame IDs change. Metadata must stay with the frozen preview,
+  native histogram and samples until Resume, then follow live frames again.
+- Switch cameras or recover a session during a delayed preview decode. No
+  previous frame metadata may appear on the replacement viewer.
+- Repeat through matching API 8 services and Studio, then in multicast Monitor
+  mode. Monitor inspection must not write chunk settings or acquisition state.
+- Snapshot and verify restoration of any configuration deliberately changed
+  during testing. Do not treat disconnecting as configuration restoration.

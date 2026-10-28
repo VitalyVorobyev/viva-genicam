@@ -66,6 +66,26 @@ to connect.
 Studio talks to the camera directly. It can also run against cameras that
 `viva-service` exposes over the network ([remote mode](#remote-mode)).
 
+### Connection loss and recovery
+
+In direct mode, Studio watches the GigE control connection even while no image
+is being acquired. If the camera disappears, the viewer closes its old stream
+and Studio looks for the same camera by MAC address for up to 30 seconds. The
+camera may return with another IP address. Its XML and feature controls are
+loaded again; configuration values are not automatically written back.
+
+**Acquisition remains stopped after recovery.** Check the current settings and
+press **Start Acq** when ready. **Cancel reconnect** abandons the search, and
+connecting another camera also cancels it. If recovery expires, reconnect
+from the device menu.
+
+When the transport reports lost control while the camera is still reachable,
+Studio keeps the session read-only and displays **Camera control lost**. It
+does not repeatedly try to reclaim control. Use **Reconnect with control**
+when the other controller has finished. On a camera that does not identify its
+controller, a takeover may become visible only after a refused write. A disconnected USB3 Vision camera
+requires manual reconnection from the device menu.
+
 ### macOS local-network access
 
 On macOS 15 or later, allow Viva Studio access to the local network when macOS

@@ -1415,7 +1415,7 @@ impl GigeDevice {
         let our_port = u32::from(us.port());
         let our_ip = u32::from(*us.ip());
         let standard = port_register & 0xFFFF == our_port && ip_register == our_ip;
-        // QUISS RTVision_6L_DCAM_v2 firmware 2.0.0.0 reports the complete
+        // A maintainer-tested six-sensor GigE device reports the complete
         // controller IP at 0x0A04 and port at 0x0A14 (observed on hardware).
         // Accept that layout only when both full values name this socket;
         // in particular, do not truncate a malformed swapped port to 16 bits.

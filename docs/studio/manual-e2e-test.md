@@ -92,6 +92,25 @@ For the debug checkpoints below, give the service
 - [ ] Embedded mode: with a camera near 31 FPS, display approaches its 30 FPS
       target rather than halving to 15–16 FPS; acquisition counters stay intact
 
+### 6b.1 Embedded connection recovery
+
+- [ ] With a GigE camera idle, make the camera unreachable: the header reports
+      the loss and offers **Cancel reconnect**. Repeat while acquiring: the
+      old preview closes rather than remaining a live-looking frozen image
+- [ ] Restore connectivity within 30 seconds: the same MAC reconnects, current
+      features reload and acquisition remains stopped. **Start Acq** then
+      receives frames. Record a software reset or NIC transition separately
+      from a physical cable pull or power cycle
+- [ ] Cancel reconnect, disconnect, switch camera or exit while recovery is
+      pending: no delayed replacement or control claim remains afterward
+- [ ] Let recovery expire: a visible error offers manual reconnect
+- [ ] Let another application take control without losing reachability: the
+      **Camera control lost** banner appears, controls become read-only, and
+      there is no automatic reclaim loop. **Reconnect with control** is explicit
+- [ ] Disconnect a USB camera while receiving: reader shutdown completes and
+      manual reconnect is offered; normal Stop and finite acquisition do not
+      trigger camera recovery
+
 ### 6c. Camera panel, user sets and stream statistics
 - [ ] Diagnostics tab while connected -> "Camera" lists the model, serial and
       firmware, the MAC and the IP address

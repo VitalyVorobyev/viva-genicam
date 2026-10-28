@@ -318,6 +318,122 @@ async fn losing_control_is_reported_and_can_be_reclaimed() {
     assert_eq!(cam.fake().controller().await, Some(client_addr(&camera)));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn refreshing_revoked_control_reads_only_and_notifies_the_watcher() {
+    let cam = common::TestCamera::start_with(|b| b.heartbeat_timeout_ms(10_000)).await;
+    let camera = open(Access::Control).await;
+    let addr = client_addr(&camera);
+    let mut changed = camera.transport().watch_control();
+    cam.fake().revoke_control().await;
+    cam.fake().commands().reset();
+
+    assert_eq!(
+        camera.transport().refresh_control_state().expect("refresh"),
+        ControlState::Lost
+    );
+    assert_eq!(*changed.borrow_and_update(), ControlState::Lost);
+    assert_eq!(
+        camera
+            .transport()
+            .refresh_control_state()
+            .expect("already lost"),
+        ControlState::Lost
+    );
+    drop(camera);
+    let sent = cam.fake().commands().from(addr);
+    assert!(
+        sent.iter().any(|&(_, at)| at == CCP),
+        "ownership was read: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|&(command, _)| is_write(command)),
+        "refresh/drop wrote: {sent:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refreshing_an_exclusive_takeover_marks_lost_and_never_releases_the_other_controller() {
+    let cam = common::TestCamera::start_with(|b| b.heartbeat_timeout_ms(10_000)).await;
+    let camera = open(Access::Control).await;
+    let addr = client_addr(&camera);
+    cam.fake().revoke_control().await;
+    let mut other = GigeDevice::open(fake_addr()).await.expect("other socket");
+    other.set_exclusive_access(true);
+    other.claim_control().await.expect("exclusive takeover");
+    let owner = cam.fake().controller().await;
+    cam.fake().commands().reset();
+
+    assert_eq!(
+        camera
+            .transport()
+            .refresh_control_state()
+            .expect("denial is reachable loss"),
+        ControlState::Lost
+    );
+    drop(camera);
+    assert_eq!(cam.fake().controller().await, owner);
+    let sent = cam.fake().commands().from(addr);
+    assert!(
+        !sent.iter().any(|&(command, _)| is_write(command)),
+        "refresh/drop wrote: {sent:?}"
+    );
+    other.release_control().await.expect("other release");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refreshing_monitor_and_released_sessions_sends_no_commands() {
+    let cam = common::TestCamera::start().await;
+    for access in [Access::Monitor, Access::Control] {
+        let camera = open(access).await;
+        let addr = client_addr(&camera);
+        let expected = if access == Access::Control {
+            camera.transport().release_control().expect("release");
+            ControlState::Released
+        } else {
+            ControlState::Monitor
+        };
+        cam.fake().commands().reset();
+        assert_eq!(
+            camera
+                .transport()
+                .refresh_control_state()
+                .expect("unchanged"),
+            expected
+        );
+        drop(camera);
+        assert!(cam.fake().commands().from(addr).is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refreshing_an_unreachable_camera_returns_the_transport_error_without_claiming_loss() {
+    let cam = common::TestCamera::start_with(|b| b.heartbeat_timeout_ms(10_000)).await;
+    let camera = open(Access::Control).await;
+    camera
+        .transport()
+        .lock_device()
+        .expect("device")
+        .set_control_timeout(Duration::from_millis(20));
+    cam.fake().unplug();
+    let error = camera
+        .transport()
+        .refresh_control_state()
+        .expect_err("no answer");
+    assert!(
+        matches!(
+            error,
+            viva_genicam::GenicamError::Gige {
+                source: gige::GigeError::Timeout,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert_eq!(camera.transport().control_state(), ControlState::Held);
+    cam.fake().plug_in();
+    drop(camera);
+}
+
 /// Another application took control in between: CCP still reads as
 /// controlled, so the heartbeat cannot tell, but the camera refuses the next
 /// write with `ACCESS_DENIED` — and that marks the session as having lost

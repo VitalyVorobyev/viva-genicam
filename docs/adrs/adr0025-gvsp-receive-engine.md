@@ -265,12 +265,12 @@ receive-engine tests using the Manta’s already-recorded per-packet layout.
 
 
 **2026-10-27 amendment (SR-28):** raise the completed-frame handoff from four
-to sixteen frames. On the QUISS six-sensor device at about 2675 FPS, eight
+to sixteen frames. On the six-sensor device at about 2675 FPS, eight
 complete frames were already evicted when `acquisition_start()` returned;
 the first consumer read received block 9. In the instrumented unpaused runs,
 the counter stayed unchanged afterward. Capacity 16 retained block 1 and
 absorbed a controlled 3 ms consumer pause in the short hardware trials. The
-[hardware record](../hardware-rtvision-2026-10-26.md#high-rate-delivery) describes
+[hardware record](../hardware-six-sensor-2026-10-26.md#high-rate-delivery) describes
 the measurements and the subsequent production CLI checks.
 
 The sixteen-frame bound provides headroom above the observed twelve-frame

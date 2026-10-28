@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -10,7 +11,7 @@ import type { Diag, ParseXmlResponse, UiGraph, UiNode } from "../../xml_model/ui
 import type { NodeValue } from "../../xml_model/values";
 import { useToast } from "../../context/ToastContext";
 import { formatErrorMessage } from "../../device/errorMessage";
-import { useFeature, useFeatureStore } from "../../device/FeatureStoreContext";
+import { useCameraReadOnly, useFeature, useFeatureStore } from "../../device/FeatureStoreContext";
 import { TauriProvider, type XmlModelProvider } from "../../xml_model/provider";
 import { isUnknownKind, nodeDisplayName, nodeKindCssKey, nodeKindIcon } from "../../xml_model/helpers";
 import { useDraftValues } from "../../state/useDraftValues";
@@ -75,6 +76,10 @@ export function FeatureBrowserPage({
   // Live state comes from the store; each control and row reads only what it
   // shows (backlog ST-29).
   const store = useFeatureStore();
+  const readOnly = useCameraReadOnly();
+  const writable = isConnected && !readOnly;
+  const operation = useRef(0);
+  useLayoutEffect(() => { operation.current++; }, [isConnected, readOnly, externalModel]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const presetInputRef = useRef<HTMLInputElement | null>(null);
@@ -381,37 +386,43 @@ export function FeatureBrowserPage({
     if (selectedNode) resetDraft(selectedNode.name);
   }, [resetDraft, selectedNode]);
 
-  const canApply = Boolean(provider.applyNodeValue);
-  const canExecute = Boolean(provider.executeCommand);
+  const canApply = writable && Boolean(provider.applyNodeValue);
+  const canExecute = writable && Boolean(provider.executeCommand);
 
   const applyDisabledReason = useMemo(() => {
+    if (!writable) return readOnly ? "Read-only camera session." : "No camera connected.";
     if (!provider.applyNodeValue) return "Offline mode: will be enabled when connected to a device.";
     if (!selectedHasDraft) return "No draft value to apply.";
     if (selectedDraftErrors.length > 0) return "Resolve validation errors before applying.";
     return "";
-  }, [provider.applyNodeValue, selectedDraftErrors.length, selectedHasDraft]);
+  }, [writable, readOnly, provider.applyNodeValue, selectedDraftErrors.length, selectedHasDraft]);
 
   const executeDisabledReason = useMemo(() => {
+    if (!writable) return readOnly ? "Read-only camera session." : "No camera connected.";
     if (!provider.executeCommand) return "Offline mode: will be enabled when connected to a device.";
     return "";
-  }, [provider.executeCommand]);
+  }, [writable, readOnly, provider.executeCommand]);
 
   const onApply = useCallback(async () => {
-    if (!provider.applyNodeValue || !selectedNode) return;
+    if (!writable || !provider.applyNodeValue || !selectedNode) return;
+    const ticket = operation.current;
     if (!selectedHasDraft || selectedDraftErrors.length > 0) return;
     const value = drafts[selectedNode.name];
     if (value === undefined) return;
     try {
       const result = await provider.applyNodeValue(selectedNode.name, value);
+      if (ticket !== operation.current) return;
       // Store the refreshed state so the form mirrors what the device
       // actually accepted (clamping/rounding applies). Then clear the draft —
       // the editor falls back to `liveState.value`, which is now correct.
       store.set(selectedNode.name, result);
       resetDraft(selectedNode.name);
     } catch (e) {
+      if (ticket !== operation.current) return;
       toast.addToast("error", `Apply failed: ${formatErrorMessage(e)}`);
     }
   }, [
+    writable,
     drafts,
     provider,
     selectedDraftErrors.length,
@@ -423,9 +434,11 @@ export function FeatureBrowserPage({
   ]);
 
   const onExecute = useCallback(async () => {
-    if (!provider.executeCommand || !selectedNode) return;
+    if (!writable || !provider.executeCommand || !selectedNode) return;
+    const ticket = operation.current;
     try {
       const result = await provider.executeCommand(selectedNode.name);
+      if (ticket !== operation.current) return;
       if (!result.ok) {
         toast.addToast(
           "error",
@@ -439,9 +452,10 @@ export function FeatureBrowserPage({
       // a manual refresh.
       store.setMany(result.affected_states ?? {});
     } catch (e) {
+      if (ticket !== operation.current) return;
       toast.addToast("error", `${selectedNode.name} failed: ${formatErrorMessage(e)}`);
     }
-  }, [provider, selectedNode, store, toast]);
+  }, [writable, provider, selectedNode, store, toast]);
 
   const applicableDraftCount = useMemo(
     () => countApplicableDrafts(drafts, errors),
@@ -449,7 +463,8 @@ export function FeatureBrowserPage({
   );
 
   const handleBatchApply = useCallback(async () => {
-    if (!provider.applyNodeValue || !graph) return;
+    if (!writable || !provider.applyNodeValue || !graph) return;
+    const ticket = operation.current;
 
     // Build ordered list of valid drafts (skip any with validation errors).
     const applicable: Array<{ name: string; value: NodeValue }> = [];
@@ -464,10 +479,12 @@ export function FeatureBrowserPage({
 
     const failed: string[] = [];
     for (let i = 0; i < applicable.length; i++) {
+      if (ticket !== operation.current) { setBatchProgress(null); return; }
       const item = applicable[i];
       if (!item) continue;
       try {
         const result = await provider.applyNodeValue(item.name, item.value);
+        if (ticket !== operation.current) { setBatchProgress(null); return; }
         store.set(item.name, result);
         resetDraft(item.name);
       } catch {
@@ -478,13 +495,13 @@ export function FeatureBrowserPage({
     }
 
     setBatchProgress(null);
-    if (failed.length > 0) {
+    if (ticket === operation.current && failed.length > 0) {
       toast.addToast(
         "error",
         `${failed.length} of ${applicable.length} writes failed (${failed.join(", ")}); their drafts are kept`,
       );
     }
-  }, [provider, graph, drafts, errors, resetDraft, store, toast]);
+  }, [writable, provider, graph, drafts, errors, resetDraft, store, toast]);
 
   // T7.1+T7.2 — filtered search results; the list shows the first
   // SEARCH_LIMIT and says so.

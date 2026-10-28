@@ -12,7 +12,7 @@ release opens with what to read before upgrading.
 
 ### Added
 
-- **QUISS hardware follow-up.** Native Studio quick controls, compact preview, corrected near-cap cadence and controls after a software reset passed short checks. Instrumented delivery probes locate small-ROI loss before the first consumer read; preloading NumPy avoided cold-import drops. See the [bench record](docs/hardware-rtvision-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27) ([#226](https://github.com/VitalyVorobyev/viva-genicam/pull/226)).
+- **Six-sensor hardware follow-up.** Native Studio quick controls, compact preview, corrected near-cap cadence and controls after a software reset passed short checks. Instrumented delivery probes locate small-ROI loss before the first consumer read; preloading NumPy avoided cold-import drops. See the [bench record](docs/hardware-six-sensor-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27) ([#226](https://github.com/VitalyVorobyev/viva-genicam/pull/226)).
 
 - **A compact image preview while configuring a camera.** Expand **Image preview** in Studio's Features tab and start acquisition to check settings without leaving the tab. It shares the existing preview connection and remembers whether it is folded ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
@@ -30,7 +30,7 @@ release opens with what to read before upgrading.
 
 ### Changed
 
-- **More startup headroom for frame delivery (SR-28).** The bounded GigE Vision and USB3 Vision delivery queue holds 16 completed frames instead of 4. QUISS hardware had already evicted eight frames while acquisition start returned; a 16-frame queue retained frame 1 in the short probes and tolerated a 3 ms consumer pause. It permits up to four times the queued payload memory and a longer pending-frame age; per-frame allocation and copying stay unchanged. GigE hardware was measured; USB3 behavior is covered by fake/queue regressions ([#227](https://github.com/VitalyVorobyev/viva-genicam/pull/227)).
+- **More startup headroom for frame delivery (SR-28).** The bounded GigE Vision and USB3 Vision delivery queue holds 16 completed frames instead of 4. The six-sensor camera had already evicted eight frames while acquisition start returned; a 16-frame queue retained frame 1 in the short probes and tolerated a 3 ms consumer pause. It permits up to four times the queued payload memory and a longer pending-frame age; per-frame allocation and copying stay unchanged. GigE hardware was measured; USB3 behavior is covered by fake/queue regressions ([#227](https://github.com/VitalyVorobyev/viva-genicam/pull/227)).
 
 - **Lower acquisition overhead on Unix.** The GVSP receiver uses bounded socket reads and resend writes instead of polling before every packet; Windows retains readiness polling. Focused timeout and cancellation tests, a reproducible two-process benchmark, and Manta ROI measurements accompany the change. Frame allocation and the four-frame delivery queue are unchanged ([#222](https://github.com/VitalyVorobyev/viva-genicam/pull/222)).
 
@@ -47,13 +47,17 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **Private bench evidence is anonymous.** Current documentation and code comments omit private device names and identifiers; raw captures and device descriptions remain outside distributed packages ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
+
+- **Studio detects a lost direct camera.** GigE sessions recover by MAC with fresh XML and controls; acquisition stays stopped until Start. A reachable camera whose control was taken stays read-only instead of silently reclaiming it. Disconnect, switching cameras and exit cancel pending recovery; disconnected USB cameras offer manual reconnection ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
+
 - **Studio controls after remote recovery (ST-61).** A replacement session refreshes both the backend model and the UI's feature cache, restoring controls without a manual reconnect. A delayed replacement cannot undo a user disconnect ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
 - **Studio preview cadence near its display limit (ST-60).** Deadline pacing avoids taking every second frame from a camera just above the preview rate; a long pause starts a fresh cadence. Encoding time no longer shifts each deadline ([#225](https://github.com/VitalyVorobyev/viva-genicam/pull/225)).
 
 - **Remote feature-state queries.** The single-feature wildcard handler no longer replies to the reserved bulk-state endpoint, avoiding duplicate error replies and repeated `bulk`-is-not-a-node warnings during Studio polling ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
 
-- **QUISS six-sensor control ownership.** RTVision_6L_DCAM_v2 reverses its primary-application IP/port register contents. Ownership now also accepts that layout when both complete values identify our socket, preventing false control loss during acquisition. The real-camera GenTL consumer also preserves compressed XML as a ZIP container. See the [hardware record](docs/hardware-rtvision-2026-10-26.md) ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
+- **Six-sensor camera control ownership.** A maintainer-tested device reverses its primary-application IP/port register contents. Ownership now also accepts that layout when both complete values identify our socket, preventing false control loss during acquisition. The real-camera GenTL consumer also preserves compressed XML as a ZIP container. See the [hardware record](docs/hardware-six-sensor-2026-10-26.md) ([#224](https://github.com/VitalyVorobyev/viva-genicam/pull/224)).
 
 - **Remote padded images.** Services retain each row's padding and send its stride in image header v2 (API 7), so Studio preview and native capture use the correct rows. Odd packed and subsampled images retain their final pixel group. Update services and Studio together ([#221](https://github.com/VitalyVorobyev/viva-genicam/pull/221)).
 

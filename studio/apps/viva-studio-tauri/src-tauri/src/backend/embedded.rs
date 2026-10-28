@@ -23,13 +23,16 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tracing::{info, warn};
-use viva_genicam::Camera;
 use viva_genicam::u3v::U3vDeviceInfo;
+use viva_genicam::{Camera, ControlState, Reopen};
 use viva_streamer::frame::{FrameEncoder, FramePacer};
 use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState, StreamCounters};
 
-use crate::state::device_state::{DeviceInfo, StreamerInfo};
-use crate::state::events::Events;
+use crate::commands::xml_model::{ParseXmlResponse, parse_camera_model};
+use crate::state::SharedModelState;
+use crate::state::connection::Connection;
+use crate::state::device_state::{ConnectionState, DeviceInfo, DisconnectReason, StreamerInfo};
+use crate::state::events::{DeviceReconnected, Events, FeaturesInvalidated};
 
 use super::camera::{Device, Frames};
 use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig, StartOptions};
@@ -50,6 +53,18 @@ struct ConnectedCamera {
     /// a USB3 Vision device admits one owner, and this app is it (DX-06).
     /// `None` for GigE Vision, which the report opens read-only.
     report: Option<viva_genicam::report::OpenCamera>,
+    gige_info: Option<viva_genicam::gige::DeviceInfo>,
+    read_only: bool,
+}
+
+impl ConnectedCamera {
+    fn writes_allowed(&self) -> bool {
+        !self.read_only
+            && self
+                .camera
+                .watch_control()
+                .is_none_or(|control| *control.borrow() == ControlState::Held)
+    }
 }
 
 /// State for an active image acquisition session.
@@ -59,6 +74,72 @@ struct AcquisitionState {
     reader: tauri::async_runtime::JoinHandle<()>,
     /// Serves the viewer's WebSocket.
     server: tauri::async_runtime::JoinHandle<()>,
+}
+
+/// One owner for connection transitions. Advancing the watch value cancels
+/// asynchronous opens immediately; the transition lock serializes cleanup and
+/// publication, including an outstanding blocking USB open.
+struct Lifecycle {
+    generation: watch::Sender<u64>,
+    transition: AsyncMutex<()>,
+    shutting_down: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Self {
+            generation: watch::channel(0).0,
+            transition: AsyncMutex::new(()),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl Lifecycle {
+    fn begin(&self) -> u64 {
+        let mut ticket = 0;
+        self.generation.send_modify(|n| {
+            *n = n.wrapping_add(1);
+            ticket = *n;
+        });
+        ticket
+    }
+    fn advance(&self, expected: u64) -> Option<u64> {
+        let mut ticket = None;
+        self.generation.send_if_modified(|current| {
+            if *current != expected {
+                return false;
+            }
+            *current = current.wrapping_add(1);
+            ticket = Some(*current);
+            true
+        });
+        ticket
+    }
+
+    fn ticket(&self) -> u64 {
+        *self.generation.borrow()
+    }
+    fn current(&self, ticket: u64) -> bool {
+        self.ticket() == ticket
+    }
+}
+
+fn cap_read_only(state: &mut FeatureState) {
+    match state.access_mode.as_str() {
+        "RW" => state.access_mode = "RO".into(),
+        "WO" => state.access_mode = "NA".into(),
+        _ => {}
+    }
+}
+
+fn parse_mac(text: &str) -> Option<[u8; 6]> {
+    let bytes: Vec<_> = text
+        .split(':')
+        .map(|b| u8::from_str_radix(b, 16))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    bytes.try_into().ok()
 }
 
 // ── EmbeddedBackend ─────────────────────────────────────────────────────────
@@ -78,37 +159,63 @@ const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Backend that communicates directly with cameras via GigE Vision / USB3 Vision.
+#[derive(Clone)]
 pub struct EmbeddedBackend {
     /// The connected camera; see the module docs.
     camera: Arc<AsyncMutex<Option<ConnectedCamera>>>,
     /// Cache of discovered devices, updated periodically.
-    discovered: RwLock<Vec<DeviceInfo>>,
+    discovered: Arc<RwLock<Vec<DeviceInfo>>>,
     /// The USB3 Vision cameras the last scan found, by device id.
-    usb: RwLock<HashMap<String, U3vDeviceInfo>>,
+    usb: Arc<RwLock<HashMap<String, U3vDeviceInfo>>>,
     /// The id each camera present at a USB position was given, keyed by the
     /// position and its vendor and product: a camera keeps its serial-based id
     /// when a later scan cannot read the serial. Positions a scan no longer
     /// finds are forgotten.
-    u3v_ids: RwLock<HashMap<UsbPosition, String>>,
+    u3v_ids: Arc<RwLock<HashMap<UsbPosition, String>>>,
     /// The host address each camera's discovery reply arrived at, by MAC.
     /// Kept across scans: one scan can miss a camera the list still shows.
-    local_ips: RwLock<HashMap<[u8; 6], Ipv4Addr>>,
+    local_ips: Arc<RwLock<HashMap<[u8; 6], Ipv4Addr>>>,
     /// Active acquisition state, if streaming.
-    acquisition: AsyncMutex<Option<AcquisitionState>>,
+    acquisition: Arc<AsyncMutex<Option<AcquisitionState>>>,
     events: Arc<Events>,
+    lifecycle: Arc<Lifecycle>,
+    connection: Arc<Connection>,
+    model: SharedModelState,
+    reopen_patience: Duration,
+    #[cfg(test)]
+    reopen_interface: Option<String>,
 }
 
 impl EmbeddedBackend {
     /// Create a new embedded backend with no connected camera.
+    #[cfg(test)]
     pub fn new(events: Arc<Events>) -> Self {
+        Self::with_state(
+            events.clone(),
+            Arc::new(Connection::new(events)),
+            Default::default(),
+        )
+    }
+
+    pub fn with_state(
+        events: Arc<Events>,
+        connection: Arc<Connection>,
+        model: SharedModelState,
+    ) -> Self {
         Self {
             camera: Arc::new(AsyncMutex::new(None)),
-            discovered: RwLock::new(Vec::new()),
-            local_ips: RwLock::new(HashMap::new()),
-            usb: RwLock::new(HashMap::new()),
-            u3v_ids: RwLock::new(HashMap::new()),
-            acquisition: AsyncMutex::new(None),
+            discovered: Default::default(),
+            local_ips: Default::default(),
+            usb: Default::default(),
+            u3v_ids: Default::default(),
+            acquisition: Default::default(),
+            lifecycle: Arc::new(Lifecycle::default()),
             events,
+            connection,
+            model,
+            reopen_patience: Duration::from_secs(30),
+            #[cfg(test)]
+            reopen_interface: None,
         }
     }
 
@@ -133,7 +240,17 @@ impl EmbeddedBackend {
         found: Vec<viva_genicam::gige::DeviceInfo>,
         usb: Vec<U3vDeviceInfo>,
     ) {
-        let (mut devices, local_ips) = discovered_gige(found);
+        let (mut devices, local_ips) = discovered_gige(found.clone());
+        let _transition = self.lifecycle.transition.lock().await;
+        if let Some(connected) = self.camera.lock().await.as_mut()
+            && let Some(previous) = &connected.gige_info
+            && let Some(fresh) = found
+                .iter()
+                .find(|d| d.mac == previous.mac && d.ip == previous.ip)
+        {
+            // Never retarget a live socket when discovery finds a changed IP.
+            connected.gige_info = Some(fresh.clone());
+        }
         let mut by_id = HashMap::new();
         let mut known = self.u3v_ids.write().await;
         // A camera that is gone takes its id with it, so a device that later
@@ -156,6 +273,13 @@ impl EmbeddedBackend {
             devices.push(device);
         }
         drop(known);
+        let usb_lost = self
+            .camera
+            .lock()
+            .await
+            .as_ref()
+            .filter(|c| c.report.is_some() && !by_id.contains_key(&c.device_id))
+            .map(|_| self.lifecycle.ticket());
         *self.usb.write().await = by_id;
         *self.discovered.write().await = devices.clone();
         // Updated, never cleared: a camera one scan misses keeps its address
@@ -163,6 +287,17 @@ impl EmbeddedBackend {
         self.local_ips.write().await.extend(local_ips);
         for d in &devices {
             self.events.send(d);
+        }
+        if let Some(ticket) = usb_lost {
+            let backend = self.clone();
+            tauri::async_runtime::spawn(async move {
+                backend
+                    .lose_camera(
+                        ticket,
+                        "USB3 Vision camera disappeared from enumeration".into(),
+                    )
+                    .await;
+            });
         }
     }
 
@@ -238,6 +373,8 @@ impl EmbeddedBackend {
             camera,
             device_id: device_id.to_string(),
             report,
+            gige_info: None,
+            read_only: false,
         });
     }
 
@@ -298,7 +435,9 @@ impl EmbeddedBackend {
             return;
         };
         let released = tauri::async_runtime::spawn_blocking(move || {
-            connected.camera.release(RELEASE_ACK_TIMEOUT);
+            if !connected.read_only {
+                connected.camera.release(RELEASE_ACK_TIMEOUT);
+            }
             drop(connected);
         })
         .await;
@@ -309,20 +448,8 @@ impl EmbeddedBackend {
     }
 }
 
-#[async_trait]
-impl DeviceBackend for EmbeddedBackend {
-    fn mode(&self) -> BackendMode {
-        BackendMode::Embedded
-    }
-
-    async fn discover(&self) -> Vec<DeviceInfo> {
-        self.discovered.read().await.clone()
-    }
-
-    async fn connect(&self, device_id: &str) -> Result<ConnectResult, String> {
-        // Disconnect any existing camera first.
-        self.release_camera().await;
-
+impl EmbeddedBackend {
+    async fn open(&self, device_id: &str) -> Result<ConnectResult, String> {
         let usb = self.usb.read().await.get(device_id).cloned();
         if let Some(info) = usb {
             return self.connect_u3v(device_id, info).await;
@@ -346,10 +473,21 @@ impl DeviceBackend for EmbeddedBackend {
                 )
             })?;
         let (name, model) = cached
-            .map(|d| (d.name, d.model))
+            .as_ref()
+            .map(|d| (d.name.clone(), d.model.clone()))
             .unwrap_or_else(|| (device_id.to_string(), String::new()));
 
-        let gige_info = viva_genicam::gige::DeviceInfo {
+        let mut gige_info = viva_genicam::gige::DeviceInfo {
+            mac: cached
+                .as_ref()
+                .and_then(|d| d.mac.as_deref())
+                .and_then(parse_mac)
+                .unwrap_or_default(),
+            local_ip: cached
+                .as_ref()
+                .and_then(|d| d.mac.as_deref())
+                .and_then(parse_mac)
+                .and_then(|mac| self.local_ips.try_read().ok()?.get(&mac).copied()),
             model: if model.is_empty() {
                 None
             } else {
@@ -358,6 +496,17 @@ impl DeviceBackend for EmbeddedBackend {
             ..viva_genicam::gige::DeviceInfo::from_ip(ip)
         };
 
+        if let Some(found) = viva_genicam::gige::discover_ip(ip, Duration::from_millis(500))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            if gige_info.mac != [0; 6] && gige_info.mac != found.mac {
+                return Err("Another camera now occupies the discovered address; rediscover before connecting".into());
+            }
+            gige_info = found;
+        } else if gige_info.mac != [0; 6] {
+            return Err("The discovered camera's MAC could not be verified at its address; rediscover before connecting".into());
+        }
         info!(device_id, "Connecting to GigE camera (embedded mode)");
 
         let (camera, xml) = viva_genicam::connect_gige_with_xml(&gige_info)
@@ -371,6 +520,9 @@ impl DeviceBackend for EmbeddedBackend {
         );
 
         self.attach(Box::new(camera), device_id, None).await;
+        if let Some(connected) = self.camera.lock().await.as_mut() {
+            connected.gige_info = Some(gige_info);
+        }
 
         Ok(ConnectResult {
             xml,
@@ -378,16 +530,78 @@ impl DeviceBackend for EmbeddedBackend {
             model,
         })
     }
+}
+
+#[async_trait]
+impl DeviceBackend for EmbeddedBackend {
+    fn mode(&self) -> BackendMode {
+        BackendMode::Embedded
+    }
+
+    async fn discover(&self) -> Vec<DeviceInfo> {
+        self.discovered.read().await.clone()
+    }
+
+    async fn connect(&self, device_id: &str) -> Result<ConnectResult, String> {
+        self.connect_session(device_id)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    async fn connect_model(
+        &self,
+        device_id: &str,
+        _: &Arc<Connection>,
+        _: &SharedModelState,
+    ) -> Result<ParseXmlResponse, String> {
+        self.connect_session(device_id)
+            .await
+            .map(|(_, model)| model)
+    }
 
     async fn disconnect(&self) -> Result<(), String> {
-        self.release_camera().await;
+        let ticket = self.lifecycle.begin();
+        let _transition = self.lifecycle.transition.lock().await;
+        if self.lifecycle.current(ticket) {
+            self.release_camera().await;
+            self.connection
+                .set_when(ConnectionState::Disconnected, || {
+                    self.lifecycle.current(ticket)
+                })
+                .await;
+        }
         Ok(())
+    }
+
+    async fn disconnect_model(&self, _: &Arc<Connection>) -> Result<(), String> {
+        self.disconnect().await
+    }
+
+    async fn publish_acquisition_status(&self, active: bool, events: &Events) {
+        let _transition = self.lifecycle.transition.lock().await;
+        let acquisition = self.acquisition.lock().await;
+        let running = acquisition
+            .as_ref()
+            .is_some_and(|s| !s.reader.inner().is_finished());
+        if active == running {
+            events.send(&if active {
+                AcquisitionStatus::active(None, None)
+            } else {
+                AcquisitionStatus::inactive()
+            });
+        }
     }
 
     async fn get_feature_state(&self, name: &str) -> Result<FeatureState, String> {
         let name = name.to_string();
-        self.with_camera(move |connected| connected.camera.feature_state(&name))
-            .await
+        self.with_camera(move |connected| {
+            let mut state = connected.camera.feature_state(&name)?;
+            if !connected.writes_allowed() {
+                cap_read_only(&mut state);
+            }
+            Ok(state)
+        })
+        .await
     }
 
     async fn set_feature(
@@ -397,14 +611,24 @@ impl DeviceBackend for EmbeddedBackend {
     ) -> Result<Vec<String>, String> {
         let value = json_value_to_string(value);
         let name = name.to_string();
-        self.with_camera(move |connected| connected.camera.set(&name, &value))
-            .await
+        self.with_camera(move |connected| {
+            if !connected.writes_allowed() {
+                return Err("Camera control lost: reconnect explicitly to write".into());
+            }
+            connected.camera.set(&name, &value)
+        })
+        .await
     }
 
     async fn exec_command(&self, name: &str) -> Result<Vec<String>, String> {
         let name = name.to_string();
-        self.with_camera(move |connected| connected.camera.execute(&name))
-            .await
+        self.with_camera(move |connected| {
+            if !connected.writes_allowed() {
+                return Err("Camera control lost: reconnect explicitly to execute commands".into());
+            }
+            connected.camera.execute(&name)
+        })
+        .await
     }
 
     async fn bulk_feature_state(
@@ -416,7 +640,10 @@ impl DeviceBackend for EmbeddedBackend {
             let mut result = HashMap::with_capacity(names.len());
             for name in names {
                 match connected.camera.feature_state(&name) {
-                    Ok(state) => {
+                    Ok(mut state) => {
+                        if !connected.writes_allowed() {
+                            cap_read_only(&mut state);
+                        }
                         result.insert(name, state);
                     }
                     Err(e) => {
@@ -430,11 +657,27 @@ impl DeviceBackend for EmbeddedBackend {
     }
 
     async fn start_acquisition(&self, options: StartOptions) -> Result<StreamerInfo, String> {
+        let ticket = self.lifecycle.ticket();
+        let _transition = self.lifecycle.transition.lock().await;
+        if self
+            .lifecycle
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+            || !self.lifecycle.current(ticket)
+        {
+            return Err("Connection superseded or Studio is shutting down".into());
+        }
         // Stop any previous acquisition.
         self.stop_acquisition_inner().await;
 
         let (width, height, pixel_format, frames) = self
             .with_camera(move |connected| {
+                if !connected.writes_allowed() {
+                    return Err(
+                        "Camera control lost: reconnect explicitly before starting acquisition"
+                            .into(),
+                    );
+                }
                 let (width, height, pixel_format) = connected.camera.image_format();
                 let frames = connected.camera.start(&options)?;
                 Ok((width, height, pixel_format, frames))
@@ -459,23 +702,23 @@ impl DeviceBackend for EmbeddedBackend {
 
         info!(ws_url, width, height, "Embedded streamer starting");
 
+        let viewer = viva_streamer::ws::AppState {
+            frame_tx,
+            info_tx,
+            native,
+        };
         let frame_reader_handle = tauri::async_runtime::spawn(run_frame_reader(
             frames,
-            frame_tx.clone(),
-            native.clone(),
-            info_tx.clone(),
+            viewer.clone(),
             shutdown_rx.clone(),
             StreamInfoTracker::new(width, height, pixel_format),
             self.events.clone(),
+            Some((self.clone(), ticket)),
         ));
 
         // Spawn WS server task.
         let ws_handle = {
-            let state = viva_streamer::ws::AppState {
-                frame_tx,
-                info_tx,
-                native,
-            };
+            let state = viewer;
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = viva_streamer::ws::run_server_with_listener(
                     listener,
@@ -502,6 +745,10 @@ impl DeviceBackend for EmbeddedBackend {
             server: ws_handle,
         });
 
+        if !self.lifecycle.current(ticket) {
+            self.stop_acquisition_inner().await;
+            return Err("Connection superseded".into());
+        }
         Ok(StreamerInfo {
             ws_url,
             width,
@@ -510,10 +757,17 @@ impl DeviceBackend for EmbeddedBackend {
     }
 
     async fn stop_acquisition(&self) -> Result<(), String> {
+        let _transition = self.lifecycle.transition.lock().await;
         self.stop_acquisition_inner().await;
         // Stop acquisition on the camera, if one is still connected.
         match self
-            .with_camera(|connected| connected.camera.acquisition_stop())
+            .with_camera(|connected| {
+                if !connected.writes_allowed() {
+                    Ok(())
+                } else {
+                    connected.camera.acquisition_stop()
+                }
+            })
             .await
         {
             Err(e) if e == "No camera connected" => Ok(()),
@@ -522,7 +776,13 @@ impl DeviceBackend for EmbeddedBackend {
     }
 
     async fn shutdown(&self) {
+        self.lifecycle
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.lifecycle.begin();
+        let _transition = self.lifecycle.transition.lock().await;
         self.release_camera().await;
+        self.connection.set(ConnectionState::Disconnected).await;
     }
 
     async fn report(&self, include_xml: bool) -> Result<String, String> {
@@ -633,6 +893,9 @@ impl DeviceBackend for EmbeddedBackend {
         gateway: Ipv4Addr,
     ) -> Result<(), String> {
         self.with_camera(move |connected| {
+            if !connected.writes_allowed() {
+                return Err("Camera control lost: persistent IP changes require control".into());
+            }
             let mut device_guard = gige_of(connected)?
                 .transport()
                 .lock_device()
@@ -663,6 +926,403 @@ fn gige_of(
         .ok_or_else(|| "Only a GigE Vision camera has an IP configuration".to_string())
 }
 
+impl EmbeddedBackend {
+    async fn connect_session(
+        &self,
+        device_id: &str,
+    ) -> Result<(ConnectResult, ParseXmlResponse), String> {
+        if self
+            .lifecycle
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("Studio is shutting down".into());
+        }
+        let ticket = self.lifecycle.begin();
+        let mut cancelled = self.lifecycle.generation.subscribe();
+        let _transition = self.lifecycle.transition.lock().await;
+        if self
+            .lifecycle
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+            || !self.lifecycle.current(ticket)
+        {
+            return Err("Connection superseded or Studio is shutting down".into());
+        }
+        self.release_camera().await;
+        self.connection
+            .set_when(
+                ConnectionState::Connecting {
+                    device_id: device_id.into(),
+                },
+                || self.lifecycle.current(ticket),
+            )
+            .await;
+        // A USB open is blocking and must finish before a replacement opens its
+        // endpoint. GigE opens are cancel-safe, including claimed-control cleanup.
+        let result = if self.usb.read().await.contains_key(device_id) {
+            self.open(device_id).await
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancelled.changed() => Err("Connection superseded".into()),
+                opened = self.open(device_id) => opened,
+            }
+        };
+        if !self.lifecycle.current(ticket) {
+            self.release_camera().await;
+            return Err("Connection superseded".into());
+        }
+        let result = match result {
+            Ok(result) => result,
+            Err(message) => {
+                self.connection
+                    .set_when(
+                        ConnectionState::Error {
+                            message: message.clone(),
+                        },
+                        || self.lifecycle.current(ticket),
+                    )
+                    .await;
+                return Err(message);
+            }
+        };
+        let parsed = match parse_camera_model(result.xml.clone()) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.release_camera().await;
+                self.connection
+                    .set_when(
+                        ConnectionState::Error {
+                            message: message.clone(),
+                        },
+                        || self.lifecycle.current(ticket),
+                    )
+                    .await;
+                return Err(message);
+            }
+        };
+        self.publish_model(
+            ticket,
+            device_id,
+            &result.device_name,
+            &result.model,
+            &parsed,
+            false,
+        )
+        .await?;
+        self.watch_session(ticket);
+        Ok((result, parsed))
+    }
+
+    async fn publish_model(
+        &self,
+        ticket: u64,
+        device_id: &str,
+        name: &str,
+        model_name: &str,
+        parsed: &ParseXmlResponse,
+        replacement: bool,
+    ) -> Result<(), String> {
+        let mut model = self.model.write().await;
+        if !self.lifecycle.current(ticket) {
+            return Err("Connection superseded".into());
+        }
+        model.update(
+            parsed.xml.clone(),
+            parsed.graph.clone(),
+            parsed.diags.clone(),
+            Some(device_id.into()),
+        );
+        drop(model);
+        self.connection
+            .set_when(
+                ConnectionState::Connected {
+                    device_id: device_id.into(),
+                    device_name: name.into(),
+                    model: model_name.into(),
+                },
+                || self.lifecycle.current(ticket),
+            )
+            .await;
+        if !self.lifecycle.current(ticket) {
+            return Err("Connection superseded".into());
+        }
+        if replacement {
+            self.events.send(&DeviceReconnected {
+                device_id: device_id.into(),
+                node_count: parsed.summary.node_count,
+                model: parsed.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn watch_session(&self, ticket: u64) {
+        let backend = self.clone();
+        let mut cancelled = self.lifecycle.generation.subscribe();
+        tauri::async_runtime::spawn(async move {
+            let mut control = backend
+                .with_camera(|c| Ok(c.camera.watch_control()))
+                .await
+                .ok()
+                .flatten();
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancelled.changed() => return,
+                    _ = async {
+                        match &mut control {
+                            Some(control) => { if control.changed().await.is_err() { std::future::pending::<()>().await; } },
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {},
+                    _ = tick.tick() => {},
+                }
+                if !backend.lifecycle.current(ticket) {
+                    return;
+                }
+                match backend.with_camera(|c| c.camera.health()).await {
+                    Err(reason) => {
+                        backend.lose_camera(ticket, reason).await;
+                        return;
+                    }
+                    Ok(ControlState::Lost) => backend.lose_control(ticket).await,
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    async fn lose_control(&self, ticket: u64) {
+        let _transition = self.lifecycle.transition.lock().await;
+        if !self.lifecycle.current(ticket) {
+            return;
+        }
+        let Ok(Some(device_id)) = self
+            .with_camera(|c| {
+                if c.read_only {
+                    return Ok(None);
+                }
+                c.read_only = true;
+                Ok(Some(c.device_id.clone()))
+            })
+            .await
+        else {
+            return;
+        };
+        self.stop_acquisition_inner().await;
+        let previous = self.connection.get().await;
+        let (device_name, model) = match previous {
+            ConnectionState::Connected {
+                device_name, model, ..
+            } => (device_name, model),
+            _ => (device_id.clone(), String::new()),
+        };
+        self.connection.set_when(ConnectionState::ControlLost { device_id, device_name, model, reason: "Camera control was lost. Features are read-only; reconnect explicitly to claim control again.".into() }, || self.lifecycle.current(ticket)).await;
+        if self.lifecycle.current(ticket) {
+            let names = self
+                .model
+                .read()
+                .await
+                .graph
+                .as_ref()
+                .map(|g| g.nodes_by_name.keys().cloned().collect())
+                .unwrap_or_default();
+            self.events.send(&FeaturesInvalidated {
+                cause: "control-lost".into(),
+                names,
+            });
+        }
+    }
+
+    async fn lose_camera(&self, ticket: u64, reason: String) {
+        let _transition = self.lifecycle.transition.lock().await;
+        if !self.lifecycle.current(ticket) {
+            return;
+        }
+        let Some((device_id, previous, was_read_only)) =
+            self.camera.lock().await.as_ref().map(|c| {
+                (
+                    c.device_id.clone(),
+                    c.gige_info.clone(),
+                    !c.writes_allowed(),
+                )
+            })
+        else {
+            return;
+        };
+        // Retire every notification from the lost session before recovery.
+        // A reader error and a watchdog timeout may arrive together.
+        let Some(ticket) = self.lifecycle.advance(ticket) else {
+            return;
+        };
+        self.events.send(&DisconnectReason {
+            device_id: device_id.clone(),
+            message: reason.clone(),
+        });
+        self.connection
+            .set_when(
+                ConnectionState::Reconnecting {
+                    device_id: device_id.clone(),
+                    attempt: 0,
+                    max_attempts: 1,
+                    reason: reason.clone(),
+                },
+                || self.lifecycle.current(ticket),
+            )
+            .await;
+        self.stop_acquisition_inner().await;
+        if let Some(connected) = self.camera.lock().await.take() {
+            // The failed health transaction already exhausted its retries.
+            // Drop cancels/drains the keepalive and makes one bounded release;
+            // do not traverse AcquisitionStop/TLParamsLocked on a missing link.
+            tauri::async_runtime::spawn_blocking(move || drop(connected))
+                .await
+                .ok();
+        }
+        let Some(previous) = previous.filter(|p| p.mac != [0; 6] && !was_read_only) else {
+            self.connection
+                .set_when(
+                    ConnectionState::Error {
+                        message: format!("{reason}. Reconnect manually; automatic recovery requires a verified GigE identity and a session that still held control."),
+                    },
+                    || self.lifecycle.current(ticket),
+                )
+                .await;
+            return;
+        };
+        // Studio has no explicitly selected NIC. The old endpoint is tried
+        // first, then every physical interface can rediscover the same MAC.
+        let options = Reopen::new().patience(self.reopen_patience);
+        #[cfg(test)]
+        let options = match &self.reopen_interface {
+            Some(interface) => options.interface(interface),
+            None => options,
+        };
+        let mut cancelled = self.lifecycle.generation.subscribe();
+        if !self.lifecycle.current(ticket) {
+            return;
+        }
+        let reopened = tokio::select! {
+            biased;
+            _ = cancelled.changed() => return,
+            result = viva_genicam::reopen_gige(&previous, &options) => result,
+        };
+        if !self.lifecycle.current(ticket) {
+            if let Ok(reopened) = reopened {
+                tauri::async_runtime::spawn_blocking(move || drop(reopened))
+                    .await
+                    .ok();
+            }
+            return;
+        }
+        match reopened {
+            Ok(reopened) => {
+                // Recovery never resumes an old acquisition, including a camera
+                // that kept sending while only the host link was interrupted.
+                let stopped = tauri::async_runtime::spawn_blocking(move || {
+                    let mut reopened = reopened;
+                    reopened.camera.acquisition_stop().map(|()| reopened)
+                })
+                .await;
+                let reopened = match stopped {
+                    Ok(Ok(reopened)) => reopened,
+                    Ok(Err(error)) => {
+                        self.connection.set_when(ConnectionState::Error { message: format!("The camera reopened but acquisition could not be stopped: {error}") }, || self.lifecycle.current(ticket)).await;
+                        return;
+                    }
+                    Err(error) => {
+                        self.connection
+                            .set_when(
+                                ConnectionState::Error {
+                                    message: format!(
+                                        "Stopping the reopened camera failed: {error}"
+                                    ),
+                                },
+                                || self.lifecycle.current(ticket),
+                            )
+                            .await;
+                        return;
+                    }
+                };
+                if !self.lifecycle.current(ticket) {
+                    tauri::async_runtime::spawn_blocking(move || drop(reopened))
+                        .await
+                        .ok();
+                    return;
+                }
+                let parsed = match parse_camera_model(reopened.xml.clone()) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        tauri::async_runtime::spawn_blocking(move || drop(reopened))
+                            .await
+                            .ok();
+                        self.connection
+                            .set_when(ConnectionState::Error { message }, || {
+                                self.lifecycle.current(ticket)
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                let info = reopened.device;
+                let name = info
+                    .user_name
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| info.model.clone())
+                    .unwrap_or_else(|| device_id.clone());
+                let model_name = info.model.clone().unwrap_or_default();
+                self.attach(Box::new(reopened.camera), &device_id, None)
+                    .await;
+                if let Some(connected) = self.camera.lock().await.as_mut() {
+                    connected.gige_info = Some(info.clone());
+                }
+                if let Some(local) = info.local_ip {
+                    self.local_ips.write().await.insert(info.mac, local);
+                }
+                let (devices, _) = discovered_gige(vec![info]);
+                let mut discovered = self.discovered.write().await;
+                if !self.lifecycle.current(ticket) {
+                    return;
+                }
+                for device in devices {
+                    if let Some(cached) = discovered.iter_mut().find(|d| d.id == device.id) {
+                        *cached = device.clone();
+                    } else {
+                        discovered.push(device.clone());
+                    }
+                    self.events.send(&device);
+                }
+                drop(discovered);
+                if self
+                    .publish_model(ticket, &device_id, &name, &model_name, &parsed, true)
+                    .await
+                    .is_ok()
+                {
+                    self.watch_session(ticket);
+                }
+            }
+            Err(error) => {
+                self.connection
+                    .set_when(
+                        ConnectionState::Error {
+                            message: format!(
+                                "Could not reconnect within {:?}: {error}. Reconnect manually.",
+                                self.reopen_patience
+                            ),
+                        },
+                        || self.lifecycle.current(ticket),
+                    )
+                    .await
+            }
+        }
+    }
+}
+
 // ── Streaming ───────────────────────────────────────────────────────────────
 
 /// Read frames until shutdown, sending the viewer a BMP of each as often as
@@ -673,13 +1333,18 @@ fn gige_of(
 /// counters as [`AcquisitionStatus::stopped`], as `viva-service` does (ST-36).
 async fn run_frame_reader(
     mut frame_stream: Frames,
-    frame_tx: watch::Sender<Bytes>,
-    native: viva_streamer::native::NativeCapture,
-    info_tx: watch::Sender<viva_streamer::ws::StreamInfo>,
+    viewer: viva_streamer::ws::AppState,
     mut shutdown_rx: watch::Receiver<bool>,
     mut info: StreamInfoTracker,
     events: Arc<Events>,
+    lifecycle: Option<(EmbeddedBackend, u64)>,
 ) {
+    let viva_streamer::ws::AppState {
+        frame_tx,
+        native,
+        info_tx,
+    } = viewer;
+    let mut terminal_error = None;
     let mut pacer = FramePacer::new(Duration::from_secs(1) / DISPLAY_FPS);
     let mut last_status = tokio::time::Instant::now();
     let mut status_tick = tokio::time::interval_at(last_status + STATUS_INTERVAL, STATUS_INTERVAL);
@@ -716,6 +1381,7 @@ async fn run_frame_reader(
                 }
                 Err(e) => {
                     warn!("Frame stream error: {e}");
+                    terminal_error = Some(e.to_string());
                     break;
                 }
             },
@@ -778,6 +1444,15 @@ async fn run_frame_reader(
     // backend awaits this task before it starts another stream or releases
     // the camera.
     frame_stream.shutdown().await;
+    if *shutdown_rx.borrow() {
+        terminal_error = None;
+    }
+    if let (Some(reason), Some((backend, ticket))) = (terminal_error, lifecycle) {
+        // Separate task: loss handling drains this reader before releasing the camera.
+        tauri::async_runtime::spawn(async move {
+            backend.lose_camera(ticket, reason).await;
+        });
+    }
 }
 
 /// The stream description the viewer last got, re-sent when a frame
@@ -1678,5 +2353,732 @@ mod tests {
         assert_eq!(info.height, 1536);
         assert_eq!(info.pixel_format, "BayerRG8");
         assert_eq!(info.encoding, "BMP");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::state::events::Recorder;
+    use viva_fake_gige::{GvcpCommand, REG_ACQ_START};
+
+    async fn wait_state(backend: &EmbeddedBackend, predicate: impl Fn(&ConnectionState) -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if predicate(&backend.connection.get().await) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("expected connection transition");
+    }
+
+    #[test]
+    fn generation_cancels_old_work_and_stale_model_publication() {
+        tauri::async_runtime::block_on(async {
+            let backend = EmbeddedBackend::new(Default::default());
+            let ticket = backend.lifecycle.begin();
+            let mut cancellation = backend.lifecycle.generation.subscribe();
+            assert!(backend.lifecycle.current(ticket));
+            backend.lifecycle.begin();
+            cancellation.changed().await.expect("cancelled");
+            assert!(!backend.lifecycle.current(ticket));
+            let parsed = parse_camera_model(
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../../crates/viva_xml_model/fixtures/minimal.xml"
+                ))
+                .into(),
+            )
+            .expect("model");
+            assert!(
+                backend
+                    .publish_model(ticket, "stale", "old", "old", &parsed, true)
+                    .await
+                    .is_err()
+            );
+            assert!(backend.model.read().await.xml.is_none());
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Disconnected
+            ));
+        });
+    }
+
+    #[test]
+    fn explicit_disconnect_wins_when_loss_waits_for_the_camera_mutex() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let (events, recorder) = Recorder::events();
+            let backend = EmbeddedBackend::new(events);
+            backend.connect("127.0.0.1").await.expect("connect");
+            let camera = backend.camera.lock().await;
+            let ticket = backend.lifecycle.ticket();
+            let losing = backend.clone();
+            let loss = tauri::async_runtime::spawn(async move {
+                losing.lose_camera(ticket, "late loss".into()).await;
+            });
+            while backend.lifecycle.transition.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+            let closing = backend.clone();
+            let disconnect = tauri::async_runtime::spawn(async move {
+                closing.disconnect().await.expect("disconnect");
+            });
+            while backend.lifecycle.current(ticket) {
+                tokio::task::yield_now().await;
+            }
+            drop(camera);
+            loss.await.expect("loss task");
+            disconnect.await.expect("disconnect task");
+            assert!(backend.camera.lock().await.is_none());
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Disconnected
+            ));
+            assert!(recorder.of("disconnect-reason").is_empty());
+            assert!(recorder.of("device-reconnected").is_empty());
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn exclusive_takeover_is_control_loss_rather_than_a_reclaim_loop() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let (events, recorder) = Recorder::events();
+            let backend = EmbeddedBackend::new(events);
+            backend.connect("127.0.0.1").await.expect("connect");
+            fake.revoke_control().await;
+            let info = backend
+                .camera
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .gige_info
+                .clone()
+                .unwrap();
+            let (other, _) = viva_genicam::connect_gige_as(&info, viva_genicam::Access::Exclusive)
+                .await
+                .expect("other controller");
+            let owner = fake.controller().await.expect("other owns camera");
+            wait_state(&backend, |s| {
+                matches!(s, ConnectionState::ControlLost { .. })
+            })
+            .await;
+            fake.commands().reset();
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            assert!(backend.start_acquisition(Default::default()).await.is_err());
+            assert_eq!(fake.controller().await, Some(owner));
+            assert_eq!(
+                fake.commands().total(GvcpCommand::WriteReg)
+                    + fake.commands().total(GvcpCommand::WriteMem),
+                0,
+                "no automatic claims or feature writes"
+            );
+            assert!(recorder.of("device-reconnected").is_empty());
+            backend.disconnect().await.expect("disconnect");
+            assert_eq!(
+                fake.controller().await,
+                Some(owner),
+                "disconnect cannot release the other controller"
+            );
+            tauri::async_runtime::spawn_blocking(move || drop(other))
+                .await
+                .expect("release other");
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn usb_loss_is_detected_idle_and_streaming_without_automatic_reopen() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use viva_genicam::u3v::{U3vError, UsbTransfer};
+        struct Disconnecting {
+            inner: viva_fake_u3v::FakeU3vTransport,
+            unplugged: AtomicBool,
+        }
+        impl UsbTransfer for Disconnecting {
+            fn bulk_write(
+                &self,
+                ep: u8,
+                bytes: &[u8],
+                timeout: Duration,
+            ) -> Result<usize, U3vError> {
+                if self.unplugged.load(SeqCst) {
+                    return Err(U3vError::Disconnected);
+                }
+                self.inner.bulk_write(ep, bytes, timeout)
+            }
+            fn bulk_read(
+                &self,
+                ep: u8,
+                bytes: &mut [u8],
+                timeout: Duration,
+            ) -> Result<usize, U3vError> {
+                if self.unplugged.load(SeqCst) {
+                    return Err(U3vError::Disconnected);
+                }
+                self.inner.bulk_read(ep, bytes, timeout)
+            }
+        }
+        tauri::async_runtime::block_on(async {
+            for streaming in [false, true] {
+                let transport = Arc::new(Disconnecting {
+                    inner: viva_fake_u3v::FakeU3vTransport::new(64, 48, 0x0108_0001),
+                    unplugged: AtomicBool::new(false),
+                });
+                let device = viva_fake_u3v::open(transport.clone()).expect("fake USB");
+                let (camera, _) = viva_genicam::open_u3v_device(device).expect("camera");
+                let backend = EmbeddedBackend::new(Default::default());
+                backend.attach(Box::new(camera), "usb-test", None).await;
+                backend
+                    .connection
+                    .set(ConnectionState::Connected {
+                        device_id: "usb-test".into(),
+                        device_name: "USB".into(),
+                        model: "USB".into(),
+                    })
+                    .await;
+                backend.watch_session(backend.lifecycle.ticket());
+                if streaming {
+                    let stream = backend
+                        .start_acquisition(Default::default())
+                        .await
+                        .expect("start");
+                    fake_camera::first_frame(&stream.ws_url).await;
+                }
+                transport.unplugged.store(true, SeqCst);
+                wait_state(&backend, |s| matches!(s, ConnectionState::Error { .. })).await;
+                assert!(backend.camera.lock().await.is_none());
+                assert!(backend.acquisition.lock().await.is_none());
+                backend.disconnect().await.expect("cleanup");
+            }
+        });
+    }
+
+    #[test]
+    fn streaming_link_loss_stops_the_camera_before_recovery_is_published() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = viva_fake_gige::FakeCamera::builder()
+                .bind_ip(Ipv4Addr::LOCALHOST)
+                .width(64)
+                .height(48)
+                .enforce_heartbeat(true)
+                .heartbeat_timeout_ms(600)
+                .build()
+                .await
+                .expect("fake");
+            let backend = EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+            let stream = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+            fake_camera::first_frame(&stream.ws_url).await;
+            fake.unplug();
+            wait_state(&backend, |s| {
+                matches!(s, ConnectionState::Reconnecting { .. })
+            })
+            .await;
+            fake.commands().reset();
+            fake.revoke_control().await;
+            fake.plug_in();
+            wait_state(&backend, |s| matches!(s, ConnectionState::Connected { .. })).await;
+            assert!(backend.acquisition.lock().await.is_none());
+            let stops = fake
+                .commands()
+                .at(GvcpCommand::WriteReg, viva_fake_gige::REG_ACQ_STOP)
+                + fake
+                    .commands()
+                    .at(GvcpCommand::WriteMem, viva_fake_gige::REG_ACQ_STOP);
+            assert!(
+                stops > 0,
+                "the reopened session stopped the existing acquisition"
+            );
+            assert_eq!(
+                fake.commands().at(GvcpCommand::WriteReg, REG_ACQ_START)
+                    + fake.commands().at(GvcpCommand::WriteMem, REG_ACQ_START),
+                0
+            );
+            let blocks = fake.blocks_sent();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                fake.blocks_sent(),
+                blocks,
+                "the camera is stopped, not merely the viewer"
+            );
+            backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn losing_a_read_only_session_never_competes_for_control() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let (events, recorder) = Recorder::events();
+            let backend = EmbeddedBackend::new(events);
+            backend.connect("127.0.0.1").await.expect("connect");
+            fake.revoke_control().await;
+            wait_state(&backend, |s| {
+                matches!(s, ConnectionState::ControlLost { .. })
+            })
+            .await;
+            fake.commands().reset();
+            fake.unplug();
+            wait_state(&backend, |s| matches!(s, ConnectionState::Error { .. })).await;
+            fake.plug_in();
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            assert!(backend.camera.lock().await.is_none());
+            assert!(fake.controller().await.is_none());
+            assert_eq!(
+                fake.commands().total(GvcpCommand::WriteReg)
+                    + fake.commands().total(GvcpCommand::WriteMem),
+                0
+            );
+            assert!(recorder.of("device-reconnected").is_empty());
+            backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn cancelling_an_initial_xml_fetch_cannot_publish_a_late_connection() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = viva_fake_gige::FakeCamera::builder()
+                .bind_ip(Ipv4Addr::LOCALHOST)
+                .delay_ack(0x1_0000, Duration::from_secs(5))
+                .build()
+                .await
+                .expect("fake");
+            let backend = EmbeddedBackend::new(Default::default());
+            let opening = backend.clone();
+            let task =
+                tauri::async_runtime::spawn(async move { opening.connect("127.0.0.1").await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while fake.controller().await.is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("XML is being fetched after claiming");
+            backend
+                .disconnect()
+                .await
+                .expect("disconnect while opening");
+            assert!(task.await.expect("open task").is_err());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while fake.controller().await.is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cancelled opening released control");
+            assert!(backend.camera.lock().await.is_none());
+            assert!(backend.model.read().await.xml.is_none());
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Disconnected
+            ));
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn shutdown_releases_the_old_camera_when_a_connect_is_queued_behind_it() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+            let transition = backend.lifecycle.transition.lock().await;
+            let closing = backend.clone();
+            let shutdown = tauri::async_runtime::spawn(async move {
+                closing.shutdown().await;
+            });
+            while !backend
+                .lifecycle
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+            let opening = backend.clone();
+            let connect =
+                tauri::async_runtime::spawn(async move { opening.connect("127.0.0.1").await });
+            drop(transition);
+            shutdown.await.expect("shutdown");
+            assert!(connect.await.expect("connect task").is_err());
+            assert!(backend.camera.lock().await.is_none());
+            assert!(fake.controller().await.is_none());
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Disconnected
+            ));
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn read_only_ceiling_preserves_unavailable_and_unreadable_features() {
+        for (from, to) in [
+            ("RW", "RO"),
+            ("RO", "RO"),
+            ("WO", "NA"),
+            ("NA", "NA"),
+            ("NI", "NI"),
+        ] {
+            let mut state = FeatureState::new(serde_json::Value::Null, from, "Integer");
+            cap_read_only(&mut state);
+            assert_eq!(state.access_mode, to);
+        }
+        assert_eq!(parse_mac("00:0C:DF:01:02:03"), Some([0, 12, 223, 1, 2, 3]));
+        assert!(parse_mac("00:0C:DF:01:02").is_none());
+        assert!(parse_mac("00:0C:DF:01:02:xx").is_none());
+    }
+
+    #[test]
+    fn idle_loss_recovers_fresh_xml_and_leaves_acquisition_stopped() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let (events, recorder) = Recorder::events();
+            let backend = EmbeddedBackend::new(events);
+            let first = fake_camera::start().await;
+            backend.connect("127.0.0.1").await.expect("connect");
+            backend
+                .set_feature("BlackLevel", &serde_json::json!(7))
+                .await
+                .expect("write");
+            assert!(
+                backend
+                    .model
+                    .read()
+                    .await
+                    .graph
+                    .as_ref()
+                    .unwrap()
+                    .nodes_by_name
+                    .contains_key("ExposureTime")
+            );
+            first.stop().await;
+            wait_state(&backend, |s| {
+                matches!(s, ConnectionState::Reconnecting { .. })
+            })
+            .await;
+            let second = viva_fake_gige::FakeCamera::builder()
+                .bind_ip(Ipv4Addr::LOCALHOST)
+                .width(64)
+                .height(48)
+                .profile(viva_fake_gige::XmlProfile::Legacy)
+                .model("Replacement XML")
+                .build()
+                .await
+                .expect("replacement");
+            wait_state(&backend, |s| matches!(s, ConnectionState::Connected { .. })).await;
+            let model = backend.model.read().await;
+            assert!(
+                model
+                    .graph
+                    .as_ref()
+                    .unwrap()
+                    .nodes_by_name
+                    .contains_key("ExposureTimeAbs")
+            );
+            assert!(
+                !model
+                    .graph
+                    .as_ref()
+                    .unwrap()
+                    .nodes_by_name
+                    .contains_key("ExposureTime")
+            );
+            drop(model);
+            assert!(backend.acquisition.lock().await.is_none());
+            assert_eq!(
+                second.commands().at(GvcpCommand::WriteReg, REG_ACQ_START)
+                    + second.commands().at(GvcpCommand::WriteMem, REG_ACQ_START),
+                0
+            );
+            assert_eq!(
+                backend
+                    .get_feature_state("BlackLevel")
+                    .await
+                    .expect("value")
+                    .value,
+                serde_json::json!(0)
+            );
+            assert_eq!(recorder.of("device-reconnected").len(), 1);
+            let stream = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("explicit Start");
+            fake_camera::first_frame(&stream.ws_url).await;
+            backend.disconnect().await.expect("disconnect");
+            second.stop().await;
+        });
+    }
+
+    #[test]
+    fn a_cached_address_cannot_open_another_mac() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = EmbeddedBackend::new(Default::default());
+            let info = viva_genicam::gige::DeviceInfo {
+                mac: [2, 0, 0, 0, 0, 1],
+                ..viva_genicam::gige::DeviceInfo::from_ip(Ipv4Addr::LOCALHOST)
+            };
+            backend.record_scan(vec![info], vec![]).await;
+            let id = backend.discover().await[0].id.clone();
+            assert!(
+                backend
+                    .connect(&id)
+                    .await
+                    .err()
+                    .expect("wrong MAC rejected")
+                    .contains("Another camera")
+            );
+            assert!(fake.controller().await.is_none());
+            backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn recovery_uses_the_mac_when_the_old_address_no_longer_answers() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let mut backend = EmbeddedBackend::new(Default::default());
+            backend.reopen_interface = Some(
+                viva_genicam::gige::Iface::from_ipv4(Ipv4Addr::LOCALHOST)
+                    .expect("loopback")
+                    .name()
+                    .into(),
+            );
+            backend.connect("127.0.0.1").await.expect("connect");
+            backend
+                .with_camera(|c| {
+                    let previous = c.gige_info.as_mut().expect("identity");
+                    previous.ip = Ipv4Addr::new(127, 0, 0, 2);
+                    previous.local_ip = Some(Ipv4Addr::LOCALHOST);
+                    Ok(())
+                })
+                .await
+                .expect("old address");
+            backend
+                .lose_camera(backend.lifecycle.ticket(), "address changed".into())
+                .await;
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Connected { .. }
+            ));
+            let current = backend.camera.lock().await;
+            assert_eq!(
+                current.as_ref().unwrap().gige_info.as_ref().unwrap().ip,
+                Ipv4Addr::LOCALHOST
+            );
+            drop(current);
+            assert!(backend.acquisition.lock().await.is_none());
+            backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn a_recovery_deadline_rejects_a_different_camera_at_the_old_address() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let mut backend = EmbeddedBackend::new(Default::default());
+            backend.reopen_patience = Duration::from_millis(300);
+            backend.connect("127.0.0.1").await.expect("connect");
+            fake.stop().await;
+            let other = viva_fake_gige::FakeCamera::builder()
+                .bind_ip(Ipv4Addr::LOCALHOST)
+                .mac([2, 0, 0, 0, 0, 1])
+                .build()
+                .await
+                .expect("other camera");
+            let started = Instant::now();
+            backend
+                .lose_camera(backend.lifecycle.ticket(), "test loss".into())
+                .await;
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Error { .. }
+            ));
+            assert!(other.controller().await.is_none());
+            backend.disconnect().await.expect("disconnect");
+            other.stop().await;
+        });
+    }
+
+    #[test]
+    fn explicit_disconnect_switch_and_shutdown_cancel_a_pending_recovery() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            for action in ["disconnect", "switch", "shutdown"] {
+                let fake = fake_camera::start().await;
+                let (events, recorder) = Recorder::events();
+                let backend = EmbeddedBackend::new(events);
+                backend.connect("127.0.0.1").await.expect("connect");
+                fake.unplug();
+                let recovering = backend.clone();
+                let ticket = backend.lifecycle.ticket();
+                let task = tauri::async_runtime::spawn(async move {
+                    recovering.lose_camera(ticket, "test loss".into()).await;
+                });
+                wait_state(&backend, |s| {
+                    matches!(s, ConnectionState::Reconnecting { .. })
+                })
+                .await;
+                let started = Instant::now();
+                match action {
+                    "disconnect" => backend.disconnect().await.expect("disconnect"),
+                    "shutdown" => backend.shutdown().await,
+                    _ => {
+                        assert!(backend.connect("not-a-camera").await.is_err());
+                    }
+                }
+                tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .expect("cancelled within deadline")
+                    .expect("task");
+                assert!(started.elapsed() < Duration::from_secs(5));
+                fake.plug_in();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(backend.camera.lock().await.is_none());
+                assert!(recorder.of("device-reconnected").is_empty());
+                if action == "shutdown" {
+                    assert!(
+                        backend.connect("127.0.0.1").await.is_err(),
+                        "shutdown is terminal"
+                    );
+                }
+                backend.disconnect().await.expect("cleanup");
+                fake.stop().await;
+            }
+        });
+    }
+
+    #[test]
+    fn control_takeover_is_read_only_and_never_reclaimed_automatically() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let backend = EmbeddedBackend::new(Default::default());
+            backend.connect("127.0.0.1").await.expect("connect");
+            let stream = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+            fake_camera::first_frame(&stream.ws_url).await;
+            fake.revoke_control().await;
+            wait_state(&backend, |s| {
+                matches!(s, ConnectionState::ControlLost { .. })
+            })
+            .await;
+            assert!(backend.acquisition.lock().await.is_none());
+            fake.commands().reset();
+            assert_eq!(
+                backend
+                    .get_feature_state("Width")
+                    .await
+                    .expect("read-only value")
+                    .access_mode,
+                "RO"
+            );
+            assert!(
+                backend
+                    .set_feature("Width", &serde_json::json!(32))
+                    .await
+                    .is_err()
+            );
+            assert!(backend.exec_command("AcquisitionStart").await.is_err());
+            assert!(backend.start_acquisition(Default::default()).await.is_err());
+            assert!(
+                backend
+                    .set_persistent_ip(
+                        Ipv4Addr::LOCALHOST,
+                        [255, 0, 0, 0].into(),
+                        Ipv4Addr::UNSPECIFIED
+                    )
+                    .await
+                    .is_err()
+            );
+            backend.stop_acquisition().await.expect("local Stop");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(fake.controller().await.is_none());
+            assert_eq!(
+                fake.commands().total(GvcpCommand::WriteReg)
+                    + fake.commands().total(GvcpCommand::WriteMem),
+                0
+            );
+            backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
+        });
+    }
+
+    #[test]
+    fn normal_stream_end_and_manual_stop_do_not_trigger_recovery() {
+        let _port = fake_camera::lock();
+        tauri::async_runtime::block_on(async {
+            let fake = fake_camera::start().await;
+            let (events, recorder) = Recorder::events();
+            let backend = EmbeddedBackend::new(events);
+            backend.connect("127.0.0.1").await.expect("connect");
+            backend
+                .set_feature("AcquisitionMode", &serde_json::json!("SingleFrame"))
+                .await
+                .expect("SingleFrame");
+            let stream = backend
+                .start_acquisition(Default::default())
+                .await
+                .expect("start");
+            fake_camera::first_frame(&stream.ws_url).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            backend.stop_acquisition().await.expect("stop");
+            let ticket = backend.lifecycle.ticket();
+            let (_shutdown, shutdown) = watch::channel(false);
+            let (frames, _) = watch::channel(Bytes::new());
+            let (info, _) = watch::channel(camera_stream_info(64, 48, "Mono8"));
+            run_frame_reader(
+                Frames::Ended,
+                viva_streamer::ws::AppState {
+                    frame_tx: frames,
+                    native: Default::default(),
+                    info_tx: info,
+                },
+                shutdown,
+                StreamInfoTracker::new(64, 48, "Mono8".into()),
+                backend.events.clone(),
+                Some((backend.clone(), ticket)),
+            )
+            .await;
+            assert_eq!(
+                backend.lifecycle.ticket(),
+                ticket,
+                "normal EOF never schedules recovery"
+            );
+            assert!(matches!(
+                backend.connection.get().await,
+                ConnectionState::Connected { .. }
+            ));
+            assert!(recorder.of("disconnect-reason").is_empty());
+            assert!(recorder.of("device-reconnected").is_empty());
+            backend.disconnect().await.expect("disconnect");
+            fake.stop().await;
+        });
     }
 }

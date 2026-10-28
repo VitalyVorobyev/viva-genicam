@@ -27,6 +27,45 @@ function numeric(value: number, unit: string, extra: Partial<FeatureState> = {})
 }
 beforeEach(() => localStorage.clear());
 
+it("keeps control-loss features read-only and requires Start after embedded recovery", async () => {
+  const model = makeModel({ Gain: { kind: "Float" } });
+  let starts = 0;
+  let disconnects = 0;
+  mockIPC(async (cmd) => {
+    if (cmd === "list_discovered_devices") return [{ id, name: "Bench camera", model: "ST61", serial: "", transport: "gige" }];
+    if (cmd === "get_connection_state") return { kind: "disconnected" };
+    if (cmd === "get_sfnc_groups") return groups;
+    if (cmd === "backend_status") return null;
+    if (cmd === "connect_device") { await emit("connection-state-changed", connected); return model; }
+    if (cmd === "query_feature_states_bulk") return { Gain: numeric(5, "dB") };
+    if (cmd === "start_acquisition") { starts++; return { ws_url: "ws://127.0.0.1:1", width: 1, height: 1 }; }
+    if (cmd === "disconnect_device") { disconnects++; await emit("connection-state-changed", { kind: "disconnected" }); }
+    return undefined;
+  }, { shouldMockEvents: true });
+  render(<AppLayout />);
+  await userEvent.click(await screen.findByRole("button", { name: /1 device/ }));
+  await userEvent.click(await screen.findByRole("button", { name: /Bench camera.*ST61/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Image" }));
+  await screen.findByRole("spinbutton", { name: "Gain" });
+  await act(() => emit("connection-state-changed", { ...connected, kind: "control_lost", reason: "Another controller" }));
+  expect(screen.getByRole("alert", { name: "Camera control lost" }).textContent).toContain("read-only");
+  expect((screen.getByRole("spinbutton", { name: "Gain" }) as HTMLInputElement).disabled).toBe(true);
+  expect(screen.queryByRole("button", { name: "Start Acq" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Reconnect with control" })).toBeTruthy();
+
+  await act(() => emit("connection-state-changed", { kind: "reconnecting", device_id: id, attempt: 0, max_attempts: 1, reason: "Link lost" }));
+  expect(screen.getByRole("status").textContent).toContain("acquisition will remain stopped");
+  await act(async () => {
+    await emit("connection-state-changed", connected);
+    await emit("device-reconnected", { device_id: id, node_count: model.summary.node_count, model });
+  });
+  expect(screen.getByRole("button", { name: "Start Acq" })).toBeTruthy();
+  expect(starts).toBe(0);
+  await act(() => emit("connection-state-changed", { kind: "reconnecting", device_id: id, attempt: 0, max_attempts: 1, reason: "Link lost" }));
+  await userEvent.click(screen.getByRole("button", { name: "Cancel reconnect" }));
+  expect(disconnects).toBe(1);
+});
+
 it("restores Image fast controls from replacement XML without reconnecting the camera again", async () => {
   const initial = makeModel({ ExposureTime: { kind: "Float" }, Gain: { kind: "Float" }, AcquisitionFrameRate: { kind: "Float" } });
   const replacement = makeModel({

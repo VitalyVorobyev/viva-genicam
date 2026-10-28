@@ -2,7 +2,7 @@ import { invokeCommand } from "../../device/commands";
 import { useEffect, useState } from "react";
 import { useToast } from "../../context/ToastContext";
 import { formatErrorMessage } from "../../device/errorMessage";
-import { useFeature } from "../../device/FeatureStoreContext";
+import { useCameraReadOnly, useFeature } from "../../device/FeatureStoreContext";
 import type { NetworkConfig } from "../../device/types";
 import { isTauri } from "../../tauri";
 
@@ -57,6 +57,7 @@ type Network =
 
 function NetworkSection() {
   const [network, setNetwork] = useState<Network>({ kind: "loading" });
+  const readOnly = useCameraReadOnly();
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -87,7 +88,7 @@ function NetworkSection() {
         <dt>IP address</dt>
         <dd>{config.current_ip}</dd>
       </dl>
-      <PersistentIpForm config={config} />
+      {readOnly ? <p className="device-panel__note">Read-only session: IP configuration cannot be changed.</p> : <PersistentIpForm config={config} />}
     </>
   );
 }

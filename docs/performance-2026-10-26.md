@@ -1,7 +1,7 @@
 # Acquisition and frame-delivery measurements, 2026-10-26
 
 This report describes the socket optimization in #222 with its original
-four-frame queue. The subsequent [delivery follow-up](hardware-rtvision-2026-10-26.md#production-delivery-default-2026-10-27)
+four-frame queue. The subsequent [delivery follow-up](hardware-six-sensor-2026-10-26.md#production-delivery-default-2026-10-27)
 validates the later sixteen-frame default; it does not change the measurements
 below.
 
@@ -181,7 +181,7 @@ variants dropped four frames, while capacities 16 and 32 dropped none. This
 supports a scheduling-budget explanation: four frames span about 1.48 ms at
 that rate. It does not establish higher sustainable throughput or a lower CPU
 cost. The fast path was discarded and these initial probes left capacity at four.
-The later [hardware follow-up](hardware-rtvision-2026-10-26.md#high-rate-delivery)
+The later [hardware follow-up](hardware-six-sensor-2026-10-26.md#high-rate-delivery)
 completes the NIC comparison and the production change (SR-28).
 
 The previous hardware Python loop first imported NumPy during acquisition.
@@ -195,6 +195,6 @@ attributing its earlier drops to steady Python overhead.
 
 The adapter was absent at the start of 2026-10-27; that software-only batch
 changed no camera/NIC configuration and started no long test. The adapter
-returned later that day. The [hardware follow-up](hardware-rtvision-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27)
+returned later that day. The [hardware follow-up](hardware-six-sensor-2026-10-26.md#studio-and-delivery-follow-up-2026-10-27)
 records the completed short native Studio checks, actual-NIC queue comparison,
 Python cold/warm conversion and configuration restoration.

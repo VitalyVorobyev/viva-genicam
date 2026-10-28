@@ -202,6 +202,13 @@ bounded immutable capture from a loopback-only endpoint: the preview, canonical
 samples and PNG belong to the same source. Analysis is explicitly frozen; PFNC
 decoding stays in Rust ([ADR-0034](adrs/adr0034-native-frame-analysis.md)).
 
+Embedded Studio observes reachability and control ownership separately. One
+lifecycle coordinator cancels obsolete sessions; a lost GigE camera is reopened
+by MAC with fresh XML and feature state. Recovery leaves acquisition stopped
+and replays no configuration. A reachable camera whose control was taken stays
+read-only; USB reconnection is manual
+([ADR-0035](adrs/adr0035-studio-embedded-recovery.md)).
+
 ## Data flows
 
 **Control path** — `camera.set("ExposureTime", …)` → `NodeMap` resolves the

@@ -510,6 +510,7 @@ impl FakeCameraBuilder {
         info!(%local_addr, "fake camera GVCP listening");
 
         // Spawn GVCP server task.
+        let (gvcp_shutdown, stopped) = tokio::sync::oneshot::channel();
         let gvcp_handle = {
             let socket = socket.clone();
             let regs = regs.clone();
@@ -517,6 +518,7 @@ impl FakeCameraBuilder {
             let acq_stop = acq_stop_flag.clone();
             let bind_ip = self.bind_ip;
             let options = gvcp_server::ServerOptions {
+                shutdown: stopped,
                 counters: counters.clone(),
                 refuse_register_commands: self.refuse_register_commands,
                 retention: retention.clone(),
@@ -572,6 +574,7 @@ impl FakeCameraBuilder {
         };
 
         Ok(FakeCamera {
+            gvcp_shutdown: Some(gvcp_shutdown),
             gvcp_handle: Some(gvcp_handle),
             gvsp_handle: Some(gvsp_handle),
             events_handle: Some(events_handle),
@@ -595,6 +598,7 @@ impl FakeCameraBuilder {
 /// The camera runs as background tokio tasks. Call [`stop`](FakeCamera::stop) or
 /// drop the handle to shut down the camera.
 pub struct FakeCamera {
+    gvcp_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     gvcp_handle: Option<JoinHandle<()>>,
     gvsp_handle: Option<JoinHandle<()>>,
     events_handle: Option<JoinHandle<()>>,
@@ -741,13 +745,15 @@ impl FakeCamera {
 
     /// Stop the fake camera and wait for its background tasks to exit.
     ///
-    /// Awaiting the `JoinHandle`s after `abort()` ensures the tokio tasks have
-    /// dropped their `Arc<UdpSocket>` clones and the GVCP port is actually
-    /// released before the call returns — otherwise a subsequent rebind on
-    /// the same port can hit `EADDRINUSE`.
+    /// The GVCP server cancels and drains its delayed acknowledgements, then
+    /// the other tasks are aborted and joined. No delayed task retains the
+    /// listening socket when this returns: a later fixture must not compete
+    /// with an obsolete socket for datagrams on the same port.
     pub async fn stop(mut self) {
+        if let Some(shutdown) = self.gvcp_shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(h) = self.gvcp_handle.take() {
-            h.abort();
             let _ = h.await;
         }
         if let Some(h) = self.gvsp_handle.take() {
@@ -765,6 +771,9 @@ impl Drop for FakeCamera {
     /// Best-effort cleanup when the handle is dropped without calling `stop`.
     /// Does not wait for tasks to exit — use `stop().await` for that.
     fn drop(&mut self) {
+        if let Some(shutdown) = self.gvcp_shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(h) = self.gvcp_handle.take() {
             h.abort();
         }

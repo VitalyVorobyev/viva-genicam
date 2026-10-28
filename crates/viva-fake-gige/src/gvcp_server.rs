@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, oneshot};
+use tokio::task::JoinSet;
 use tracing::{debug, trace, warn};
 
 use crate::registers::RegisterMap;
@@ -223,6 +224,8 @@ impl CommandCounters {
 /// Behaviour of the GVCP server beyond the register store.
 #[derive(Debug)]
 pub(crate) struct ServerOptions {
+    /// End reception and drain delayed replies before releasing the socket.
+    pub shutdown: oneshot::Receiver<()>,
     /// Counts of every register-access command received.
     pub counters: Arc<CommandCounters>,
     /// Refuse READREG/WRITEREG in this way, if set.
@@ -259,15 +262,22 @@ pub async fn run(
     acq_start_notify: Arc<Notify>,
     acq_stop_flag: Arc<AtomicBool>,
     bind_ip: std::net::Ipv4Addr,
-    options: ServerOptions,
+    mut options: ServerOptions,
     identity: Identity,
 ) {
     let mut buf = [0u8; 2048];
     // Delayed commands not yet acknowledged, by sender and request id: a
     // retry of one is the same command, not a second one to execute.
     let in_flight: Arc<std::sync::Mutex<HashSet<(SocketAddr, u16)>>> = Arc::default();
+    let mut delayed = JoinSet::new();
     loop {
-        let (len, peer) = match socket.recv_from(&mut buf).await {
+        while delayed.try_join_next().is_some() {}
+        let received = tokio::select! {
+            biased;
+            _ = &mut options.shutdown => break,
+            received = socket.recv_from(&mut buf) => received,
+        };
+        let (len, peer) = match received {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "GVCP recv error");
@@ -410,7 +420,7 @@ pub async fn run(
                 let socket = socket.clone();
                 let in_flight = in_flight.clone();
                 debug!(%peer, request_id, ?delay, "acknowledging after a delay");
-                tokio::spawn(async move {
+                delayed.spawn(async move {
                     tokio::time::sleep(delay).await;
                     if let Ok(mut pending) = in_flight.lock() {
                         pending.remove(&(peer, request_id));
@@ -420,6 +430,9 @@ pub async fn run(
             }
         }
     }
+    // A delayed reply owns an Arc of the listening socket. Aborting only the
+    // receive loop leaves that old socket bound during the next fixture.
+    delayed.shutdown().await;
 }
 
 /// The time a `PENDING_ACK` asks for: the delay and half again, so the
@@ -993,5 +1006,68 @@ fn check_acquisition(addr: u64, data: &[u8], acq_start: &Notify, acq_stop_flag: 
             debug!("AcquisitionStop triggered");
             acq_stop_flag.store(true, Ordering::SeqCst);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stopping_the_server_releases_delayed_reply_socket() {
+        let socket = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let address = socket.local_addr().unwrap();
+        let weak = Arc::downgrade(&socket);
+        let regs = Arc::new(Mutex::new(RegisterMap::new(
+            64,
+            48,
+            crate::MONO8,
+            false,
+            Default::default(),
+        )));
+        let (shutdown, stopped) = oneshot::channel();
+        let options = ServerOptions {
+            shutdown: stopped,
+            counters: Arc::default(),
+            refuse_register_commands: None,
+            retention: Arc::new(std::sync::Mutex::new(Retention::new(4))),
+            resend: Arc::default(),
+            discoveries: Arc::default(),
+            delayed_acks: Arc::new(HashMap::from([(crate::REG_WIDTH, Duration::from_secs(60))])),
+            expiries: Arc::default(),
+            actions: Arc::default(),
+            action_commands: true,
+            link_down: Arc::default(),
+        };
+        let server = tokio::spawn(run(
+            socket,
+            regs,
+            Arc::default(),
+            Arc::default(),
+            Ipv4Addr::LOCALHOST,
+            options,
+            Identity::default(),
+        ));
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut request = vec![GVCP_CMD_KEY, 1, 0, 0x80, 0, 4, 0, 1];
+        request.extend_from_slice(&(crate::REG_WIDTH as u32).to_be_bytes());
+        client.send_to(&request, address).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak.strong_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the delayed reply owns a socket clone");
+
+        shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("shutdown drains pending replies without waiting for their delay")
+            .expect("server");
+        assert!(
+            weak.upgrade().is_none(),
+            "delayed reply retained the stopped server's socket"
+        );
     }
 }

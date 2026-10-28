@@ -17,7 +17,7 @@ use std::net::Ipv4Addr;
 use async_trait::async_trait;
 use viva_zenoh_api::FeatureState;
 
-use crate::state::device_state::{DeviceInfo, StreamerInfo};
+use crate::state::device_state::{ConnectionAccess, DeviceInfo, StreamerInfo};
 
 /// Which backend mode the application is currently using.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -71,14 +71,30 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// MAC-derived `viva_zenoh_api::gige_device_id`, in both modes.
     async fn connect(&self, device_id: &str) -> Result<ConnectResult, String>;
 
+    /// Select direct access; unsupported transports refuse monitor mode.
+    async fn connect_as(
+        &self,
+        device_id: &str,
+        access: ConnectionAccess,
+    ) -> Result<ConnectResult, String> {
+        if access != ConnectionAccess::Control {
+            return Err("Direct monitor access requires an embedded GigE Vision camera; remote services own camera access".into());
+        }
+        self.connect(device_id).await
+    }
+
     /// Open and publish one camera model. Embedded sessions override this to
     /// keep the complete transition under their cancellation/generation guard.
     async fn connect_model(
         &self,
         device_id: &str,
+        access: ConnectionAccess,
         connection: &std::sync::Arc<crate::state::connection::Connection>,
         model: &crate::state::SharedModelState,
     ) -> Result<crate::commands::xml_model::ParseXmlResponse, String> {
+        if access != ConnectionAccess::Control {
+            return Err("Direct monitor access is unavailable in remote mode; the service owns camera access".into());
+        }
         use crate::commands::xml_model::parse_camera_model;
         use crate::state::device_state::ConnectionState;
         connection
@@ -87,7 +103,7 @@ pub trait DeviceBackend: Send + Sync + 'static {
             })
             .await;
         let result: Result<crate::commands::xml_model::ParseXmlResponse, String> = async {
-            let result = self.connect(device_id).await?;
+            let result = self.connect_as(device_id, access).await?;
             let response = parse_camera_model(result.xml)?;
             model.write().await.update(
                 response.xml.clone(),
@@ -100,6 +116,7 @@ pub trait DeviceBackend: Send + Sync + 'static {
                     device_id: device_id.into(),
                     device_name: result.device_name,
                     model: result.model,
+                    access: None,
                 })
                 .await;
             Ok(response)

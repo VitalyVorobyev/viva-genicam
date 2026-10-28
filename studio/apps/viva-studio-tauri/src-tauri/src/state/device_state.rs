@@ -50,6 +50,8 @@ pub struct DeviceInfo {
     pub user_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manufacturer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares_subnet_with_host: Option<bool>,
 }
 
 impl DeviceInfo {
@@ -68,12 +70,31 @@ impl DeviceInfo {
             mac: announce.mac,
             user_name: announce.user_name,
             manufacturer: announce.manufacturer,
+            shares_subnet_with_host: None,
         }
     }
 }
 
 fn default_transport() -> String {
     "gige".to_string()
+}
+
+/// Access for a direct GigE session; remote services keep their own ownership.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionAccess {
+    #[default]
+    Control,
+    Monitor,
+}
+impl ConnectionAccess {
+    pub(crate) fn gige(self) -> viva_genicam::Access {
+        match self {
+            Self::Control => viva_genicam::Access::Control,
+            Self::Monitor => viva_genicam::Access::Monitor,
+        }
+    }
 }
 
 /// Connection state, serialized with a `kind` tag so TypeScript can switch on it.
@@ -89,6 +110,9 @@ pub enum ConnectionState {
         device_id: String,
         device_name: String,
         model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        access: Option<ConnectionAccess>,
     },
     ControlLost {
         device_id: String,

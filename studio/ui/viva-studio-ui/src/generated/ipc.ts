@@ -283,9 +283,11 @@ mac?: string,
 /**
  * User-defined device name, when one is set.
  */
-user_name?: string, manufacturer?: string, };
+user_name?: string, manufacturer?: string, shares_subnet_with_host?: boolean, };
 
-export type ConnectionState = { "kind": "disconnected" } | { "kind": "connecting", device_id: string, } | { "kind": "connected", device_id: string, device_name: string, model: string, } | { "kind": "control_lost", device_id: string, device_name: string, model: string, reason: string, } | { "kind": "reconnecting", device_id: string, attempt: number, max_attempts: number, reason: string, } | { "kind": "error", message: string, };
+export type ConnectionState = { "kind": "disconnected" } | { "kind": "connecting", device_id: string, } | { "kind": "connected", device_id: string, device_name: string, model: string, access?: ConnectionAccess, } | { "kind": "control_lost", device_id: string, device_name: string, model: string, reason: string, } | { "kind": "reconnecting", device_id: string, attempt: number, max_attempts: number, reason: string, } | { "kind": "error", message: string, };
+
+export type ConnectionAccess = "control" | "monitor";
 
 export type StreamerInfo = { ws_url: string, width: number, height: number, };
 
@@ -366,7 +368,7 @@ export type StudioEvents = {
 /** Registered Tauri commands: wire arguments and successful response. */
 export type StudioCommands = {
   "backend_status": { args: Record<string, never>; result: BackendStatus };
-  "connect_device": { args: { deviceId: string }; result: ParseXmlResponse };
+  "connect_device": { args: { deviceId: string; access?: ConnectionAccess | null }; result: ParseXmlResponse };
   "disconnect_device": { args: Record<string, never>; result: null };
   "execute_command": { args: { nodeName: string }; result: CommandResult };
   "force_ip": { args: { mac: string; ip: string; subnet: string; gateway: string }; result: null };

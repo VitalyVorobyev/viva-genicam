@@ -20,3 +20,10 @@ export function commandContractTypechecks() {
   const wrong: Promise<string> = invokeCommand("backend_status");
   return { state, optional, wrong };
 }
+
+// Direct access is constrained by the generated Rust enum.
+export function accessContractTypechecks() {
+invokeCommand("connect_device", { deviceId: "fake-camera", access: "monitor" });
+// @ts-expect-error Direct Studio access exposes control and monitor only.
+invokeCommand("connect_device", { deviceId: "fake-camera", access: "exclusive" });
+}

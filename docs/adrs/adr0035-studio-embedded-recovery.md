@@ -37,6 +37,11 @@ appropriate. The maintainer explicitly chose manual Start after recovery.
   explicit reconnection rather than automatically competing for control.
 - USB stream disconnection tears down its reader and offers manual reconnect;
   automatic matching of a replacement USB device is not part of this decision.
+- An explicitly selected GigE monitor keeps `Access::Monitor` during recovery.
+  It never starts or stops the camera, writes configuration or releases the
+  controller. Its local viewer remains stopped after replacement until the
+  user chooses Watch stream. Receiving uses the interface of the actual control
+  socket, including when more than one NIC reaches the camera's subnet.
 - Normal Stop and finite acquisition completion are not device loss.
 
 ## Consequences

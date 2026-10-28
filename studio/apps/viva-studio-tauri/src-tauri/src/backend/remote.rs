@@ -425,6 +425,7 @@ impl RemoteBackend {
                                 device_id: device_id.clone(),
                                 device_name: result.device_name,
                                 model: result.model,
+                                access: None,
                             })
                             .await;
                         self.events.send(&DeviceReconnected {

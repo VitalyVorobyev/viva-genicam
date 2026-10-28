@@ -18,6 +18,7 @@ export type {
   AcquisitionStatus,
   CommandResult,
   ConnectionState,
+  ConnectionAccess,
   DeviceInfo,
   DisconnectReason,
   FeatureState,

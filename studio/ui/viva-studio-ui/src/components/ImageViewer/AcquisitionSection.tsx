@@ -1,3 +1,4 @@
+import { useCameraReadOnly } from "../../device/FeatureStoreContext";
 import { useState } from "react";
 import type { SfncGroup } from "../../device/types";
 import { SfncFeatureControl } from "./SfncFeatureControl";
@@ -66,9 +67,11 @@ export function AcquisitionSection({
  * Applies from the next start.
  */
 function PacketSizeSetting({ deviceId, isAcquiring }: { deviceId: string; isAcquiring: boolean }) {
+  const readOnly = useCameraReadOnly();
   const [size, setSize] = useState<number | null>(() => loadPacketSize(deviceId));
   const [text, setText] = useState(() => String(size ?? 1500));
   const choose = (next: number | null) => {
+    if (readOnly) return;
     setSize(next);
     savePacketSize(deviceId, next);
   };
@@ -77,7 +80,7 @@ function PacketSizeSetting({ deviceId, isAcquiring }: { deviceId: string; isAcqu
     if (Number.isInteger(n) && n >= PACKET_SIZE_MIN && n <= PACKET_SIZE_MAX) choose(n);
     else setText(String(size ?? 1500));
   };
-  const hint = isAcquiring ? "Applies from the next start" : undefined;
+  const hint = readOnly ? "Configured by the stream controller" : isAcquiring ? "Applies from the next start" : undefined;
   return (
     <>
       <InspectorRow label="Packet size" blocked={null} hint={hint}>
@@ -86,6 +89,7 @@ function PacketSizeSetting({ deviceId, isAcquiring }: { deviceId: string; isAcqu
             id={id}
             className="iv-select"
             aria-label="Packet size"
+            disabled={readOnly}
             value={size === null ? "auto" : "fixed"}
             onChange={(e) => choose(e.target.value === "auto" ? null : Number(text) || 1500)}
           >
@@ -103,6 +107,7 @@ function PacketSizeSetting({ deviceId, isAcquiring }: { deviceId: string; isAcqu
                 type="number"
                 className="iv-number__input"
                 aria-label="Packet size in bytes"
+                disabled={readOnly}
                 title={`${PACKET_SIZE_MIN} – ${PACKET_SIZE_MAX} B`}
                 min={PACKET_SIZE_MIN}
                 max={PACKET_SIZE_MAX}

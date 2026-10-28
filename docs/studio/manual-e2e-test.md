@@ -222,3 +222,23 @@ If the image view stays blank, check the logs:
   `First raw image frame received`, `First BMP frame published`
 - **Browser/Tauri console**: look for `WebSocket opened` and
   `First binary frame received`
+
+## Direct GigE monitor and subnet discovery
+
+These are short hardware checks for the next available device; software fake
+coverage does not close ST-62.
+
+- [ ] A camera on another subnet appears with **Different subnet** and **Set IP…**;
+      a routed connection can still be attempted. Remote mode exposes no direct
+      monitor or temporary-IP action, and USB monitor is labelled unavailable
+- [ ] Another application holds control and configures a multicast stream:
+      **Monitor** connects, reads features and offers **Watch stream**; commands,
+      feature writes, persistent-IP edits and packet-size changes are disabled
+- [ ] Watch receives an image; **Stop watching**, Disconnect and app exit leave
+      the controller acquiring. Packet capture shows no monitor claims, writes
+      or resend requests, including with induced packet loss
+- [ ] A unicast stream produces a clear multicast requirement rather than
+      silently reconfiguring the camera
+- [ ] After a brief connection interruption, the same MAC reconnects as Monitor;
+      its viewer remains stopped, and Watch works again without touching the
+      controller's acquisition or settings

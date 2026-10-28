@@ -162,7 +162,8 @@ impl Device for Camera<GigeRegisterIo> {
     }
 
     fn start(&mut self, options: &StartOptions) -> Result<Frames, String> {
-        if self.transport().control_state() != ControlState::Held {
+        let monitor = self.transport().control_state() == ControlState::Monitor;
+        if !monitor && self.transport().control_state() != ControlState::Held {
             return Err("Control lost: reconnect explicitly before starting acquisition".into());
         }
         // The library's one stream-open recipe: claim control again (a
@@ -170,20 +171,43 @@ impl Device for Camera<GigeRegisterIo> {
         // packet size — a size the user measured for their link is a ceiling
         // the path probe stays under (backlog ST-22, issue #112) — and start
         // the receive engine with the camera's PayloadSize.
-        let stream_options = match options.packet_size {
-            Some(size) => StreamOptions::new().packet_size(size),
-            None => StreamOptions::new().auto_packet_size(),
+        // Use the host address of the actual control socket. Discovery may
+        // have selected one of several interfaces sharing the camera's subnet.
+        let local = self
+            .transport()
+            .lock_device()
+            .map_err(|e| e.to_string())?
+            .local_addr()
+            .map_err(|e| format!("Stream interface: {e}"))?
+            .ip();
+        let std::net::IpAddr::V4(local) = local else {
+            return Err("GigE Vision streaming requires an IPv4 interface".into());
+        };
+        let iface = viva_genicam::gige::Iface::from_ipv4(local)
+            .map_err(|e| format!("Stream interface {local}: {e}"))?;
+        let stream_options = if monitor {
+            StreamOptions::monitor()
+        } else {
+            match options.packet_size {
+                Some(size) => StreamOptions::new().packet_size(size),
+                None => StreamOptions::new().auto_packet_size(),
+            }
         };
         let frames = self
-            .open_stream(stream_options)
+            .open_stream(stream_options.iface(iface))
             .map_err(|e| format!("Failed to open the stream: {e}"))?;
         let frames = Frames::Gige(Box::new(frames));
-        self.acquisition_start()
-            .map_err(|e| format!("Failed to start acquisition: {e}"))?;
+        if !monitor {
+            self.acquisition_start()
+                .map_err(|e| format!("Failed to start acquisition: {e}"))?;
+        }
         Ok(frames)
     }
 
     fn acquisition_stop(&mut self) -> Result<(), String> {
+        if self.transport().control_state() == ControlState::Monitor {
+            return Ok(());
+        }
         Camera::acquisition_stop(self).map_err(|e| format!("Failed to stop acquisition: {e}"))
     }
 

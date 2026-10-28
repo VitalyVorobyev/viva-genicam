@@ -17,6 +17,7 @@ import { ImageViewer } from "../ImageViewer/ImageViewer";
 import { DiagnosticsTab } from "../Diagnostics/DiagnosticsTab";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ToastContainer } from "./ToastContainer";
+import type { ConnectionAccess } from "../../device/types";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 
 type MainTab = "features" | "image" | "diagnostics";
@@ -62,6 +63,7 @@ function AppLayoutInner() {
 
   const isConnected = connectionState.kind === "connected";
   const controlLost = connectionState.kind === "control_lost";
+  const monitoring = connectionState.kind === "connected" && connectionState.access === "monitor";
   const hasSession = isConnected || controlLost;
   const connectedDeviceName =
     hasSession ? connectionState.device_name : null;
@@ -130,10 +132,10 @@ function AppLayoutInner() {
   }
 
   const handleConnect = useCallback(
-    async (deviceId: string) => {
+    async (deviceId: string, access: ConnectionAccess = "control") => {
       log("info", "Connecting to device\u2026", deviceId);
       try {
-        const response = await connect(deviceId);
+        const response = await connect(deviceId, access);
         setExternalModel(response);
         setActiveTab("features");
         log("success", `Connected`, deviceId);
@@ -164,37 +166,37 @@ function AppLayoutInner() {
   }, [disconnect, connectedDeviceName, log, addToast]);
 
   const handleStartAcquisition = useCallback(async () => {
-    log("info", "Starting acquisition\u2026");
+    log("info", monitoring ? "Starting stream viewer\u2026" : "Starting acquisition\u2026");
     try {
       if (activeTab !== "features" || !configurationPreviewExpanded) {
         setActiveTab("image");
       }
       await startAcq(
-        connectionState.kind === "connected" ? loadPacketSize(connectionState.device_id) : null,
+        connectionState.kind === "connected" && !monitoring ? loadPacketSize(connectionState.device_id) : null,
       );
-      log("success", "Acquisition started");
-      addToast("success", "Acquisition started");
+      log("success", monitoring ? "Watching multicast stream" : "Acquisition started");
+      addToast("success", monitoring ? "Watching multicast stream" : "Acquisition started");
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
-      log("error", `Acquisition start failed: ${String(e)}`);
-      addToast("error", `Acquisition start failed: ${String(e)}`);
+      log("error", `${monitoring ? "Watching stream" : "Acquisition start"} failed: ${String(e)}`);
+      addToast("error", `${monitoring ? "Watching stream" : "Acquisition start"} failed: ${String(e)}`);
     }
-  }, [startAcq, connectionState, activeTab, configurationPreviewExpanded, log, addToast]);
+  }, [startAcq, connectionState, monitoring, activeTab, configurationPreviewExpanded, log, addToast]);
 
   const handleStopAcquisition = useCallback(async () => {
-    log("info", "Stopping acquisition\u2026");
+    log("info", monitoring ? "Stopping local stream viewer\u2026" : "Stopping acquisition\u2026");
     try {
       await stopAcq();
-      log("success", "Acquisition stopped");
-      addToast("info", "Acquisition stopped");
+      log("success", monitoring ? "Stopped watching stream" : "Acquisition stopped");
+      addToast("info", monitoring ? "Stopped watching stream" : "Acquisition stopped");
     } catch (e) {
-      log("error", `Acquisition stop failed: ${String(e)}`);
-      addToast("error", `Acquisition stop failed: ${String(e)}`);
+      log("error", `${monitoring ? "Stopping viewer" : "Acquisition stop"} failed: ${String(e)}`);
+      addToast("error", `${monitoring ? "Stopping viewer" : "Acquisition stop"} failed: ${String(e)}`);
     }
-  }, [stopAcq, log, addToast]);
+  }, [stopAcq, monitoring, log, addToast]);
 
   return (
-    <FeatureStoreProvider connected={hasSession} readOnly={controlLost} sessionKey={externalModel}>
+    <FeatureStoreProvider connected={hasSession} readOnly={controlLost || monitoring} sessionKey={externalModel}>
     <div className="app-layout">
       <header className="app-header">
         {/* Left: brand wordmark + backend mode (reference info, not an action) */}
@@ -254,7 +256,7 @@ function AppLayoutInner() {
         <div className="app-header__actions">
           {isConnected && !acqStatus.active && (
             <button type="button" className="btn btn--sm" onClick={handleStartAcquisition}>
-              Start Acq
+              {monitoring ? "Watch stream" : "Start Acq"}
             </button>
           )}
           {acqStatus.active && (
@@ -274,12 +276,13 @@ function AppLayoutInner() {
               className="btn--stop-sm"
               onClick={handleStopAcquisition}
             >
-              Stop
+              {monitoring ? "Stop watching" : "Stop"}
             </button>
           )}
           {isTauri() && (
             <DeviceDropdown
               devices={devices}
+              embedded={backendStatus?.mode === "Embedded"}
               connectionState={connectionState}
               disconnectReason={disconnectReason}
               onConnect={handleConnect}
@@ -291,9 +294,10 @@ function AppLayoutInner() {
 
       <ToastContainer />
 
+      {monitoring && <div className="status status--info" role="status">Monitor: read-only camera access. Watch an existing multicast stream; another host's unicast stream cannot be watched. Stop watching closes only this viewer.</div>}
       {connectionState.kind === "reconnecting" && (
         <div className="status status--info" role="status">
-          Camera connection lost: {connectionState.reason}. Reconnecting; acquisition will remain stopped.
+          Camera connection lost: {connectionState.reason}. Reconnecting; the viewer will remain stopped.
           <button type="button" className="btn--secondary btn--sm" onClick={handleDisconnect}>Cancel reconnect</button>
         </div>
       )}
@@ -301,6 +305,7 @@ function AppLayoutInner() {
         <div className="status status--error" role="alert" aria-label="Camera control lost">
           Camera control lost: {connectionState.reason}. Features are read-only.
           <button type="button" className="btn--secondary btn--sm" onClick={() => handleConnect(connectionState.device_id)}>Reconnect with control</button>
+          {backendStatus?.mode === "Embedded" && transport === "gige" && <button type="button" className="btn--secondary btn--sm" onClick={() => handleConnect(connectionState.device_id, "monitor")}>Open as monitor</button>}
         </div>
       )}
       {connectionState.kind === "error" && disconnectReason && (

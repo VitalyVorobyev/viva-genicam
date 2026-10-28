@@ -52,14 +52,20 @@ To build Studio from source instead, see
 ## Connect to a camera
 
 Studio lists the cameras it finds in the device menu at the top right. Pick one
-to connect.
+to connect with **Control** access (the default). The separate **Monitor** action
+opens an embedded GigE Vision camera read-only, including while another
+application controls it. Direct monitor access is unavailable for USB cameras
+and in remote mode, where the service owns camera access.
 
 - **GigE Vision** cameras are found by broadcast on every network interface.
   If yours does not appear, it is almost always the network:
   [Networking](networking.md) covers addressing, firewalls and jumbo frames.
 - A GigE camera on the wrong subnet can be given a temporary address from the
   device menu with **Set IP…** (FORCEIP), and a permanent one from the
-  **Camera** panel of the Diagnostics tab.
+  **Camera** panel of the Diagnostics tab. Discovery requests broadcast
+  acknowledgements, so devices on another subnet can still appear with a
+  **Different subnet** label. The label does not prohibit a connection through
+  a configured route.
 - **USB3 Vision** cameras are found by USB enumeration. On Linux your user
   needs permission to open the device (a udev rule).
 
@@ -85,6 +91,22 @@ does not repeatedly try to reclaim control. Use **Reconnect with control**
 when the other controller has finished. On a camera that does not identify its
 controller, a takeover may become visible only after a refused write. A disconnected USB3 Vision camera
 requires manual reconnection from the device menu.
+
+### Watching another application's stream
+
+In a direct GigE **Monitor** session, feature controls, commands and persistent
+IP changes are read-only. **Watch stream** joins the multicast destination
+already configured by the controller; it does not start acquisition or change
+packet size, timing, destination or trigger settings. A stream sent by unicast
+to another host cannot be watched this way. Configure multicast and start
+acquisition in the controlling application first.
+
+**Stop watching**, Disconnect and closing Studio only end this viewer's
+reception. The controller and camera keep acquiring. After a monitor connection
+is recovered, it remains a monitor and its viewer stays stopped until you
+choose **Watch stream** again. Packet-size controls are disabled because the
+controller owns those settings. A lost-control banner also offers **Open as
+monitor** for a direct GigE camera; this is always an explicit choice.
 
 ### macOS local-network access
 

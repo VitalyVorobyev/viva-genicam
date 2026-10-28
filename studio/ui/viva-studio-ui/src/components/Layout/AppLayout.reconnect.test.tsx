@@ -54,7 +54,7 @@ it("keeps control-loss features read-only and requires Start after embedded reco
   expect(screen.getByRole("button", { name: "Reconnect with control" })).toBeTruthy();
 
   await act(() => emit("connection-state-changed", { kind: "reconnecting", device_id: id, attempt: 0, max_attempts: 1, reason: "Link lost" }));
-  expect(screen.getByRole("status").textContent).toContain("acquisition will remain stopped");
+  expect(screen.getByRole("status").textContent).toContain("viewer will remain stopped");
   await act(async () => {
     await emit("connection-state-changed", connected);
     await emit("device-reconnected", { device_id: id, node_count: model.summary.node_count, model });
@@ -143,4 +143,41 @@ it.each([false, true])("keeps configuration visible on Start only when its previ
   await userEvent.click(screen.getByRole("button", { name: "Start Acq" }));
   const chosen = expanded ? "Features" : "Image";
   expect(screen.getByRole("button", { name: chosen }).className).toContain("app-header__tab--active");
+});
+
+it("opens a monitor explicitly and starts/stops only local watching with read-only controls", async () => {
+  const model = makeModel({ Gain: { kind: "Float" }, AcquisitionFrameRate: { kind: "Float" } });
+  const connectedMonitor = { ...connected, access: "monitor" };
+  const connections: unknown[] = [];
+  const starts: unknown[] = [];
+  let stops = 0;
+  mockIPC(async (cmd, raw) => {
+    if (cmd === "list_discovered_devices") return [{ id, name: "Bench camera", model: "ST61", serial: "FAKE-01", transport: "gige" }];
+    if (cmd === "get_connection_state") return { kind: "disconnected" };
+    if (cmd === "get_sfnc_groups") return groups;
+    if (cmd === "backend_status") return { mode: "Embedded", zenoh_config_error: null };
+    if (cmd === "connect_device") { connections.push(raw); await emit("connection-state-changed", connectedMonitor); return model; }
+    if (cmd === "query_feature_states_bulk") return { Gain: numeric(5, "dB"), AcquisitionFrameRate: numeric(30, "Hz") };
+    if (cmd === "start_acquisition") {
+      starts.push(raw);
+      await emit("acquisition-status", { active: true, fps: null, stats: null });
+      return { ws_url: "ws://127.0.0.1:1", width: 1, height: 1 };
+    }
+    if (cmd === "stop_acquisition") { stops++; await emit("acquisition-status", { active: false, fps: null, stats: null }); }
+    return undefined;
+  }, { shouldMockEvents: true });
+  render(<AppLayout />);
+  await userEvent.click(await screen.findByRole("button", { name: /1 device/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Monitor camera FAKE-01" }));
+  expect(connections).toEqual([{ deviceId: id, access: "monitor" }]);
+  expect(screen.queryByRole("button", { name: "Start Acq" })).toBeNull();
+  expect(screen.getByRole("status").textContent).toContain("another host's unicast");
+  await userEvent.click(screen.getByRole("button", { name: "Image" }));
+  const gain = await screen.findByRole("spinbutton", { name: "Gain" }) as HTMLInputElement;
+  expect(gain.disabled).toBe(true);
+  expect((screen.getByRole("combobox", { name: "Packet size" }) as HTMLSelectElement).disabled).toBe(true);
+  await userEvent.click(screen.getByRole("button", { name: "Watch stream" }));
+  expect(starts).toEqual([{ packetSize: null }]);
+  await userEvent.click(screen.getByRole("button", { name: "Stop watching" }));
+  expect(stops).toBe(1);
 });

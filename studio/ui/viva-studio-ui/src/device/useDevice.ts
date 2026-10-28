@@ -2,7 +2,7 @@ import { invokeCommand } from "./commands";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "../tauri";
 import { listenTo } from "./events";
-import type { ConnectionState, DeviceInfo, DisconnectReason } from "./types";
+import type { ConnectionAccess, ConnectionState, DeviceInfo, DisconnectReason } from "./types";
 import type { ParseXmlResponse } from "../xml_model/uigraph";
 
 export function useDevice() {
@@ -93,14 +93,14 @@ export function useDevice() {
     };
   }, []);
 
-  const connect = useCallback(async (deviceId: string): Promise<ParseXmlResponse> => {
+  const connect = useCallback(async (deviceId: string, access: ConnectionAccess = "control"): Promise<ParseXmlResponse> => {
     const ticket = ++operation.current;
     manualTransition.current = true;
     currentConnection.current = { kind: "connecting", device_id: deviceId };
     setDisconnectReason(null);
     setReplacementModel(null);
     try {
-      const model = await invokeCommand("connect_device", { deviceId });
+      const model = await invokeCommand("connect_device", { deviceId, access });
       if (ticket !== operation.current) throw new DOMException("Connection superseded", "AbortError");
       return model;
     } catch (error) {

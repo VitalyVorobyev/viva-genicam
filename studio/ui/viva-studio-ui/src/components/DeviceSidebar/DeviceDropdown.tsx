@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deviceDetail, deviceLabel } from "../../device/deviceLabel";
-import type { ConnectionState, DeviceInfo, DisconnectReason } from "../../device/types";
+import type { ConnectionAccess, ConnectionState, DeviceInfo, DisconnectReason } from "../../device/types";
 import { ForceIpForm } from "./ForceIpForm";
 
 interface DeviceDropdownProps {
   devices: DeviceInfo[];
   connectionState: ConnectionState;
   disconnectReason?: DisconnectReason | null;
-  onConnect: (deviceId: string) => void;
+  onConnect: (deviceId: string, access?: ConnectionAccess) => void;
+  embedded?: boolean;
   onDisconnect: () => void;
 }
 
@@ -18,6 +19,7 @@ export function DeviceDropdown({
   disconnectReason = null,
   onConnect,
   onDisconnect,
+  embedded = true,
 }: DeviceDropdownProps) {
   const [open, setOpen] = useState(false);
   /** The camera whose temporary-IP form is open. */
@@ -47,8 +49,8 @@ export function DeviceDropdown({
   }, [open]);
 
   const handleConnect = useCallback(
-    (id: string) => {
-      onConnect(id);
+    (id: string, access: ConnectionAccess = "control") => {
+      onConnect(id, access);
       setOpen(false);
     },
     [onConnect],
@@ -85,7 +87,7 @@ export function DeviceDropdown({
       : "";
 
   const label = isConnected
-    ? connectionState.kind === "control_lost" ? `${connectedName} (read-only)` : connectedName
+    ? connectionState.kind === "control_lost" ? `${connectedName} (read-only)` : connectionState.access === "monitor" ? `${connectedName} (monitor)` : `${connectedName} (control)`
     : isConnecting
       ? "Connecting\u2026"
       : isReconnecting
@@ -132,6 +134,7 @@ export function DeviceDropdown({
             <button type="button" className="btn--secondary btn--sm" onClick={onDisconnect}>Cancel reconnect</button>
           )}
 
+          {!embedded && <div className="device-dd__device-meta">Direct monitor access is unavailable in remote mode; the service owns camera access.</div>}
           {/* Available devices */}
           {!isConnected && devices.length === 0 && (
             <div className="device-dd__scanning">
@@ -150,22 +153,30 @@ export function DeviceDropdown({
                   type="button"
                   className="device-dd__option"
                   disabled={isBusy}
+                  title="Connect with control access"
                   onClick={() => handleConnect(d.id)}
                 >
                   <span className="device-dd__dot device-dd__dot--idle" />
                   <span className="device-dd__option-text">
                     <span className="device-dd__option-name">{deviceLabel(d)}</span>
+                    {d.shares_subnet_with_host === false && <span className="device-dd__option-detail">Different subnet</span>}
                     {deviceDetail(d) && (
                       <span className="device-dd__option-detail">{deviceDetail(d)}</span>
                     )}
                   </span>
+                  <span className="device-dd__transport">Control</span>
                   {d.transport && (
                     <span className={`device-dd__transport device-dd__transport--${d.transport}`}>
                       {d.transport === "gige" ? "GigE" : d.transport === "usb3" ? "USB3" : d.transport}
                     </span>
                   )}
                 </button>
-                {d.transport === "gige" && d.mac && (
+                <button type="button" className="btn--ghost device-dd__set-ip"
+                  disabled={isBusy || !embedded || d.transport !== "gige"}
+                  aria-label={`Monitor camera ${d.serial || d.id}`}
+                  title={!embedded ? "Direct monitor is unavailable in remote mode" : d.transport !== "gige" ? "Monitor access requires GigE Vision" : "Open read-only; watch an existing multicast stream"}
+                  onClick={() => handleConnect(d.id, "monitor")}>Monitor</button>
+                {embedded && d.transport === "gige" && d.mac && (
                   <button
                     type="button"
                     className="btn--ghost device-dd__set-ip"
@@ -177,7 +188,7 @@ export function DeviceDropdown({
                     Set IP…
                   </button>
                 )}
-                {forcing === d.id && d.mac && (
+                {embedded && forcing === d.id && d.mac && (
                   <ForceIpForm mac={d.mac} onDone={() => setForcing(null)} />
                 )}
               </div>

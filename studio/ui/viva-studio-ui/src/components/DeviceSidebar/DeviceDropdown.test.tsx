@@ -59,3 +59,30 @@ describe("DeviceDropdown", () => {
     expect(await screen.findByText(/until it restarts/)).toBeTruthy();
   });
 });
+
+it("offers explicit control and monitor access while explaining another subnet", async () => {
+  const choices: unknown[] = [];
+  render(<ToastProvider><DeviceDropdown devices={[{ ...camera, shares_subnet_with_host: false }]}
+    connectionState={{ kind: "disconnected" }} embedded
+    onConnect={(id, access) => choices.push([id, access])} onDisconnect={() => {}} />
+  </ToastProvider>);
+  await userEvent.click(screen.getByRole("button", { name: /1 device/ }));
+  expect(screen.getByText("Different subnet")).toBeTruthy();
+  expect((screen.getByRole("button", { name: /U321.*FS-3200T/ }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByRole("button", { name: "Set IP…" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Monitor camera U321" }));
+  expect(choices).toEqual([[camera.id, "monitor"]]);
+});
+
+it.each(["remote", "usb"])("labels direct monitor unavailable for %s and never offers remote network writes", async (mode) => {
+  const device = mode === "usb" ? { ...camera, transport: "usb3" } : camera;
+  render(<ToastProvider><DeviceDropdown devices={[device]} connectionState={{ kind: "disconnected" }}
+    embedded={mode !== "remote"} onConnect={() => {}} onDisconnect={() => {}} /></ToastProvider>);
+  await userEvent.click(screen.getByRole("button", { name: /1 device/ }));
+  const monitor = screen.getByRole("button", { name: "Monitor camera U321" }) as HTMLButtonElement;
+  expect(monitor.disabled).toBe(true);
+  if (mode === "remote") {
+    expect(screen.getByText(/Direct monitor access is unavailable in remote mode/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Set IP…" })).toBeNull();
+  }
+});

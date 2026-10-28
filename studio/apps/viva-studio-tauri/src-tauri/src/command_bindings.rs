@@ -59,6 +59,7 @@ fn type_name(ty: &Type, cfg: &Config) -> String {
                 "FeatureState" => <viva_zenoh_api::FeatureState>::name(cfg),
                 "CommandResult" => <viva_zenoh_api::CommandResult>::name(cfg),
                 "ParseXmlResponse" => <crate::commands::xml_model::ParseXmlResponse>::name(cfg),
+                "ConnectionAccess" => <crate::state::device_state::ConnectionAccess>::name(cfg),
                 "DeviceInfo" => <crate::state::device_state::DeviceInfo>::name(cfg),
                 "ConnectionState" => <crate::state::device_state::ConnectionState>::name(cfg),
                 "StreamerInfo" => <crate::state::device_state::StreamerInfo>::name(cfg),

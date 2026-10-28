@@ -31,7 +31,9 @@ use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState, StreamCoun
 use crate::commands::xml_model::{ParseXmlResponse, parse_camera_model};
 use crate::state::SharedModelState;
 use crate::state::connection::Connection;
-use crate::state::device_state::{ConnectionState, DeviceInfo, DisconnectReason, StreamerInfo};
+use crate::state::device_state::{
+    ConnectionAccess, ConnectionState, DeviceInfo, DisconnectReason, StreamerInfo,
+};
 use crate::state::events::{DeviceReconnected, Events, FeaturesInvalidated};
 
 use super::camera::{Device, Frames};
@@ -55,6 +57,7 @@ struct ConnectedCamera {
     report: Option<viva_genicam::report::OpenCamera>,
     gige_info: Option<viva_genicam::gige::DeviceInfo>,
     read_only: bool,
+    access: ConnectionAccess,
 }
 
 impl ConnectedCamera {
@@ -375,6 +378,7 @@ impl EmbeddedBackend {
             report,
             gige_info: None,
             read_only: false,
+            access: ConnectionAccess::Control,
         });
     }
 
@@ -449,9 +453,19 @@ impl EmbeddedBackend {
 }
 
 impl EmbeddedBackend {
-    async fn open(&self, device_id: &str) -> Result<ConnectResult, String> {
+    async fn open(
+        &self,
+        device_id: &str,
+        access: ConnectionAccess,
+    ) -> Result<ConnectResult, String> {
         let usb = self.usb.read().await.get(device_id).cloned();
         if let Some(info) = usb {
+            if access == ConnectionAccess::Monitor {
+                return Err(
+                    "Direct monitor access is available only for embedded GigE Vision cameras"
+                        .into(),
+                );
+            }
             return self.connect_u3v(device_id, info).await;
         }
 
@@ -505,11 +519,17 @@ impl EmbeddedBackend {
             }
             gige_info = found;
         } else if gige_info.mac != [0; 6] {
-            return Err("The discovered camera's MAC could not be verified at its address; rediscover before connecting".into());
+            let found = viva_genicam::gige::discover_with(
+                Duration::from_millis(500),
+                &studio_discovery_options(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            gige_info = verified_discovery(&gige_info, found)?;
         }
         info!(device_id, "Connecting to GigE camera (embedded mode)");
 
-        let (camera, xml) = viva_genicam::connect_gige_with_xml(&gige_info)
+        let (camera, xml) = viva_genicam::connect_gige_as(&gige_info, access.gige())
             .await
             .map_err(|e| format!("Failed to connect to camera at {device_id}: {e}"))?;
 
@@ -522,6 +542,8 @@ impl EmbeddedBackend {
         self.attach(Box::new(camera), device_id, None).await;
         if let Some(connected) = self.camera.lock().await.as_mut() {
             connected.gige_info = Some(gige_info);
+            connected.access = access;
+            connected.read_only = access == ConnectionAccess::Monitor;
         }
 
         Ok(ConnectResult {
@@ -548,13 +570,24 @@ impl DeviceBackend for EmbeddedBackend {
             .map(|(result, _)| result)
     }
 
+    async fn connect_as(
+        &self,
+        device_id: &str,
+        access: ConnectionAccess,
+    ) -> Result<ConnectResult, String> {
+        self.connect_session_as(device_id, access)
+            .await
+            .map(|(result, _)| result)
+    }
+
     async fn connect_model(
         &self,
         device_id: &str,
+        access: ConnectionAccess,
         _: &Arc<Connection>,
         _: &SharedModelState,
     ) -> Result<ParseXmlResponse, String> {
-        self.connect_session(device_id)
+        self.connect_session_as(device_id, access)
             .await
             .map(|(_, model)| model)
     }
@@ -672,7 +705,7 @@ impl DeviceBackend for EmbeddedBackend {
 
         let (width, height, pixel_format, frames) = self
             .with_camera(move |connected| {
-                if !connected.writes_allowed() {
+                if connected.access != ConnectionAccess::Monitor && !connected.writes_allowed() {
                     return Err(
                         "Camera control lost: reconnect explicitly before starting acquisition"
                             .into(),
@@ -931,12 +964,26 @@ impl EmbeddedBackend {
         &self,
         device_id: &str,
     ) -> Result<(ConnectResult, ParseXmlResponse), String> {
+        self.connect_session_as(device_id, ConnectionAccess::Control)
+            .await
+    }
+
+    async fn connect_session_as(
+        &self,
+        device_id: &str,
+        access: ConnectionAccess,
+    ) -> Result<(ConnectResult, ParseXmlResponse), String> {
         if self
             .lifecycle
             .shutting_down
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return Err("Studio is shutting down".into());
+        }
+        if access == ConnectionAccess::Monitor && self.usb.read().await.contains_key(device_id) {
+            return Err(
+                "Direct monitor access is available only for embedded GigE Vision cameras".into(),
+            );
         }
         let ticket = self.lifecycle.begin();
         let mut cancelled = self.lifecycle.generation.subscribe();
@@ -961,12 +1008,12 @@ impl EmbeddedBackend {
         // A USB open is blocking and must finish before a replacement opens its
         // endpoint. GigE opens are cancel-safe, including claimed-control cleanup.
         let result = if self.usb.read().await.contains_key(device_id) {
-            self.open(device_id).await
+            self.open(device_id, access).await
         } else {
             tokio::select! {
                 biased;
                 _ = cancelled.changed() => Err("Connection superseded".into()),
-                opened = self.open(device_id) => opened,
+                opened = self.open(device_id, access) => opened,
             }
         };
         if !self.lifecycle.current(ticket) {
@@ -1024,6 +1071,7 @@ impl EmbeddedBackend {
         parsed: &ParseXmlResponse,
         replacement: bool,
     ) -> Result<(), String> {
+        let access = self.camera.lock().await.as_ref().map(|c| c.access);
         let mut model = self.model.write().await;
         if !self.lifecycle.current(ticket) {
             return Err("Connection superseded".into());
@@ -1041,6 +1089,7 @@ impl EmbeddedBackend {
                     device_id: device_id.into(),
                     device_name: name.into(),
                     model: model_name.into(),
+                    access,
                 },
                 || self.lifecycle.current(ticket),
             )
@@ -1143,12 +1192,13 @@ impl EmbeddedBackend {
         if !self.lifecycle.current(ticket) {
             return;
         }
-        let Some((device_id, previous, was_read_only)) =
+        let Some((device_id, previous, was_read_only, access)) =
             self.camera.lock().await.as_ref().map(|c| {
                 (
                     c.device_id.clone(),
                     c.gige_info.clone(),
                     !c.writes_allowed(),
+                    c.access,
                 )
             })
         else {
@@ -1183,7 +1233,9 @@ impl EmbeddedBackend {
                 .await
                 .ok();
         }
-        let Some(previous) = previous.filter(|p| p.mac != [0; 6] && !was_read_only) else {
+        let Some(previous) = previous
+            .filter(|p| p.mac != [0; 6] && (!was_read_only || access == ConnectionAccess::Monitor))
+        else {
             self.connection
                 .set_when(
                     ConnectionState::Error {
@@ -1196,7 +1248,9 @@ impl EmbeddedBackend {
         };
         // Studio has no explicitly selected NIC. The old endpoint is tried
         // first, then every physical interface can rediscover the same MAC.
-        let options = Reopen::new().patience(self.reopen_patience);
+        let options = Reopen::new()
+            .patience(self.reopen_patience)
+            .access(access.gige());
         #[cfg(test)]
         let options = match &self.reopen_interface {
             Some(interface) => options.interface(interface),
@@ -1225,7 +1279,11 @@ impl EmbeddedBackend {
                 // that kept sending while only the host link was interrupted.
                 let stopped = tauri::async_runtime::spawn_blocking(move || {
                     let mut reopened = reopened;
-                    reopened.camera.acquisition_stop().map(|()| reopened)
+                    if access == ConnectionAccess::Monitor {
+                        Ok(reopened)
+                    } else {
+                        reopened.camera.acquisition_stop().map(|()| reopened)
+                    }
                 })
                 .await;
                 let reopened = match stopped {
@@ -1280,6 +1338,8 @@ impl EmbeddedBackend {
                     .await;
                 if let Some(connected) = self.camera.lock().await.as_mut() {
                     connected.gige_info = Some(info.clone());
+                    connected.access = access;
+                    connected.read_only = access == ConnectionAccess::Monitor;
                 }
                 if let Some(local) = info.local_ip {
                     self.local_ips.write().await.insert(info.mac, local);
@@ -1492,13 +1552,26 @@ impl StreamInfoTracker {
 
 // ── Discovery helpers ───────────────────────────────────────────────────────
 
+fn studio_discovery_options() -> viva_genicam::gige::DiscoveryOptions {
+    // Defaults exclude loopback; broadcast ACKs expose devices on other subnets.
+    viva_genicam::gige::DiscoveryOptions::new().allow_broadcast_ack(true)
+}
+
+fn verified_discovery(
+    previous: &viva_genicam::gige::DeviceInfo,
+    found: Vec<viva_genicam::gige::DeviceInfo>,
+) -> Result<viva_genicam::gige::DeviceInfo, String> {
+    found.into_iter().find(|d| d.mac == previous.mac && d.ip == previous.ip)
+        .ok_or_else(|| "The discovered camera's MAC could not be verified at its address; rediscover before connecting".into())
+}
+
 async fn discover_gige_devices() -> Vec<viva_genicam::gige::DeviceInfo> {
     let timeout = Duration::from_secs(1);
     // `discover` rather than `discover_all`: the latter probes loopback, which
     // on Windows can raise WSAECONNRESET and used to abort the whole scan,
     // leaving the UI on "No device" with a real camera on the wire (#57).
     // `discover_all` remains for the fake-camera tests that need loopback.
-    viva_genicam::gige::discover(timeout)
+    viva_genicam::gige::discover_with(timeout, &studio_discovery_options())
         .await
         .unwrap_or_else(|e| {
             warn!("GigE discovery failed: {e}");
@@ -1616,7 +1689,9 @@ fn discovered_gige(
                 d.user_name.as_deref(),
                 d.manufacturer.as_deref(),
             );
-            DeviceInfo::from_announce(announce, "gige")
+            let mut info = DeviceInfo::from_announce(announce, "gige");
+            info.shares_subnet_with_host = d.shares_subnet_with_host();
+            info
         })
         .collect();
     (infos, local_ips)
@@ -2543,6 +2618,7 @@ mod lifecycle_tests {
                         device_id: "usb-test".into(),
                         device_name: "USB".into(),
                         model: "USB".into(),
+                        access: Some(ConnectionAccess::Control),
                     })
                     .await;
                 backend.watch_session(backend.lifecycle.ticket());
@@ -3082,3 +3158,7 @@ mod lifecycle_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "embedded_monitor_tests.rs"]
+mod monitor_tests;

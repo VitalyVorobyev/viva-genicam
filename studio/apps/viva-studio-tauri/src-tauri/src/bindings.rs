@@ -53,6 +53,7 @@ fn render() -> String {
         crate::state::DiagLevel,
         crate::state::device_state::DeviceInfo,
         crate::state::device_state::ConnectionState,
+        crate::state::device_state::ConnectionAccess,
         crate::state::device_state::StreamerInfo,
         crate::commands::backend::BackendStatus,
         crate::backend::BackendMode,

@@ -326,6 +326,38 @@ events: Array<string>,
  */
 warnings: Array<string>, };
 
+export type ConfigurationOmission = {
+/**
+ * The feature, with the selector entries it was read under when only
+ * some of its values were left out: `Gain[GainSelector=DigitalAll]`.
+ */
+feature: string,
+/**
+ * Why: "not available", "locked by ExposureAuto", ...
+ */
+reason: string, };
+
+export type ConfigurationLoaded = {
+/**
+ * Values written.
+ */
+written: number,
+/**
+ * Of `written`, those written only on the second pass, once the values
+ * they depend on were in place.
+ */
+written_on_retry: number,
+/**
+ * Each value that could not be written, with the reason:
+ * `Gain[GainSelector=DigitalAll] = 9: <why>`.
+ */
+failures: Array<string>,
+/**
+ * Doubts about the file as a whole: saved from another camera model, or
+ * from another version of its XML.
+ */
+warnings: Array<string>, };
+
 export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string,
 /**
  * Declarations in the XML that could not become features, so a viewer
@@ -440,6 +472,48 @@ export type SfncFeature = { node: string, widget: string,
  */
 aliases?: Array<string>, };
 
+export type ConfigurationSaveReport = {
+/**
+ * The file written.
+ */
+path: string,
+/**
+ * How many values it holds.
+ */
+values: number,
+/**
+ * What was left out, and why; the file carries the same as comments.
+ */
+omitted: Array<ConfigurationOmission>, };
+
+export type ActionCommandResult = {
+/**
+ * Where it was sent.
+ */
+destination: string,
+/**
+ * Datagrams sent.
+ */
+sent: number,
+/**
+ * Devices that acknowledged it within the timeout.
+ */
+acks: number,
+/**
+ * Devices that refused it, each once.
+ */
+refusals: Array<ActionRefusal>, };
+
+export type ActionRefusal = {
+/**
+ * Who answered.
+ */
+source: string,
+/**
+ * The status it answered with, such as `NOT_IMPLEMENTED`.
+ */
+status: string, };
+
 export type DisconnectReason = { message: string, device_id: string, };
 
 export type ApiVersionMismatch = { device_id: string,
@@ -494,6 +568,7 @@ export type StudioEvents = {
 export type StudioCommands = {
   "backend_status": { args: Record<string, never>; result: BackendStatus };
   "connect_device": { args: { deviceId: string; access?: ConnectionAccess | null }; result: ParseXmlResponse };
+  "default_action_destination": { args: Record<string, never>; result: string };
   "disconnect_device": { args: Record<string, never>; result: null };
   "execute_command": { args: { nodeName: string }; result: CommandResult };
   "force_ip": { args: { mac: string; ip: string; subnet: string; gateway: string }; result: null };
@@ -505,14 +580,19 @@ export type StudioCommands = {
   "list_camera_events": { args: Record<string, never>; result: Array<string> };
   "list_discovered_devices": { args: Record<string, never>; result: Array<DeviceInfo> };
   "list_fixtures": { args: Record<string, never>; result: Array<string> };
+  "load_camera_configuration": { args: { path: string }; result: ConfigurationLoaded };
   "load_fixture": { args: { name: string }; result: ParseXmlResponse };
   "parse_xml": { args: { xml: string }; result: ParseXmlResponse };
   "ping": { args: Record<string, never>; result: string };
   "query_feature_states_bulk": { args: { names: Array<string> }; result: Record<string, FeatureState> };
+  "read_register": { args: { nodeName: string }; result: Array<number> };
+  "save_camera_configuration": { args: { path: string }; result: ConfigurationSaveReport };
+  "send_action_command": { args: { destination: string; deviceKey: string; groupKey: string; groupMask: string; scheduledTime?: string | null; timeoutMs: number }; result: ActionCommandResult };
   "set_persistent_ip": { args: { ip: string; subnet: string; gateway: string }; result: null };
   "start_acquisition": { args: { packetSize?: number | null }; result: StreamerInfo };
   "start_camera_events": { args: { events: Array<string> }; result: EventMonitorStatus };
   "stop_acquisition": { args: Record<string, never>; result: null };
   "stop_camera_events": { args: Record<string, never>; result: EventMonitorStatus };
   "write_node": { args: { nodeName: string; value: JsonValue }; result: FeatureState };
+  "write_register": { args: { nodeName: string; data: Array<number> }; result: null };
 };

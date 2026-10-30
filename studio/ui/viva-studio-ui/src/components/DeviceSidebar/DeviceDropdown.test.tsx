@@ -53,10 +53,11 @@ describe("DeviceDropdown", () => {
     await user.type(subnet, "255.255.0.0");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
+    // The confirmation follows the IPC call; asserting `sent` first races it.
+    expect(await screen.findByText(/until it restarts/)).toBeTruthy();
     expect(sent).toEqual([
       { mac: "00:0C:DF:01:02:03", ip: "169.254.10.20", subnet: "255.255.0.0", gateway: "0.0.0.0" },
     ]);
-    expect(await screen.findByText(/until it restarts/)).toBeTruthy();
   });
 });
 

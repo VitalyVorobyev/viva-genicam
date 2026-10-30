@@ -44,6 +44,8 @@ fn render() -> String {
         viva_zenoh_api::CameraEvent,
         viva_zenoh_api::EventFeature,
         viva_zenoh_api::EventMonitorStatus,
+        viva_zenoh_api::ConfigurationOmission,
+        viva_zenoh_api::ConfigurationLoaded,
         // The UiGraph contract (`viva_xml_model`).
         viva_xml_model::UiGraph,
         viva_xml_model::UiNode,
@@ -66,6 +68,9 @@ fn render() -> String {
         crate::backend::NetworkConfig,
         crate::commands::sfnc_groups::SfncGroup,
         crate::commands::sfnc_groups::SfncFeature,
+        crate::commands::configuration::ConfigurationSaveReport,
+        crate::commands::action::ActionCommandResult,
+        crate::commands::action::ActionRefusal,
         // Event payloads.
         crate::state::device_state::DisconnectReason,
         crate::state::device_state::ApiVersionMismatch,

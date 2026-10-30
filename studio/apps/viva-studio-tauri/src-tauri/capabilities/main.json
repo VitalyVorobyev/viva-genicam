@@ -16,6 +16,8 @@
     "sfnc-groups",
     "diagnostics",
     "ip-config",
+    "configuration",
+    "action-command",
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-write-file",

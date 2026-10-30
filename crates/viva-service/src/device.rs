@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::{COMMAND_TIMEOUT, Camera, GenicamError};
-use viva_zenoh_api::FeatureState;
+use viva_zenoh_api::{ConfigurationLoaded, ConfigurationSaved, FeatureState};
 
 /// A camera shared between a service's tasks: every call takes the mutex on
 /// the blocking pool, since register I/O blocks.
@@ -140,6 +140,46 @@ pub trait DeviceOps: Send + Sync + 'static {
             .with(move |camera| camera.feature_state(&owned).map(FeatureState::from))
             .await
             .map_err(|e| format!("Failed to read '{name}': {e}"))
+    }
+
+    /// Save the camera's configuration as a GenApi feature file
+    /// ([`Camera::save_features`], ADR-0028), with what was left out.
+    async fn save_configuration(&self) -> Result<ConfigurationSaved, GenicamError> {
+        self.camera()
+            .with(|camera| {
+                let configuration = camera.save_features(&mut std::io::sink())?;
+                Ok(ConfigurationSaved::from(&configuration))
+            })
+            .await
+    }
+
+    /// Restore a configuration file to the camera
+    /// ([`Camera::load_features`]). Only a file that cannot be read at all
+    /// is an error; each value that could not be written is in the report.
+    async fn load_configuration(&self, text: String) -> Result<ConfigurationLoaded, GenicamError> {
+        self.camera()
+            .with(move |camera| {
+                let report = camera.load_features(&mut text.as_bytes())?;
+                Ok(ConfigurationLoaded::from(&report))
+            })
+            .await
+    }
+
+    /// Read a `<Register>` node's bytes ([`Camera::get_register`]).
+    async fn get_register(&self, name: &str) -> Result<Vec<u8>, GenicamError> {
+        let name = name.to_string();
+        self.camera()
+            .with(move |camera| camera.get_register(&name))
+            .await
+    }
+
+    /// Write a `<Register>` node's bytes, exactly its length
+    /// ([`Camera::set_register`]).
+    async fn set_register(&self, name: &str, data: Vec<u8>) -> Result<(), GenicamError> {
+        let name = name.to_string();
+        self.camera()
+            .with(move |camera| camera.set_register(&name, &data))
+            .await
     }
 
     /// The features a write to `name` may change, which a client should

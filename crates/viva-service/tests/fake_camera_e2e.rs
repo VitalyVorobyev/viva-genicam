@@ -1202,3 +1202,140 @@ async fn e2e_events_are_published_with_their_features_and_stop_restores() {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 }
+
+/// Ask `key` with `payload`, as JSON; the reply decoded, or its error text.
+async fn ask<T: serde::de::DeserializeOwned>(
+    session: &zenoh::Session,
+    key: &str,
+    payload: Option<Vec<u8>>,
+) -> Result<T, String> {
+    let mut get = session.get(key).timeout(Duration::from_secs(10));
+    if let Some(payload) = payload {
+        get = get.payload(payload);
+    }
+    let replies = get.await.expect("GET failed");
+    let reply = replies.recv_async().await.expect("no reply received");
+    match reply.result() {
+        Ok(sample) => Ok(serde_json::from_slice(&sample.payload().to_bytes()).unwrap()),
+        Err(error) => Err(String::from_utf8_lossy(&error.payload().to_bytes()).into_owned()),
+    }
+}
+
+/// ST-50 and ST-53 in remote mode: a configuration saved over Zenoh and
+/// loaded back restores the camera, and a `<Register>` is written exactly
+/// its length and read back. Every check reads the fake's registers, past
+/// the protocol.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_configuration_and_registers_reach_the_camera() {
+    use viva_fake_gige::{REG_DEVICE_USER_BUFFER, REG_EXPOSURE_TIME};
+    use viva_zenoh_api::{
+        ConfigurationLoadRequest, ConfigurationLoaded, ConfigurationSaved, RegisterData,
+        RegisterWriteRequest,
+    };
+
+    let cam = TestCamera::start().await;
+    let fake = cam.camera.as_ref().unwrap();
+    let exposure = || async {
+        f64::from_be_bytes(
+            fake.peek(REG_EXPOSURE_TIME, 8)
+                .await
+                .try_into()
+                .expect("eight bytes"),
+        )
+    };
+
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .expect("discovery failed");
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    handle.set_feature("ExposureTime", "1234").await.unwrap();
+    let saved: ConfigurationSaved = ask(&session, &keys::configuration_save(&device_id), None)
+        .await
+        .expect("save");
+    assert!(
+        saved.text.contains("ExposureTime\t1234\n"),
+        "{}",
+        saved.text
+    );
+    assert!(saved.values > 0);
+
+    handle.set_feature("ExposureTime", "5000").await.unwrap();
+    assert_eq!(exposure().await, 5000.0);
+    let request = serde_json::to_vec(&ConfigurationLoadRequest::new(saved.text)).unwrap();
+    let loaded: ConfigurationLoaded = ask(
+        &session,
+        &keys::configuration_load(&device_id),
+        Some(request),
+    )
+    .await
+    .expect("load");
+    assert!(loaded.failures.is_empty(), "{:?}", loaded.failures);
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert_eq!(exposure().await, 1234.0);
+
+    // A file that cannot be read at all is an error reply, and writes nothing.
+    let request = serde_json::to_vec(&ConfigurationLoadRequest::new("Width 640\n")).unwrap();
+    let refused = ask::<ConfigurationLoaded>(
+        &session,
+        &keys::configuration_load(&device_id),
+        Some(request),
+    )
+    .await
+    .expect_err("an unreadable file is refused");
+    assert!(refused.contains("line 1"), "{refused}");
+
+    let bytes: Vec<u8> = (1..=16).collect();
+    let write = |data: Vec<u8>| {
+        let session = session.clone();
+        let key = keys::node_register_set(&device_id, "DeviceUserBuffer");
+        async move {
+            let payload = serde_json::to_vec(&RegisterWriteRequest::new(data)).unwrap();
+            ask::<NodeOpResponse>(&session, &key, Some(payload))
+                .await
+                .expect("a write reply")
+        }
+    };
+    let resp = write(bytes.clone()).await;
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(fake.peek(REG_DEVICE_USER_BUFFER, 16).await, bytes);
+    let read: RegisterData = ask(
+        &session,
+        &keys::node_register(&device_id, "DeviceUserBuffer"),
+        None,
+    )
+    .await
+    .expect("read");
+    assert_eq!(read.data, bytes);
+
+    // A write of another length is refused, and the device keeps its bytes.
+    let resp = write(vec![0xAA; 3]).await;
+    assert!(!resp.ok);
+    let error = resp.error.unwrap_or_default();
+    assert!(error.contains("16"), "{error}");
+    assert_eq!(fake.peek(REG_DEVICE_USER_BUFFER, 16).await, bytes);
+
+    // A node that is not a register is refused with the reason.
+    let refused = ask::<RegisterData>(&session, &keys::node_register(&device_id, "Width"), None)
+        .await
+        .expect_err("Width is not a register");
+    assert!(refused.contains("Width"), "{refused}");
+
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+}

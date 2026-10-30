@@ -18,9 +18,10 @@ use tokio::sync::{Mutex, OnceCell, watch};
 use viva_streamer::meta;
 use viva_zenoh_api::{
     AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, BulkReadRequest, CameraEvent,
-    DeviceAnnounce, DeviceReportRequest, DeviceReportResponse, DeviceStatus, DeviceXmlResponse,
+    ConfigurationLoadRequest, ConfigurationLoaded, ConfigurationSaved, DeviceAnnounce,
+    DeviceReportRequest, DeviceReportResponse, DeviceStatus, DeviceXmlResponse,
     EventControlRequest, EventMonitorStatus, FeatureState, ImageMeta, NodeOpResponse,
-    NodeSetRequest, keys,
+    NodeSetRequest, RegisterData, RegisterWriteRequest, keys,
 };
 use zenoh::Session;
 
@@ -45,6 +46,10 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// cameras worth reporting on are the slow and troubled ones (Codex review
 /// of #174).
 const REPORT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the service may take to save or restore a configuration: it
+/// reads or writes every streamable feature, under every selector entry.
+const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A device not announced for this long is dropped from the list: the
 /// expiry the services announce against (SVC-01).
@@ -785,6 +790,48 @@ impl DeviceBackend for RemoteBackend {
         Ok(status)
     }
 
+    async fn save_configuration(&self) -> Result<ConfigurationSaved, String> {
+        let session = self.session()?;
+        let device_id = self.device_id().await?;
+        let key = keys::configuration_save(&device_id);
+        query_within(&session, &key, None, CONFIGURATION_TIMEOUT).await
+    }
+
+    async fn load_configuration(&self, text: String) -> Result<ConfigurationLoaded, String> {
+        let session = self.session()?;
+        let device_id = self.device_id().await?;
+        let payload =
+            serde_json::to_vec(&ConfigurationLoadRequest::new(text)).map_err(|e| e.to_string())?;
+        let key = keys::configuration_load(&device_id);
+        query_within(&session, &key, Some(payload), CONFIGURATION_TIMEOUT).await
+    }
+
+    async fn read_register(&self, name: &str) -> Result<Vec<u8>, String> {
+        let session = self.session()?;
+        let device_id = self.device_id().await?;
+        let register: RegisterData =
+            query(&session, &keys::node_register(&device_id, name), None).await?;
+        Ok(register.data)
+    }
+
+    async fn write_register(&self, name: &str, data: Vec<u8>) -> Result<Vec<String>, String> {
+        let session = self.session()?;
+        let device_id = self.device_id().await?;
+        let payload =
+            serde_json::to_vec(&RegisterWriteRequest::new(data)).map_err(|e| e.to_string())?;
+        let resp: NodeOpResponse = query(
+            &session,
+            &keys::node_register_set(&device_id, name),
+            Some(payload),
+        )
+        .await?;
+        if resp.ok {
+            Ok(resp.invalidated)
+        } else {
+            Err(resp.error.unwrap_or_else(|| "Write failed".to_string()))
+        }
+    }
+
     async fn shutdown(&self) {
         if let Err(e) = self.disconnect().await {
             tracing::debug!("disconnect at exit: {e}");
@@ -1169,6 +1216,56 @@ mod tests {
                     .event_notification_on(viva_fake_gige::EVENT_EXPOSURE_END)
                     .await
             );
+
+            // A register is written and read through the service (ST-53),
+            // exactly its length.
+            let bytes: Vec<u8> = (1..=16).collect();
+            backend
+                .write_register("DeviceUserBuffer", bytes.clone())
+                .await
+                .expect("register write");
+            assert_eq!(
+                fake.peek(viva_fake_gige::REG_DEVICE_USER_BUFFER, 16).await,
+                bytes
+            );
+            assert_eq!(
+                backend.read_register("DeviceUserBuffer").await.unwrap(),
+                bytes
+            );
+            assert!(
+                backend
+                    .write_register("DeviceUserBuffer", vec![0; 4])
+                    .await
+                    .is_err()
+            );
+
+            // A configuration saved through the service restores the camera
+            // (ST-50); the file stays with the app.
+            let exposure = || async {
+                let bytes = fake.peek(viva_fake_gige::REG_EXPOSURE_TIME, 8).await;
+                f64::from_be_bytes(bytes.try_into().unwrap())
+            };
+            backend
+                .set_feature("ExposureAuto", &serde_json::json!("Off"))
+                .await
+                .unwrap();
+            backend
+                .set_feature("ExposureTime", &serde_json::json!(1234.0))
+                .await
+                .unwrap();
+            let saved = backend.save_configuration().await.expect("save");
+            backend
+                .set_feature("ExposureTime", &serde_json::json!(5000.0))
+                .await
+                .unwrap();
+            assert_eq!(exposure().await, 5000.0);
+            let loaded = backend.load_configuration(saved.text).await.expect("load");
+            assert!(loaded.failures.is_empty(), "{:?}", loaded.failures);
+            assert_eq!(exposure().await, 1234.0);
+
+            // An action command is a broadcast from the cameras' network:
+            // not this app's in remote mode (ST-54).
+            assert!(backend.default_action_destination().await.is_err());
 
             // The report comes from the service, which can reach the camera.
             let report = backend.report(false).await.expect("report");

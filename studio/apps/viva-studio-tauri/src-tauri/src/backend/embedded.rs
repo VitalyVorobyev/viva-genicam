@@ -27,8 +27,8 @@ use viva_genicam::u3v::U3vDeviceInfo;
 use viva_genicam::{Camera, ControlState, Reopen};
 use viva_streamer::frame::{FrameEncoder, FramePacer};
 use viva_zenoh_api::{
-    AcquisitionStatus, CameraEvent, DeviceAnnounce, EventMonitorStatus, FeatureState,
-    StreamCounters,
+    AcquisitionStatus, CameraEvent, ConfigurationLoaded, ConfigurationSaved, DeviceAnnounce,
+    EventMonitorStatus, FeatureState, StreamCounters,
 };
 
 use crate::commands::xml_model::{ParseXmlResponse, parse_camera_model};
@@ -934,6 +934,78 @@ impl DeviceBackend for EmbeddedBackend {
         })
     }
 
+    async fn save_configuration(&self) -> Result<ConfigurationSaved, String> {
+        self.with_camera(|connected| {
+            if !connected.writes_allowed() {
+                return Err(
+                    "Camera control lost or read-only: saving a configuration sets selectors to read each entry"
+                        .into(),
+                );
+            }
+            let configuration = connected.camera.save_configuration()?;
+            Ok(ConfigurationSaved::from(&configuration))
+        })
+        .await
+    }
+
+    async fn load_configuration(&self, text: String) -> Result<ConfigurationLoaded, String> {
+        let configuration = viva_genicam::genapi::Configuration::parse(&text)
+            .map_err(|e| format!("Not a configuration file: {e}"))?;
+        self.with_camera(move |connected| {
+            if !connected.writes_allowed() {
+                return Err(
+                    "Camera control lost or read-only: a configuration cannot be loaded".into(),
+                );
+            }
+            let report = connected.camera.load_configuration(&configuration);
+            Ok(ConfigurationLoaded::from(&report))
+        })
+        .await
+    }
+
+    async fn read_register(&self, name: &str) -> Result<Vec<u8>, String> {
+        let name = name.to_string();
+        self.with_camera(move |connected| connected.camera.get_register(&name))
+            .await
+    }
+
+    async fn write_register(&self, name: &str, data: Vec<u8>) -> Result<Vec<String>, String> {
+        let name = name.to_string();
+        self.with_camera(move |connected| {
+            if !connected.writes_allowed() {
+                return Err("Camera control lost: reconnect explicitly to write".into());
+            }
+            connected.camera.set_register(&name, &data)
+        })
+        .await
+    }
+
+    async fn default_action_destination(&self) -> Result<Ipv4Addr, String> {
+        let info = self
+            .with_camera(|connected| Ok(connected.gige_info.clone()))
+            .await
+            .ok()
+            .flatten();
+        Ok(info
+            .as_ref()
+            .and_then(subnet_broadcast)
+            .unwrap_or(Ipv4Addr::BROADCAST))
+    }
+
+    async fn send_action(
+        &self,
+        destination: Ipv4Addr,
+        params: viva_genicam::gige::ActionParams,
+        timeout_ms: u64,
+    ) -> Result<viva_genicam::gige::AckSummary, String> {
+        let address = std::net::SocketAddr::new(destination.into(), viva_genicam::gige::GVCP_PORT);
+        let summary = viva_genicam::gige::send_action(address, &params, timeout_ms)
+            .await
+            .map_err(|e| format!("Sending the action command to {destination} failed: {e}"))?;
+        info!(%destination, acks = summary.acks, refusals = summary.refusals.len(), "Action command sent");
+        Ok(summary)
+    }
+
     async fn shutdown(&self) {
         self.lifecycle
             .shutting_down
@@ -1073,6 +1145,22 @@ impl DeviceBackend for EmbeddedBackend {
         info!(%ip, %subnet, %gateway, "Persistent IP configured and enabled");
         Ok(())
     }
+}
+
+/// The broadcast address of the network a camera was found on: the host
+/// side's, which the broadcast leaves from, or else the camera's own. `None`
+/// without an address and mask, or for a host route (`/31`, `/32`), which has
+/// no broadcast address.
+fn subnet_broadcast(info: &viva_genicam::gige::DeviceInfo) -> Option<Ipv4Addr> {
+    let (ip, mask) = match (info.local_ip, info.local_netmask) {
+        (Some(ip), Some(mask)) => (ip, mask),
+        _ => (info.ip, info.subnet?),
+    };
+    let mask = u32::from(mask);
+    if mask.count_ones() >= 31 || ip.is_unspecified() {
+        return None;
+    }
+    Some(Ipv4Addr::from(u32::from(ip) | !mask))
 }
 
 /// The connected camera as GigE Vision, for what only GigE Vision has.
@@ -3417,3 +3505,7 @@ mod metadata_tests;
 #[cfg(test)]
 #[path = "embedded_event_tests.rs"]
 mod event_tests;
+
+#[cfg(test)]
+#[path = "embedded_tool_tests.rs"]
+mod tool_tests;

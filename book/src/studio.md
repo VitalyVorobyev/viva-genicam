@@ -142,6 +142,23 @@ Acquisition still starts from **Start Acq**; with the preview expanded, Start
 keeps the Features tab visible. The canvas shares the Image tab's preview
 connection, and only the visible canvas decodes frames.
 
+### Register nodes
+
+A `<Register>` node is a block of raw bytes — a vendor's user data area, a
+lookup table, a file-transfer buffer. Selected while a camera is connected, it
+shows its bytes as a hex dump: the offset, sixteen bytes to a row in
+hexadecimal, and the same bytes as ASCII. **Refresh** reads it again. Studio
+reads the whole register but draws only its first 4096 bytes; **Copy to
+editor** copies all of them into the editor.
+
+To write one, type or paste the new bytes in hexadecimal — spaces, `:`, `-`
+and `,` between bytes are fine — and press **Write**. A register is written
+whole: Studio refuses anything but exactly its length, rather than padding or
+cutting it. After the write it reads the register back, and re-reads any
+feature the write may have changed. A read-only register has no editor, a
+write-only one no dump, and a read-only session writes nothing. Offline,
+with only the XML, a register has no bytes to show.
+
 ## Images
 
 The Image sidebar puts acquisition rate, exposure and gain above the statistics
@@ -184,15 +201,58 @@ is the preview, not a loss. The counters keep their last values after **Stop**.
 
 ## Diagnostics and reports
 
-The **Diagnostics** tab shows the camera's identity, its IP configuration, the
-events it sends ([Camera events](#camera-events)), the declarations in its XML
-that the library could not turn into features, and a log of what Studio did.
+The **Diagnostics** tab shows the camera's identity, its IP configuration, its
+configuration file ([Saving a camera's configuration](#saving-a-cameras-configuration)),
+the events it sends ([Camera events](#camera-events)), action commands
+([Action commands](#action-commands)), the declarations in its XML that the
+library could not turn into features, and a log of what Studio did.
 
 **Generate report** writes the same report as
 `viva-camctl report` ([Reporting a camera we can't open](reporting.md)):
 your system, what discovery heard, the camera's identity and, by default, its
 XML. Save it or copy it, and attach it to an issue. It is the most useful thing
 you can send us.
+
+## Saving a camera's configuration
+
+**Configuration** in the Diagnostics tab saves every feature the camera's XML
+marks as streamable to a file, and loads one back — the same file
+`viva-camctl save` and `load` use, in the layout GenApi's own tools write. A
+feature behind a selector, such as `Gain` behind `GainSelector`, is saved
+under each of its entries. **Save to file…** picks the file and shows how many
+values it saved, and under **Left out, and why** each feature it could not,
+with the reason: not available, locked by another feature, and the like.
+Stop acquisition before saving: features the camera locks while streaming are
+left out otherwise, and the panel says so while the camera acquires.
+
+**Load from file…** writes the values back in the order the camera's features
+depend on one another, and lists each value the camera refused, with its
+reason. A file saved from another camera model, or another version of its
+XML, still loads, with a warning. Afterwards Studio reads every feature on
+screen again. Neither is available in a read-only session: loading writes
+features, and saving sets selectors to read each entry. In remote mode the
+service saves and loads on its camera, and the file stays on your computer.
+
+## Action commands
+
+A GigE Vision action command makes several cameras act at once — trigger an
+exposure, say — from one broadcast. It is addressed by keys, not by camera:
+every camera that receives it compares the **device key**, **group key** and
+**group mask** with its own `ActionDeviceKey`, `ActionGroupKey` and
+`ActionGroupMask`, and the ones that match act on it and acknowledge.
+**Action command** in the Diagnostics tab sends one, as `viva-camctl action`
+does.
+
+Studio fills in the connected camera's keys when the camera lets them be read;
+`ActionDeviceKey` is often write-only, and then you enter the key the camera
+was given. The destination is the broadcast address of the network the camera
+is on, or `255.255.255.255` with no camera connected; a camera's own address
+reaches that camera only. A **scheduled time**, in the cameras' timestamp
+ticks, makes the cameras act at that time instead of at once — only cameras
+that support scheduled actions accept it. Studio shows how many devices
+acknowledged within the timeout, and each device that refused, with the
+status it answered. The command reaches every device on the network, not only
+the connected camera. Action commands are sent in direct mode only.
 
 ## Frame timestamps and chunks
 
@@ -238,7 +298,8 @@ closing Studio put back exactly what starting changed. When something cannot
 be put back — the camera was unplugged, another application took control, a
 write was refused — the panel says which setting, rather than reporting a
 clean stop. A read-only session cannot start events. In remote mode the
-service does the same, and Studio and the service need API version 9.
+service does the same, and Studio and the service need API version 9 or
+later.
 
 A camera whose XML has no `EventSelector` has no events Studio can turn on,
 and the panel says so.

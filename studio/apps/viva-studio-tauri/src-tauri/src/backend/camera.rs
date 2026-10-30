@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use viva_genicam::genapi::RegisterIo;
+use viva_genicam::genapi::{Configuration, LoadReport, RegisterIo};
 use viva_genicam::u3v::UsbTransfer;
 use viva_genicam::{
     COMMAND_TIMEOUT, Camera, ControlState, Event, EventConfiguration, EventRestoreReport,
@@ -45,6 +45,22 @@ pub(crate) trait Device: Send {
 
     /// The image size and pixel format a stream would start with.
     fn image_format(&self) -> (u32, u32, String);
+
+    /// Read the camera's configuration (`Camera::save_features`, ADR-0028).
+    /// A feature behind a selector is read under each entry, so this sets
+    /// the selector, and puts it back.
+    fn save_configuration(&mut self) -> Result<Configuration, String>;
+
+    /// Restore a configuration (`Camera::load_configuration`): every value
+    /// it could not write is in the report.
+    fn load_configuration(&mut self, configuration: &Configuration) -> LoadReport;
+
+    /// A `<Register>` node's bytes.
+    fn get_register(&self, name: &str) -> Result<Vec<u8>, String>;
+
+    /// Write a `<Register>` node, exactly its length, and name the features
+    /// the write may change.
+    fn set_register(&mut self, name: &str, data: &[u8]) -> Result<Vec<String>, String>;
 
     /// Decode this frame's attached chunk ports without device register I/O.
     fn chunk_features(&mut self, _frame: &Frame) -> Vec<(String, Result<String, String>)> {
@@ -97,6 +113,29 @@ fn set_on<R: RegisterIo>(
 ) -> Result<Vec<String>, String> {
     camera
         .set(name, value)
+        .map_err(|e| format!("Failed to write '{name}': {e}"))?;
+    Ok(camera.nodemap().invalidated_by(name))
+}
+
+fn save_configuration_of<R: RegisterIo>(camera: &mut Camera<R>) -> Result<Configuration, String> {
+    camera
+        .save_features(&mut std::io::sink())
+        .map_err(|e| format!("Failed to save the configuration: {e}"))
+}
+
+fn get_register_of<R: RegisterIo>(camera: &Camera<R>, name: &str) -> Result<Vec<u8>, String> {
+    camera
+        .get_register(name)
+        .map_err(|e| format!("Failed to read '{name}': {e}"))
+}
+
+fn set_register_on<R: RegisterIo>(
+    camera: &mut Camera<R>,
+    name: &str,
+    data: &[u8],
+) -> Result<Vec<String>, String> {
+    camera
+        .set_register(name, data)
         .map_err(|e| format!("Failed to write '{name}': {e}"))?;
     Ok(camera.nodemap().invalidated_by(name))
 }
@@ -195,6 +234,22 @@ impl Device for Camera<GigeRegisterIo> {
 
     fn image_format(&self) -> (u32, u32, String) {
         image_format_of(self)
+    }
+
+    fn save_configuration(&mut self) -> Result<Configuration, String> {
+        save_configuration_of(self)
+    }
+
+    fn load_configuration(&mut self, configuration: &Configuration) -> LoadReport {
+        Camera::load_configuration(self, configuration)
+    }
+
+    fn get_register(&self, name: &str) -> Result<Vec<u8>, String> {
+        get_register_of(self, name)
+    }
+
+    fn set_register(&mut self, name: &str, data: &[u8]) -> Result<Vec<String>, String> {
+        set_register_on(self, name, data)
     }
 
     fn chunk_features(&mut self, frame: &Frame) -> Vec<(String, Result<String, String>)> {
@@ -341,6 +396,22 @@ impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
 
     fn image_format(&self) -> (u32, u32, String) {
         image_format_of(self)
+    }
+
+    fn save_configuration(&mut self) -> Result<Configuration, String> {
+        save_configuration_of(self)
+    }
+
+    fn load_configuration(&mut self, configuration: &Configuration) -> LoadReport {
+        Camera::load_configuration(self, configuration)
+    }
+
+    fn get_register(&self, name: &str) -> Result<Vec<u8>, String> {
+        get_register_of(self, name)
+    }
+
+    fn set_register(&mut self, name: &str, data: &[u8]) -> Result<Vec<String>, String> {
+        set_register_on(self, name, data)
     }
 
     fn chunk_features(&mut self, frame: &Frame) -> Vec<(String, Result<String, String>)> {

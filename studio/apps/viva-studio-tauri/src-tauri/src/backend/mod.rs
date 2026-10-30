@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use async_trait::async_trait;
-use viva_zenoh_api::{EventMonitorStatus, FeatureState};
+use viva_genicam::gige::{AckSummary, ActionParams};
+use viva_zenoh_api::{ConfigurationLoaded, ConfigurationSaved, EventMonitorStatus, FeatureState};
 
 use crate::state::device_state::{ConnectionAccess, DeviceInfo, StreamerInfo};
 
@@ -201,6 +202,24 @@ pub trait DeviceBackend: Send + Sync + 'static {
     /// stop monitoring too.
     async fn stop_events(&self) -> Result<EventMonitorStatus, String>;
 
+    /// Save the camera's configuration — every feature its XML marks
+    /// `<Streamable>` — as a GenApi feature file (ADR-0028, backlog ST-50).
+    /// Saving reads a selected feature under each selector entry, so it sets
+    /// selectors and puts them back: a read-only session refuses it.
+    async fn save_configuration(&self) -> Result<ConfigurationSaved, String>;
+
+    /// Restore the configuration file `text` to the camera. Each value that
+    /// could not be written is in the result; only a file that cannot be
+    /// read at all is an error. A read-only session refuses it.
+    async fn load_configuration(&self, text: String) -> Result<ConfigurationLoaded, String>;
+
+    /// A `<Register>` node's bytes (backlog ST-53).
+    async fn read_register(&self, name: &str) -> Result<Vec<u8>, String>;
+
+    /// Write a `<Register>` node, exactly its length, and return the
+    /// features the write may have changed.
+    async fn write_register(&self, name: &str, data: Vec<u8>) -> Result<Vec<String>, String>;
+
     /// Leave the camera free before the app exits; see `on_run_event` in
     /// `main.rs`.
     async fn shutdown(&self) {}
@@ -237,7 +256,31 @@ pub trait DeviceBackend: Send + Sync + 'static {
     ) -> Result<(), String> {
         Err("Persistent IP not supported in this mode".to_string())
     }
+
+    // ── Action commands (GigE, embedded mode; backlog ST-54) ────────────────
+
+    /// Where an action command goes unless the user says otherwise: the
+    /// broadcast address of the network the connected camera is on.
+    async fn default_action_destination(&self) -> Result<Ipv4Addr, String> {
+        Err(ACTION_NOT_REMOTE.to_string())
+    }
+
+    /// Send a GigE Vision action command to `destination` and collect the
+    /// acknowledgements for `timeout_ms`. Every device the address reaches
+    /// whose keys match acts on it.
+    async fn send_action(
+        &self,
+        _destination: Ipv4Addr,
+        _params: ActionParams,
+        _timeout_ms: u64,
+    ) -> Result<AckSummary, String> {
+        Err(ACTION_NOT_REMOTE.to_string())
+    }
 }
+
+/// Why remote mode sends no action command: it is a broadcast from the host
+/// on the cameras' network, and in remote mode that host runs the service.
+const ACTION_NOT_REMOTE: &str = "Action commands require embedded mode: they are broadcast on the cameras' network, which in remote mode is the service's";
 
 /// Type alias for the managed backend state in Tauri.
 pub type BackendState = std::sync::Arc<dyn DeviceBackend>;

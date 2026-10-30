@@ -1,5 +1,7 @@
 pub mod acquisition;
+pub mod action;
 pub mod backend;
+pub mod configuration;
 pub mod device;
 pub mod events;
 pub mod ip_config;

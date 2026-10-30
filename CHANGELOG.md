@@ -11,7 +11,8 @@ release opens with what to read before upgrading.
 ## [Unreleased]
 
 Read before upgrading:
-- **Zenoh API version 9.** Camera events need a version 9 service and Studio;
+- **Zenoh API version 10.** Camera events (version 9) and configuration files
+  and register nodes (version 10) need a version 10 service and Studio;
   upgrade `viva-service`, `viva-service-u3v` and Viva Studio together. Images
   are unchanged.
 - **`viva-service`:** a `StreamSource` implements `open_events`.
@@ -34,6 +35,23 @@ Read before upgrading:
   stop event monitoring on `events/control`, publish each event as a
   `CameraEvent` on `events` and the monitoring status on `events/status`
   (API version 9, [#233]).
+- **Viva Studio: save and load a camera's configuration.** The Diagnostics
+  tab's Configuration panel saves the camera's streamable features to a file
+  and loads one back, listing what a save left out and why, each value a load
+  could not write, and a file saved from another model; every feature on
+  screen is read again after a load ([#234]).
+- **Viva Studio: register nodes.** A connected camera's `<Register>` node shows
+  its bytes as a hex dump with offsets and ASCII, and writes bytes typed in
+  hexadecimal — exactly the register's length, or nothing ([#234]).
+- **Viva Studio: action commands.** The Diagnostics tab sends a GigE Vision
+  action command with its keys, group mask and an optional scheduled time,
+  to the camera network's broadcast address by default, and shows the
+  acknowledgements and each refusal; embedded mode only ([#234]).
+- **Configurations and registers over Zenoh.** `viva-service` and
+  `viva-service-u3v` save and restore a camera's configuration on
+  `configuration/save` and `configuration/load`, and read and write a
+  `<Register>` node on `nodes/{name}/register` and `nodes/{name}/register_set`
+  (API version 10, [#234]).
 
 ### Changed
 
@@ -45,6 +63,7 @@ Read before upgrading:
   "no event selection" ([#233]).
 
 [#233]: https://github.com/VitalyVorobyev/viva-genicam/pull/233
+[#234]: https://github.com/VitalyVorobyev/viva-genicam/pull/234
 
 ## Releases
 

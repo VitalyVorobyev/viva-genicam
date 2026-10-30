@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod camera_event;
+pub mod camera_tools;
 pub mod evs_header;
 pub mod frame_header;
 pub mod frame_metadata;
@@ -19,6 +20,10 @@ pub use camera_event::{
 #[cfg(feature = "genicam")]
 #[cfg_attr(docsrs, doc(cfg(feature = "genicam")))]
 pub use camera_event::{restore_warnings, setup_error_message};
+pub use camera_tools::{
+    ConfigurationLoadRequest, ConfigurationLoaded, ConfigurationOmission, ConfigurationSaved,
+    RegisterData, RegisterWriteRequest,
+};
 pub use evs_header::{EVS_HEADER_SIZE, EVS_MAGIC, EvsFormat, EvsHeader, EvsHeaderError};
 pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 pub use frame_metadata::{
@@ -68,7 +73,12 @@ pub use frame_metadata::{
 ///   monitoring ([`EventControlRequest`]), each event is a [`CameraEvent`] on
 ///   [`keys::events`], and [`EventMonitorStatus`] on [`keys::events_status`]
 ///   says when monitoring stops and what could not be restored.
-pub const API_VERSION: u32 = 9;
+/// - `10` — a camera's configuration is saved on
+///   [`keys::configuration_save`] ([`ConfigurationSaved`]) and restored on
+///   [`keys::configuration_load`] ([`ConfigurationLoaded`]), and a
+///   `<Register>` node is read on [`keys::node_register`] ([`RegisterData`])
+///   and written on [`keys::node_register_set`] ([`RegisterWriteRequest`]).
+pub const API_VERSION: u32 = 10;
 
 /// Periodic announcement published by the camera service.
 ///
@@ -1068,6 +1078,38 @@ pub mod keys {
         format!("genicam/devices/{device_id}/evs")
     }
 
+    /// Where a `<Register>` node's bytes are read.
+    /// Direction: App -> Service (queryable GET, no payload). The reply is a
+    /// [`super::RegisterData`], or an error reply when the read failed.
+    pub fn node_register(device_id: &str, node_name: &str) -> String {
+        format!("genicam/devices/{device_id}/nodes/{node_name}/register")
+    }
+
+    /// Where a `<Register>` node's bytes are written.
+    /// Direction: App -> Service (queryable GET). Payload is a
+    /// [`super::RegisterWriteRequest`]; the reply a [`super::NodeOpResponse`]
+    /// naming the features the write invalidated.
+    pub fn node_register_set(device_id: &str, node_name: &str) -> String {
+        format!("genicam/devices/{device_id}/nodes/{node_name}/register_set")
+    }
+
+    /// Where the camera's configuration is saved: every feature its XML
+    /// marks `<Streamable>`, as a GenApi feature file (ADR-0028).
+    /// Direction: App -> Service (queryable GET, no payload). The reply is a
+    /// [`super::ConfigurationSaved`].
+    pub fn configuration_save(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/configuration/save")
+    }
+
+    /// Where a saved configuration is restored to the camera.
+    /// Direction: App -> Service (queryable GET). Payload is a
+    /// [`super::ConfigurationLoadRequest`]; the reply a
+    /// [`super::ConfigurationLoaded`], or an error reply for a file that
+    /// cannot be read.
+    pub fn configuration_load(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/configuration/load")
+    }
+
     /// Where GenICam device events are started and stopped.
     /// Direction: App -> Service (queryable GET). Payload is a
     /// [`super::EventControlRequest`]; the reply is a
@@ -1092,7 +1134,8 @@ pub mod keys {
     }
 
     /// Extract node name from `genicam/devices/{id}/nodes/{name}/{suffix}`
-    /// where suffix is `"value"`, `"set"`, or `"execute"`.
+    /// where suffix is `"value"`, `"set"`, `"execute"`, `"state"`,
+    /// `"register"` or `"register_set"`.
     pub fn extract_node_name(key: &str) -> Option<&str> {
         let parts: Vec<&str> = key.split('/').collect();
         if parts.len() >= 6 && parts[parts.len() - 3] == "nodes" {
@@ -1321,6 +1364,20 @@ mod tests {
             keys::extract_node_name("genicam/devices/cam0/nodes/AcquisitionStart/execute"),
             Some("AcquisitionStart")
         );
+    }
+
+    #[test]
+    fn test_extract_node_name_register_keys() {
+        for key in [
+            keys::node_register("cam0", "DeviceUserBuffer"),
+            keys::node_register_set("cam0", "DeviceUserBuffer"),
+        ] {
+            assert_eq!(
+                keys::extract_node_name(&key),
+                Some("DeviceUserBuffer"),
+                "{key}"
+            );
+        }
     }
 
     #[test]

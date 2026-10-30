@@ -12,7 +12,7 @@ The Manta and [six-sensor bench](hardware-six-sensor-2026-10-26.md) run the [har
 - **Control channel**: TC-38.
 - **GenApi**: TC-39, API-19.
 - **Local validation**: run the opt-in hardware suite while a camera is available. CI-22 is deferred: no self-hosted runner or hardware workflow is planned.
-- **Studio qualification**: ST-62 (recovery/access and restoration), ST-63 (frame metadata/chunks), ST-64 (camera events) and ST-65 (naming events the XML does not map) remain open until hardware is available for short native checks.
+- **Studio qualification**: ST-62 (recovery/access and restoration), ST-63 (frame metadata/chunks), ST-64 (camera events), ST-65 (naming events the XML does not map) and ST-66 (configuration, register and action tools) remain open until hardware is available for short native checks.
 - **Endurance**: SR-27, decided by the plan's area L and the [acquisition profile](performance-2026-10-26.md). Repeat endurance with resource and restoration evidence when hardware is available; a buffer pool needs a measured bottleneck.
 - **Evidence**: the [tested-camera page](../book/src/tested-cameras.md) records completed hardware runs.
 
@@ -42,9 +42,9 @@ The Manta and [six-sensor bench](hardware-six-sensor-2026-10-26.md) run the [har
 Studio is the library's reference viewer ([ADR-0024](adrs/adr0024-studio-reference-viewer.md)); a change to a type it consumes updates it in the same PR.
 
 - **Found on the bench**: ST-59, the earlier hand-assembled macOS bundle failure; the proper-bundle [native follow-up](hardware-2026-10-25.md#native-studio-follow-up-2026-10-26) passes.
-- **Viewer parity**: camera events are chosen, shown with their data and restored on stop from the Diagnostics tab, in both modes. Native sample inspection and PNG snapshots use an explicit frozen capture ([ADR-0034](adrs/adr0034-native-frame-analysis.md)).
+- **Viewer parity**: camera events are chosen, shown with their data and restored on stop from the Diagnostics tab, in both modes. A camera's configuration is saved to and loaded from a file, and its `<Register>` nodes read and written, in both modes; action commands are sent in embedded mode. Native sample inspection and PNG snapshots use an explicit frozen capture ([ADR-0034](adrs/adr0034-native-frame-analysis.md)).
 - **Distribution**: ST-07.
-- **Later**: ST-50, ST-53, ST-54, ST-55, ST-57, ST-58, ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.
+- **Later**: ST-67, ST-55, ST-57, ST-58, ST-08, ST-09, ST-10, ST-11, ST-12, ST-13.
 
 ## Not planned
 

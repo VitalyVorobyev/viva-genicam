@@ -1,0 +1,7 @@
+[[permission]]
+identifier = "configuration"
+description = "Allows saving the camera's configuration to a file and loading it back."
+commands.allow = [
+  "save_camera_configuration",
+  "load_camera_configuration"
+]

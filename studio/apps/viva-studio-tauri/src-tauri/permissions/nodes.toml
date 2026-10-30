@@ -1,8 +1,10 @@
 [[permission]]
 identifier = "nodes"
-description = "Allows feature state, write and execute commands."
+description = "Allows feature state, write and execute commands, and register reads and writes."
 commands.allow = [
   "query_feature_states_bulk",
   "write_node",
-  "execute_command"
+  "execute_command",
+  "read_register",
+  "write_register"
 ]

@@ -1,0 +1,7 @@
+[[permission]]
+identifier = "action-command"
+description = "Allows sending GigE Vision action commands."
+commands.allow = [
+  "default_action_destination",
+  "send_action_command"
+]

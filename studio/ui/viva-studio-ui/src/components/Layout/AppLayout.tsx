@@ -352,7 +352,7 @@ function AppLayoutInner() {
                 isActive={activeTab === "image"}
               />
             </div>
-            {activeTab === "diagnostics" && <DiagnosticsTab connected={hasSession} />}
+            {activeTab === "diagnostics" && <DiagnosticsTab connected={hasSession} acquiring={acqStatus.active} />}
           </div>
         </main>
       </div>

@@ -2007,10 +2007,22 @@
           "markdownDescription": "Allows acquisition start/stop commands."
         },
         {
+          "description": "Allows sending GigE Vision action commands.",
+          "type": "string",
+          "const": "action-command",
+          "markdownDescription": "Allows sending GigE Vision action commands."
+        },
+        {
           "description": "Allows listing, starting and stopping camera event monitoring.",
           "type": "string",
           "const": "camera-events",
           "markdownDescription": "Allows listing, starting and stopping camera event monitoring."
+        },
+        {
+          "description": "Allows saving the camera's configuration to a file and loading it back.",
+          "type": "string",
+          "const": "configuration",
+          "markdownDescription": "Allows saving the camera's configuration to a file and loading it back."
         },
         {
           "description": "Allows device discovery and connection commands.",
@@ -2031,10 +2043,10 @@
           "markdownDescription": "Allows reading and setting a GigE camera's IP configuration."
         },
         {
-          "description": "Allows feature state, write and execute commands.",
+          "description": "Allows feature state, write and execute commands, and register reads and writes.",
           "type": "string",
           "const": "nodes",
-          "markdownDescription": "Allows feature state, write and execute commands."
+          "markdownDescription": "Allows feature state, write and execute commands, and register reads and writes."
         },
         {
           "description": "Allows invoking the app ping() command.",

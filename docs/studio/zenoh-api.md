@@ -48,7 +48,7 @@ opaque string without `/`).
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional. The app compares this against
-  `viva_zenoh_api::API_VERSION` (currently `9`). On mismatch or absence, the app emits
+  `viva_zenoh_api::API_VERSION` (currently `10`). On mismatch or absence, the app emits
   an `api-version-mismatch` Tauri event (see below) and still discovers the device — no
   hard rejection.
 
@@ -233,6 +233,68 @@ opaque string without `/`).
   ```
 - **Rust type:** request: `BulkReadRequest`; response: `HashMap<String, FeatureState>` — types in `viva_zenoh_api`
 - **Semantics:** Batch introspection. Names whose state cannot be built are silently omitted (same as `nodes/bulk/read`); write-only and command nodes are not among them — they are reported with `"value": null`.
+
+### `genicam/devices/{device_id}/nodes/{node_name}/register`
+
+- **Direction:** App → Service (queryable GET, no payload)
+- **Response (JSON):** `{ "data": [86, 105, 118, 97] }` — the `<Register>` node's
+  bytes, in the order the device holds them; an error reply, whose payload is the
+  message, when the node is not a register or cannot be read now.
+- **Rust type:** `RegisterData` in `viva-zenoh-api`
+- **Semantics:** `Camera::get_register`: the whole register, however long. A
+  register's `FeatureState` reports only its length
+  (`{ "kind": "register", "length": 16 }`), since a register can be 100 000 bytes;
+  its bytes are read here.
+
+### `genicam/devices/{device_id}/nodes/{node_name}/register_set`
+
+- **Direction:** App → Service (queryable GET)
+- **Request (JSON):** `{ "data": [0, 1, 2, 3] }` — exactly the register's length.
+- **Response (JSON):** a `NodeOpResponse`, as for `set`: `ok`, `error`, and on
+  success `invalidated`, the features the write may have changed.
+- **Rust type:** `RegisterWriteRequest` in `viva-zenoh-api`
+- **Semantics:** `Camera::set_register`. Data of any other length is refused and
+  nothing is written: a register is never padded or cut.
+
+---
+
+## Configuration
+
+A camera's configuration is every feature its XML marks `<Streamable>`, as the text
+of a GenApi feature file (ADR-0028) — the file `viva-camctl save` writes. The service
+saves and restores it on its camera; the client reads and writes the file.
+
+### `genicam/devices/{device_id}/configuration/save`
+
+- **Direction:** App → Service (queryable GET, no payload)
+- **Response (JSON):**
+  ```json
+  { "text": "# {05D8C294-F295-4dfb-9D01-096BD04049F4}\n...", "values": 42,
+    "omitted": [ { "feature": "Gain[GainSelector=DigitalAll]", "reason": "not available" } ] }
+  ```
+- **Rust type:** `ConfigurationSaved` and `ConfigurationOmission` in `viva-zenoh-api`
+- **Semantics:** `Camera::save_features`. A feature behind a selector is read under
+  each entry, the selector put back after. `omitted` names what was left out and why,
+  with the selector entries when only some values were; the file carries the same as
+  comments. What `TLParamsLocked` locks is left out while the camera acquires.
+
+### `genicam/devices/{device_id}/configuration/load`
+
+- **Direction:** App → Service (queryable GET)
+- **Request (JSON):** `{ "text": "<the file>" }`
+- **Response (JSON):**
+  ```json
+  { "written": 40, "written_on_retry": 2,
+    "failures": ["Gain[GainSelector=DigitalAll] = 99: <why>"],
+    "warnings": ["<saved from another model or XML version>"] }
+  ```
+  An error reply, whose payload is the message, for a file that cannot be read at
+  all (`line 1: ...`); nothing is written then.
+- **Rust type:** `ConfigurationLoadRequest` and `ConfigurationLoaded` in `viva-zenoh-api`
+- **Semantics:** `Camera::load_features`: values are written in the order the
+  camera's dependencies require, a failed write is tried once more after the others,
+  and every value still refused is in `failures`. Any feature may have changed
+  afterwards, so a client re-reads what it shows.
 
 ---
 
@@ -564,10 +626,13 @@ figures are constants in `viva-zenoh-api` — `ANNOUNCE_INTERVAL` and
 
 ## Error Semantics
 
-- All Zenoh `get()` calls to service queryables expect a single reply within 5 seconds.
+- All Zenoh `get()` calls to service queryables expect a single reply within 5 seconds,
+  except `report` and the two `configuration` keys, which read or write the whole
+  camera and are given 120 seconds.
 - Timeout or Zenoh-level error → surfaced as `"Zenoh timeout or error"`.
 - Service-level error → returned in `{ "ok": false, "error": "..." }` response body;
-  `events/control` answers a failed `start` with an error reply instead.
+  `events/control` answers a failed `start` with an error reply instead, and
+  `nodes/{name}/register` and `configuration/*` answer a failure with an error reply.
 - The app never puts to `image` or `nodes/*/value` — those are service-owned.
 
 ---

@@ -11,6 +11,7 @@ import { CommandView } from "./editors/CommandView";
 import { EnumEditor } from "./editors/EnumEditor";
 import { FloatEditor } from "./editors/FloatEditor";
 import { IntegerEditor } from "./editors/IntegerEditor";
+import { RegisterEditor } from "./editors/RegisterEditor";
 import { StringEditor } from "./editors/StringEditor";
 import { UnknownNodeView } from "./editors/UnknownNodeView";
 
@@ -383,7 +384,11 @@ function renderEditor(
         />
       );
     case "Register":
-      return (
+      // Connected, the register's bytes are read and written; offline there
+      // is no device to hold them.
+      return liveState ? (
+        <RegisterEditor key={node.name} name={node.name} liveState={liveState} />
+      ) : (
         <div className="editor__hint">Register node — read-only in offline mode.</div>
       );
     case "Category":

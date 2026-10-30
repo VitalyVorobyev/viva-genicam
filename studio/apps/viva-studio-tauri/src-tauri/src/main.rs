@@ -193,6 +193,11 @@ fn main() {
             commands::nodes::query_feature_states_bulk,
             commands::nodes::write_node,
             commands::nodes::execute_command,
+            commands::nodes::read_register,
+            commands::nodes::write_register,
+            // Camera configuration files
+            commands::configuration::save_camera_configuration,
+            commands::configuration::load_camera_configuration,
             // Acquisition
             commands::acquisition::start_acquisition,
             commands::acquisition::stop_acquisition,
@@ -208,6 +213,9 @@ fn main() {
             commands::ip_config::force_ip,
             commands::ip_config::get_network_config,
             commands::ip_config::set_persistent_ip,
+            // Action commands (embedded mode only)
+            commands::action::default_action_destination,
+            commands::action::send_action_command,
         ])
         .build(tauri::generate_context!())
         .map(|app| app.run(move |_, event| on_run_event(&event, &backend_for_exit)))
@@ -341,6 +349,21 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_secs(10));
         }
         async fn report(&self, _: bool) -> Result<String, String> {
+            Err("stuck".into())
+        }
+        async fn save_configuration(&self) -> Result<viva_zenoh_api::ConfigurationSaved, String> {
+            Err("stuck".into())
+        }
+        async fn load_configuration(
+            &self,
+            _: String,
+        ) -> Result<viva_zenoh_api::ConfigurationLoaded, String> {
+            Err("stuck".into())
+        }
+        async fn read_register(&self, _: &str) -> Result<Vec<u8>, String> {
+            Err("stuck".into())
+        }
+        async fn write_register(&self, _: &str, _: Vec<u8>) -> Result<Vec<String>, String> {
             Err("stuck".into())
         }
     }

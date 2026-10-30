@@ -16,8 +16,13 @@
 
 export type {
   AcquisitionStatus,
+  ActionCommandResult,
+  ActionRefusal,
   CameraEvent,
   CommandResult,
+  ConfigurationLoaded,
+  ConfigurationOmission,
+  ConfigurationSaveReport,
   ConnectionState,
   ConnectionAccess,
   DeviceInfo,

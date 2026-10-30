@@ -231,6 +231,66 @@ pub async fn execute_command(
     Ok(result)
 }
 
+/// Refuse what the XML says is not a `<Register>` node, or, for a write,
+/// not writable. What depends on the device's state — availability, locks,
+/// the length a `<pLength>` reads now — is checked where the I/O is done.
+async fn check_register(
+    model: &crate::state::SharedModelState,
+    node_name: &str,
+    write: bool,
+) -> Result<(), String> {
+    let model = model.read().await;
+    let Some(node) = model
+        .graph
+        .as_ref()
+        .and_then(|graph| graph.nodes_by_name.get(node_name))
+    else {
+        return Ok(());
+    };
+    if !matches!(node.kind, UiNodeKind::Register) {
+        return Err(format!(
+            "Node '{node_name}' (kind {:?}) is not a Register node",
+            node.kind
+        ));
+    }
+    let access_mode = node.access_mode.as_deref().unwrap_or("RW");
+    if write && (access_mode == "RO" || access_mode == "NA") {
+        return Err(format!(
+            "Node '{node_name}' is not writable (access_mode={access_mode})"
+        ));
+    }
+    Ok(())
+}
+
+/// The bytes of a `<Register>` node, in the order the device holds them
+/// (backlog ST-53). The whole register is read, however long.
+#[tauri::command]
+pub async fn read_register(
+    node_name: String,
+    model: State<'_, crate::state::SharedModelState>,
+    backend: State<'_, BackendState>,
+) -> Result<Vec<u8>, String> {
+    check_register(&model, &node_name, false).await?;
+    backend.read_register(&node_name).await.humanize()
+}
+
+/// Write a `<Register>` node: `data` must be exactly its length, or nothing
+/// is written. The features the write may have changed are announced in a
+/// `features-invalidated` event; the caller reads the register back.
+#[tauri::command]
+pub async fn write_register(
+    node_name: String,
+    data: Vec<u8>,
+    model: State<'_, crate::state::SharedModelState>,
+    backend: State<'_, BackendState>,
+    events: State<'_, Arc<Events>>,
+) -> Result<(), String> {
+    check_register(&model, &node_name, true).await?;
+    let invalidated = backend.write_register(&node_name, data).await.humanize()?;
+    events.invalidated(&node_name, &invalidated);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{nodes_affected_by_command, validate_node_write, validate_numeric_constraints};

@@ -175,6 +175,29 @@ For the debug checkpoints below, give the service
       it while monitoring shows a warning that the event settings were not
       restored
 
+### 6h. Configuration files, registers and action commands
+- [ ] Diagnostics tab -> Configuration -> Save to file… -> "Saved N values to
+      <path>"; the file starts with
+      `# {05D8C294-F295-4dfb-9D01-096BD04049F4}` and holds `ExposureTime`
+- [ ] Change ExposureTime in the Features tab, then Load from file… the saved
+      file -> "Restored N values", no failures, and ExposureTime on screen shows
+      the saved value again without a manual refresh
+- [ ] Load a file saved from another model, or edit its `ModelName` comment ->
+      it loads, with a warning naming the model
+- [ ] While acquiring, the panel says locked features are left out of a save;
+      a save then lists Width, Height and PixelFormat under "Left out, and why"
+- [ ] Features tab -> DeviceUserBuffer shows 16 bytes as a hex dump with an
+      ASCII column; typing 3 bytes shows "3 of 16 bytes" and Write stays
+      disabled; 16 bytes -> Write -> the dump shows them after the read-back
+- [ ] Monitor or control-lost session: Save, Load and Write are disabled, and
+      the dump still reads
+- [ ] Remote mode: Action command -> "Send an action command…" explains that
+      action commands require embedded mode
+- [ ] Embedded mode with a GigE camera (real hardware): the destination is the
+      camera network's broadcast address; with the camera's keys Send ->
+      "acknowledged by 1 device"; a camera without action support is listed as
+      refused with its status
+
 ### 6b. Report
 - [ ] Diagnostics tab -> Save report… -> the file holds
       "# viva-genicam diagnostic report" and a "## Camera" section on the
@@ -220,7 +243,8 @@ For the debug checkpoints below, give the service
 | Chunk data (Timestamp, ExposureTime) | Yes (when ChunkModeActive=1) |
 | Multicast | No |
 | Events (StartOfTransfer, EndOfTransfer, ExposureEnd, while streaming) | Yes |
-| Action commands | No |
+| Action commands (device key 0x42, group key 0x1, group mask 0x1) | Yes |
+| A `<Register>` node (DeviceUserBuffer, 16 bytes) | Yes |
 
 ## CLI flags (`viva-fake-gige`)
 

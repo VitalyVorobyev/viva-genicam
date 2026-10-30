@@ -54,6 +54,7 @@ fn type_name(ty: &Type, cfg: &Config) -> String {
                 ),
                 "String" | "str" => <String>::name(cfg),
                 "bool" => <bool>::name(cfg),
+                "u8" => <u8>::name(cfg),
                 "u32" => <u32>::name(cfg),
                 "Value" => <serde_json::Value>::name(cfg),
                 "FeatureState" => <viva_zenoh_api::FeatureState>::name(cfg),
@@ -67,6 +68,11 @@ fn type_name(ty: &Type, cfg: &Config) -> String {
                 "BackendStatus" => <crate::commands::backend::BackendStatus>::name(cfg),
                 "NetworkConfig" => <crate::backend::NetworkConfig>::name(cfg),
                 "SfncGroup" => <crate::commands::sfnc_groups::SfncGroup>::name(cfg),
+                "ConfigurationLoaded" => <viva_zenoh_api::ConfigurationLoaded>::name(cfg),
+                "ConfigurationSaveReport" => {
+                    <crate::commands::configuration::ConfigurationSaveReport>::name(cfg)
+                }
+                "ActionCommandResult" => <crate::commands::action::ActionCommandResult>::name(cfg),
                 name => panic!("unsupported IPC type {name}: add its ts-rs mapping"),
             }
         }

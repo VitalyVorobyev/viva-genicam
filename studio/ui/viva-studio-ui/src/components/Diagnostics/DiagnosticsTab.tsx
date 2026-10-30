@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useAppLog } from "../../context/AppLogContext";
+import { ActionCommandPanel } from "./ActionCommandPanel";
 import { CameraEventsPanel } from "./CameraEventsPanel";
+import { ConfigurationPanel } from "./ConfigurationPanel";
 import { DevicePanel } from "./DevicePanel";
 import { ReportPanel } from "./ReportPanel";
 
-// DiagnosticsTab renders the camera, its events, the report, and Studio's own
-// timestamped activity log from AppLogContext.
+// DiagnosticsTab renders the camera, its configuration file, its events,
+// action commands, the report, and Studio's own timestamped activity log from
+// AppLogContext.
 // The log auto-scrolls to the newest entry (top, since entries are newest-first).
-export function DiagnosticsTab({ connected }: { connected: boolean }) {
+export function DiagnosticsTab({ connected, acquiring = false }: { connected: boolean; acquiring?: boolean }) {
   const { entries, clear } = useAppLog();
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -29,7 +32,9 @@ export function DiagnosticsTab({ connected }: { connected: boolean }) {
   return (
     <div className="diagnostics-tab">
       <DevicePanel connected={connected} />
+      <ConfigurationPanel connected={connected} acquiring={acquiring} />
       <CameraEventsPanel connected={connected} />
+      <ActionCommandPanel />
       <ReportPanel />
       <div className="diagnostics-tab__toolbar">
         <span className="diagnostics-tab__title">Activity Log</span>

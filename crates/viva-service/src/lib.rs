@@ -10,6 +10,7 @@
 //! one camera's task set, for tests that serve a camera in-process.
 
 mod acquisition;
+mod camera_tools;
 mod device;
 mod discovery;
 mod events;

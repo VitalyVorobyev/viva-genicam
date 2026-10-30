@@ -9,12 +9,13 @@ use tokio::sync::watch;
 use viva_zenoh_api::DeviceAnnounce;
 
 use crate::source::StreamSource;
-use crate::{acquisition, events, nodes, report, status, xml};
+use crate::{acquisition, camera_tools, events, nodes, report, status, xml};
 
 /// Start everything a service runs for one connected camera: publish its
 /// status and initial feature states, then answer its XML, feature, command,
-/// report, acquisition and event queries until `shutdown` turns true, or its
-/// sender is dropped. Then each task lets go of what it holds — the
+/// register, configuration, report, acquisition and event queries until
+/// `shutdown` turns true, or its sender is dropped. Then each task lets go of
+/// what it holds — the
 /// acquisition task stops the frame loop, closes the stream and stops
 /// acquisition; the event task stops monitoring and restores the camera's
 /// event settings — and ends,
@@ -66,6 +67,16 @@ pub async fn serve_device<D: StreamSource>(
             shutdown.clone(),
         )),
         tokio::spawn(nodes::run_bulk_state_queryable(
+            session.clone(),
+            device.clone(),
+            shutdown.clone(),
+        )),
+        tokio::spawn(camera_tools::run_registers(
+            session.clone(),
+            device.clone(),
+            shutdown.clone(),
+        )),
+        tokio::spawn(camera_tools::run_configuration(
             session.clone(),
             device.clone(),
             shutdown.clone(),

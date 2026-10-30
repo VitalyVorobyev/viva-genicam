@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 if-addrs = { workspace = true }
 bytes = { workspace = true }
-viva-gencp = { version = "0.10", path = "../viva-gencp" }
+viva-gencp = { version = "0.11", path = "../viva-gencp" }
 tokio = { workspace = true, features = ["macros", "net", "time"] }
 fastrand = "2"
 socket2 = { workspace = true, features = ["all"] }

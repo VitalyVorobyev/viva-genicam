@@ -31,11 +31,15 @@ pub struct StreamArgs {
     /// Set from NIC MTU then path-probe (ADR-0021). Mutually exclusive with
     /// [`StreamArgs::packet_size`].
     pub auto: bool,
-    pub save: usize,
+    /// Frames, or EVT blocks, to save as files; `None` is [`save_limit`]'s
+    /// default.
+    pub save: Option<usize>,
     /// File format of the frames `save` writes.
     pub save_format: common::SaveFormat,
-    /// Append every completed EVT block's raw payload to this single file.
+    /// Write every completed EVT block's raw payload to this single file.
     pub raw_out: Option<PathBuf>,
+    /// Add to `raw_out` instead of replacing it.
+    pub append: bool,
     pub rgb: bool,
     pub duration_s: u64,
     /// How to open the camera. A monitor watches the multicast stream
@@ -129,17 +133,12 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     let mut saved_frames = 0usize;
     let mut frame_index = 0usize;
     let mut warned_evs_rgb = false;
+    let save_frames = save_limit(args.save, args.raw_out.is_some(), false);
+    let save_blocks = save_limit(args.save, args.raw_out.is_some(), true);
     let mut raw_out = args
         .raw_out
-        .as_ref()
-        .map(|path| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .with_context(|| format!("open raw-out file {}", path.display()))
-        })
-        .transpose()?;
+        .clone()
+        .map(|path| RawOut::new(path, args.append));
     let end_deadline = if args.duration_s > 0 {
         Some(Instant::now() + Duration::from_secs(args.duration_s))
     } else {
@@ -183,7 +182,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                                 }
                                 frame_index += 1;
 
-                                if saved_frames < args.save {
+                                if saved_frames < save_frames {
                                     if let Err(err) = save_frame(&frame, frame_index, args.save_format, args.rgb) {
                                         warn!(error = %err, frame = frame_index, "failed to save frame");
                                     } else {
@@ -202,11 +201,10 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                                     warned_evs_rgb = true;
                                 }
                                 if let Some(file) = raw_out.as_mut() {
-                                    use std::io::Write;
-                                    file.write_all(block.payload.as_ref())
+                                    file.write(block.payload.as_ref())
                                         .with_context(|| format!("write EVT payload to raw-out (block {})", frame_index))?;
                                 }
-                                if saved_frames < args.save {
+                                if saved_frames < save_blocks {
                                     if let Err(err) = save_evs_block(&block, frame_index) {
                                         warn!(error = %err, block = frame_index, "failed to save EVT block");
                                     } else {
@@ -236,6 +234,55 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     common::print_stream_counters("Summary:", &stats.snapshot());
 
     Ok(())
+}
+
+/// How many frames, or EVT blocks, `--save` writes: what it says, else 1 —
+/// but no EVT blocks with `--raw-out`, which records every one already.
+fn save_limit(save: Option<usize>, raw_out: bool, evs: bool) -> usize {
+    save.unwrap_or(if evs && raw_out { 0 } else { 1 })
+}
+
+/// The `--raw-out` file, opened when the first EVT block arrives: a stream
+/// that sends none leaves no file behind, and an earlier capture as it was.
+struct RawOut {
+    path: PathBuf,
+    append: bool,
+    file: Option<std::fs::File>,
+}
+
+impl RawOut {
+    fn new(path: PathBuf, append: bool) -> Self {
+        Self {
+            path,
+            append,
+            file: None,
+        }
+    }
+
+    /// Write one block's payload, creating the file — or replacing it,
+    /// unless appending — before the first.
+    fn write(&mut self, payload: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let file = match self.file.take() {
+            Some(file) => file,
+            None => {
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true);
+                if self.append {
+                    options.append(true);
+                } else {
+                    options.write(true).truncate(true);
+                }
+                let file = options
+                    .open(&self.path)
+                    .with_context(|| format!("open raw-out file {}", self.path.display()))?;
+                info!(file = %self.path.display(), append = self.append, "recording EVT blocks");
+                file
+            }
+        };
+        self.file.insert(file).write_all(payload)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,4 +335,42 @@ fn save_evs_block(block: &EvsBlock, index: usize) -> Result<PathBuf> {
         "saved raw EVT block"
     );
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_defaults_to_one_but_no_evt_block_with_raw_out() {
+        assert_eq!(save_limit(None, false, false), 1);
+        assert_eq!(save_limit(None, false, true), 1);
+        assert_eq!(save_limit(None, true, false), 1, "an image is still saved");
+        assert_eq!(save_limit(None, true, true), 0);
+        assert_eq!(save_limit(Some(3), true, true), 3, "--save says otherwise");
+    }
+
+    #[test]
+    fn raw_out_is_created_at_the_first_block_and_replaces_or_appends() {
+        let dir = std::env::temp_dir().join(format!("viva-camctl-rawout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("capture.evt3");
+
+        let raw = RawOut::new(path.clone(), false);
+        drop(raw);
+        assert!(!path.exists(), "no block, no file");
+
+        std::fs::write(&path, b"earlier").unwrap();
+        let mut raw = RawOut::new(path.clone(), false);
+        raw.write(b"ab").unwrap();
+        raw.write(b"cd").unwrap();
+        drop(raw);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcd", "replaced");
+
+        let mut raw = RawOut::new(path.clone(), true);
+        raw.write(b"ef").unwrap();
+        drop(raw);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdef", "appended");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

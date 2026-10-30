@@ -257,17 +257,23 @@ pub enum Cmd {
         /// camera's GevSCPSPacketSize. Mutually exclusive with --auto.
         #[arg(long, conflicts_with = "auto")]
         packet_size: Option<u32>,
-        #[arg(long, default_value_t = 1)]
-        save: usize,
+        /// Save the first N frames as frame_NNNN files, or EVT blocks as
+        /// block_NNNN files [default: 1, and no EVT blocks with --raw-out]
+        #[arg(long)]
+        save: Option<usize>,
         /// File format for --save: pnm (8-bit PGM/PPM), or png/tiff at the
         /// camera's bit depth (16-bit above 8 bits)
         #[arg(long, value_enum, default_value_t = SaveFormat::Pnm)]
         save_format: SaveFormat,
-        /// Append every completed EVT block's raw payload to this file,
-        /// in arrival order (replay capture). Image frames are unaffected;
-        /// use --save for frame_NNNN files.
+        /// Write every completed EVT block's raw payload to this file, in
+        /// arrival order (replay capture). The file is created, or replaced,
+        /// when the first block arrives. Image frames are unaffected; use
+        /// --save for frame_NNNN files.
         #[arg(long)]
         raw_out: Option<PathBuf>,
+        /// Add to the --raw-out file instead of replacing it
+        #[arg(long, requires = "raw_out")]
+        append: bool,
         #[arg(long)]
         rgb: bool,
         #[arg(long, default_value_t = 0)]
@@ -560,7 +566,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             ..
         } => {
             common::chosen_access(access, viva_genicam::Access::Control, true)?;
-            cmd_usb::run_stream(usb, save, save_format, rgb, duration_s)?
+            cmd_usb::run_stream(usb, save.unwrap_or(1), save_format, rgb, duration_s)?
         }
         Cmd::Stream {
             ip,
@@ -579,6 +585,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             rgb,
             duration_s,
             raw_out,
+            append,
             access,
             monitor,
         } => {
@@ -599,6 +606,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 rgb,
                 duration_s,
                 raw_out,
+                append,
             };
             cmd_stream::run(args).await?
         }
@@ -796,6 +804,30 @@ mod tests {
         assert!(
             Cli::try_parse_from(["viva-camctl", "stream", "--usb", "0", "--index", "1"]).is_err()
         );
+    }
+
+    /// `--save` has no default of its own, so a `--raw-out` capture can save
+    /// no block files; `--append` only adds to a `--raw-out` file.
+    #[test]
+    fn stream_save_is_optional_and_append_needs_raw_out() {
+        let cli = Cli::parse_from(["viva-camctl", "stream", "--raw-out", "capture.evt3"]);
+        match cli.cmd {
+            Cmd::Stream {
+                save,
+                raw_out,
+                append,
+                ..
+            } => assert_eq!(
+                (save, raw_out, append),
+                (None, Some(PathBuf::from("capture.evt3")), false)
+            ),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["viva-camctl", "stream", "--raw-out", "c.evt3", "--append"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["viva-camctl", "stream", "--append"]).is_err());
     }
 
     /// API-11: events and chunks take --usb, as stream does.

@@ -30,7 +30,6 @@ The Manta and [six-sensor bench](hardware-six-sensor-2026-10-26.md) run the [har
 - **DC-04**: a fake that emits `Coord3D_*` frames, built from that one capture.
 - **SR-23**: the receive engine's restart, late-window and oversized-packet rules; a camera whose block ids restart at 1, or whose packet size the host misjudges mid-stream, settles them (the Manta G-125B's ids run on).
 - **SR-25**: the standard-id resend request's first word on a stream channel other than 0, and other vendors' answers to a resend they cannot serve.
-- **DC-06**: `stream --raw-out` edge cases; only event-vision streams write raw output, so it goes with DC-05.
 - **PX-05**: how a camera that declares line padding counts a packing group its line ends inside (an odd width in `Mono12p`); needs a capture from such a camera.
 - **TC-38**: whether cameras other than the Manta G-125B refuse a non-holder's claim and writes while nobody holds control, and whether the keepalive should write CCP to see a takeover at once.
 - **TC-39**: whether a widened WRITEMEM (a 1-byte register) is accepted; a `-vv` log of one.

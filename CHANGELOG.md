@@ -36,6 +36,8 @@ release opens with what to read before upgrading.
 
 ### Changed
 
+- **`viva-camctl stream --raw-out` replaces its file.** It appended, so a rerun added to the previous capture, even in another EVT format; the file is now replaced, and `--append` adds to it. The file is created when the first event block arrives, so an image stream leaves none, and `--raw-out` without `--save` no longer also writes `block_0001.*`.
+
 - **More startup headroom for frame delivery (SR-28).** The bounded GigE Vision and USB3 Vision delivery queue holds 16 completed frames instead of 4. The six-sensor camera had already evicted eight frames while acquisition start returned; a 16-frame queue retained frame 1 in the short probes and tolerated a 3 ms consumer pause. It permits up to four times the queued payload memory and a longer pending-frame age; per-frame allocation and copying stay unchanged. GigE hardware was measured; USB3 behavior is covered by fake/queue regressions ([#227](https://github.com/VitalyVorobyev/viva-genicam/pull/227)).
 
 - **Lower acquisition overhead on Unix.** The GVSP receiver uses bounded socket reads and resend writes instead of polling before every packet; Windows retains readiness polling. Focused timeout and cancellation tests, a reproducible two-process benchmark, and Manta ROI measurements accompany the change. Frame allocation and the four-frame delivery queue are unchanged ([#222](https://github.com/VitalyVorobyev/viva-genicam/pull/222)).

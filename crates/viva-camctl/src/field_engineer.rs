@@ -662,3 +662,72 @@ fn stream_monitor_watches_a_stream_another_application_controls() {
         "a monitor configures no stream"
     );
 }
+
+/// `stream --raw-out` records an event camera's EVT blocks, and only them: it
+/// replaces the file unless `--append`, writes no `block_NNNN` files unless
+/// `--save` asks for them, and an image stream leaves no file at all.
+#[test]
+fn stream_raw_out_records_evt_blocks_and_nothing_else() {
+    use viva_genicam::pfnc::PixelFormat;
+
+    let dir = std::env::temp_dir().join(format!("viva-camctl-raw-out-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let capture = dir.join("capture.evt3");
+    let path = capture.to_str().unwrap();
+    let stream = |extra: &[&str]| {
+        let mut args = vec![
+            "viva-camctl",
+            "--iface",
+            "127.0.0.1",
+            "stream",
+            "--ip",
+            "127.0.0.1",
+            "--duration-s",
+            "1",
+            "--raw-out",
+            path,
+        ];
+        args.extend_from_slice(extra);
+        crate::run(args)
+    };
+    // The fake sends one byte per "pixel" of an EVT format: 64-byte blocks.
+    let block = 16 * 4;
+
+    {
+        let _fake = Fake::start_with(|builder| {
+            builder
+                .width(16)
+                .height(4)
+                .pixel_format(PixelFormat::VendorLucidEvsEvt30.code())
+        });
+        std::fs::write(&capture, b"earlier capture").unwrap();
+        assert_eq!(stream(&[]), 0);
+        let first = std::fs::read(&capture).unwrap();
+        assert!(
+            !first.is_empty() && first.len().is_multiple_of(block),
+            "whole blocks, the earlier capture replaced: {} bytes",
+            first.len()
+        );
+        assert!(
+            !std::path::Path::new("block_0001.evt3").exists(),
+            "--raw-out without --save saves no block file"
+        );
+
+        assert_eq!(stream(&["--append"]), 0);
+        let appended = std::fs::read(&capture).unwrap();
+        assert!(
+            appended.len() > first.len() && appended.starts_with(&first),
+            "--append adds to the capture: {} bytes after {}",
+            appended.len(),
+            first.len()
+        );
+    }
+
+    std::fs::remove_file(&capture).unwrap();
+    {
+        let _fake = Fake::start_with(|builder| builder.width(16).height(4));
+        assert_eq!(stream(&["--save", "0"]), 0);
+        assert!(!capture.exists(), "an image stream leaves no raw-out file");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

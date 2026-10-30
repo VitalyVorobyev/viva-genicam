@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Union
 
+from . import _native
+from .evs import EvsBlock
 from .frame import Frame
 
 
@@ -105,6 +107,21 @@ class FrameStream:
         """
         native = self._native.next_frame(timeout_ms)
         return None if native is None else Frame(native)
+
+    def next_block(self, timeout_ms: Optional[int] = None) -> Union[Frame, EvsBlock, None]:
+        """Pull the next block: a :class:`Frame` for an image, an
+        :class:`EvsBlock` for an event camera's data.
+
+        :meth:`next_frame` hands out event data as a frame of raw bytes;
+        this tells the two apart. A USB3 Vision stream returns frames.
+        Returns ``None`` on a clean stream end; raises on error or timeout.
+        """
+        native = self._native.next_block(timeout_ms)
+        if native is None:
+            return None
+        if isinstance(native, _native.EvsBlock):
+            return EvsBlock(native)
+        return Frame(native)
 
     def stats(self) -> StreamStats:
         """The stream's counters so far."""

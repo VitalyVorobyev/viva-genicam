@@ -12,6 +12,8 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Event-vision blocks in Python.** `FrameStream.next_block()` returns a `Frame` for an image and the new `EvsBlock` for an event camera's EVT 3.0 or EVT 2.1 data: its bytes as sent, its `format` (`"evt3.0"` or `"evt2.1"`), timestamps, block ID, status, chunks, and the GVSP leader and trailer sizes. `next_frame()` still hands event data out as a frame of raw bytes; a USB3 Vision stream returns frames.
+
 - **Frame timestamps and chunks in Studio (ST-52).** The Image tab shows exact frame IDs, device ticks, optional calibrated host time and XML-decoded chunk values/errors from the displayed or frozen image. Standard chunk controls remain explicit and respect read-only access. Remote services and Studio must be upgraded together for API 8 / image header 3 ([#230](https://github.com/VitalyVorobyev/viva-genicam/pull/230)).
 
 - **Read-only GigE monitoring in Studio (ST-49).** Choose Monitor to inspect features and watch an existing multicast stream while another application controls the camera. Stop watching and reconnect preserve the controller and never start or stop its acquisition. Discovery now requests broadcast acknowledgements and identifies cameras on another subnet, with the existing temporary-IP action available in direct mode ([#229](https://github.com/VitalyVorobyev/viva-genicam/pull/229)).

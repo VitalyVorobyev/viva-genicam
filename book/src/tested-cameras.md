@@ -119,6 +119,9 @@ read from its interface name.
   ([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138)), and
   streaming its EVT event data with `viva-camctl stream --raw-out`
   ([#154](https://github.com/VitalyVorobyev/viva-genicam/pull/154)).
+- Reported: "Works", with its GenApi XML, which is now in the vendor corpus
+  ([#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138#issuecomment-6525333130)).
+  The report does not say which version or command it ran.
 - The EVT decoder's tests use bytes captured from this camera
   ([#139](https://github.com/VitalyVorobyev/viva-genicam/pull/139)).
 

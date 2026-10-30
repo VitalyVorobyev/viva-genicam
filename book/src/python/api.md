@@ -246,6 +246,7 @@ class FrameStream:
     def __iter__(self) -> Iterator[Frame]: ...
     def __next__(self) -> Frame: ...                # 5-second default timeout
     def next_frame(self, timeout_ms: Optional[int] = None) -> Optional[Frame]: ...
+    def next_block(self, timeout_ms: Optional[int] = None) -> Frame | EvsBlock | None: ...
     def stats(self) -> StreamStats: ...             # GigE
     def close(self) -> None: ...
 ```
@@ -288,6 +289,25 @@ class FrameStatus(str, Enum):
 
 What shape and type `to_numpy` returns for each format:
 [Streaming → to_numpy()](streaming.md#to_numpy--the-cameras-values).
+
+## EvsBlock
+
+```python
+class EvsBlock:                        # from FrameStream.next_block()
+    format: str                        # "evt3.0" | "evt2.1"
+    block_id: int
+    status: FrameStatus
+    leader_size_x: int                 # GVSP leader and trailer, as sent
+    leader_size_y: int
+    trailer_size_y: int
+    chunks: Optional[dict[int, bytes]]
+    ts_dev: Optional[int]
+    ts_host: Optional[float]
+
+    def payload(self) -> bytes: ...    # the EVT bytes as sent
+```
+
+See [Streaming → Event-vision blocks](streaming.md#event-vision-blocks).
 
 ## Events
 

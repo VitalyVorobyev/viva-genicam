@@ -11,6 +11,7 @@ mod camera;
 mod discovery;
 mod errors;
 mod events;
+mod evs;
 mod frame;
 mod gige;
 mod nodemap;
@@ -24,6 +25,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     discovery::register(m)?;
     camera::register(m)?;
     frame::register(m)?;
+    evs::register(m)?;
     stream::register(m)?;
     events::register(m)?;
     gige::register(m)?;

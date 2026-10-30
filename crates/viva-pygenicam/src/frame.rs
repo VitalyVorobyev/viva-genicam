@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use numpy::{PyArray1, PyArray3, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
-use viva_genicam::{Frame, FrameStatus};
+use viva_genicam::{ChunkData, Frame, FrameStatus};
 use viva_pfnc::convert::{self, ConvertError, Pixels};
 use viva_pfnc::PixelFormat;
 
@@ -88,7 +88,7 @@ fn decode(frame: &Frame, demosaic: bool) -> Result<Decoded, ConvertError> {
 
 /// `FrameStatus` as Python sees it: its name, and the missing-packet count or
 /// device status code some variants carry.
-fn status_parts(status: FrameStatus) -> (&'static str, Option<u32>, Option<u16>) {
+pub(crate) fn status_parts(status: FrameStatus) -> (&'static str, Option<u32>, Option<u16>) {
     match status {
         FrameStatus::Complete => ("Complete", None, None),
         FrameStatus::Incomplete { missing_packets } => ("Incomplete", Some(missing_packets), None),
@@ -96,6 +96,18 @@ fn status_parts(status: FrameStatus) -> (&'static str, Option<u32>, Option<u16>)
         FrameStatus::TrailerMissing => ("TrailerMissing", None, None),
         _ => ("Unknown", None, None),
     }
+}
+
+/// A block's chunks as a dict of chunk ID to bytes.
+pub(crate) fn chunks_dict<'py>(
+    py: Python<'py>,
+    chunks: &ChunkData,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    for (id, data) in chunks.iter() {
+        dict.set_item(id, PyBytes::new(py, data))?;
+    }
+    Ok(dict)
 }
 
 #[pymethods]
@@ -197,14 +209,11 @@ impl PyFrame {
     /// The frame's chunks by chunk ID, or `None` for a frame without chunks.
     #[getter]
     fn chunks<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let Some(chunks) = self.inner.chunks.as_ref() else {
-            return Ok(None);
-        };
-        let dict = PyDict::new(py);
-        for (id, data) in chunks.iter() {
-            dict.set_item(id, PyBytes::new(py, data))?;
-        }
-        Ok(Some(dict))
+        self.inner
+            .chunks
+            .as_ref()
+            .map(|chunks| chunks_dict(py, chunks))
+            .transpose()
     }
 
     /// Raw payload bytes (copies into a Python `bytes` object).

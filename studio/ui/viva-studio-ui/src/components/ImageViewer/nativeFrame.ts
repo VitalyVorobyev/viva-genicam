@@ -2,11 +2,14 @@
  * A capture includes the matching preview and native-depth PNG so freezing,
  * inspection and saving cannot accidentally combine different camera frames.
  */
+import { MAX_FRAME_METADATA_BYTES, parseFrameMetadata } from "../../device/frameMetadata";
+import type { FrameMetadata } from "../../device/types";
 import type { PixelSample } from "./pixelInspectorUtils";
 import type { HistogramData } from "./histogramUtils";
 import { bresenhamLine, type ProfileData } from "./lineProfileUtils";
 
 export interface NativeFrame {
+  metadata?: FrameMetadata | null;
   width: number;
   height: number;
   pixelFormat: string;
@@ -29,7 +32,7 @@ export function parseNativeFrame(buffer: ArrayBuffer): NativeFrame {
   const view = new DataView(buffer);
   if (bytes.length < 8 || String.fromCharCode(...bytes.subarray(0, 4)) !== "VRAW") throw new Error("Invalid native capture signature");
   const headerLength = view.getUint32(4, true);
-  if (headerLength < 2 || headerLength > 4096 || 8 + headerLength > bytes.length) throw new Error("Invalid native capture header");
+  if (headerLength < 2 || headerLength > MAX_FRAME_METADATA_BYTES + 4096 || 8 + headerLength > bytes.length) throw new Error("Invalid native capture header");
   const h: Record<string, unknown> = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(8, 8 + headerLength)));
   if (h.version !== 1 || !integer(h.width) || !integer(h.height) || h.width * h.height > MAX_PIXELS
       || !integer(h.bits) || h.bits < 8 || h.bits > 16 || (h.channels !== 1 && h.channels !== 3)
@@ -50,7 +53,7 @@ export function parseNativeFrame(buffer: ArrayBuffer): NativeFrame {
   at += expected;
   const png = bytes.slice(at);
   if (png.length < 8 || png[0] !== 0x89 || png[1] !== 0x50 || png[2] !== 0x4e || png[3] !== 0x47) throw new Error("Invalid native PNG");
-  return { width: h.width, height: h.height, pixelFormat: h.pixel_format, bits: h.bits, channels: h.channels, mosaic: h.mosaic, bmp, png, samples };
+  return { metadata: h.metadata == null ? null : parseFrameMetadata(h.metadata), width: h.width, height: h.height, pixelFormat: h.pixel_format, bits: h.bits, channels: h.channels, mosaic: h.mosaic, bmp, png, samples };
 }
 
 export async function captureNativeFrame(wsUrl: string, signal?: AbortSignal): Promise<NativeFrame> {

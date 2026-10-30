@@ -94,3 +94,11 @@ describe("native frame capture", () => {
     await expect(captureNativeFrame("ws://127.0.0.1:3001/ws")).rejects.toThrow("HTTP 422): Response exceeded the error-message limit");
   });
 });
+
+
+it("retains exact metadata inside the matching frozen image and validates it", () => {
+  const metadata = { block_id: "18446744073709551615", ts_dev: null, ts_host_ns: null,
+    complete: true, chunks: [], features: [], chunk_error: null, truncated: false };
+  expect(parseNativeFrame(packet({ metadata })).metadata).toEqual(metadata);
+  expect(() => parseNativeFrame(packet({ metadata: { ...metadata, block_id: 42 } }))).toThrow(/metadata/);
+});

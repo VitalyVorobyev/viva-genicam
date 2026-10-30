@@ -1,74 +1,88 @@
-//! Binary frame header prepended to every raw pixel buffer on the Zenoh image key.
+//! Binary image envelope on the Zenoh image key.
 //!
-//! ## Layout (20 bytes, all fields little-endian)
+//! Version 3 keeps the version-2 geometry offsets, then carries a bounded
+//! JSON metadata object in the same packet as its pixels. The fixed prefix
+//! is 24 bytes, all integers little endian:
 //!
-//! | Offset | Size | Field   | Value / Notes                          |
-//! |--------|------|---------|----------------------------------------|
-//! | 0      | 2    | magic   | `0x4746` LE (`[0x46, 0x47]`)           |
-//! | 2      | 1    | version | `2`                                    |
-//! | 3      | 1    | format  | pixel format discriminant (see table)  |
-//! | 4      | 4    | width   | image width in pixels, u32 LE          |
-//! | 8      | 4    | height  | image height in pixels, u32 LE         |
-//! | 12     | 4    | seq     | monotonically increasing frame counter |
-//! | 16     | 4    | stride  | row bytes, or 0 for continuous packing  |
+//! | Offset | Size | Field |
+//! |--------|------|-------|
+//! | 0 | 2 | magic `0x4746` |
+//! | 2 | 1 | version `3` |
+//! | 3 | 1 | pixel format code |
+//! | 4 | 4 | width |
+//! | 8 | 4 | height |
+//! | 12 | 4 | sequence counter |
+//! | 16 | 4 | row stride, or 0 for continuous packing |
+//! | 20 | 4 | metadata JSON byte length, at most 64 KiB |
+//!
+//! Metadata bytes follow, then the image pixels. Length 0 means no metadata.
 
+use crate::{FrameMetadata, MAX_FRAME_METADATA_BYTES};
 use thiserror::Error;
-
 use viva_pfnc::PixelFormat;
 
-/// Magic bytes identifying a GenICam frame header.
-/// Little-endian encoding of `0x4746` -> bytes `[0x46, 0x47]`.
+/// Little-endian image magic, bytes `[0x46, 0x47]`.
 pub const FRAME_MAGIC: u16 = 0x4746;
+/// Fixed prefix size, excluding the optional metadata object and pixels.
+pub const HEADER_SIZE: usize = 24;
+/// The only supported image envelope version.
+pub const SUPPORTED_VERSION: u8 = 3;
 
-/// Fixed size of the binary frame header in bytes.
-pub const HEADER_SIZE: usize = 20;
-
-/// The only supported header version. Bumped when the layout changes.
-pub const SUPPORTED_VERSION: u8 = 2;
-
-/// Errors returned by [`FrameHeader::decode`].
+/// A malformed or unrepresentable image envelope.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FrameHeaderError {
-    /// Buffer is shorter than [`HEADER_SIZE`] bytes.
+    /// The fixed prefix is incomplete.
     #[error("buffer too short: need {HEADER_SIZE} bytes, got {0}")]
     TooShort(usize),
-
-    /// First two bytes do not match [`FRAME_MAGIC`].
+    /// The image magic is wrong.
     #[error("bad magic: expected 0x{:04X}, got 0x{got:04X}", FRAME_MAGIC)]
     BadMagic {
-        /// What the first two bytes hold.
+        /// What the packet's magic field holds.
         got: u16,
     },
-
-    /// Version byte is not [`SUPPORTED_VERSION`].
+    /// The sender uses a different envelope version.
     #[error("unsupported version {0}; only version {SUPPORTED_VERSION} is supported")]
     UnsupportedVersion(u8),
+    /// Metadata exceeds the packet's bounded allocation limit.
+    #[error("frame metadata length {0} exceeds {MAX_FRAME_METADATA_BYTES}")]
+    MetadataTooLarge(usize),
+    /// The declared metadata length exceeds the available bytes.
+    #[error("frame metadata is truncated")]
+    TruncatedMetadata,
+    /// Metadata JSON or its field bounds are invalid.
+    #[error("invalid frame metadata: {0}")]
+    InvalidMetadata(String),
 }
 
-/// 20-byte binary frame header prepended to every image payload.
-///
-/// See module-level documentation for the byte layout and format discriminant table.
+/// Geometry and optional metadata for the pixels that follow it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameHeader {
-    /// Pixel format of the following pixel data; a format the header has no
-    /// code for decodes as `PixelFormat::Unknown(0)`.
+    /// PFNC format projected onto the wire's byte code.
     pub pixel_format: PixelFormat,
     /// Image width in pixels.
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
-    /// Monotonically increasing frame sequence number (wraps at u32::MAX).
+    /// Service image sequence, wrapping at `u32::MAX`.
     pub seq: u32,
-    /// Bytes per padded row; `None` means continuous image packing.
-    /// Zero is reserved on the wire for `None`.
+    /// Bytes per padded row; `None` means continuous packing.
     pub row_stride: Option<u32>,
+    /// Facts from this exact frame, inline rather than separately published.
+    pub metadata: Option<FrameMetadata>,
 }
 
 impl FrameHeader {
-    /// Encode this header into a 20-byte `Vec<u8>`.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(HEADER_SIZE);
+    /// Encode the prefix and bounded metadata. Append the pixels afterward.
+    pub fn encode(&self) -> Result<Vec<u8>, FrameHeaderError> {
+        let metadata = self
+            .metadata
+            .as_ref()
+            .map(FrameMetadata::encode)
+            .transpose()
+            .map_err(|e| FrameHeaderError::InvalidMetadata(e.to_string()))?
+            .unwrap_or_default();
+        let mut buf = Vec::with_capacity(HEADER_SIZE + metadata.len());
         buf.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
         buf.push(SUPPORTED_VERSION);
         buf.push(pixel_format_to_u8(self.pixel_format));
@@ -76,44 +90,53 @@ impl FrameHeader {
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&self.seq.to_le_bytes());
         buf.extend_from_slice(&self.row_stride.unwrap_or(0).to_le_bytes());
-        buf
+        buf.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&metadata);
+        Ok(buf)
     }
 
-    /// Decode a header from the front of `buf`.
-    ///
-    /// On success returns `(header, pixel_data_slice)` where `pixel_data_slice`
-    /// is the remaining bytes after the 20-byte header.
+    /// Decode bounded metadata before exposing the remaining image bytes.
+    /// Older envelope versions are rejected, never read with guessed offsets.
     pub fn decode(buf: &[u8]) -> Result<(FrameHeader, &[u8]), FrameHeaderError> {
         if buf.len() < HEADER_SIZE {
             return Err(FrameHeaderError::TooShort(buf.len()));
         }
-
         let magic = u16::from_le_bytes([buf[0], buf[1]]);
         if magic != FRAME_MAGIC {
             return Err(FrameHeaderError::BadMagic { got: magic });
         }
-
         let version = buf[2];
         if version != SUPPORTED_VERSION {
             return Err(FrameHeaderError::UnsupportedVersion(version));
         }
-
-        let pixel_format = u8_to_pixel_format(buf[3]);
-        let width = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-        let height = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-        let seq = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
-
-        let stride = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
-        let row_stride = (stride != 0).then_some(stride);
-
-        let header = FrameHeader {
-            pixel_format,
-            width,
-            height,
-            seq,
-            row_stride,
+        let size = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]) as usize;
+        if size > MAX_FRAME_METADATA_BYTES {
+            return Err(FrameHeaderError::MetadataTooLarge(size));
+        }
+        let end = HEADER_SIZE
+            .checked_add(size)
+            .filter(|&end| end <= buf.len())
+            .ok_or(FrameHeaderError::TruncatedMetadata)?;
+        let metadata = if size == 0 {
+            None
+        } else {
+            Some(
+                FrameMetadata::decode(&buf[HEADER_SIZE..end])
+                    .map_err(FrameHeaderError::InvalidMetadata)?,
+            )
         };
-        Ok((header, &buf[HEADER_SIZE..]))
+        let stride = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        Ok((
+            Self {
+                pixel_format: u8_to_pixel_format(buf[3]),
+                width: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+                height: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+                seq: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+                row_stride: (stride != 0).then_some(stride),
+                metadata,
+            },
+            &buf[end..],
+        ))
     }
 }
 
@@ -210,36 +233,38 @@ mod tests {
             height: 480,
             seq: 7,
             row_stride: None,
+            metadata: None,
         }
     }
 
     #[test]
-    fn v2_wire_layout_has_literal_offsets_and_continuous_sentinel() {
+    fn v3_wire_layout_has_literal_offsets_and_continuous_sentinel() {
         let header = FrameHeader {
             pixel_format: PixelFormat::Mono8,
             width: 0x12345678,
             height: 2,
             seq: 0x44332211,
             row_stride: Some(0x88776655),
+            metadata: None,
         };
         let expected = [
-            0x46, 0x47, 2, 1, 0x78, 0x56, 0x34, 0x12, 2, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0x88,
+            0x46, 0x47, 3, 1, 0x78, 0x56, 0x34, 0x12, 2, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0, 0, 0, 0,
         ];
-        assert_eq!(header.encode(), expected);
+        assert_eq!(header.encode().unwrap(), expected);
         let mut wire = expected.to_vec();
         wire.extend_from_slice(&[9, 8]);
         assert_eq!(FrameHeader::decode(&wire).unwrap(), (header, &[9, 8][..]));
         wire[16..20].fill(0);
         assert_eq!(FrameHeader::decode(&wire).unwrap().0.row_stride, None);
-        for version in [0, 1, 3, 255] {
+        for version in [0, 1, 2, 255] {
             wire[2] = version;
             assert_eq!(
                 FrameHeader::decode(&wire),
                 Err(FrameHeaderError::UnsupportedVersion(version))
             );
         }
-        for length in 0..20 {
+        for length in 0..24 {
             assert_eq!(
                 FrameHeader::decode(&wire[..length]),
                 Err(FrameHeaderError::TooShort(length))
@@ -250,7 +275,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_mono8() {
         let hdr = make_header(PixelFormat::Mono8);
-        let encoded = hdr.encode();
+        let encoded = hdr.encode().unwrap();
         let (decoded, remaining) = FrameHeader::decode(&encoded).expect("decode should succeed");
         assert_eq!(decoded, hdr);
         assert!(remaining.is_empty());
@@ -259,7 +284,7 @@ mod tests {
     #[test]
     fn test_encode_produces_correct_magic() {
         let hdr = make_header(PixelFormat::Mono8);
-        let encoded = hdr.encode();
+        let encoded = hdr.encode().unwrap();
         assert_eq!(encoded[0], 0x46);
         assert_eq!(encoded[1], 0x47);
     }
@@ -267,7 +292,7 @@ mod tests {
     #[test]
     fn test_encode_length() {
         let hdr = make_header(PixelFormat::Mono8);
-        let encoded = hdr.encode();
+        let encoded = hdr.encode().unwrap();
         assert_eq!(encoded.len(), HEADER_SIZE);
     }
 
@@ -280,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_decode_bad_magic() {
-        let mut buf = make_header(PixelFormat::Mono8).encode();
+        let mut buf = make_header(PixelFormat::Mono8).encode().unwrap();
         buf[0] = 0x00;
         buf[1] = 0x00;
         let err = FrameHeader::decode(&buf).unwrap_err();
@@ -289,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_decode_unsupported_version() {
-        let mut buf = make_header(PixelFormat::Mono8).encode();
+        let mut buf = make_header(PixelFormat::Mono8).encode().unwrap();
         buf[2] = 1;
         let err = FrameHeader::decode(&buf).unwrap_err();
         assert_eq!(err, FrameHeaderError::UnsupportedVersion(1));
@@ -349,5 +374,67 @@ mod tests {
         assert_eq!(pixel_format_to_u8(PixelFormat::Coord3DABC32f), 0);
         assert_eq!(u8_to_pixel_format(0), PixelFormat::Unknown(0));
         assert_eq!(u8_to_pixel_format(0xFF), PixelFormat::Unknown(0));
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn inline_metadata_stays_with_its_pixels() {
+        let header = FrameHeader {
+            pixel_format: PixelFormat::Mono8,
+            width: 2,
+            height: 1,
+            seq: 9,
+            row_stride: None,
+            metadata: Some(FrameMetadata {
+                block_id: u64::MAX.to_string(),
+                ts_dev: Some(u64::MAX.to_string()),
+                ts_host_ns: None,
+                complete: true,
+                chunks: Vec::new(),
+                features: Vec::new(),
+                chunk_error: None,
+                truncated: false,
+            }),
+        };
+        let mut packet = header.encode().unwrap();
+        packet.extend_from_slice(&[21, 22]);
+        let (decoded, pixels) = FrameHeader::decode(&packet).unwrap();
+        assert_eq!(decoded, header);
+        assert_eq!(pixels, &[21, 22]);
+    }
+
+    #[test]
+    fn malformed_and_oversized_metadata_never_becomes_pixels() {
+        let header = FrameHeader {
+            pixel_format: PixelFormat::Mono8,
+            width: 1,
+            height: 1,
+            seq: 0,
+            row_stride: None,
+            metadata: None,
+        };
+        let mut packet = header.encode().unwrap();
+        packet[20..24].copy_from_slice(&((MAX_FRAME_METADATA_BYTES + 1) as u32).to_le_bytes());
+        assert_eq!(
+            FrameHeader::decode(&packet),
+            Err(FrameHeaderError::MetadataTooLarge(
+                MAX_FRAME_METADATA_BYTES + 1
+            ))
+        );
+        packet[20..24].copy_from_slice(&8u32.to_le_bytes());
+        assert_eq!(
+            FrameHeader::decode(&packet),
+            Err(FrameHeaderError::TruncatedMetadata)
+        );
+        packet[20..24].copy_from_slice(&1u32.to_le_bytes());
+        packet.push(b'{');
+        assert!(matches!(
+            FrameHeader::decode(&packet),
+            Err(FrameHeaderError::InvalidMetadata(_))
+        ));
     }
 }

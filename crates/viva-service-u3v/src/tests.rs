@@ -104,6 +104,11 @@ async fn a_packed_format_streams_at_its_payload_size() {
         .unwrap();
     let bytes = sample.payload().to_bytes();
     let (header, pixels) = FrameHeader::decode(&bytes).unwrap();
+    let metadata = header.metadata.as_ref().expect("USB same-frame metadata");
+    assert!(metadata.complete);
+    assert!(metadata.block_id.parse::<u64>().is_ok());
+    assert!(metadata.ts_dev.is_some());
+    assert!(metadata.features.is_empty());
     assert_eq!((header.width, header.height), (64, 48));
     assert_eq!(pixels.len(), 64 * 48 * 3 / 2, "64 × 48 × 1.5 bytes");
 

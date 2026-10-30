@@ -340,6 +340,7 @@ mod tests {
             width: 1,
             height: 1,
             row_stride: None,
+            metadata: None,
             pixels: Bytes::from_static(&[7]),
             bmp,
         });

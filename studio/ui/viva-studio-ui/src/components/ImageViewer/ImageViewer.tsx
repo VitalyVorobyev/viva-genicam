@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import type { StreamerInfo, ImageMeta, StreamCounters } from "../../device/types";
+import type { StreamerInfo, ImageMeta, StreamCounters, FrameMetadata } from "../../device/types";
 import type { StreamTransport } from "../../device/acquisitionStatus";
 import type { ParseXmlResponse } from "../../xml_model/uigraph";
 import type { ZoomPanState } from "./useZoomPan";
@@ -51,6 +51,7 @@ export function ImageViewer({
   isActive = true,
 }: ImageViewerProps) {
   const writeNode = useFeatureWriter();
+  const [frameMetadata, setFrameMetadata] = useState<FrameMetadata | null>(null);
   const [fps, setFps] = useState<number>(0);
   const [frameCount, setFrameCount] = useState<number>(0);
   const [zoomLabel, setZoomLabel] = useState<string>("Fit");
@@ -91,8 +92,11 @@ export function ImageViewer({
     }
   }
   const [prevStreamerInfo, setPrevStreamerInfo] = useState(streamerInfo);
-  if (streamerInfo !== prevStreamerInfo) {
+  const [prevDeviceId, setPrevDeviceId] = useState(deviceId);
+  if (streamerInfo !== prevStreamerInfo || deviceId !== prevDeviceId) {
+    setPrevDeviceId(deviceId);
     setPrevStreamerInfo(streamerInfo);
+    setFrameMetadata(null);
     if (!streamerInfo) setWsStreamInfo(null);
     setNativeFrame(null);
     setRenderedNativeFrame(null);
@@ -101,7 +105,7 @@ export function ImageViewer({
   useEffect(() => {
     if (!streamerInfo) snapshotRef.current = null;
     return () => { captureAbort.current?.abort(); };
-  }, [streamerInfo]);
+  }, [streamerInfo, deviceId]);
 
   // Turning a tool off clears what it drew.
   const setRoiTool = (on: boolean) => {
@@ -172,7 +176,7 @@ export function ImageViewer({
   }, [isSnapshotBusy, captureBusy, nativeFrame, streamerInfo]);
 
   const freeze = async () => {
-    if (nativeFrame) { setNativeFrame(null); setRenderedNativeFrame(null); setPixelHover(null); return; }
+    if (nativeFrame) { setFrameMetadata(null); setNativeFrame(null); setRenderedNativeFrame(null); setPixelHover(null); return; }
     if (captureBusy || isSnapshotBusy || !streamerInfo) return;
     const controller = new AbortController();
     captureAbort.current = controller;
@@ -222,6 +226,8 @@ export function ImageViewer({
           cameraModel={cameraModel ?? null}
           deviceId={deviceId}
           statistics={statistics}
+          frameMetadata={nativeFrame ? readyNativeFrame?.metadata ?? null : frameMetadata}
+          frozen={nativeFrame !== null}
         />
       </div>
     );
@@ -271,6 +277,7 @@ export function ImageViewer({
           wsUrl={streamerInfo.ws_url}
           onFrameStats={setFps}
           onFrame={handleFrame}
+          onFrameMetadata={setFrameMetadata}
           onZoomPanChange={handleZoomPanChange}
           pixelFormat={pixelFormat}
           onPixelHover={setPixelHover}
@@ -313,6 +320,8 @@ export function ImageViewer({
         cameraModel={cameraModel ?? null}
         deviceId={deviceId}
         statistics={statistics}
+        frameMetadata={nativeFrame ? readyNativeFrame?.metadata ?? null : frameMetadata}
+        frozen={nativeFrame !== null}
       />
     </div>
   );

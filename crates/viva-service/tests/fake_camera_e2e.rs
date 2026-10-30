@@ -174,6 +174,14 @@ async fn e2e_acquisition_roundtrip() {
     assert!(header.width > 0, "frame width should be > 0");
     assert!(header.height > 0, "frame height should be > 0");
     assert!(!pixel_data.is_empty(), "pixel data should not be empty");
+    let metadata = header.metadata.as_ref().expect("same-frame metadata");
+    assert!(metadata.complete);
+    assert!(metadata.block_id.parse::<u64>().unwrap() > 0);
+    assert!(metadata.ts_dev.is_some());
+    assert!(
+        metadata.features.is_empty(),
+        "plain frames need no chunk reads"
+    );
     eprintln!(
         "E2E frame: {}x{} seq={} pixel_data={}B",
         header.width,

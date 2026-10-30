@@ -11,6 +11,7 @@ use viva_pfnc::{
     PixelFormat,
     convert::{self, Pixels},
 };
+use viva_zenoh_api::{FrameHeader, FrameMetadata, MAX_FRAME_METADATA_BYTES};
 
 /// Prevent a hostile geometry from requesting an unbounded decoded capture.
 /// This bounds BMP + raw + decoded + PNG work, independently of the camera.
@@ -27,6 +28,8 @@ pub struct SourceFrame {
     pub row_stride: Option<usize>,
     pub pixels: Bytes,
     pub bmp: Bytes,
+    /// Metadata from this exact source, never a separately arriving update.
+    pub metadata: Option<FrameMetadata>,
 }
 
 /// A single acquisition's source cache and conversion permit. Creating a new
@@ -56,27 +59,29 @@ impl NativeCapture {
 
     /// Retain the explicit Zenoh image layout after preview conversion.
     /// Continuous packing and partial final groups are decoded by PFNC.
-    pub fn replace_remote(
-        &self,
-        format: PixelFormat,
-        width: u32,
-        height: u32,
-        row_stride: Option<usize>,
-        pixels: &[u8],
-        bmp: Bytes,
-    ) {
+    pub fn replace_remote(&self, header: &FrameHeader, pixels: &[u8], bmp: Bytes) {
+        let row_stride = header.row_stride.map(|stride| stride as usize);
         // Validate before allocating a copy of a remote payload: a tiny
         // declared image may carry arbitrarily large trailing bytes.
-        let result = source_lengths(width, height, pixels.len(), bmp.len())
-            .and_then(|_| remote_layout(format, width, height, row_stride, pixels.len()))
+        let result = source_lengths(header.width, header.height, pixels.len(), bmp.len())
+            .and_then(|_| {
+                remote_layout(
+                    header.pixel_format,
+                    header.width,
+                    header.height,
+                    row_stride,
+                    pixels.len(),
+                )
+            })
             .map(|()| {
                 Some(SourceFrame {
-                    format,
-                    width,
-                    height,
+                    format: header.pixel_format,
+                    width: header.width,
+                    height: header.height,
                     row_stride,
                     pixels: Bytes::copy_from_slice(pixels),
                     bmp,
+                    metadata: header.metadata.clone(),
                 })
             });
         self.store(result);
@@ -159,7 +164,7 @@ fn response_size(lengths: &[usize]) -> Result<usize, String> {
 }
 
 #[derive(Serialize)]
-struct Header {
+struct Header<'a> {
     version: u8,
     width: u32,
     height: u32,
@@ -170,6 +175,7 @@ struct Header {
     bmp_bytes: usize,
     sample_bytes: usize,
     png_bytes: usize,
+    metadata: Option<&'a FrameMetadata>,
 }
 
 /// VRAW, a little-endian u32 JSON-header length, UTF-8 metadata, BMP, native
@@ -177,6 +183,11 @@ struct Header {
 /// and PNG always describe the same immutable source.
 pub fn encode(frame: &SourceFrame) -> Result<Bytes, String> {
     let count = source_size(frame)?;
+    let metadata = frame
+        .metadata
+        .clone()
+        .map(crate::preview::normalize)
+        .transpose()?;
     let full = convert::full_depth(
         frame.format,
         frame.width,
@@ -233,8 +244,12 @@ pub fn encode(frame: &SourceFrame) -> Result<Bytes, String> {
         bmp_bytes: frame.bmp.len(),
         sample_bytes: samples.len(),
         png_bytes: png.len(),
+        metadata: metadata.as_ref(),
     })
     .map_err(|error| error.to_string())?;
+    if header.len() > MAX_FRAME_METADATA_BYTES + 4096 {
+        return Err("Native capture metadata exceeds the header limit".into());
+    }
     let mut output = Vec::with_capacity(response_size(&[
         8,
         header.len(),
@@ -263,12 +278,24 @@ mod tests {
     use super::*;
     use crate::frame::FrameEncoder;
 
+    fn header(format: PixelFormat, width: u32, height: u32, stride: Option<usize>) -> FrameHeader {
+        FrameHeader {
+            pixel_format: format,
+            width,
+            height,
+            row_stride: stride.map(|s| s as u32),
+            seq: 1,
+            metadata: None,
+        }
+    }
+
     fn source(format: PixelFormat, width: u32, height: u32, pixels: &[u8]) -> SourceFrame {
         SourceFrame {
             format,
             width,
             height,
             row_stride: None,
+            metadata: None,
             pixels: Bytes::copy_from_slice(pixels),
             bmp: FrameEncoder::new()
                 .encode(format, width, height, None, pixels)
@@ -301,6 +328,28 @@ mod tests {
         assert_eq!(header["mosaic"], true);
         let start = 8 + len + source.bmp.len();
         assert_eq!(&encoded[start..start + 8], source.pixels.as_ref());
+    }
+
+    #[test]
+    fn frozen_metadata_and_pixels_remain_together_after_a_new_frame_arrives() {
+        let facts: FrameMetadata = serde_json::from_value(serde_json::json!({
+            "block_id": "18446744073709551615", "ts_dev": "9007199254740993",
+            "ts_host_ns": null, "complete": true, "chunks": [], "features": [],
+            "chunk_error": null, "truncated": false
+        }))
+        .unwrap();
+        let mut first = source(PixelFormat::Mono8, 1, 1, &[17]);
+        first.metadata = Some(facts.clone());
+        let cache = NativeCapture::default();
+        cache.replace(first);
+        let frozen = cache.latest().unwrap().unwrap();
+        cache.replace(source(PixelFormat::Mono8, 1, 1, &[99]));
+        let encoded = encode(&frozen).unwrap();
+        let length = u32::from_le_bytes(encoded[4..8].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&encoded[8..8 + length]).unwrap();
+        assert_eq!(header["metadata"], serde_json::to_value(facts).unwrap());
+        assert_eq!(samples(&encoded), &[17]);
+        assert!(cache.latest().unwrap().unwrap().metadata.is_none());
     }
 
     #[test]
@@ -361,7 +410,11 @@ mod tests {
                 .encode(PixelFormat::Mono8, 2, 2, None, &pixels)
                 .unwrap()
         );
-        cache.replace_remote(PixelFormat::Mono8, 2, 2, Some(4), &pixels, bmp.clone());
+        cache.replace_remote(
+            &header(PixelFormat::Mono8, 2, 2, Some(4)),
+            &pixels,
+            bmp.clone(),
+        );
         let retained = cache.latest().unwrap().unwrap();
         assert_eq!(retained.bmp, bmp);
         assert_eq!(samples(&encode(&retained).unwrap()), &[1, 2, 3, 4]);
@@ -373,10 +426,7 @@ mod tests {
         let odd = source(PixelFormat::Mono12Packed, 3, 1, &[1, 0x42, 3, 5, 6]);
         let cache = NativeCapture::default();
         cache.replace_remote(
-            odd.format,
-            odd.width,
-            odd.height,
-            None,
+            &header(odd.format, odd.width, odd.height, None),
             &odd.pixels,
             odd.bmp.clone(),
         );
@@ -394,20 +444,14 @@ mod tests {
         for stride in [Some(1), Some(4), Some(usize::MAX)] {
             cache.replace(source(PixelFormat::Mono8, 2, 2, &[1, 2, 3, 4]));
             cache.replace_remote(
-                PixelFormat::Mono8,
-                2,
-                2,
-                stride,
+                &header(PixelFormat::Mono8, 2, 2, stride),
                 &[1, 2, 3, 4],
                 Bytes::new(),
             );
             assert!(cache.latest().is_err());
         }
         cache.replace_remote(
-            PixelFormat::Mono8,
-            1,
-            1,
-            None,
+            &header(PixelFormat::Mono8, 1, 1, None),
             &vec![0; MAX_SOURCE_BYTES + 1],
             Bytes::new(),
         );

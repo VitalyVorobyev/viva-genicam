@@ -57,11 +57,14 @@ endurance run; pure synthetic captures do not establish hardware coverage.
 
 ## 2026-10-25 amendment: explicit remote row layout (SR-26)
 
-API 7 carries a version-2, 20-byte image header with a per-frame row stride.
+API 7 introduced a version-2, 20-byte image header with a per-frame row stride.
+[ADR-0036](adr0036-frame-metadata-with-pixels.md) supersedes that envelope with
+API 8 / version 3, retaining the stride and adding inline frame metadata.
 Zero means continuous packing; nonzero stride includes padding after every
 row, including the final row. Services preserve the padded image, and both
 preview and native capture use the declared stride through the shared PFNC
 converter. This replaces the initial remote tight-row restriction above.
 Version-1 image headers are rejected, so services and clients update together.
 The wire layout is specified in [the Zenoh contract](../studio/zenoh-api.md).
-Frame timestamps and decoded chunks remain separate ST-52 work.
+That change did not carry frame timestamps or decoded chunks; ADR-0036 adds
+both while retaining the matching-source capture rule.

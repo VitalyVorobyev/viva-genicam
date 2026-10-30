@@ -1480,6 +1480,59 @@ async fn run_frame_reader(
             frame.payload.as_ref(),
         ) {
             Ok(bmp) => {
+                if *shutdown_rx.borrow()
+                    || lifecycle
+                        .as_ref()
+                        .is_some_and(|(backend, ticket)| !backend.lifecycle.current(*ticket))
+                {
+                    break;
+                }
+                let mut metadata = viva_zenoh_api::FrameMetadata::from(&frame);
+                // Chunk values are decoded only for preview-admitted frames.
+                // Plain frames never lock or read the camera for metadata.
+                if frame.chunks.is_some()
+                    && let Some((backend, ticket)) = lifecycle.as_ref()
+                {
+                    let frame = frame.clone();
+                    let current = backend.lifecycle.clone();
+                    let ticket = *ticket;
+                    match backend
+                        .with_camera(move |connected| {
+                            if !current.current(ticket) {
+                                return Err("Frame belongs to an earlier camera session".into());
+                            }
+                            Ok(connected.camera.chunk_features(&frame))
+                        })
+                        .await
+                    {
+                        Ok(features) => metadata = metadata.with_features(features),
+                        Err(error) => {
+                            metadata = metadata
+                                .with_features([("ChunkData".into(), Err::<String, _>(error))])
+                        }
+                    }
+                }
+                if *shutdown_rx.borrow()
+                    || lifecycle
+                        .as_ref()
+                        .is_some_and(|(backend, ticket)| !backend.lifecycle.current(*ticket))
+                {
+                    break;
+                }
+                let metadata = match viva_streamer::preview::normalize(metadata) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        warn!(%error, "Invalid frame metadata");
+                        continue;
+                    }
+                };
+                let preview = match viva_streamer::preview::encode(&bmp, Some(&metadata)) {
+                    Ok(preview) => preview,
+                    Err(error) => {
+                        warn!(%error, "Frame metadata not drawn");
+                        continue;
+                    }
+                };
                 native.replace(viva_streamer::native::SourceFrame {
                     format: frame.pixel_format,
                     width: frame.width,
@@ -1487,9 +1540,10 @@ async fn run_frame_reader(
                     row_stride: frame.row_stride(),
                     pixels: frame.payload.clone(),
                     bmp: bmp.clone(),
+                    metadata: Some(metadata),
                 });
                 // Stored even with no viewer: the next one to connect is sent it.
-                frame_tx.send_replace(bmp);
+                frame_tx.send_replace(preview);
                 pacer.sent(admitted_at);
             }
             Err(e) => warn!("Frame not drawn: {e}"),
@@ -1791,6 +1845,12 @@ pub(crate) mod fake_camera {
     /// The first image the viewer's WebSocket delivers: a BMP file, since
     /// that is what both backends encode frames into.
     pub(crate) async fn first_frame(ws_url: &str) -> Vec<u8> {
+        first_preview(ws_url).await.1
+    }
+
+    pub(crate) async fn first_preview(
+        ws_url: &str,
+    ) -> (Option<viva_zenoh_api::FrameMetadata>, Vec<u8>) {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
 
@@ -1808,8 +1868,9 @@ pub(crate) mod fake_camera {
         let frame = tokio::time::timeout(Duration::from_secs(10), wait)
             .await
             .expect("no frame within 10 s");
-        assert_eq!(&frame[..2], b"BM", "a frame is a BMP file");
-        frame
+        let (metadata, bmp) =
+            viva_streamer::preview::decode(&frame).expect("valid preview envelope");
+        (metadata, bmp.to_vec())
     }
 
     /// The camera was told to stop acquiring and no longer has a controller.
@@ -3162,3 +3223,7 @@ mod lifecycle_tests {
 #[cfg(test)]
 #[path = "embedded_monitor_tests.rs"]
 mod monitor_tests;
+
+#[cfg(test)]
+#[path = "embedded_metadata_tests.rs"]
+mod metadata_tests;

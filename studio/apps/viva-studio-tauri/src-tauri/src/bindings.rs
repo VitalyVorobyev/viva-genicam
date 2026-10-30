@@ -38,6 +38,9 @@ fn render() -> String {
         viva_zenoh_api::AcquisitionStatus,
         viva_zenoh_api::StreamCounters,
         viva_zenoh_api::ImageMeta,
+        viva_zenoh_api::FrameMetadata,
+        viva_zenoh_api::FrameChunk,
+        viva_zenoh_api::FrameFeature,
         // The UiGraph contract (`viva_xml_model`).
         viva_xml_model::UiGraph,
         viva_xml_model::UiNode,

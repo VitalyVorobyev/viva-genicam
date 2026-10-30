@@ -26,7 +26,7 @@ opaque string without `/`).
     "name": "Left",
     "model": "SPC-3000",
     "serial": "SN12345678",
-    "api_version": 7,
+    "api_version": 8,
     "ip": "192.168.1.10",
     "mac": "00:0C:DF:06:5B:2F",
     "user_name": "Left",
@@ -48,7 +48,7 @@ opaque string without `/`).
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional. The app compares this against
-  `viva_zenoh_api::API_VERSION` (currently `7`). On mismatch or absence, the app emits
+  `viva_zenoh_api::API_VERSION` (currently `8`). On mismatch or absence, the app emits
   an `api-version-mismatch` Tauri event (see below) and still discovers the device — no
   hard rejection.
 
@@ -292,24 +292,50 @@ opaque string without `/`).
 
 - **Direction:** Service → Streamer (NOT consumed by Tauri directly)
 - **Mechanism:** `put` per frame
-- **Payload:** 20-byte binary [`FrameHeader`] immediately followed by raw pixel data (row-major,
+- **Payload:** 24-byte fixed [`FrameHeader`] prefix, bounded JSON frame metadata, then raw pixel data (row-major,
   no further encoding). The header makes every frame self-describing — consumers do not need to
   rely on a prior `image/meta` subscription.
 - **Consumer:** the Tauri app's remote backend runs `viva_streamer`'s Zenoh source
   in-process while acquiring: it subscribes to this key and broadcasts BMP-encoded
   frames to the viewer over a local WebSocket.
 
-#### Binary frame header layout (20 bytes, all fields little-endian)
+#### Binary frame header layout (24-byte fixed prefix, all fields little-endian)
 
 | Offset | Size | Field    | Description                                              |
 |--------|------|----------|----------------------------------------------------------|
 | 0      | 2    | `magic`  | `0x4746` LE (`[0x46, 0x47]`) — frame marker             |
-| 2      | 1    | `version`| Header layout version; currently `2`                    |
+| 2      | 1    | `version`| Header layout version; currently `3`                    |
 | 3      | 1    | `format` | Pixel format discriminant (see table below)              |
 | 4      | 4    | `width`  | Image width in pixels, `u32` LE                          |
 | 8      | 4    | `height` | Image height in pixels, `u32` LE                         |
 | 12     | 4    | `seq`    | Monotonically increasing frame counter, `u32` LE         |
 | 16     | 4    | `stride` | Row stride in bytes, `u32` LE; `0` means continuous packing |
+| 20     | 4    | `metadata_len` | JSON byte length, `u32` LE; at most 65,536 |
+
+The JSON follows the prefix, then pixels begin at `24 + metadata_len`. Zero
+length means no per-frame metadata. Otherwise the object is `FrameMetadata`:
+
+```json
+{
+  "block_id": "18446744073709551615",
+  "ts_dev": "9007199254740993",
+  "ts_host_ns": null,
+  "complete": true,
+  "chunks": [{ "id": "42", "bytes": 8 }],
+  "features": [{ "name": "ChunkTimestamp", "value": "9007199254740993", "error": null }],
+  "chunk_error": null,
+  "truncated": false
+}
+```
+
+IDs and clock values are decimal strings to preserve all bits in JavaScript.
+`ts_dev` is nullable raw ticks. `ts_host_ns` is nullable signed Unix nanoseconds
+from device-clock calibration, never receipt time. Exactly one of a feature
+value and error is present (the other is null). Chunk/feature lists retain at
+most 128 items and descriptive strings at most 1,024 Unicode characters.
+Oversized generated metadata is clipped with `truncated=true`; invalid remote
+metadata is rejected, including malformed JSON, invalid decimal fields and
+excessive lengths. See [ADR-0036](../adrs/adr0036-frame-metadata-with-pixels.md).
 
 The stride belongs to this frame, not the separately published metadata. A
 nonzero stride includes the pixel packing group and padding after each row,
@@ -320,7 +346,7 @@ the packing rules, including supported partial final groups. Consumers pass
 the declared stride to the shared PFNC converter instead of treating padding
 as pixels.
 
-This is API version 7 and binary frame-header version 2. Version 1 image
+This is API version 8 and binary frame-header version 3. Older image
 headers are rejected; update services and Studio together. The one-byte pixel
 format codes retain their existing meanings. Event-vision framing is unchanged.
 

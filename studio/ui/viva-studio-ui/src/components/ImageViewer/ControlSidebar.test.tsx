@@ -75,7 +75,7 @@ describe("ControlSidebar", () => {
     render(<Sidebar initiallyCollapsed={false} />);
     await screen.findByRole("button", { name: "Image Format" });
     const order = Array.from(document.querySelectorAll(".sidebar-section__label")).map((l) => l.textContent);
-    expect(order).toEqual(["Acquisition Control", "Statistics", "Image Format"]);
+    expect(order).toEqual(["Acquisition Control", "Statistics", "Frame metadata", "Image Format"]);
     expect(screen.getByRole("button", { name: "Statistics" }).getAttribute("aria-expanded")).toBe("true");
   });
 

@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! [JSON header (null-terminated)]
-//! [Frame 0: 20-byte FrameHeader + raw pixel data]
-//! [Frame 1: 20-byte FrameHeader + raw pixel data]
+//! [Frame 0: versioned FrameHeader + inline metadata + raw pixel data]
+//! [Frame 1: versioned FrameHeader + inline metadata + raw pixel data]
 //! ...
 //! [Frame index JSON (appended on stop)]
 //! ```
@@ -250,5 +250,63 @@ mod tests {
         let status = RecordingStatus::default();
         assert!(!status.active);
         assert_eq!(status.frame_count, 0);
+    }
+
+    #[tokio::test]
+    async fn recording_indexes_the_full_variable_length_header() {
+        let path =
+            std::env::temp_dir().join(format!("viva-record-metadata-{}.gsr", std::process::id()));
+        let header = GsrHeader {
+            version: 1,
+            pixel_format: "Mono8".into(),
+            width: 1,
+            height: 1,
+            device_id: "fake".into(),
+            started_at: "test".into(),
+        };
+        let metadata = serde_json::from_value(serde_json::json!({
+            "block_id": "42", "ts_dev": null, "ts_host_ns": null,
+            "complete": true, "chunks": [], "features": [], "chunk_error": null, "truncated": false
+        }))
+        .unwrap();
+        let encoded = FrameHeader {
+            pixel_format: viva_pfnc::PixelFormat::Mono8,
+            width: 1,
+            height: 1,
+            seq: 17,
+            row_stride: None,
+            metadata: Some(metadata),
+        }
+        .encode()
+        .unwrap();
+        assert!(encoded.len() > HEADER_SIZE);
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(RecordFrame {
+                header_bytes: encoded.clone(),
+                pixel_data: vec![7],
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        let (_stop, shutdown) = watch::channel(false);
+        recording_writer_task(
+            path.clone(),
+            header.clone(),
+            receiver,
+            shutdown,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let start = serde_json::to_vec(&header).unwrap().len() + 1;
+        assert_eq!(&bytes[start..start + encoded.len()], encoded.as_slice());
+        let index: Vec<FrameIndexEntry> =
+            serde_json::from_slice(&bytes[start + encoded.len() + 1..]).unwrap();
+        assert_eq!(index[0].seq, 17);
+        assert_eq!(index[0].size, (encoded.len() + 1) as u64);
+        assert_eq!(index[0].offset, start as u64);
     }
 }

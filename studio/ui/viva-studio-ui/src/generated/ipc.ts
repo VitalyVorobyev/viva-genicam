@@ -203,6 +203,65 @@ height: number,
  */
 payload_size: number, };
 
+export type FrameMetadata = {
+/**
+ * Decimal transport block identifier, not a rounded JavaScript number.
+ */
+block_id: string,
+/**
+ * Decimal device ticks, absent when the leader supplied none.
+ */
+ts_dev: string | null,
+/**
+ * Calibrated Unix nanoseconds; absent without a fitted device clock.
+ * This is not the host reception time. Negative values precede the epoch.
+ */
+ts_host_ns: string | null,
+/**
+ * Whether every packet arrived and the device reported success.
+ */
+complete: boolean,
+/**
+ * Chunk identifiers and sizes in this frame.
+ */
+chunks: Array<FrameChunk>,
+/**
+ * Chunk values evaluated through the camera's own XML.
+ */
+features: Array<FrameFeature>,
+/**
+ * Why the payload's chunks could not be decoded, when applicable.
+ */
+chunk_error: string | null,
+/**
+ * Some metadata was omitted to keep the image packet bounded.
+ */
+truncated: boolean, };
+
+export type FrameChunk = {
+/**
+ * Decimal chunk identifier, kept exact in JavaScript.
+ */
+id: string,
+/**
+ * Bytes in this chunk, without its trailer.
+ */
+bytes: number, };
+
+export type FrameFeature = {
+/**
+ * Feature name from the camera XML.
+ */
+name: string,
+/**
+ * GenApi's textual value, without a lossy numeric conversion.
+ */
+value: string | null,
+/**
+ * The per-feature read error, when there is no value.
+ */
+error: string | null, };
+
 export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string,
 /**
  * Declarations in the XML that could not become features, so a viewer

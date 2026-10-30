@@ -24,27 +24,27 @@ Read before upgrading:
   and its `EventRestoreReport` names whatever could not be restored — a lost
   camera, lost control, a refused write — instead of passing it off as clean.
   `Camera::event_name` names an event by its `EventSelector` entry
-  ([#PR]).
+  ([#233]).
 - **Viva Studio: camera events.** The Diagnostics tab's Camera events panel
   turns on the events you choose and lists each as it arrives, with its device
   timestamp and the values the camera's XML reads from it; Stop, disconnecting
   and closing Studio restore the camera's event settings, and a setting that
-  could not be restored is shown ([#PR]).
+  could not be restored is shown ([#233]).
 - **Camera events over Zenoh.** `viva-service` and `viva-service-u3v` start and
   stop event monitoring on `events/control`, publish each event as a
   `CameraEvent` on `events` and the monitoring status on `events/status`
-  (API version 9, [#PR]).
+  (API version 9, [#233]).
 
 ### Changed
 
 - **A USB3 Vision event stream restores the EventEnable word it found** when
   it closes, rather than clearing it, and `U3vEventStream::shutdown` waits for
-  its reader and reports a restoration that failed ([#PR]).
+  its reader and reports a restoration that failed ([#233]).
 - **Enabling an event that cannot be enabled reports the GenApi error**, such
   as the entry `EventSelector` does not have, rather than a generic
-  "no event selection" ([#PR]).
+  "no event selection" ([#233]).
 
-[#PR]: https://github.com/VitalyVorobyev/viva-genicam/pull/PR
+[#233]: https://github.com/VitalyVorobyev/viva-genicam/pull/233
 
 ## Releases
 

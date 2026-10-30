@@ -95,6 +95,42 @@ frame.payload()           # bytes, copy of the whole GVSP payload
 
 Use this when you need to feed bytes to another decoder or serialize to disk as-is.
 
+## Event-vision blocks
+
+An event camera, such as a LUCID Triton2 EVS, streams Prophesee EVT 3.0 or
+EVT 2.1 data instead of images. `next_frame()` hands each such block out as a
+`Frame` holding the raw bytes; `next_block()` tells the two apart, returning a
+`Frame` for an image and an `EvsBlock` for event data:
+
+<!-- pytest: camera -->
+```python
+with cam.stream() as frames:
+    block = frames.next_block(timeout_ms=5000)
+if isinstance(block, vg.EvsBlock):
+    print(block.format, block.block_id, len(block.payload()))  # "evt3.0" or "evt2.1"
+elif block is not None:
+    print("image", block.width, block.height)
+```
+
+```python
+block.format             # "evt3.0" (16-bit words) or "evt2.1" (64-bit events)
+block.block_id           # the camera's number for the block
+block.status             # vg.FrameStatus, as for a frame
+block.ts_dev             # device tick count, Optional[int]
+block.ts_host            # POSIX seconds, Optional[float]: None until cam.time_calibrate()
+block.leader_size_x      # Size X and Size Y from the GVSP leader, as sent
+block.leader_size_y
+block.trailer_size_y     # Size Y from the GVSP trailer, as sent
+block.chunks             # {chunk_id: bytes}, or None
+block.payload()          # the EVT bytes as the camera sent them, one copy
+```
+
+The leader's sizes are not an image's geometry: an EVT block has none. Decode
+the payload with event-vision tooling; `viva-camctl stream --raw-out` records
+the same bytes to a file ([Streaming → Event-vision
+cameras](../tutorials/streaming.md#23-event-vision-cameras)). A USB3 Vision
+stream returns only frames.
+
 ## Streaming options
 
 The `stream()` call accepts GigE-specific knobs:

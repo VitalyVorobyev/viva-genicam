@@ -12,6 +12,8 @@ release opens with what to read before upgrading.
 
 ### Added
 
+- **Event-vision blocks in Python.** `FrameStream.next_block()` returns a `Frame` for an image and the new `EvsBlock` for an event camera's EVT 3.0 or EVT 2.1 data: its bytes as sent, its `format` (`"evt3.0"` or `"evt2.1"`), timestamps, block ID, status, chunks, and the GVSP leader and trailer sizes. `next_frame()` still hands event data out as a frame of raw bytes; a USB3 Vision stream returns frames. ([#231](https://github.com/VitalyVorobyev/viva-genicam/pull/231))
+
 - **Frame timestamps and chunks in Studio (ST-52).** The Image tab shows exact frame IDs, device ticks, optional calibrated host time and XML-decoded chunk values/errors from the displayed or frozen image. Standard chunk controls remain explicit and respect read-only access. Remote services and Studio must be upgraded together for API 8 / image header 3 ([#230](https://github.com/VitalyVorobyev/viva-genicam/pull/230)).
 
 - **Read-only GigE monitoring in Studio (ST-49).** Choose Monitor to inspect features and watch an existing multicast stream while another application controls the camera. Stop watching and reconnect preserve the controller and never start or stop its acquisition. Discovery now requests broadcast acknowledgements and identifies cameras on another subnet, with the existing temporary-IP action available in direct mode ([#229](https://github.com/VitalyVorobyev/viva-genicam/pull/229)).
@@ -34,6 +36,8 @@ release opens with what to read before upgrading.
 
 ### Changed
 
+- **`viva-camctl stream --raw-out` replaces its file.** It appended, so a rerun added to the previous capture, even in another EVT format; the file is now replaced, and `--append` adds to it. The file is created when the first event block arrives, so an image stream leaves none, and `--raw-out` without `--save` no longer also writes `block_0001.*`. ([#231](https://github.com/VitalyVorobyev/viva-genicam/pull/231))
+
 - **More startup headroom for frame delivery (SR-28).** The bounded GigE Vision and USB3 Vision delivery queue holds 16 completed frames instead of 4. The six-sensor camera had already evicted eight frames while acquisition start returned; a 16-frame queue retained frame 1 in the short probes and tolerated a 3 ms consumer pause. It permits up to four times the queued payload memory and a longer pending-frame age; per-frame allocation and copying stay unchanged. GigE hardware was measured; USB3 behavior is covered by fake/queue regressions ([#227](https://github.com/VitalyVorobyev/viva-genicam/pull/227)).
 
 - **Lower acquisition overhead on Unix.** The GVSP receiver uses bounded socket reads and resend writes instead of polling before every packet; Windows retains readiness polling. Focused timeout and cancellation tests, a reproducible two-process benchmark, and Manta ROI measurements accompany the change. Frame allocation and the four-frame delivery queue are unchanged ([#222](https://github.com/VitalyVorobyev/viva-genicam/pull/222)).
@@ -50,6 +54,8 @@ release opens with what to read before upgrading.
 - **A camera's reported tick frequency is its clock's slope.** `Camera::time_calibrate` (and `TimeSync::fit` given a frequency) now fits only the offset, as the median over the samples, and takes the slope from `GevTimestampTickFrequency`. Sixteen samples taken over GVCP fitted an Allied Vision Manta G-125B's 48 MHz clock at 48.46 MHz in one calibration and 47.76 MHz in the next, and frames mapped through `map_dev_ts` after the first drifted 9.5 ms a second from their arrival (14.3 s in 25 minutes); with the reported frequency they drifted 31 ms in 20 minutes, the camera's clock running about 26 ppm ahead of the host's ([#217](https://github.com/VitalyVorobyev/viva-genicam/pull/217)).
 
 ### Fixed
+
+- **An integer register reads the length its `<pLength>` gives.** A `<pLength>` on an `<IntReg>` or `<MaskedIntReg>` was read past, so the register kept the default 4 bytes. The Lucid TRT009S event camera's `EventExposureStartFrameID` and `EventExposureEndFrameID` are 2 bytes, or 8 with extended IDs, and read 4 bytes from the event: with 16-bit IDs, the block ID and two bytes of the timestamp. A `<MaskedIntReg>` whose length only a `<pLength>` gives is now skipped with that reason. Found by the camera's GenApi XML from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138), now in the vendor corpus. ([#231](https://github.com/VitalyVorobyev/viva-genicam/pull/231))
 
 - **Private bench evidence is anonymous.** Current documentation and code comments omit private device names and identifiers; raw captures and device descriptions remain outside distributed packages ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
 

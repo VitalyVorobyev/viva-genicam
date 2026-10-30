@@ -122,14 +122,16 @@ handles those blocks differently from image frames:
 
 - `--save N` writes the first N blocks as raw payloads, `block_0001.evt3` or
   `block_0001.evt21`, in the current directory. `--rgb` does not apply.
-- `--raw-out <FILE>` appends **every** block's payload to one file, in arrival
+- `--raw-out <FILE>` writes **every** block's payload to one file, in arrival
   order — a continuous recording you can replay with event-vision tooling. The
-  file is opened for appending, not truncated, so delete it between runs if you
-  want a fresh capture. Image frames are never written there.
+  file is created, or replaced, when the first block arrives, so a stream that
+  sends no event data leaves no file; `--append` adds to it instead. With
+  `--raw-out`, `--save` writes no block files unless you give it a count.
+  Image frames are never written there.
 
 ```bash
 cargo run -p viva-camctl -- stream \
-  --ip 192.168.0.10 --iface 192.168.0.5 --duration-s 10 --save 0 --raw-out capture.evt3
+  --ip 192.168.0.10 --iface 192.168.0.5 --duration-s 10 --raw-out capture.evt3
 ```
 
 ### 2.4. Multicast

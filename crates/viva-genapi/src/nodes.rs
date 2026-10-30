@@ -254,7 +254,8 @@ pub struct IntegerNode {
     /// Register addressing (absent when delegated via `pvalue`); resolve it
     /// with [`NodeMap::register_address`](crate::NodeMap::register_address).
     pub(crate) addressing: Option<Addressing>,
-    /// Nominal register length in bytes.
+    /// Nominal register length in bytes; `0` when a `<pLength>` node gives
+    /// it, which is read at each access.
     pub len: u32,
     /// Declared access rights.
     pub access: AccessMode,

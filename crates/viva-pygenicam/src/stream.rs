@@ -9,12 +9,13 @@ use pyo3::types::PyDict;
 
 use viva_genicam::gige::Iface;
 use viva_genicam::{
-    FrameStream, GenicamError, ResendPolicy, StreamOptions, StreamStats,
+    FrameStream, GenicamError, ResendPolicy, StreamBlock, StreamOptions, StreamStats,
     U3vFrameStream as U3vStream, U3vStreamOptions,
 };
 
 use crate::camera::{lock_open, GigeCamera, U3vCamera};
-use crate::errors::{parse_error, transport_error, IntoPyErr};
+use crate::errors::{genicam_error, parse_error, transport_error, IntoPyErr};
+use crate::evs::PyEvsBlock;
 use crate::frame::PyFrame;
 
 /// Boxed so the enum costs every `PyFrameStream` one pointer whichever
@@ -46,6 +47,37 @@ impl PyFrameStream {
             inner: Some(StreamInner::U3v(Box::new(stream))),
             default_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// The open stream, and how long a read waits.
+    fn inner_and_timeout(
+        &mut self,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<(&mut StreamInner, Duration)> {
+        let to = timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.default_timeout);
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| parse_error("frame stream is closed"))?;
+        Ok((inner, to))
+    }
+}
+
+/// What `next_block` hands Python: an image as a `Frame`, event data as an
+/// `EvsBlock`.
+#[derive(IntoPyObject)]
+pub(crate) enum PyBlock {
+    Frame(PyFrame),
+    Evs(PyEvsBlock),
+}
+
+/// A blocking read's result, its timeout as Python's `TransportError`.
+fn timed<T>(result: Result<T, GenicamError>) -> PyResult<T> {
+    match result {
+        Err(GenicamError::Timeout(_)) => Err(transport_error("timeout waiting for frame")),
+        other => other.into_py_err(),
     }
 }
 
@@ -102,26 +134,36 @@ impl PyFrameStream {
     /// Pull the next frame. Returns `None` on clean stream end, raises on error.
     #[pyo3(signature = (timeout_ms=None))]
     fn next_frame(&mut self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Option<PyFrame>> {
-        let to = timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(self.default_timeout);
-        let inner = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| parse_error("frame stream is closed"))?;
+        let (inner, to) = self.inner_and_timeout(timeout_ms)?;
         py.detach(|| match inner {
             // The receive engine's own blocking front end: no runtime needed.
-            StreamInner::Gige(s) => match s.next_frame_blocking(to) {
-                Err(GenicamError::Timeout(_)) => Err(transport_error("timeout waiting for frame")),
-                other => other.into_py_err(),
-            },
+            StreamInner::Gige(s) => timed(s.next_frame_blocking(to)),
             // So is the USB3 Vision reader's.
-            StreamInner::U3v(s) => match s.next_frame_blocking(to) {
-                Err(GenicamError::Timeout(_)) => Err(transport_error("timeout waiting for frame")),
-                other => other.into_py_err(),
-            },
+            StreamInner::U3v(s) => timed(s.next_frame_blocking(to)),
         })
         .map(|opt| opt.map(PyFrame::new))
+    }
+
+    /// Pull the next block: a `Frame`, or an `EvsBlock` for event data. A
+    /// USB3 Vision stream has only frames.
+    #[pyo3(signature = (timeout_ms=None))]
+    fn next_block(&mut self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Option<PyBlock>> {
+        let (inner, to) = self.inner_and_timeout(timeout_ms)?;
+        let block = py.detach(|| match inner {
+            StreamInner::Gige(s) => timed(s.next_block_blocking(to)).map(|b| b.map(Into::into)),
+            StreamInner::U3v(s) => {
+                timed(s.next_frame_blocking(to)).map(|f| f.map(StreamBlock::Image))
+            }
+        })?;
+        block
+            .map(|block| match block {
+                StreamBlock::Image(frame) => Ok(PyBlock::Frame(PyFrame::new(frame))),
+                StreamBlock::Evs(events) => Ok(PyBlock::Evs(PyEvsBlock::new(events))),
+                _ => Err(genicam_error(
+                    "a stream block kind this binding does not know",
+                )),
+            })
+            .transpose()
     }
 
     /// The stream's counters: every block's fate, and on GigE Vision every

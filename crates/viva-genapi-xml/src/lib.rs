@@ -1019,7 +1019,8 @@ pub enum NodeDecl {
         meta: NodeMeta,
         /// Addressing metadata (absent when delegated via `pvalue`).
         addressing: Option<Addressing>,
-        /// Length in bytes of the register payload.
+        /// Length in bytes of the register payload; `0` when a `<pLength>`
+        /// node gives it ([`Addressing::length_node`]).
         len: u32,
         /// Access privileges.
         access: AccessMode,
@@ -2957,6 +2958,46 @@ mod tests {
             Some("DeviceFirmwareVersion_InqLengthFao")
         );
         assert!(decl.meta.ignored.is_empty(), "{:?}", decl.meta.ignored);
+    }
+
+    /// `<pLength>` on an `<IntReg>`: the Lucid TRT009S's event frame IDs
+    /// (`N248`/`N252`, behind `EventExposureStartFrameID`) are 2 or 8 bytes,
+    /// as the extended-ID bit says. It used to be read past, leaving the
+    /// default 4.
+    #[test]
+    fn an_int_reg_keeps_its_p_length() {
+        let model = parse_fragment(
+            r#"<IntReg Name="N248"><pAddress>N256</pAddress><pLength>N257</pLength><AccessMode>RO</AccessMode><pPort>EventPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>"#,
+        );
+        match model.nodes.iter().find(|n| n.name() == "N248") {
+            Some(NodeDecl::Integer {
+                addressing: Some(addressing),
+                len,
+                meta,
+                ..
+            }) => {
+                assert_eq!(addressing.length_node(), Some("N257"));
+                assert_eq!(*len, 0);
+                assert!(meta.ignored.is_empty(), "{:?}", meta.ignored);
+            }
+            other => panic!("not an addressed integer: {other:?}"),
+        }
+    }
+
+    /// A bit field has to be placed within a length known when the document
+    /// is read, so a `<MaskedIntReg>` whose length only a `<pLength>` gives
+    /// is skipped with the reason, not with "zero-length register".
+    #[test]
+    fn a_masked_int_reg_with_only_a_p_length_is_skipped_with_the_reason() {
+        let model = parse_fragment(
+            r#"<MaskedIntReg Name="Field"><Address>0x10</Address><pLength>Len</pLength><Bit>3</Bit></MaskedIntReg>"#,
+        );
+        assert!(model.nodes.is_empty());
+        assert!(
+            model.skipped[0].error.contains("only its <pLength> gives"),
+            "{:?}",
+            model.skipped
+        );
     }
 
     /// H-2: a child element no parser interprets is recorded on its node, in

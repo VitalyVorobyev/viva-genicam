@@ -83,6 +83,11 @@ done
 # documents fetched above; it was read from the maintainer's own camera with
 # `viva-camctl xml` while testing the hardware plan (#215).
 #
+# The TRT009S is an event camera (Sony IMX636): its document has no
+# PixelFormat node at all. It showed that a `<pLength>` on an `<IntReg>` was
+# read past, so its event frame IDs, 2 or 8 bytes as the extended-ID bit says,
+# were read as 4 (#138).
+#
 # Gist URLs are pinned to a revision SHA. The bare `/raw` form follows the
 # latest revision, so an edit upstream would silently change what the corpus
 # tests run against.
@@ -93,6 +98,7 @@ Hikrobot_MV-CS050-10GC.xml	https://github.com/user-attachments/files/30513169/xm
 MicroEpsilon_scanCONTROL_850050.xml	https://gist.githubusercontent.com/Katze719/f1116fda94ff1f424fc7bf5955c86952/raw/9e3153952c8fab3b64e60268c4a6119fcc70f39d/scancontrol-device.xml	93
 TIS_DMK_33GP2000e.xml	https://github.com/user-attachments/files/31440543/camera_dmk_33GP2000e.xml	122
 AVT_Manta_G125B_1.44.28514.xml	https://gist.githubusercontent.com/VitalyVorobyev/a458f692ab7944f3fb3b4684efab8453/raw/46c5189a402852361022c34580a9ad67de820070/AVT_Manta_G125B_1.44.28514.xml	215
+Lucid_TRT009S.xml	https://github.com/user-attachments/files/34187527/trt009s.txt	138
 EOF
 )
 

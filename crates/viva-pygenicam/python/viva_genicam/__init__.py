@@ -36,6 +36,7 @@ from .errors import (
     UnsupportedPixelFormatError,
 )
 from .events import Event, EventStream
+from .evs import EvsBlock
 from .frame import Frame, FrameStatus
 from .network import AckSummary, force_ip, send_action
 from .node import FeatureState, NodeInfo, NodeKind, SkippedNode, ValueRange
@@ -51,6 +52,7 @@ __all__ = [
     "DeviceInfo",
     "Event",
     "EventStream",
+    "EvsBlock",
     "FeatureState",
     "Frame",
     "FrameStatus",

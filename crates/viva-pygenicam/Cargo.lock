@@ -1037,7 +1037,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "viva-camctl"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "viva-fake-gige"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "clap",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "viva-fake-u3v"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "viva-gencp",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genapi"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "thiserror",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genapi-xml"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "quick-xml",
  "serde",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gencp"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "viva-genicam"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "viva-gige"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "fastrand",
@@ -1149,11 +1149,11 @@ dependencies = [
 
 [[package]]
 name = "viva-pfnc"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "viva-pygenicam"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "if-addrs",
@@ -1175,11 +1175,11 @@ dependencies = [
 
 [[package]]
 name = "viva-sfnc"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "viva-u3v"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "nusb",

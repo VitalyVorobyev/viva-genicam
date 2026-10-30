@@ -6,7 +6,7 @@ use quick_xml::events::{BytesStart, Event};
 use super::{
     IndexedBuilder, NodeMetaBuilder, TAG_BIT, TAG_BYTE_ORDER, TAG_ENDIANESS, TAG_ENDIANNESS,
     TAG_INT_SWISS_KNIFE, TAG_LSB, TAG_LSB_MIXED, TAG_MASK, TAG_MSB, TAG_MSB_MIXED, TAG_P_ADDRESS,
-    TAG_P_INDEX, TAG_P_PORT, TAG_P_SELECTED, TAG_VALUE, handle_addressing_empty,
+    TAG_P_INDEX, TAG_P_LENGTH, TAG_P_PORT, TAG_P_SELECTED, TAG_VALUE, handle_addressing_empty,
     handle_addressing_start, handle_invalidator_start, handle_p_selected_start,
     handle_predicate_start,
 };
@@ -97,8 +97,11 @@ pub(crate) fn parse_integer(
                     static_value = Some(parse_i64(&text)?);
                 }
                 // Shared handling so `<Address>`, `<pAddress>` and
-                // `<pIndex>` all contribute their term.
-                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_INT_SWISS_KNIFE | TAG_P_PORT => {
+                // `<pIndex>` all contribute their term, and `<pLength>` its
+                // node (GenICam Standard v2.1.1 §2.8.3) — the Lucid
+                // TRT009S's event frame IDs are 2 or 8 bytes by it.
+                "Address" | TAG_P_ADDRESS | TAG_P_INDEX | TAG_INT_SWISS_KNIFE | TAG_P_PORT
+                | TAG_P_LENGTH => {
                     handle_addressing_start(reader, e, &name, &mut addressing)?;
                 }
                 "Length" => {
@@ -267,6 +270,16 @@ pub(crate) fn parse_integer(
     // Value, or appear as pure UI features without register backing.
     let (addressing, len, bitfield) = if let Ok(addr) = addressing.finalize(&name, Some(4)) {
         let len = addr.byte_len();
+        // A bit field is placed within a length known now; one a
+        // `<pLength>` node gives later is not, and a field placed against
+        // the `0` that stands for it would be refused as a zero-length
+        // register, which says the wrong thing.
+        if len == 0 && addr.length_node().is_some() && bitfield.is_declared() {
+            return Err(XmlError::invalid(
+                &name,
+                "declares a bit field on a register whose length only its <pLength> gives",
+            ));
+        }
         let bf = bitfield.finish(&name, len)?;
         (Some(addr), len, bf)
     } else {

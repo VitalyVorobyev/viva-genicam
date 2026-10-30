@@ -514,3 +514,89 @@ fn register_address_refuses_a_chunk_register() {
         (0x100, 4)
     );
 }
+
+/// The Lucid TRT009S's `EventExposureStartFrameID` (#138), cut down: its
+/// register `N248` takes both address and length from IntSwissKnifes on the
+/// extended-ID bit `N466` (`<Bit>1</Bit>` of big-endian 0x0960), so the frame
+/// id is the 16-bit block id at 0x6 or the 64-bit one at 0x8 (GenICam
+/// Standard v2.1.1 §2.8.3's `<pLength>`). `Scratch` is the same `<pLength>`
+/// on a device-port register, which can be written.
+const TRT009S_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0">
+  <Port Name="Device"/>
+  <Integer Name="EventExposureStartFrameID"><pValue>N248</pValue></Integer>
+  <IntReg Name="N248"><pAddress>N256</pAddress><pLength>N257</pLength><AccessMode>RO</AccessMode><pPort>EventExposureStartPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <IntSwissKnife Name="N256"><pVariable Name="V1">N466</pVariable><Formula>(V1) ? 0x8 : 0x6</Formula></IntSwissKnife>
+  <IntSwissKnife Name="N257"><pVariable Name="V1">N466</pVariable><Formula>(V1) ? 0x8 : 0x2</Formula></IntSwissKnife>
+  <StructReg Comment="N465"><Address>0x0960</Address><Length>4</Length><AccessMode>RW</AccessMode><pPort>Device</pPort><Endianess>BigEndian</Endianess><StructEntry Name="N466"><Bit>1</Bit></StructEntry></StructReg>
+  <Port Name="EventExposureStartPort"><EventID>900B</EventID></Port>
+
+  <IntReg Name="Scratch"><Address>0x200</Address><pLength>ScratchLength</pLength><AccessMode>RW</AccessMode><pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+  <Integer Name="ScratchLength"><Value>2</Value></Integer>
+</RegisterDescription>
+"#;
+
+fn trt009s_nodemap() -> NodeMap {
+    let model = viva_genapi_xml::parse(TRT009S_XML).expect("parse");
+    let map = NodeMap::try_from_xml(model).expect("build");
+    assert!(map.skipped().is_empty(), "{:?}", map.skipped());
+    map
+}
+
+/// An `<IntReg>` reads as many bytes as its `<pLength>` node gives, where its
+/// `<pAddress>` node puts them — on the TRT009S, 2 bytes at 0x6 for 16-bit
+/// block ids, 8 at 0x8 for 64-bit ones. The default 4 bytes at 0x6 read the
+/// block id and half the timestamp: 0x0102_0000.
+#[test]
+fn an_int_reg_reads_the_length_its_p_length_gives() {
+    let mut map = trt009s_nodemap();
+    let io = MemIo::default();
+
+    // Extended ids off: the 16-bit block id 0x0102 at 0x6.
+    io.regs.borrow_mut().insert(0x0960, vec![0, 0, 0, 0]);
+    #[rustfmt::skip]
+    let short: [u8; 16] = [
+        0x00, 0x00, 0x90, 0x0B, 0x00, 0x00, 0x01, 0x02,
+        0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A,
+    ];
+    map.attach_event(0x900B, Bytes::copy_from_slice(&short));
+    assert_eq!(
+        map.get_integer("EventExposureStartFrameID", &io)
+            .expect("16-bit frame id"),
+        0x0102
+    );
+
+    // Extended ids on — `<Bit>1</Bit>` counts from the MSB of a big-endian
+    // register: the 64-bit block id at 0x8.
+    io.regs
+        .borrow_mut()
+        .insert(0x0960, 0x4000_0000u32.to_be_bytes().to_vec());
+    map.invalidate_all();
+    #[rustfmt::skip]
+    let extended: [u8; 24] = [
+        0x00, 0x00, 0x90, 0x0B, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+        0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A,
+    ];
+    map.attach_event(0x900B, Bytes::copy_from_slice(&extended));
+    assert_eq!(
+        map.get_integer("EventExposureStartFrameID", &io)
+            .expect("64-bit frame id"),
+        0x0000_0001_0203_0405
+    );
+}
+
+/// A write goes out at the length the `<pLength>` node gives too, not as the
+/// default 4 bytes over whatever follows the register.
+#[test]
+fn an_int_reg_writes_the_length_its_p_length_gives() {
+    let mut map = trt009s_nodemap();
+    let io = MemIo::default();
+    map.set_integer("Scratch", 0x1234, &io).expect("write");
+    assert_eq!(io.writes(), vec![(0x200, vec![0x12, 0x34])]);
+
+    io.regs.borrow_mut().insert(0x200, vec![0xAB, 0xCD]);
+    map.invalidate_all();
+    assert_eq!(map.get_integer("Scratch", &io).expect("read"), 0xABCD);
+    assert_eq!(io.reads(), vec![(0x200, 2)]);
+}

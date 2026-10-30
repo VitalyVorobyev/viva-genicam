@@ -51,6 +51,8 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
+- **An integer register reads the length its `<pLength>` gives.** A `<pLength>` on an `<IntReg>` or `<MaskedIntReg>` was read past, so the register kept the default 4 bytes. The Lucid TRT009S event camera's `EventExposureStartFrameID` and `EventExposureEndFrameID` are 2 bytes, or 8 with extended IDs, and read 4 bytes from the event: with 16-bit IDs, the block ID and two bytes of the timestamp. A `<MaskedIntReg>` whose length only a `<pLength>` gives is now skipped with that reason. Found by the camera's GenApi XML from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138), now in the vendor corpus.
+
 - **Private bench evidence is anonymous.** Current documentation and code comments omit private device names and identifiers; raw captures and device descriptions remain outside distributed packages ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
 
 - **Studio detects a lost direct camera.** GigE sessions recover by MAC with fresh XML and controls; acquisition stays stopped until Start. A reachable camera whose control was taken stays read-only instead of silently reclaiming it. Disconnect, switching cameras and exit cancel pending recovery; disconnected USB cameras offer manual reconnection ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).

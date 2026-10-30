@@ -193,6 +193,11 @@ impl BitfieldBuilder {
         self.byte_order = Some(order);
     }
 
+    /// Whether any bit field element was declared.
+    pub(crate) fn is_declared(&self) -> bool {
+        self.source.is_some()
+    }
+
     /// Finalize the builder into a [`BitField`] if sufficient data was provided.
     pub(crate) fn finish(self, node: &str, len_bytes: u32) -> Result<Option<BitField>, XmlError> {
         let source = match self.source {

@@ -12,7 +12,7 @@ release opens with what to read before upgrading.
 
 ### Added
 
-- **Event-vision blocks in Python.** `FrameStream.next_block()` returns a `Frame` for an image and the new `EvsBlock` for an event camera's EVT 3.0 or EVT 2.1 data: its bytes as sent, its `format` (`"evt3.0"` or `"evt2.1"`), timestamps, block ID, status, chunks, and the GVSP leader and trailer sizes. `next_frame()` still hands event data out as a frame of raw bytes; a USB3 Vision stream returns frames.
+- **Event-vision blocks in Python.** `FrameStream.next_block()` returns a `Frame` for an image and the new `EvsBlock` for an event camera's EVT 3.0 or EVT 2.1 data: its bytes as sent, its `format` (`"evt3.0"` or `"evt2.1"`), timestamps, block ID, status, chunks, and the GVSP leader and trailer sizes. `next_frame()` still hands event data out as a frame of raw bytes; a USB3 Vision stream returns frames. ([#231](https://github.com/VitalyVorobyev/viva-genicam/pull/231))
 
 - **Frame timestamps and chunks in Studio (ST-52).** The Image tab shows exact frame IDs, device ticks, optional calibrated host time and XML-decoded chunk values/errors from the displayed or frozen image. Standard chunk controls remain explicit and respect read-only access. Remote services and Studio must be upgraded together for API 8 / image header 3 ([#230](https://github.com/VitalyVorobyev/viva-genicam/pull/230)).
 
@@ -36,7 +36,7 @@ release opens with what to read before upgrading.
 
 ### Changed
 
-- **`viva-camctl stream --raw-out` replaces its file.** It appended, so a rerun added to the previous capture, even in another EVT format; the file is now replaced, and `--append` adds to it. The file is created when the first event block arrives, so an image stream leaves none, and `--raw-out` without `--save` no longer also writes `block_0001.*`.
+- **`viva-camctl stream --raw-out` replaces its file.** It appended, so a rerun added to the previous capture, even in another EVT format; the file is now replaced, and `--append` adds to it. The file is created when the first event block arrives, so an image stream leaves none, and `--raw-out` without `--save` no longer also writes `block_0001.*`. ([#231](https://github.com/VitalyVorobyev/viva-genicam/pull/231))
 
 - **More startup headroom for frame delivery (SR-28).** The bounded GigE Vision and USB3 Vision delivery queue holds 16 completed frames instead of 4. The six-sensor camera had already evicted eight frames while acquisition start returned; a 16-frame queue retained frame 1 in the short probes and tolerated a 3 ms consumer pause. It permits up to four times the queued payload memory and a longer pending-frame age; per-frame allocation and copying stay unchanged. GigE hardware was measured; USB3 behavior is covered by fake/queue regressions ([#227](https://github.com/VitalyVorobyev/viva-genicam/pull/227)).
 
@@ -55,7 +55,7 @@ release opens with what to read before upgrading.
 
 ### Fixed
 
-- **An integer register reads the length its `<pLength>` gives.** A `<pLength>` on an `<IntReg>` or `<MaskedIntReg>` was read past, so the register kept the default 4 bytes. The Lucid TRT009S event camera's `EventExposureStartFrameID` and `EventExposureEndFrameID` are 2 bytes, or 8 with extended IDs, and read 4 bytes from the event: with 16-bit IDs, the block ID and two bytes of the timestamp. A `<MaskedIntReg>` whose length only a `<pLength>` gives is now skipped with that reason. Found by the camera's GenApi XML from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138), now in the vendor corpus.
+- **An integer register reads the length its `<pLength>` gives.** A `<pLength>` on an `<IntReg>` or `<MaskedIntReg>` was read past, so the register kept the default 4 bytes. The Lucid TRT009S event camera's `EventExposureStartFrameID` and `EventExposureEndFrameID` are 2 bytes, or 8 with extended IDs, and read 4 bytes from the event: with 16-bit IDs, the block ID and two bytes of the timestamp. A `<MaskedIntReg>` whose length only a `<pLength>` gives is now skipped with that reason. Found by the camera's GenApi XML from [#138](https://github.com/VitalyVorobyev/viva-genicam/issues/138), now in the vendor corpus. ([#231](https://github.com/VitalyVorobyev/viva-genicam/pull/231))
 
 - **Private bench evidence is anonymous.** Current documentation and code comments omit private device names and identifiers; raw captures and device descriptions remain outside distributed packages ([#228](https://github.com/VitalyVorobyev/viva-genicam/pull/228)).
 

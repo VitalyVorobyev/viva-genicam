@@ -80,6 +80,7 @@ pub use viva_u3v as u3v;
 pub mod blocking;
 mod chunks;
 mod error;
+mod event_configuration;
 mod events;
 mod evs;
 mod frame;
@@ -107,6 +108,10 @@ use tracing::{debug, info, warn};
 
 pub use chunks::{ChunkData, ChunkError, chunk_data};
 pub use error::{GenicamError, WriteRefused};
+pub use event_configuration::{
+    EventConfiguration, EventRestoreFailure, EventRestoreReport, EventRestoreSkipped,
+    EventSetupError,
+};
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub use events::U3vEventStream;
@@ -150,6 +155,7 @@ pub struct Camera<T: RegisterIo> {
     transport: T,
     nodemap: NodeMap,
     time_sync: TimeSync,
+    event_identity: Arc<()>,
 }
 
 impl<T: RegisterIo> Camera<T> {
@@ -159,6 +165,7 @@ impl<T: RegisterIo> Camera<T> {
             transport,
             nodemap,
             time_sync: TimeSync::with_capacity(64),
+            event_identity: Arc::new(()),
         }
     }
 
@@ -787,6 +794,40 @@ impl<T: RegisterIo> Camera<T> {
         })
     }
 
+    /// The `EventSelector` entry an event with `event_id` belongs to, when
+    /// the XML says.
+    ///
+    /// SFNC names an event's data features `Event<Entry>` and
+    /// `Event<Entry>Timestamp`, so an entry with either feature on the port
+    /// whose `<EventID>` is `event_id` names the event. Otherwise an entry
+    /// whose literal `<Value>` is the ID does, as Basler's do. `None` when
+    /// neither matches, or the camera has no `EventSelector`.
+    pub fn event_name(&self, event_id: u16) -> Option<String> {
+        let Some(Node::Enum(selector)) = self.nodemap.node(viva_sfnc::EVENT_SELECTOR) else {
+            return None;
+        };
+        let id = u64::from(event_id);
+        let features = self.features_on_ports(
+            |kind| matches!(kind, PortKind::Event { event_id } if event_id == id),
+        );
+        let named = |entry: &str| {
+            let feature = format!("Event{entry}");
+            features
+                .iter()
+                .any(|name| *name == feature || *name == format!("{feature}Timestamp"))
+        };
+        selector
+            .entries
+            .iter()
+            .find(|entry| named(&entry.name))
+            .or_else(|| {
+                selector.entries.iter().find(|entry| {
+                    matches!(entry.value, genapi::EnumValueSrc::Literal(value) if value == i64::from(event_id))
+                })
+            })
+            .map(|entry| entry.name.clone())
+    }
+
     /// Turn on notification of each event named, through SFNC's
     /// `EventSelector` and `EventNotification`.
     ///
@@ -797,30 +838,22 @@ impl<T: RegisterIo> Camera<T> {
     pub(crate) fn enable_events(&mut self, enable_ids: &[&str]) -> Result<(), GenicamError> {
         let sfnc = self.nodemap.node(viva_sfnc::EVENT_SELECTOR).is_some()
             && self.nodemap.node(viva_sfnc::EVENT_NOTIFICATION).is_some();
-        let enabled = sfnc
-            && self.with_map(|nodemap, transport| {
-                for &name in enable_ids {
-                    if let Err(err) = nodemap.set_enum(viva_sfnc::EVENT_SELECTOR, name, transport) {
-                        warn!(event = name, error = %err, "failed to select event via SFNC");
-                        return false;
-                    }
-                    if let Err(err) = nodemap.set_enum(
-                        viva_sfnc::EVENT_NOTIFICATION,
-                        viva_sfnc::EVENT_NOTIF_ON,
-                        transport,
-                    ) {
-                        warn!(event = name, error = %err, "failed to enable event via SFNC");
-                        return false;
-                    }
-                }
-                true
-            });
-        if !enabled && !enable_ids.is_empty() {
+        if !sfnc && !enable_ids.is_empty() {
             return Err(GenicamError::NoEventSelection {
                 events: enable_ids.iter().map(ToString::to_string).collect(),
             });
         }
-        Ok(())
+        self.with_map(|nodemap, transport| {
+            for &name in enable_ids {
+                nodemap.set_enum(viva_sfnc::EVENT_SELECTOR, name, transport)?;
+                nodemap.set_enum(
+                    viva_sfnc::EVENT_NOTIFICATION,
+                    viva_sfnc::EVENT_NOTIF_ON,
+                    transport,
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// The features fed by the ports `which` selects, sorted, without
@@ -2128,7 +2161,7 @@ impl<T: u3v::UsbTransfer + 'static> Camera<U3vRegisterIo<T>> {
     /// Set the event interface's EventEnable and read its endpoint on a
     /// thread of its own. Events carry their device time in ns, mapped to
     /// host time once [`time_calibrate`](Camera::time_calibrate) has fitted
-    /// a clock; dropping the stream clears EventEnable.
+    /// a clock; dropping the stream restores the previous EventEnable word.
     pub fn open_event_stream(&self) -> Result<U3vEventStream, GenicamError> {
         let time_sync = (!self.time_sync.is_empty()).then(|| self.time_sync.clone());
         events::open_u3v_event_stream(&self.transport, time_sync)

@@ -3,6 +3,7 @@ import { isTauri } from "../../tauri";
 import { useDevice } from "../../device/useDevice";
 import { useBackendStatus } from "../../device/useBackendStatus";
 import { formatBackendChip } from "../../device/backendStatus";
+import { CameraEventsProvider } from "../../device/CameraEventsContext";
 import { FeatureStoreProvider } from "../../device/FeatureStoreContext";
 import { loadPacketSize } from "../../device/packetSize";
 import { useAcquisition } from "../../device/useAcquisition";
@@ -197,6 +198,7 @@ function AppLayoutInner() {
 
   return (
     <FeatureStoreProvider connected={hasSession} readOnly={controlLost || monitoring} sessionKey={externalModel}>
+    <CameraEventsProvider connected={hasSession}>
     <div className="app-layout">
       <header className="app-header">
         {/* Left: brand wordmark + backend mode (reference info, not an action) */}
@@ -355,6 +357,7 @@ function AppLayoutInner() {
         </main>
       </div>
     </div>
+    </CameraEventsProvider>
     </FeatureStoreProvider>
   );
 }

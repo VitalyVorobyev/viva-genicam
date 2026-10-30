@@ -8,14 +8,14 @@ use tracing::{debug, warn};
 use viva_genicam::gige::{self, Iface, IfaceSelector};
 use viva_genicam::report::ReportTarget;
 use viva_genicam::{
-    ControlState, GenicamError, GigeRegisterIo, Reopen, Reopened, StreamOptions,
-    connect_gige_with_xml, reopen_gige,
+    ControlState, EventConfiguration, GenicamError, GigeRegisterIo, Reopen, Reopened,
+    StreamOptions, connect_gige_with_xml, reopen_gige,
 };
 use viva_zenoh_api::DeviceAnnounce;
 
 use crate::device::{DeviceOps, SharedCamera};
 use crate::discovery::Discovery;
-use crate::source::{BlockStream, StreamSource};
+use crate::source::{BlockStream, EventReceiver, StreamSource};
 
 /// How long [`DeviceHandle::refresh_connection`] waits for the camera to
 /// answer and be free again.
@@ -176,6 +176,43 @@ impl StreamSource for DeviceHandle {
 
     fn service_name(&self) -> &'static str {
         "viva-service"
+    }
+
+    /// A message channel bound on the host address of the camera's control
+    /// socket, at a port the OS picks, which the camera is then told.
+    async fn open_events(
+        &self,
+        events: Vec<String>,
+    ) -> Result<(Box<dyn EventReceiver>, EventConfiguration), String> {
+        let (stream, saved) = self
+            .camera
+            .with(move |camera| {
+                let local = match camera.transport().lock_device()?.local_addr() {
+                    Ok(std::net::SocketAddr::V4(local)) => *local.ip(),
+                    Ok(other) => {
+                        return Ok(Err(format!("GigE Vision events need IPv4, not {other}")));
+                    }
+                    Err(source) => {
+                        return Err(GenicamError::Network {
+                            during: "read the control socket's address",
+                            source,
+                        });
+                    }
+                };
+                // The register transport drives its own I/O from this
+                // blocking thread; the socket bind needs the runtime.
+                let runtime = tokio::runtime::Handle::current();
+                let stream = runtime.block_on(camera.open_event_stream(local, 0))?;
+                let port = stream.local_addr()?.port();
+                let names: Vec<&str> = events.iter().map(String::as_str).collect();
+                Ok(runtime
+                    .block_on(camera.configure_events_restorable(local, port, &names))
+                    .map(|saved| (stream, saved))
+                    .map_err(|error| viva_zenoh_api::setup_error_message(&error)))
+            })
+            .await
+            .map_err(|error| format!("Starting events failed: {error}"))??;
+        Ok((Box::new(stream), saved))
     }
 }
 

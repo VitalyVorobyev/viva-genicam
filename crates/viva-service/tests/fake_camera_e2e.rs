@@ -17,8 +17,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use viva_fake_gige::{FakeCamera, FakeCameraBuilder, GvcpCommand};
 use viva_zenoh_api::frame_header::FrameHeader;
 use viva_zenoh_api::{
-    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, EvsFormat, EvsHeader,
-    NodeOpResponse, keys,
+    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, CameraEvent,
+    EventControlRequest, EventMonitorStatus, EvsFormat, EvsHeader, NodeOpResponse, keys,
 };
 
 // ---------------------------------------------------------------------------
@@ -1090,4 +1090,115 @@ async fn e2e_discovery_replaces_a_rebooted_camera_and_resumes_acquisition() {
         .expect("service shutdown")
         .expect("service task");
     cam.camera.take().expect("rebooted fake").stop().await;
+}
+
+/// Ask the event control queryable; the reply's status, or its error text.
+async fn send_event_command(
+    session: &zenoh::Session,
+    device_id: &str,
+    request: &EventControlRequest,
+) -> Result<EventMonitorStatus, String> {
+    let replies = session
+        .get(keys::events_control(device_id))
+        .payload(serde_json::to_vec(request).unwrap())
+        .timeout(Duration::from_secs(10))
+        .await
+        .expect("GET failed");
+    let reply = replies.recv_async().await.expect("no reply received");
+    match reply.result() {
+        Ok(sample) => Ok(serde_json::from_slice(&sample.payload().to_bytes()).unwrap()),
+        Err(error) => Err(String::from_utf8_lossy(&error.payload().to_bytes()).into_owned()),
+    }
+}
+
+/// ST-51: starting event monitoring over Zenoh turns the camera's
+/// notification on — read from the fake, not from the service — each event
+/// arrives with its name and the features its port feeds, and stopping turns
+/// notification off again and points the message channel back where it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_events_are_published_with_their_features_and_stop_restores() {
+    use viva_fake_gige::EVENT_EXPOSURE_END;
+    use viva_genicam::gige::consts::MESSAGE_DESTINATION_PORT;
+
+    let cam = TestCamera::start().await;
+    let fake = cam.camera.as_ref().unwrap();
+
+    let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+    let devices = viva_genicam::gige::discover_all(Duration::from_secs(2))
+        .await
+        .expect("discovery failed");
+    let dev_info = devices
+        .iter()
+        .find(|d| d.ip == Ipv4Addr::LOCALHOST)
+        .expect("fake camera not found on loopback");
+    let handle = Arc::new(
+        DeviceHandle::connect(dev_info, Some(loopback_iface()))
+            .await
+            .expect("connect failed"),
+    );
+    let device_id = handle.device_id().to_string();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle.clone(), shutdown_rx).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let port_before = fake.peek(MESSAGE_DESTINATION_PORT, 4).await;
+
+    let refused = send_event_command(
+        &session,
+        &device_id,
+        &EventControlRequest::start(vec!["NoSuchEvent".into()]),
+    )
+    .await
+    .expect_err("an unknown event is refused");
+    assert!(refused.contains("NoSuchEvent"), "{refused}");
+    assert!(!fake.event_notification_on(EVENT_EXPOSURE_END).await);
+
+    let events = session
+        .declare_subscriber(keys::events(&device_id))
+        .await
+        .unwrap();
+    let status = send_event_command(
+        &session,
+        &device_id,
+        &EventControlRequest::start(vec!["ExposureEnd".into()]),
+    )
+    .await
+    .expect("events start");
+    assert!(status.active, "{status:?}");
+    assert_eq!(status.events, ["ExposureEnd"]);
+    assert!(fake.event_notification_on(EVENT_EXPOSURE_END).await);
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Start).await;
+    assert!(resp.ok, "AcquisitionStart failed: {:?}", resp.error);
+    let sample = tokio::time::timeout(Duration::from_secs(5), events.recv_async())
+        .await
+        .expect("no event within 5 s")
+        .expect("subscriber closed");
+    let event: CameraEvent = serde_json::from_slice(&sample.payload().to_bytes()).unwrap();
+    assert_eq!(event.event_id, "0x9001");
+    assert_eq!(event.name.as_deref(), Some("ExposureEnd"));
+    assert_eq!(event.stream_channel, Some(0));
+    let feature = |name: &str| {
+        event
+            .features
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.value.clone())
+            .unwrap_or_else(|| panic!("{name} in {:?}", event.features))
+    };
+    assert_eq!(feature("EventExposureEndTimestamp"), event.ts_dev);
+    assert_eq!(Some(feature("EventExposureEndFrameID")), event.block_id);
+
+    let resp = send_acq_command(&session, &device_id, AcquisitionCommand::Stop).await;
+    assert!(resp.ok, "AcquisitionStop failed: {:?}", resp.error);
+    let status = send_event_command(&session, &device_id, &EventControlRequest::stop())
+        .await
+        .expect("events stop");
+    assert_eq!(status, EventMonitorStatus::inactive(Vec::new()));
+    assert!(!fake.event_notification_on(EVENT_EXPOSURE_END).await);
+    assert_eq!(fake.peek(MESSAGE_DESTINATION_PORT, 4).await, port_before);
+
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
 }

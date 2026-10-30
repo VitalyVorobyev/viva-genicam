@@ -48,7 +48,7 @@ opaque string without `/`).
   user-defined name, else serial, else address, so identical cameras stay distinguishable
   ([#137](https://github.com/VitalyVorobyev/viva-genicam/issues/137)).
 - **`api_version`:** Optional. The app compares this against
-  `viva_zenoh_api::API_VERSION` (currently `8`). On mismatch or absence, the app emits
+  `viva_zenoh_api::API_VERSION` (currently `9`). On mismatch or absence, the app emits
   an `api-version-mismatch` Tauri event (see below) and still discovers the device — no
   hard rejection.
 
@@ -346,7 +346,7 @@ the packing rules, including supported partial final groups. Consumers pass
 the declared stride to the shared PFNC converter instead of treating padding
 as pixels.
 
-This is API version 8 and binary frame-header version 3. Older image
+Binary frame-header version 3 arrived with API version 8. Older image
 headers are rejected; update services and Studio together. The one-byte pixel
 format codes retain their existing meanings. Event-vision framing is unchanged.
 
@@ -475,6 +475,72 @@ travels as `0`, which decodes as `viva_pfnc::PixelFormat::Unknown(0)`.
   `viva_zenoh_api::evs_header`. `EvsHeader::decode` rejects a message whose `payload_len`
   disagrees with the bytes that follow.
 
+## Camera Events
+
+GenICam device events — a GigE Vision camera's `EVENT`/`EVENTDATA` messages, a
+USB3 Vision camera's `EVENT_CMD`s, such as `ExposureEnd` — not the event-vision
+blocks on `evs`.
+
+### `genicam/devices/{device_id}/events/control`
+
+- **Direction:** App → Service (queryable GET)
+- **Request (JSON):**
+  ```json
+  { "command": "start", "events": ["ExposureEnd", "FrameStart"] }
+  { "command": "stop" }
+  ```
+- **Response (JSON):** an `EventMonitorStatus` (below); an error reply, whose
+  payload is the message, when `start` fails — an unknown `EventSelector` entry, a
+  read-only session, no `EventSelector` at all. The message names each setting the
+  failed start's rollback could not restore.
+- **Rust type:** `EventControlRequest { command: EventCommand, events: Vec<String> }`
+  in `viva-zenoh-api`; `EventCommand` serializes as `"start"` or `"stop"`.
+- **Semantics:** `start` turns `EventNotification` on for each named
+  `EventSelector` entry and, for GigE Vision, points the camera's message channel
+  at a socket the service binds; it replaces monitoring already on. `stop` ends
+  forwarding and restores exactly the settings `start` changed
+  (`Camera::restore_events`): each notification, the selectors, the message channel,
+  and a USB3 Vision camera's EventEnable word. The service also stops and restores
+  when it lets go of the camera, and when the event channel fails.
+
+### `genicam/devices/{device_id}/events`
+
+- **Direction:** Service → App
+- **Mechanism:** `put` per event, while monitoring is on
+- **Payload (JSON):**
+  ```json
+  { "event_id": "0x9001", "name": "ExposureEnd", "ts_dev": "123456789", "ts_host_ns": null,
+    "stream_channel": 0, "block_id": "42",
+    "features": [ { "name": "EventExposureEndFrameID", "value": "42", "error": null },
+                  { "name": "EventExposureEndTimestamp", "value": "123456789", "error": null } ] }
+  ```
+- **Rust type:** `CameraEvent` and `EventFeature` in `viva-zenoh-api`
+- **Fields:** 64-bit values are decimal strings. `name` is the `EventSelector`
+  entry the ID belongs to (`Camera::event_name`), `null` when the XML does not say.
+  `ts_host_ns` is the device time mapped through a fitted clock, `null` without one —
+  never the time the event arrived. `stream_channel` and `block_id` are GigE
+  Vision's; a USB3 Vision event has neither, and both are `null`. `features` are
+  the features the event's port feeds (`Camera::event_features`), sorted, each with
+  its value or its read error.
+- **Viva Studio:** embedded mode sends the same payload as its `camera-event` event.
+
+### `genicam/devices/{device_id}/events/status`
+
+- **Direction:** Service → App
+- **Mechanism:** `put` on every start and stop, and when monitoring stops by itself
+- **Payload (JSON):**
+  ```json
+  { "active": true, "events": ["ExposureEnd"], "warnings": [] }
+  { "active": false, "events": [], "warnings": ["EventNotification[ExposureEnd] was not restored: …"] }
+  ```
+- **Rust type:** `EventMonitorStatus` in `viva-zenoh-api`
+- **Semantics:** `warnings` says why monitoring stopped by itself, and lists each
+  setting stopping could not restore — a lost camera, lost control, a refused write.
+  Empty means everything was restored. A client shows them; it never reports a stop
+  with warnings as clean.
+- **Viva Studio:** embedded mode sends the same payload as its
+  `camera-events-status` event.
+
 ---
 
 ## Timing Guarantees
@@ -486,6 +552,8 @@ travels as `0`, which decodes as `viva_pfnc::PixelFormat::Unknown(0)`.
 | `acquisition/status` | On change |
 | `image` | At acquisition frame rate |
 | `evs` | Per event block, while an event-vision camera acquires |
+| `events` | Per camera event, while event monitoring is on |
+| `events/status` | On start and stop of event monitoring |
 | `image/meta` | On acquisition start; on Width, Height, or PixelFormat change during active acquisition |
 
 Device is considered lost if `announce` is not received for 6 seconds. Both
@@ -498,7 +566,8 @@ figures are constants in `viva-zenoh-api` — `ANNOUNCE_INTERVAL` and
 
 - All Zenoh `get()` calls to service queryables expect a single reply within 5 seconds.
 - Timeout or Zenoh-level error → surfaced as `"Zenoh timeout or error"`.
-- Service-level error → returned in `{ "ok": false, "error": "..." }` response body.
+- Service-level error → returned in `{ "ok": false, "error": "..." }` response body;
+  `events/control` answers a failed `start` with an error reply instead.
 - The app never puts to `image` or `nodes/*/value` — those are service-owned.
 
 ---
@@ -523,6 +592,8 @@ sequenceDiagram
     App->>Z: subscribe(status)
     App->>Z: subscribe(acquisition/status)
     App->>Z: subscribe(image/meta)
+    App->>Z: subscribe(events)
+    App->>Z: subscribe(events/status)
 ```
 
 ### Acquisition

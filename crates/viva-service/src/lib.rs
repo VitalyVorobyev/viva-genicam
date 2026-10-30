@@ -6,12 +6,13 @@
 //! every stream and follow every camera's lifecycle the same way (backlog
 //! API-04). A transport supplies a [`Discovery`], whose cameras are
 //! [`DeviceOps`] for their features and a [`StreamSource`] for their
-//! frames; [`run_discovery`] does the rest. [`serve_device`] runs one camera's
-//! task set, for tests that serve a camera in-process.
+//! frames and events; [`run_discovery`] does the rest. [`serve_device`] runs
+//! one camera's task set, for tests that serve a camera in-process.
 
 mod acquisition;
 mod device;
 mod discovery;
+mod events;
 mod gige;
 mod nodes;
 mod pixel_format;
@@ -27,4 +28,4 @@ pub use gige::{
     DeviceHandle, GigeDiscovery, GigeFound, derive_device_id, device_announce, publish_announce,
 };
 pub use serve::serve_device;
-pub use source::{BlockStream, StreamSource};
+pub use source::{BlockStream, EventReceiver, StreamSource};

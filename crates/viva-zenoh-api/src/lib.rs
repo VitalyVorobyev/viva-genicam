@@ -9,9 +9,16 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod camera_event;
 pub mod evs_header;
 pub mod frame_header;
 pub mod frame_metadata;
+pub use camera_event::{
+    CameraEvent, EventCommand, EventControlRequest, EventFeature, EventMonitorStatus,
+};
+#[cfg(feature = "genicam")]
+#[cfg_attr(docsrs, doc(cfg(feature = "genicam")))]
+pub use camera_event::{restore_warnings, setup_error_message};
 pub use evs_header::{EVS_HEADER_SIZE, EVS_MAGIC, EvsFormat, EvsHeader, EvsHeaderError};
 pub use frame_header::{FRAME_MAGIC, FrameHeader, FrameHeaderError, HEADER_SIZE};
 pub use frame_metadata::{
@@ -57,7 +64,11 @@ pub use frame_metadata::{
 ///   version-1 image headers are rejected.
 /// - `8` — version-3 image headers carry bounded per-frame metadata inline,
 ///   preserving exact identifiers, timestamps and chunk values with the pixels.
-pub const API_VERSION: u32 = 8;
+/// - `9` — GenICam device events: [`keys::events_control`] starts and stops
+///   monitoring ([`EventControlRequest`]), each event is a [`CameraEvent`] on
+///   [`keys::events`], and [`EventMonitorStatus`] on [`keys::events_status`]
+///   says when monitoring stops and what could not be restored.
+pub const API_VERSION: u32 = 9;
 
 /// Periodic announcement published by the camera service.
 ///
@@ -1055,6 +1066,29 @@ pub mod keys {
     /// (GVCP `EVENT` messages such as `EventExposureEnd`).
     pub fn evs(device_id: &str) -> String {
         format!("genicam/devices/{device_id}/evs")
+    }
+
+    /// Where GenICam device events are started and stopped.
+    /// Direction: App -> Service (queryable GET). Payload is a
+    /// [`super::EventControlRequest`]; the reply is a
+    /// [`super::EventMonitorStatus`], or an error reply when starting failed.
+    pub fn events_control(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/events/control")
+    }
+
+    /// Where each GenICam device event is published while monitoring is on.
+    /// Direction: Service -> App (`put` per event). Payload is a
+    /// [`super::CameraEvent`]. Not [`evs`], which carries event-vision
+    /// pixels.
+    pub fn events(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/events")
+    }
+
+    /// Where event monitoring status is published: on every start and stop,
+    /// and when monitoring ends by itself. Direction: Service -> App.
+    /// Payload is a [`super::EventMonitorStatus`].
+    pub fn events_status(device_id: &str) -> String {
+        format!("genicam/devices/{device_id}/events/status")
     }
 
     /// Extract node name from `genicam/devices/{id}/nodes/{name}/{suffix}`

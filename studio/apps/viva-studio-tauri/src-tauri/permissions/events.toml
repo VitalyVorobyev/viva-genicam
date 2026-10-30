@@ -1,0 +1,8 @@
+[[permission]]
+identifier = "camera-events"
+description = "Allows listing, starting and stopping camera event monitoring."
+commands.allow = [
+  "list_camera_events",
+  "start_camera_events",
+  "stop_camera_events"
+]

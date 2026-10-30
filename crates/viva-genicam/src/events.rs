@@ -106,14 +106,15 @@ impl EventStream {
 /// ID at 0x2, its timestamp at 0x4, its data at 0xC — which is what the
 /// camera's event ports address ([`Camera::with_event`](crate::Camera::with_event)).
 /// USB3 Vision events have no stream channel or block id of their own: both
-/// are 0. Dropping the stream stops the reader and clears the device's
-/// EventEnable.
+/// are 0. Dropping the stream stops the reader and restores the device's
+/// previous EventEnable control word. Use [`U3vEventStream::shutdown`] for
+/// awaited cleanup with restoration errors.
 #[cfg(feature = "u3v")]
 #[cfg_attr(docsrs, doc(cfg(feature = "u3v")))]
 pub struct U3vEventStream {
     shared: Arc<U3vEventShared>,
     reader: Option<std::thread::JoinHandle<()>>,
-    disable: Option<Box<dyn FnOnce() + Send + Sync>>,
+    disable: Option<Box<dyn FnOnce() -> Result<(), GenicamError> + Send + Sync>>,
 }
 
 #[cfg(feature = "u3v")]
@@ -136,19 +137,51 @@ pub(crate) fn open_u3v_event_stream<T: viva_u3v::UsbTransfer + 'static>(
     time_sync: Option<TimeSync>,
 ) -> Result<U3vEventStream, GenicamError> {
     let device = transport.shared_device();
-    let mut events = device
-        .lock()
-        .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))?
-        .open_events()
-        .map_err(|source| {
-            if matches!(source, viva_u3v::U3vError::Disconnected) {
-                transport.mark_lost();
-            }
-            GenicamError::U3v {
-                during: "open the event stream",
+    let opened = (|| {
+        let mut device = device
+            .lock()
+            .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))?;
+        let address = device
+            .read_eirm()
+            .map_err(|source| GenicamError::U3v {
+                during: "read the event interface",
                 source,
+            })?
+            .base
+            + viva_u3v::registers::eirm::CONTROL;
+        let previous = device
+            .read_mem(address, 4)
+            .map_err(|source| GenicamError::U3v {
+                during: "save EventEnable",
+                source,
+            })?;
+        match device.open_events() {
+            Ok(events) => Ok((events, address, previous)),
+            Err(source) => {
+                // A disconnected device is not written; loss is noted below.
+                if !matches!(source, viva_u3v::U3vError::Disconnected)
+                    && let Err(error) = device.write_mem(address, &previous)
+                {
+                    debug!(%error, "restoring EventEnable after event setup failed");
+                }
+                Err(GenicamError::U3v {
+                    during: "open the event stream",
+                    source,
+                })
             }
-        })?;
+        }
+    })();
+    let (mut events, enable_address, previous_enable) = opened.inspect_err(|error| {
+        if matches!(
+            error,
+            GenicamError::U3v {
+                source: viva_u3v::U3vError::Disconnected,
+                ..
+            }
+        ) {
+            transport.mark_lost();
+        }
+    })?;
     let shared = Arc::new(U3vEventShared {
         queue: crate::stream::EventQueue::new(U3V_EVENT_CAPACITY),
         stop: std::sync::atomic::AtomicBool::new(false),
@@ -193,15 +226,36 @@ pub(crate) fn open_u3v_event_stream<T: viva_u3v::UsbTransfer + 'static>(
                 }
                 shared.queue.finish();
             })
-            .map_err(crate::error::network("start the event reader thread"))?
     };
+    let connection = transport.connection();
     let disable = Box::new(move || {
-        if let Ok(mut device) = device.lock()
-            && let Err(error) = device.stop_events()
-        {
-            debug!(%error, "clearing EventEnable");
+        if connection.is_lost() {
+            return Err(GenicamError::U3v {
+                during: "restore EventEnable",
+                source: viva_u3v::U3vError::Disconnected,
+            });
         }
+        let mut device = device
+            .lock()
+            .map_err(|_| GenicamError::Panicked("a thread holding the camera's device lock"))?;
+        device
+            .write_mem(enable_address, &previous_enable)
+            .map_err(|source| GenicamError::U3v {
+                during: "restore EventEnable",
+                source,
+            })
     });
+    let reader = match reader {
+        Ok(reader) => reader,
+        Err(error) => {
+            if let Err(restore_error) = disable() {
+                debug!(%restore_error, "restoring EventEnable after reader spawn failed");
+            }
+            return Err(crate::error::network("start the event reader thread")(
+                error,
+            ));
+        }
+    };
     Ok(U3vEventStream {
         shared,
         reader: Some(reader),
@@ -211,6 +265,34 @@ pub(crate) fn open_u3v_event_stream<T: viva_u3v::UsbTransfer + 'static>(
 
 #[cfg(feature = "u3v")]
 impl U3vEventStream {
+    /// Stop and join the event reader on the blocking pool, then restore the
+    /// exact EventEnable control word saved before the reader was opened.
+    ///
+    /// Do not hold the camera or device mutex while awaiting this method.
+    /// A disconnected device is not written; the returned error records that
+    /// its previous EventEnable state could not be restored.
+    pub async fn shutdown(mut self) -> Result<(), GenicamError> {
+        tokio::task::spawn_blocking(move || self.stop_and_restore())
+            .await
+            .map_err(|source| GenicamError::Task {
+                during: "stop the event reader",
+                source,
+            })?
+    }
+
+    fn stop_and_restore(&mut self) -> Result<(), GenicamError> {
+        self.shared
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        let joined = self.reader.take().map_or(Ok(()), |reader| {
+            reader
+                .join()
+                .map_err(|_| GenicamError::Panicked("the USB event reader"))
+        });
+        let restored = self.disable.take().map_or(Ok(()), |restore| restore());
+        joined.and(restored)
+    }
+
     /// The next event; an error once the stream has ended, by failing —
     /// with [`U3vError::Disconnected`](viva_u3v::U3vError::Disconnected) as
     /// the source when the camera is gone — or by being closed.
@@ -246,14 +328,8 @@ impl U3vEventStream {
 #[cfg(feature = "u3v")]
 impl Drop for U3vEventStream {
     fn drop(&mut self) {
-        self.shared
-            .stop
-            .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-        if let Some(disable) = self.disable.take() {
-            disable();
+        if let Err(error) = self.stop_and_restore() {
+            debug!(%error, "stopping the USB event reader");
         }
     }
 }

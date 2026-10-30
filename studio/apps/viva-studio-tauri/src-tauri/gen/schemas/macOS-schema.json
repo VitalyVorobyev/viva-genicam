@@ -2007,6 +2007,12 @@
           "markdownDescription": "Allows acquisition start/stop commands."
         },
         {
+          "description": "Allows listing, starting and stopping camera event monitoring.",
+          "type": "string",
+          "const": "camera-events",
+          "markdownDescription": "Allows listing, starting and stopping camera event monitoring."
+        },
+        {
           "description": "Allows device discovery and connection commands.",
           "type": "string",
           "const": "device",

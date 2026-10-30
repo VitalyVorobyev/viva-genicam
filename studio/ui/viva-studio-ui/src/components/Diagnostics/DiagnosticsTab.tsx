@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useAppLog } from "../../context/AppLogContext";
+import { CameraEventsPanel } from "./CameraEventsPanel";
 import { DevicePanel } from "./DevicePanel";
 import { ReportPanel } from "./ReportPanel";
 
-// DiagnosticsTab renders the timestamped event log from AppLogContext.
+// DiagnosticsTab renders the camera, its events, the report, and Studio's own
+// timestamped activity log from AppLogContext.
 // The log auto-scrolls to the newest entry (top, since entries are newest-first).
 export function DiagnosticsTab({ connected }: { connected: boolean }) {
   const { entries, clear } = useAppLog();
@@ -27,9 +29,10 @@ export function DiagnosticsTab({ connected }: { connected: boolean }) {
   return (
     <div className="diagnostics-tab">
       <DevicePanel connected={connected} />
+      <CameraEventsPanel connected={connected} />
       <ReportPanel />
       <div className="diagnostics-tab__toolbar">
-        <span className="diagnostics-tab__title">Event Log</span>
+        <span className="diagnostics-tab__title">Activity Log</span>
         <div className="diagnostics-tab__actions">
           {entries.length > 0 && (
             <span className="diagnostics-tab__count">{entries.length}</span>
@@ -49,8 +52,8 @@ export function DiagnosticsTab({ connected }: { connected: boolean }) {
       <div className="diagnostics-tab__log" ref={listRef}>
         {entries.length === 0 ? (
           <div className="diagnostics-tab__empty">
-            No events yet. Events appear here when you connect to devices, apply
-            node values, or start acquisition.
+            No activity yet. Entries appear here when you connect to devices,
+            apply node values, or start acquisition.
           </div>
         ) : (
           entries.map((entry) => (

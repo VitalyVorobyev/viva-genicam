@@ -170,8 +170,8 @@ leave the live preview available.
 Native capture supports images up to 16 Mi pixels. Remote mode carries each
 frame's row stride, so padded rows and supported odd-width packed images use
 the same conversion as embedded mode. Update the service and Studio together:
-this requires service API version 8 and frame-header version 3; older frame
-headers are rejected.
+this requires service API version 8 or later and frame-header version 3;
+older frame headers are rejected.
 
 The **Statistics** section of the Image tab counts every frame the camera
 sent: received complete, incomplete, missed, dropped by the host, and for GigE
@@ -185,8 +185,8 @@ is the preview, not a loss. The counters keep their last values after **Stop**.
 ## Diagnostics and reports
 
 The **Diagnostics** tab shows the camera's identity, its IP configuration, the
-declarations in its XML that the library could not turn into features, and a
-log of what Studio did.
+events it sends ([Camera events](#camera-events)), the declarations in its XML
+that the library could not turn into features, and a log of what Studio did.
 
 **Generate report** writes the same report as
 `viva-camctl report` ([Reporting a camera we can't open](reporting.md)):
@@ -214,8 +214,34 @@ recovery. Monitor access remains read-only. Chunk values add processing work,
 so leave chunk mode off when it is unnecessary for high-rate acquisition.
 
 In remote mode, update Studio and the camera services together: this feature
-uses image wire version 3 / API 8. A bare preview from an older local streamer
+uses image wire version 3 / API 8 or later. A bare preview from an older local streamer
 can still be displayed, but has no per-frame metadata.
+
+## Camera events
+
+A camera can tell you when something happens on it — an exposure ended, a
+trigger was missed — with an event: a GigE Vision message or a USB3 Vision
+event. **Camera events** in the Diagnostics tab lists the events the camera
+offers (its `EventSelector` entries). Tick the ones you want and press
+**Start**; each event appears in the list as it arrives, newest first, with
+its name and ID, its raw device ticks and, for GigE Vision, the block it
+concerns. Expand an event to see the values the camera's XML reads from it,
+such as `EventExposureEndFrameID`; a value that could not be read shows its
+error. **Host time** is available only once the device clock has been
+calibrated; Studio never substitutes the time the event arrived. The list
+keeps the newest 500 events.
+
+Most cameras send events only while they acquire: start acquisition too.
+
+Starting changes the camera's event settings. **Stop**, disconnecting and
+closing Studio put back exactly what starting changed. When something cannot
+be put back — the camera was unplugged, another application took control, a
+write was refused — the panel says which setting, rather than reporting a
+clean stop. A read-only session cannot start events. In remote mode the
+service does the same, and Studio and the service need API version 9.
+
+A camera whose XML has no `EventSelector` has no events Studio can turn on,
+and the panel says so.
 
 ## Remote mode
 

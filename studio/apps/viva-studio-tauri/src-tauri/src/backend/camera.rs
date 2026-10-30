@@ -10,12 +10,17 @@ use std::time::Duration;
 use viva_genicam::genapi::RegisterIo;
 use viva_genicam::u3v::UsbTransfer;
 use viva_genicam::{
-    COMMAND_TIMEOUT, Camera, ControlState, Frame, FrameStream, GenicamError, GigeRegisterIo,
-    StreamOptions, StreamStats, U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
+    COMMAND_TIMEOUT, Camera, ControlState, Event, EventConfiguration, EventRestoreReport,
+    EventSetupError, EventStream, Frame, FrameStream, GenicamError, GigeRegisterIo, StreamOptions,
+    StreamStats, U3vEventStream, U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
 };
 use viva_zenoh_api::FeatureState;
 
 use super::StartOptions;
+
+/// An event's `EventSelector` entry, if the XML names one, and each feature
+/// its port feeds with its value or read error.
+pub(crate) type ReadEvent = (Option<String>, Vec<(String, Result<String, String>)>);
 
 /// What the backend asks of a connected camera. Every method blocks on the
 /// camera's I/O, so the backend calls them on the blocking pool.
@@ -48,6 +53,22 @@ pub(crate) trait Device: Send {
 
     /// Open the stream and start acquiring.
     fn start(&mut self, options: &StartOptions) -> Result<Frames, String>;
+
+    /// Turn notification on for the `EventSelector` entries `names` and open
+    /// the channel their events arrive on. The token restores what this
+    /// changed ([`Device::restore_events`]) once the channel is shut down.
+    fn start_events(
+        &mut self,
+        names: &[String],
+    ) -> Result<(CameraEvents, EventConfiguration), String>;
+
+    /// Put back the event settings [`Device::start_events`] changed, as far
+    /// as the session still allows.
+    fn restore_events(&mut self, saved: EventConfiguration) -> EventRestoreReport;
+
+    /// The `EventSelector` entry `event` belongs to, and the features its
+    /// port feeds; reads the event's own bytes, not the device.
+    fn read_event(&mut self, event: &Event) -> ReadEvent;
 
     fn acquisition_stop(&mut self) -> Result<(), String>;
 
@@ -91,6 +112,16 @@ fn execute_on<R: RegisterIo>(camera: &mut Camera<R>, name: &str) -> Result<Vec<S
         Err(e) => return Err(format!("Failed to execute '{name}': {e}")),
     }
     Ok(camera.nodemap().invalidated_by(name))
+}
+
+fn read_event_of<R: RegisterIo>(camera: &mut Camera<R>, event: &Event) -> ReadEvent {
+    let name = camera.event_name(event.id);
+    let features = camera
+        .event_features(event)
+        .into_iter()
+        .map(|(name, value)| (name, value.map_err(|error| error.to_string())))
+        .collect();
+    (name, features)
 }
 
 fn image_format_of<R: RegisterIo>(camera: &Camera<R>) -> (u32, u32, String) {
@@ -216,6 +247,45 @@ impl Device for Camera<GigeRegisterIo> {
         Ok(frames)
     }
 
+    fn start_events(
+        &mut self,
+        names: &[String],
+    ) -> Result<(CameraEvents, EventConfiguration), String> {
+        let local = self
+            .transport()
+            .lock_device()
+            .map_err(|e| e.to_string())?
+            .local_addr()
+            .map_err(|e| format!("Event interface: {e}"))?
+            .ip();
+        let std::net::IpAddr::V4(local) = local else {
+            return Err("GigE Vision events require an IPv4 interface".into());
+        };
+        // On the blocking pool: the socket bind needs the runtime, and the
+        // register transport drives its own I/O from this thread.
+        let runtime = tokio::runtime::Handle::current();
+        let events = runtime
+            .block_on(self.open_event_stream(local, 0))
+            .map_err(|e| format!("Failed to open the event channel: {e}"))?;
+        let port = events
+            .local_addr()
+            .map_err(|e| format!("Event channel: {e}"))?
+            .port();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let saved = runtime
+            .block_on(self.configure_events_restorable(local, port, &names))
+            .map_err(|error| viva_zenoh_api::setup_error_message(&error))?;
+        Ok((CameraEvents::Gige(Box::new(events)), saved))
+    }
+
+    fn restore_events(&mut self, saved: EventConfiguration) -> EventRestoreReport {
+        Camera::restore_events(self, saved)
+    }
+
+    fn read_event(&mut self, event: &Event) -> ReadEvent {
+        read_event_of(self, event)
+    }
+
     fn acquisition_stop(&mut self) -> Result<(), String> {
         if self.transport().control_state() == ControlState::Monitor {
             return Ok(());
@@ -289,6 +359,34 @@ impl<T: UsbTransfer + Send + 'static> Device for Camera<U3vRegisterIo<T>> {
         Ok(Frames::U3v(frames))
     }
 
+    fn start_events(
+        &mut self,
+        names: &[String],
+    ) -> Result<(CameraEvents, EventConfiguration), String> {
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let saved = self
+            .configure_events_restorable(&names)
+            .map_err(|error| viva_zenoh_api::setup_error_message(&error))?;
+        match self.open_event_stream() {
+            Ok(events) => Ok((CameraEvents::U3v(events), saved)),
+            Err(source) => {
+                let restoration = Camera::restore_events(self, saved);
+                Err(viva_zenoh_api::setup_error_message(&EventSetupError {
+                    source,
+                    restoration,
+                }))
+            }
+        }
+    }
+
+    fn restore_events(&mut self, saved: EventConfiguration) -> EventRestoreReport {
+        Camera::restore_events(self, saved)
+    }
+
+    fn read_event(&mut self, event: &Event) -> ReadEvent {
+        read_event_of(self, event)
+    }
+
     fn acquisition_stop(&mut self) -> Result<(), String> {
         Camera::acquisition_stop(self).map_err(|e| format!("Failed to stop acquisition: {e}"))
     }
@@ -340,6 +438,44 @@ impl Frames {
             Frames::U3v(stream) => stream.stats(),
             #[cfg(test)]
             Frames::Ended => StreamStats::default(),
+        }
+    }
+}
+
+/// The events of either kind of channel: a GigE Vision message channel or a
+/// USB3 Vision event interface.
+pub(crate) enum CameraEvents {
+    Gige(Box<EventStream>),
+    U3v(U3vEventStream),
+}
+
+impl CameraEvents {
+    /// The next event; an error once the channel has failed.
+    pub(crate) async fn next(&self) -> Result<Event, GenicamError> {
+        match self {
+            CameraEvents::Gige(events) => events.next().await,
+            CameraEvents::U3v(events) => events.next().await,
+        }
+    }
+
+    /// Whether events carry a stream channel and block: GigE Vision's do.
+    pub(crate) fn carry_blocks(&self) -> bool {
+        matches!(self, CameraEvents::Gige(_))
+    }
+
+    /// Stop receiving and wait until the channel has let go of the camera: a
+    /// USB3 Vision reader is joined and EventEnable restored, and an error
+    /// says it could not be.
+    pub(crate) async fn shutdown(self) -> Result<(), String> {
+        match self {
+            CameraEvents::Gige(events) => {
+                drop(events);
+                Ok(())
+            }
+            CameraEvents::U3v(events) => events
+                .shutdown()
+                .await
+                .map_err(|error| format!("The event channel was not closed cleanly: {error}")),
         }
     }
 }

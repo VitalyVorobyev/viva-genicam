@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use viva_zenoh_api::{AcquisitionStatus, FeatureState, ImageMeta};
+use viva_zenoh_api::{AcquisitionStatus, CameraEvent, EventMonitorStatus, FeatureState, ImageMeta};
 
 use super::device_state::{ApiVersionMismatch, ConnectionState, DeviceInfo, DisconnectReason};
 
@@ -101,6 +101,8 @@ studio_events! {
     FeaturesInvalidated => "features-invalidated",
     AcquisitionStatus => "acquisition-status",
     ImageMeta => "image-meta-changed",
+    CameraEvent => "camera-event",
+    EventMonitorStatus => "camera-events-status",
 }
 
 /// Where events go: the webview in the app, a recorder in tests.

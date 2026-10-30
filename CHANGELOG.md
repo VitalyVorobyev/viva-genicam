@@ -10,6 +10,42 @@ release opens with what to read before upgrading.
 
 ## [Unreleased]
 
+Read before upgrading:
+- **Zenoh API version 9.** Camera events need a version 9 service and Studio;
+  upgrade `viva-service`, `viva-service-u3v` and Viva Studio together. Images
+  are unchanged.
+- **`viva-service`:** a `StreamSource` implements `open_events`.
+
+### Added
+
+- **Restorable event setup.** `Camera::configure_events_restorable` turns
+  events on and returns an `EventConfiguration`; `Camera::restore_events` puts
+  back exactly the notifications, selectors and message channel it changed,
+  and its `EventRestoreReport` names whatever could not be restored — a lost
+  camera, lost control, a refused write — instead of passing it off as clean.
+  `Camera::event_name` names an event by its `EventSelector` entry
+  ([#233]).
+- **Viva Studio: camera events.** The Diagnostics tab's Camera events panel
+  turns on the events you choose and lists each as it arrives, with its device
+  timestamp and the values the camera's XML reads from it; Stop, disconnecting
+  and closing Studio restore the camera's event settings, and a setting that
+  could not be restored is shown ([#233]).
+- **Camera events over Zenoh.** `viva-service` and `viva-service-u3v` start and
+  stop event monitoring on `events/control`, publish each event as a
+  `CameraEvent` on `events` and the monitoring status on `events/status`
+  (API version 9, [#233]).
+
+### Changed
+
+- **A USB3 Vision event stream restores the EventEnable word it found** when
+  it closes, rather than clearing it, and `U3vEventStream::shutdown` waits for
+  its reader and reports a restoration that failed ([#233]).
+- **Enabling an event that cannot be enabled reports the GenApi error**, such
+  as the entry `EventSelector` does not have, rather than a generic
+  "no event selection" ([#233]).
+
+[#233]: https://github.com/VitalyVorobyev/viva-genicam/pull/233
+
 ## Releases
 
 | Series | Releases | File |

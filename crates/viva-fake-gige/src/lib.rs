@@ -731,6 +731,13 @@ impl FakeCamera {
         self.regs.lock().await.read(addr, len)
     }
 
+    /// Whether `EventNotification` is `On` for `event_id`, as the device
+    /// keeps it per event, whatever `EventSelector` currently selects. Read
+    /// past the protocol, like [`FakeCamera::peek`].
+    pub async fn event_notification_on(&self, event_id: u16) -> bool {
+        self.regs.lock().await.event_notification_on(event_id)
+    }
+
     /// How many times `TriggerSoftware` was executed, counted by the device.
     pub async fn software_triggers(&self) -> u64 {
         self.regs.lock().await.software_triggers()

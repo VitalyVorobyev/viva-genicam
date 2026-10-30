@@ -1,7 +1,9 @@
 //! What the acquisition queryable needs of a camera: a stream of blocks.
 
 use viva_genicam::report::ReportTarget;
-use viva_genicam::{FrameStream, GenicamError, StreamBlock, StreamStats};
+use viva_genicam::{
+    Event, EventConfiguration, EventStream, FrameStream, GenicamError, StreamBlock, StreamStats,
+};
 
 use crate::device::DeviceOps;
 
@@ -34,6 +36,28 @@ impl BlockStream for FrameStream {
     }
 }
 
+/// A camera's open event channel, as the event loop reads it.
+#[async_trait::async_trait]
+pub trait EventReceiver: Send + Sync {
+    /// The next event; an error once the channel has failed.
+    async fn next_event(&self) -> Result<Event, GenicamError>;
+
+    /// Stop receiving and let go of what the receiver holds; an error when
+    /// that could not be undone on the device, such as a USB3 Vision
+    /// EventEnable left set.
+    async fn close(self: Box<Self>) -> Result<(), GenicamError> {
+        Ok(())
+    }
+}
+
+/// A GigE Vision message channel: closing it is dropping its socket.
+#[async_trait::async_trait]
+impl EventReceiver for EventStream {
+    async fn next_event(&self) -> Result<Event, GenicamError> {
+        self.next().await
+    }
+}
+
 /// A camera a service streams from, over whichever transport: the one
 /// abstraction the GigE Vision and USB3 Vision services share for
 /// acquisition, so their Zenoh behaviour is one implementation (backlog
@@ -57,4 +81,20 @@ pub trait StreamSource: DeviceOps {
     /// The service serving the camera, as the report names it, such as
     /// `"viva-service"`.
     fn service_name(&self) -> &'static str;
+
+    /// Configure the camera to send the `EventSelector` entries `events`
+    /// and open the channel they arrive on. The configuration token is
+    /// restored with [`viva_genicam::Camera::restore_events`] once the
+    /// receiver is closed. A setup error says what its rollback could not
+    /// restore.
+    async fn open_events(
+        &self,
+        events: Vec<String>,
+    ) -> Result<(Box<dyn EventReceiver>, EventConfiguration), String>;
+
+    /// Whether this transport's events carry a stream channel and block id:
+    /// GigE Vision's do, USB3 Vision's do not.
+    fn events_carry_blocks(&self) -> bool {
+        true
+    }
 }

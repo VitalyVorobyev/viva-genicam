@@ -2,10 +2,10 @@
 
 use viva_genicam::report::{OpenCamera, ReportTarget};
 use viva_genicam::{
-    Camera, GenicamError, StreamBlock, StreamStats, U3vConnection, U3vFrameStream, U3vRegisterIo,
-    U3vStreamOptions,
+    Camera, Event, EventConfiguration, EventSetupError, GenicamError, StreamBlock, StreamStats,
+    U3vConnection, U3vEventStream, U3vFrameStream, U3vRegisterIo, U3vStreamOptions,
 };
-use viva_service::{BlockStream, DeviceOps, SharedCamera, StreamSource};
+use viva_service::{BlockStream, DeviceOps, EventReceiver, SharedCamera, StreamSource};
 use viva_u3v::UsbTransfer;
 use viva_zenoh_api::DeviceAnnounce;
 
@@ -118,6 +118,57 @@ impl<T: UsbTransfer + Send + 'static> StreamSource for U3vDeviceHandle<T> {
 
     fn service_name(&self) -> &'static str {
         "viva-service-u3v"
+    }
+
+    /// Notification on through `EventSelector`, then the event interface
+    /// opened; an interface that will not open rolls the notifications back.
+    async fn open_events(
+        &self,
+        events: Vec<String>,
+    ) -> Result<(Box<dyn EventReceiver>, EventConfiguration), String> {
+        let opened = self
+            .camera
+            .with(move |camera| {
+                let names: Vec<&str> = events.iter().map(String::as_str).collect();
+                let saved = match camera.configure_events_restorable(&names) {
+                    Ok(saved) => saved,
+                    Err(error) => return Ok(Err(viva_zenoh_api::setup_error_message(&error))),
+                };
+                Ok(match camera.open_event_stream() {
+                    Ok(stream) => Ok((stream, saved)),
+                    Err(source) => {
+                        let restoration = camera.restore_events(saved);
+                        Err(viva_zenoh_api::setup_error_message(&EventSetupError {
+                            source,
+                            restoration,
+                        }))
+                    }
+                })
+            })
+            .await
+            .map_err(|error| format!("Starting events failed: {error}"))??;
+        let (stream, saved) = opened;
+        Ok((Box::new(U3vEvents(stream)), saved))
+    }
+
+    fn events_carry_blocks(&self) -> bool {
+        false
+    }
+}
+
+/// A USB3 Vision event interface as the event loop reads it. Closing joins
+/// its reader and restores the EventEnable word it found.
+struct U3vEvents(U3vEventStream);
+
+#[async_trait::async_trait]
+impl EventReceiver for U3vEvents {
+    async fn next_event(&self) -> Result<Event, GenicamError> {
+        self.0.next().await
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), GenicamError> {
+        let U3vEvents(events) = *self;
+        events.shutdown().await
     }
 }
 

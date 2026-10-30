@@ -12,6 +12,7 @@
     "device",
     "nodes",
     "acquisition",
+    "camera-events",
     "sfnc-groups",
     "diagnostics",
     "ip-config",

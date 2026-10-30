@@ -26,7 +26,10 @@ use tracing::{info, warn};
 use viva_genicam::u3v::U3vDeviceInfo;
 use viva_genicam::{Camera, ControlState, Reopen};
 use viva_streamer::frame::{FrameEncoder, FramePacer};
-use viva_zenoh_api::{AcquisitionStatus, DeviceAnnounce, FeatureState, StreamCounters};
+use viva_zenoh_api::{
+    AcquisitionStatus, CameraEvent, DeviceAnnounce, EventMonitorStatus, FeatureState,
+    StreamCounters,
+};
 
 use crate::commands::xml_model::{ParseXmlResponse, parse_camera_model};
 use crate::state::SharedModelState;
@@ -36,7 +39,7 @@ use crate::state::device_state::{
 };
 use crate::state::events::{DeviceReconnected, Events, FeaturesInvalidated};
 
-use super::camera::{Device, Frames};
+use super::camera::{CameraEvents, Device, Frames};
 use super::{BackendMode, ConnectResult, DeviceBackend, NetworkConfig, StartOptions};
 
 // ── Internal types ──────────────────────────────────────────────────────────
@@ -77,6 +80,16 @@ struct AcquisitionState {
     reader: tauri::async_runtime::JoinHandle<()>,
     /// Serves the viewer's WebSocket.
     server: tauri::async_runtime::JoinHandle<()>,
+}
+
+/// Event monitoring that is on (backlog ST-51).
+struct EventMonitor {
+    shutdown_tx: watch::Sender<bool>,
+    /// Forwards events; shuts its channel down on the way out and returns
+    /// what it could not undo.
+    reader: tauri::async_runtime::JoinHandle<Vec<String>>,
+    /// What starting changed, restored once the reader is gone.
+    saved: viva_genicam::EventConfiguration,
 }
 
 /// One owner for connection transitions. Advancing the watch value cancels
@@ -180,6 +193,8 @@ pub struct EmbeddedBackend {
     local_ips: Arc<RwLock<HashMap<[u8; 6], Ipv4Addr>>>,
     /// Active acquisition state, if streaming.
     acquisition: Arc<AsyncMutex<Option<AcquisitionState>>>,
+    /// Event monitoring, if on. Never locked while waiting for the camera.
+    event_monitor: Arc<AsyncMutex<Option<EventMonitor>>>,
     events: Arc<Events>,
     lifecycle: Arc<Lifecycle>,
     connection: Arc<Connection>,
@@ -212,6 +227,7 @@ impl EmbeddedBackend {
             usb: Default::default(),
             u3v_ids: Default::default(),
             acquisition: Default::default(),
+            event_monitor: Default::default(),
             lifecycle: Arc::new(Lifecycle::default()),
             events,
             connection,
@@ -426,6 +442,53 @@ impl EmbeddedBackend {
         }
     }
 
+    /// Stop event monitoring: end the reader, which shuts its channel down,
+    /// then — with `restore` — put back the settings starting changed. The
+    /// reader is joined before the camera is asked for, and no lock it needs
+    /// is held meanwhile. Sends and returns the inactive status, carrying
+    /// everything that could not be undone; `None` when nothing was on.
+    ///
+    /// Without `restore` the camera is gone: the token is dropped, which
+    /// performs no I/O, and the status says the settings were not restored.
+    async fn stop_events_inner(&self, restore: bool) -> Option<EventMonitorStatus> {
+        let monitor = self.event_monitor.lock().await.take()?;
+        let _ = monitor.shutdown_tx.send(true);
+        let mut warnings = monitor
+            .reader
+            .await
+            .unwrap_or_else(|error| vec![format!("Event monitoring stopped: {error}")]);
+        if restore {
+            let saved = monitor.saved;
+            match self
+                .with_camera(move |connected| Ok(connected.camera.restore_events(saved)))
+                .await
+            {
+                Ok(report) => warnings.extend(viva_zenoh_api::restore_warnings(&report)),
+                Err(error) => warnings.push(format!("Event settings were not restored: {error}")),
+            }
+        } else {
+            warnings.push(
+                "Event settings were not restored: the camera was lost before monitoring stopped"
+                    .into(),
+            );
+        }
+        if !warnings.is_empty() {
+            warn!(?warnings, "event monitoring stopped");
+        }
+        let status = EventMonitorStatus::inactive(warnings);
+        self.events.send(&status);
+        Some(status)
+    }
+
+    /// The reader's channel failed: stop monitoring, unless the session it
+    /// belonged to has already been retired, which stopped it.
+    async fn end_events(&self, ticket: u64) {
+        let _transition = self.lifecycle.transition.lock().await;
+        if self.lifecycle.current(ticket) {
+            self.stop_events_inner(true).await;
+        }
+    }
+
     /// Stop streaming, tell the camera to stop acquiring, give back control
     /// privilege, and drop the camera.
     ///
@@ -435,6 +498,7 @@ impl EmbeddedBackend {
     /// blocking pool belongs to.
     async fn release_camera(&self) {
         self.stop_acquisition_inner().await;
+        self.stop_events_inner(true).await;
         let Some(mut connected) = self.camera.lock().await.take() else {
             return;
         };
@@ -808,6 +872,68 @@ impl DeviceBackend for EmbeddedBackend {
         }
     }
 
+    async fn start_events(&self, names: Vec<String>) -> Result<EventMonitorStatus, String> {
+        if names.is_empty() {
+            return Err("Choose at least one event to monitor".into());
+        }
+        let ticket = self.lifecycle.ticket();
+        let _transition = self.lifecycle.transition.lock().await;
+        if self
+            .lifecycle
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+            || !self.lifecycle.current(ticket)
+        {
+            return Err("Connection superseded or Studio is shutting down".into());
+        }
+        let previous = self.stop_events_inner(true).await;
+        let chosen = names.clone();
+        let (events, saved) = self
+            .with_camera(move |connected| {
+                if !connected.writes_allowed() {
+                    return Err(
+                        "Camera control lost or read-only: event settings cannot be changed".into(),
+                    );
+                }
+                connected.camera.start_events(&chosen)
+            })
+            .await?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let reader = tauri::async_runtime::spawn(run_event_reader(
+            events,
+            shutdown_rx,
+            self.clone(),
+            ticket,
+        ));
+        *self.event_monitor.lock().await = Some(EventMonitor {
+            shutdown_tx,
+            reader,
+            saved,
+        });
+        if !self.lifecycle.current(ticket) {
+            self.stop_events_inner(true).await;
+            return Err("Connection superseded".into());
+        }
+        info!(?names, "Event monitoring started (embedded mode)");
+        let mut status = EventMonitorStatus::active(names);
+        // What stopping the previous monitoring could not undo.
+        status.warnings = previous.map(|p| p.warnings).unwrap_or_default();
+        self.events.send(&status);
+        Ok(status)
+    }
+
+    async fn stop_events(&self) -> Result<EventMonitorStatus, String> {
+        let _transition = self.lifecycle.transition.lock().await;
+        Ok(match self.stop_events_inner(true).await {
+            Some(status) => status,
+            None => {
+                let status = EventMonitorStatus::inactive(Vec::new());
+                self.events.send(&status);
+                status
+            }
+        })
+    }
+
     async fn shutdown(&self) {
         self.lifecycle
             .shutting_down
@@ -1163,6 +1289,8 @@ impl EmbeddedBackend {
             return;
         };
         self.stop_acquisition_inner().await;
+        // Restoration is skipped without control, and the status says so.
+        self.stop_events_inner(true).await;
         let previous = self.connection.get().await;
         let (device_name, model) = match previous {
             ConnectionState::Connected {
@@ -1225,6 +1353,8 @@ impl EmbeddedBackend {
             )
             .await;
         self.stop_acquisition_inner().await;
+        // No restoring writes on a missing link, as for AcquisitionStop.
+        self.stop_events_inner(false).await;
         if let Some(connected) = self.camera.lock().await.take() {
             // The failed health transaction already exhausted its retries.
             // Drop cancels/drains the keepalive and makes one bounded release;
@@ -1567,6 +1697,62 @@ async fn run_frame_reader(
             backend.lose_camera(ticket, reason).await;
         });
     }
+}
+
+/// Forward each event, with the features its XML reads from it, until
+/// shutdown or until the channel fails; then shut the channel down and
+/// return what that could not undo. A failed channel stops monitoring through
+/// [`EmbeddedBackend::end_events`], on a task of its own: stopping joins this
+/// reader.
+async fn run_event_reader(
+    events: CameraEvents,
+    mut shutdown_rx: watch::Receiver<bool>,
+    backend: EmbeddedBackend,
+    ticket: u64,
+) -> Vec<String> {
+    let blocks = events.carry_blocks();
+    let mut warnings = Vec::new();
+    let mut failed = false;
+    loop {
+        let event = tokio::select! {
+            _ = shutdown_rx.wait_for(|stop| *stop) => break,
+            event = events.next() => match event {
+                Ok(event) => event,
+                Err(error) => {
+                    warn!("Event channel error: {error}");
+                    warnings.push(format!("Event monitoring stopped: {error}"));
+                    failed = true;
+                    break;
+                }
+            },
+        };
+        let wire = CameraEvent::new(&event, !blocks);
+        let current = backend.lifecycle.clone();
+        let read = backend
+            .with_camera(move |connected| {
+                if !current.current(ticket) {
+                    return Err("Event belongs to an earlier camera session".into());
+                }
+                Ok(connected.camera.read_event(&event))
+            })
+            .await;
+        if *shutdown_rx.borrow() || !backend.lifecycle.current(ticket) {
+            break;
+        }
+        let wire = match read {
+            Ok((name, features)) => wire.with_name(name).with_features(features),
+            Err(error) => wire.with_features([("Event".to_string(), Err::<String, _>(error))]),
+        };
+        backend.events.send(&wire);
+    }
+    if let Err(error) = events.shutdown().await {
+        warnings.push(error);
+    }
+    if failed && !*shutdown_rx.borrow() {
+        let backend = backend.clone();
+        tauri::async_runtime::spawn(async move { backend.end_events(ticket).await });
+    }
+    warnings
 }
 
 /// The stream description the viewer last got, re-sent when a frame
@@ -3227,3 +3413,7 @@ mod monitor_tests;
 #[cfg(test)]
 #[path = "embedded_metadata_tests.rs"]
 mod metadata_tests;
+
+#[cfg(test)]
+#[path = "embedded_event_tests.rs"]
+mod event_tests;

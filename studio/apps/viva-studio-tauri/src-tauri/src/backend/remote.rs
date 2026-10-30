@@ -17,9 +17,10 @@ use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, OnceCell, watch};
 use viva_streamer::meta;
 use viva_zenoh_api::{
-    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, BulkReadRequest,
+    AcquisitionCommand, AcquisitionControlRequest, AcquisitionStatus, BulkReadRequest, CameraEvent,
     DeviceAnnounce, DeviceReportRequest, DeviceReportResponse, DeviceStatus, DeviceXmlResponse,
-    FeatureState, ImageMeta, NodeOpResponse, NodeSetRequest, keys,
+    EventControlRequest, EventMonitorStatus, FeatureState, ImageMeta, NodeOpResponse,
+    NodeSetRequest, keys,
 };
 use zenoh::Session;
 
@@ -32,7 +33,7 @@ use crate::state::device_state::{
 use crate::state::events::{
     DeviceLost, DeviceReconnected, Events, StudioEvent, ZenohSessionLost, ZenohSessionRestored,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{BackendMode, ConnectResult, DeviceBackend, StartOptions};
 
@@ -74,6 +75,9 @@ pub struct RemoteBackend {
     /// Subscriptions for the connected device; aborted on disconnect.
     subscriptions: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     streamer: Mutex<Option<Streamer>>,
+    /// Whether this app started event monitoring on the service, so a
+    /// disconnect stops it as it stops an acquisition this app started.
+    events_started: AtomicBool,
 }
 
 impl RemoteBackend {
@@ -94,6 +98,7 @@ impl RemoteBackend {
             device: Mutex::new(None),
             subscriptions: Mutex::new(Vec::new()),
             streamer: Mutex::new(None),
+            events_started: AtomicBool::new(false),
         })
     }
 
@@ -243,6 +248,13 @@ impl RemoteBackend {
             ),
             self.clone()
                 .follow::<ImageMeta>(session.clone(), keys::image_meta(device_id), epoch),
+            self.clone()
+                .follow::<CameraEvent>(session.clone(), keys::events(device_id), epoch),
+            self.clone().follow::<EventMonitorStatus>(
+                session.clone(),
+                keys::events_status(device_id),
+                epoch,
+            ),
         ];
         self.subscriptions.lock().await.extend(tasks);
     }
@@ -528,6 +540,18 @@ impl RemoteBackend {
         (dim("Width", 640), dim("Height", 480))
     }
 
+    /// Ask the service to start or stop event monitoring. The service
+    /// publishes the resulting status on `events/status` too.
+    async fn send_events(
+        &self,
+        request: EventControlRequest,
+    ) -> Result<EventMonitorStatus, String> {
+        let session = self.session()?;
+        let device_id = self.device_id().await?;
+        let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        query(&session, &keys::events_control(&device_id), Some(payload)).await
+    }
+
     async fn send_acquisition(&self, request: AcquisitionControlRequest) -> Result<(), String> {
         let session = self.session()?;
         let device_id = self.device_id().await?;
@@ -583,6 +607,13 @@ impl DeviceBackend for RemoteBackend {
                 tracing::debug!("AcquisitionStop on disconnect: {e}");
             }
             self.stop_streamer().await;
+        }
+        // The service restores the camera's event settings on Stop.
+        if self.events_started.swap(false, Ordering::AcqRel) {
+            match self.send_events(EventControlRequest::stop()).await {
+                Ok(status) => self.events.send(&status),
+                Err(e) => tracing::debug!("Stopping events on disconnect: {e}"),
+            }
         }
         *self.device.lock().await = None;
         Ok(())
@@ -740,6 +771,18 @@ impl DeviceBackend for RemoteBackend {
             .await;
         self.stop_streamer().await;
         result
+    }
+
+    async fn start_events(&self, names: Vec<String>) -> Result<EventMonitorStatus, String> {
+        let status = self.send_events(EventControlRequest::start(names)).await?;
+        self.events_started.store(status.active, Ordering::Release);
+        Ok(status)
+    }
+
+    async fn stop_events(&self) -> Result<EventMonitorStatus, String> {
+        let status = self.send_events(EventControlRequest::stop()).await?;
+        self.events_started.store(false, Ordering::Release);
+        Ok(status)
     }
 
     async fn shutdown(&self) {
@@ -1077,12 +1120,35 @@ mod tests {
                 .await
                 .expect("the published state of ExposureAuto reaches the UI");
 
+            // Events start through the service and reach the UI as embedded
+            // mode sends them (ST-51); the camera's notification is on.
+            let status = backend
+                .start_events(vec!["ExposureEnd".into()])
+                .await
+                .expect("start events");
+            assert!(status.active, "{status:?}");
+            assert!(
+                fake.event_notification_on(viva_fake_gige::EVENT_EXPOSURE_END)
+                    .await
+            );
+
             // A packet size the user set reaches the camera through the
             // service (ST-22).
             let options = crate::backend::StartOptions {
                 packet_size: Some(1000),
             };
             let streamer = backend.start_acquisition(options).await.expect("start");
+            let event = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(event) = recorder.of("camera-event").into_iter().next() {
+                        return event;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("a camera event reaches the UI");
+            assert_eq!(event["name"], "ExposureEnd", "{event}");
             let scps = {
                 use viva_genicam::gige::consts::{
                     STREAM_CHANNEL_BASE, STREAM_PACKET_SIZE as SCP_PACKET_SIZE,
@@ -1093,6 +1159,16 @@ mod tests {
             assert_eq!(scps, 1000);
             fake_camera::first_frame(&streamer.ws_url).await;
             backend.stop_acquisition().await.expect("stop");
+            let status = backend.stop_events().await.expect("stop events");
+            assert_eq!(
+                status,
+                viva_zenoh_api::EventMonitorStatus::inactive(Vec::new())
+            );
+            assert!(
+                !fake
+                    .event_notification_on(viva_fake_gige::EVENT_EXPOSURE_END)
+                    .await
+            );
 
             // The report comes from the service, which can reach the camera.
             let report = backend.report(false).await.expect("report");

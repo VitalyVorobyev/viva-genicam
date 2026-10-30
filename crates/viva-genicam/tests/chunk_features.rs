@@ -161,3 +161,33 @@ fn event_features_read_the_event_through_its_port() {
     let ts = camera.with_event(&event, |cam| cam.get("EventExposureEndTimestamp"));
     assert_eq!(ts.expect("timestamp"), 0x0000_0003_0000_0004u64.to_string());
 }
+
+/// An event is named by the `EventSelector` entry whose SFNC data features
+/// sit on its port — FLIR's entry values (0, 3) are not its event IDs
+/// (0x9C40, 0x9C43) — and otherwise by the entry whose value is its ID, as
+/// Basler's are. An ID neither path knows has no name.
+#[test]
+fn an_event_is_named_by_its_selector_entry() {
+    assert_eq!(
+        camera().event_name(EVENT_EXPOSURE_END).as_deref(),
+        Some("ExposureEnd")
+    );
+
+    let xml = r#"<RegisterDescription SchemaMajorVersion="1" SchemaMinorVersion="0" SchemaSubMinorVersion="0">
+      <Category Name="Root"><pFeature>EventSelector</pFeature><pFeature>EventExposureEndTimestamp</pFeature></Category>
+      <Enumeration Name="EventSelector">
+        <EnumEntry Name="Error"><Value>0</Value></EnumEntry>
+        <EnumEntry Name="ExposureEnd"><Value>3</Value></EnumEntry>
+        <EnumEntry Name="FrameStart"><Value>4</Value></EnumEntry>
+        <Value>0</Value>
+      </Enumeration>
+      <Port Name="EventExposureEndPort"><EventID>9C43</EventID></Port>
+      <Integer Name="EventExposureEndTimestamp"><pValue>EventExposureEndTimestampReg</pValue></Integer>
+      <IntReg Name="EventExposureEndTimestampReg"><Address>0x8</Address><Length>8</Length><AccessMode>RO</AccessMode><pPort>EventExposureEndPort</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess></IntReg>
+    </RegisterDescription>"#;
+    let nodemap = NodeMap::try_from_xml(viva_genapi_xml::parse(xml).unwrap()).unwrap();
+    let camera = Camera::new(NullIo, nodemap);
+    assert_eq!(camera.event_name(0x9C43).as_deref(), Some("ExposureEnd"));
+    assert_eq!(camera.event_name(4).as_deref(), Some("FrameStart"));
+    assert_eq!(camera.event_name(0x9C40), None);
+}

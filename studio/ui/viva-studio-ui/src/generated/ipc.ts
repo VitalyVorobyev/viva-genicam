@@ -262,6 +262,70 @@ value: string | null,
  */
 error: string | null, };
 
+export type CameraEvent = {
+/**
+ * The event identifier the device sent, as `0x` and four hex digits.
+ */
+event_id: string,
+/**
+ * The `EventSelector` entry the identifier belongs to, when the XML says
+ * (`viva_genicam::Camera::event_name`).
+ */
+name: string | null,
+/**
+ * Device timestamp in ticks, decimal.
+ */
+ts_dev: string,
+/**
+ * Calibrated Unix nanoseconds; absent without a fitted device clock.
+ * Never the time the event arrived. Negative values precede the epoch.
+ */
+ts_host_ns: string | null,
+/**
+ * GigE Vision: the stream channel the event concerns. Absent for USB3
+ * Vision, whose events carry none.
+ */
+stream_channel: number | null,
+/**
+ * GigE Vision: the block the event concerns, decimal. Absent for USB3
+ * Vision.
+ */
+block_id: string | null,
+/**
+ * The features the event's port feeds, each with its value or the
+ * error that kept it from being read, sorted by name.
+ */
+features: Array<EventFeature>, };
+
+export type EventFeature = {
+/**
+ * Feature name from the camera XML.
+ */
+name: string,
+/**
+ * GenApi's textual value.
+ */
+value: string | null,
+/**
+ * The read error, when there is no value.
+ */
+error: string | null, };
+
+export type EventMonitorStatus = {
+/**
+ * Whether events are being forwarded.
+ */
+active: boolean,
+/**
+ * The `EventSelector` entries monitored; empty when inactive.
+ */
+events: Array<string>,
+/**
+ * Why monitoring stopped by itself, and each setting that could not be
+ * restored when it stopped. Empty when stopping restored everything.
+ */
+warnings: Array<string>, };
+
 export type UiGraph = { nodes_by_name: { [key in string]: UiNode }, categories: { [key in string]: UiCategory }, root_category: string,
 /**
  * Declarations in the XML that could not become features, so a viewer
@@ -422,6 +486,8 @@ export type StudioEvents = {
   "features-invalidated": FeaturesInvalidated;
   "acquisition-status": AcquisitionStatus;
   "image-meta-changed": ImageMeta;
+  "camera-event": CameraEvent;
+  "camera-events-status": EventMonitorStatus;
 };
 
 /** Registered Tauri commands: wire arguments and successful response. */
@@ -436,6 +502,7 @@ export type StudioCommands = {
   "get_current_model": { args: Record<string, never>; result: ParseXmlResponse | null };
   "get_network_config": { args: Record<string, never>; result: NetworkConfig };
   "get_sfnc_groups": { args: Record<string, never>; result: Array<SfncGroup> };
+  "list_camera_events": { args: Record<string, never>; result: Array<string> };
   "list_discovered_devices": { args: Record<string, never>; result: Array<DeviceInfo> };
   "list_fixtures": { args: Record<string, never>; result: Array<string> };
   "load_fixture": { args: { name: string }; result: ParseXmlResponse };
@@ -444,6 +511,8 @@ export type StudioCommands = {
   "query_feature_states_bulk": { args: { names: Array<string> }; result: Record<string, FeatureState> };
   "set_persistent_ip": { args: { ip: string; subnet: string; gateway: string }; result: null };
   "start_acquisition": { args: { packetSize?: number | null }; result: StreamerInfo };
+  "start_camera_events": { args: { events: Array<string> }; result: EventMonitorStatus };
   "stop_acquisition": { args: Record<string, never>; result: null };
+  "stop_camera_events": { args: Record<string, never>; result: EventMonitorStatus };
   "write_node": { args: { nodeName: string; value: JsonValue }; result: FeatureState };
 };

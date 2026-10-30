@@ -196,6 +196,10 @@ fn main() {
             // Acquisition
             commands::acquisition::start_acquisition,
             commands::acquisition::stop_acquisition,
+            // Camera events
+            commands::events::list_camera_events,
+            commands::events::start_camera_events,
+            commands::events::stop_camera_events,
             // Evidence
             commands::backend::generate_report,
             // SFNC groups config
@@ -323,6 +327,15 @@ mod tests {
         }
         async fn stop_acquisition(&self) -> Result<(), String> {
             Ok(())
+        }
+        async fn start_events(
+            &self,
+            _: Vec<String>,
+        ) -> Result<viva_zenoh_api::EventMonitorStatus, String> {
+            Err("stuck".into())
+        }
+        async fn stop_events(&self) -> Result<viva_zenoh_api::EventMonitorStatus, String> {
+            Err("stuck".into())
         }
         async fn shutdown(&self) {
             std::thread::sleep(std::time::Duration::from_secs(10));

@@ -16,11 +16,14 @@
 
 export type {
   AcquisitionStatus,
+  CameraEvent,
   CommandResult,
   ConnectionState,
   ConnectionAccess,
   DeviceInfo,
   DisconnectReason,
+  EventFeature,
+  EventMonitorStatus,
   FeatureState,
   FeatureStateChanged,
   FeaturesInvalidated,

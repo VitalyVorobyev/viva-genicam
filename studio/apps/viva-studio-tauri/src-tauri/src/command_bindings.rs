@@ -58,6 +58,7 @@ fn type_name(ty: &Type, cfg: &Config) -> String {
                 "Value" => <serde_json::Value>::name(cfg),
                 "FeatureState" => <viva_zenoh_api::FeatureState>::name(cfg),
                 "CommandResult" => <viva_zenoh_api::CommandResult>::name(cfg),
+                "EventMonitorStatus" => <viva_zenoh_api::EventMonitorStatus>::name(cfg),
                 "ParseXmlResponse" => <crate::commands::xml_model::ParseXmlResponse>::name(cfg),
                 "ConnectionAccess" => <crate::state::device_state::ConnectionAccess>::name(cfg),
                 "DeviceInfo" => <crate::state::device_state::DeviceInfo>::name(cfg),

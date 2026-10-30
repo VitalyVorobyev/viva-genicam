@@ -160,6 +160,21 @@ For the debug checkpoints below, give the service
 - [ ] Linux: without a udev rule granting access, the camera is missing or
       fails to open — note which
 
+### 6g. Camera events
+- [ ] Diagnostics tab -> Camera events lists the fake's entries
+      (StartOfTransfer, EndOfTransfer, ExposureEnd)
+- [ ] Tick ExposureEnd -> Start -> "Monitoring ExposureEnd"; start
+      acquisition -> events arrive newest first, named ExposureEnd with ID
+      0x9001; expanding one shows `EventExposureEndFrameID` equal to its block
+      and `EventExposureEndTimestamp` equal to its ticks
+- [ ] Stop -> "Not monitoring" with no warning; the Features tab's
+      EventSelector = ExposureEnd shows EventNotification Off again
+- [ ] Start again, then Disconnect -> reconnect: EventNotification is Off
+- [ ] `viva-service-u3v --fake`: the same, and an event shows no block
+- [ ] A USB3 Vision camera in embedded mode (real hardware): the same; unplugging
+      it while monitoring shows a warning that the event settings were not
+      restored
+
 ### 6b. Report
 - [ ] Diagnostics tab -> Save report… -> the file holds
       "# viva-genicam diagnostic report" and a "## Camera" section on the
@@ -204,7 +219,8 @@ For the debug checkpoints below, give the service
 | Device timestamps (1 GHz) | Yes |
 | Chunk data (Timestamp, ExposureTime) | Yes (when ChunkModeActive=1) |
 | Multicast | No |
-| Events / Action commands | No |
+| Events (StartOfTransfer, EndOfTransfer, ExposureEnd, while streaming) | Yes |
+| Action commands | No |
 
 ## CLI flags (`viva-fake-gige`)
 

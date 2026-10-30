@@ -708,3 +708,54 @@ fn a_camera_below_superspeed_is_warned_about() {
         "{log}"
     );
 }
+
+/// Explicit event setup owns only its selected notification changes; Stop
+/// restores the values that were present before the setup.
+#[test]
+fn restorable_event_configuration_restores_the_selected_notifications() {
+    let (_transport, mut camera) = inspectable_camera();
+    assert_eq!(camera.get("EventNotification").unwrap(), "Off");
+    let saved = camera
+        .configure_events_restorable(&["ExposureEnd"])
+        .unwrap();
+    assert_eq!(camera.get("EventNotification").unwrap(), "On");
+    let report = camera.restore_events(saved);
+    assert!(report.is_complete(), "{report:?}");
+    assert_eq!(camera.get("EventNotification").unwrap(), "Off");
+}
+
+/// Preserve the exact pre-open Control word, including an EventEnable that
+/// was already set and unrelated bits. Reader cleanup is awaited explicitly.
+#[tokio::test]
+async fn event_shutdown_restores_the_original_enable_word() {
+    use viva_fake_u3v::registers::EIRM_CONTROL;
+    use viva_genicam::genapi::RegisterIo;
+    for original in [0x20u32, 0x21] {
+        let (transport, camera) = inspectable_camera();
+        camera
+            .transport()
+            .write(EIRM_CONTROL, &original.to_le_bytes())
+            .unwrap();
+        let events = camera.open_event_stream().unwrap();
+        assert!(transport.events_enabled());
+        events.shutdown().await.unwrap();
+        assert_eq!(transport.peek(EIRM_CONTROL, 4), original.to_le_bytes());
+    }
+}
+
+/// A lost event reader stops locally and reports that configuration could
+/// not be restored, rather than writing to a disconnected transport.
+#[tokio::test]
+async fn event_shutdown_after_usb_loss_skips_enable_restoration() {
+    let (transport, camera) = inspectable_camera();
+    let events = camera.open_event_stream().unwrap();
+    transport.unplug();
+    tokio::time::timeout(Duration::from_secs(2), events.next())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(camera.transport().is_lost());
+    let count = transport.writes().len();
+    assert!(events.shutdown().await.is_err());
+    assert_eq!(transport.writes().len(), count);
+}

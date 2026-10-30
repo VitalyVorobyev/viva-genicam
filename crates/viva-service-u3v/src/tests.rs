@@ -281,3 +281,88 @@ async fn a_camera_lost_mid_acquisition_is_stopped_before_it_is_published_lost() 
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(10), service).await;
 }
+
+/// ST-51: USB3 Vision events reach Zenoh with their features and no stream
+/// channel or block, and stopping restores both what the device held before:
+/// `EventNotification` off and the EIRM's EventEnable clear — read from the
+/// fake's registers, not through the service.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_are_published_and_stop_restores_the_device() {
+    use viva_fake_u3v::registers::REG_EVENT_NOTIFICATION;
+    use viva_zenoh_api::{CameraEvent, EventControlRequest, EventMonitorStatus};
+
+    let session = session().await;
+    let transport = Arc::new(viva_fake_u3v::FakeU3vTransport::new(64, 48, MONO8));
+    let device = viva_fake_u3v::open(transport.clone()).unwrap();
+    let (camera, xml) = open_u3v_device(device).unwrap();
+    let device_id = format!("u3v-events-test-{}", std::process::id());
+    let announce = viva_zenoh_api::DeviceAnnounce::new(device_id.clone(), "Fake", "Fake", "");
+    let handle = Arc::new(U3vDeviceHandle::new(camera, xml, announce));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tasks = serve_device(session.clone(), handle, shutdown_rx).await;
+    let events = session
+        .declare_subscriber(keys::events(&device_id))
+        .await
+        .unwrap();
+    let control = |request: EventControlRequest| {
+        let session = session.clone();
+        let key = keys::events_control(&device_id);
+        async move {
+            let reply = ask(
+                &session,
+                &key,
+                serde_json::to_vec(&request).unwrap(),
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("no answer to the event control");
+            serde_json::from_slice::<EventMonitorStatus>(&reply).unwrap()
+        }
+    };
+
+    let status = control(EventControlRequest::start(vec!["ExposureEnd".into()])).await;
+    assert!(status.active, "{status:?}");
+    assert_eq!(
+        transport.peek(REG_EVENT_NOTIFICATION, 4),
+        1u32.to_le_bytes()
+    );
+    assert!(transport.events_enabled());
+
+    let start =
+        serde_json::to_vec(&AcquisitionControlRequest::new(AcquisitionCommand::Start)).unwrap();
+    ask(
+        &session,
+        &keys::acquisition_control(&device_id),
+        start,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("no answer to Start");
+    let sample = tokio::time::timeout(Duration::from_secs(5), events.recv_async())
+        .await
+        .expect("no event within 5 s")
+        .unwrap();
+    let event: CameraEvent = serde_json::from_slice(&sample.payload().to_bytes()).unwrap();
+    assert_eq!(event.event_id, "0x9001");
+    assert_eq!(event.name.as_deref(), Some("ExposureEnd"));
+    assert_eq!((event.stream_channel, event.block_id), (None, None));
+    let timestamp = event
+        .features
+        .iter()
+        .find(|f| f.name == "EventExposureEndTimestamp")
+        .and_then(|f| f.value.clone());
+    assert_eq!(timestamp, Some(event.ts_dev.clone()));
+
+    let status = control(EventControlRequest::stop()).await;
+    assert_eq!(status, EventMonitorStatus::inactive(Vec::new()));
+    assert_eq!(
+        transport.peek(REG_EVENT_NOTIFICATION, 4),
+        0u32.to_le_bytes()
+    );
+    assert!(!transport.events_enabled(), "EventEnable left set");
+
+    let _ = shutdown_tx.send(true);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    }
+}

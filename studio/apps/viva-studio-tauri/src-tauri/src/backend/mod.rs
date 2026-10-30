@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use async_trait::async_trait;
-use viva_zenoh_api::FeatureState;
+use viva_zenoh_api::{EventMonitorStatus, FeatureState};
 
 use crate::state::device_state::{ConnectionAccess, DeviceInfo, StreamerInfo};
 
@@ -189,6 +189,17 @@ pub trait DeviceBackend: Send + Sync + 'static {
 
     /// Stop image acquisition.
     async fn stop_acquisition(&self) -> Result<(), String>;
+
+    /// Turn notification on for the `EventSelector` entries `names` and
+    /// forward each event as a `CameraEvent` (backlog ST-51), replacing any
+    /// monitoring already on. Every change of monitoring is also sent as an
+    /// `EventMonitorStatus`.
+    async fn start_events(&self, names: Vec<String>) -> Result<EventMonitorStatus, String>;
+
+    /// Stop forwarding events and restore the camera's event settings; the
+    /// status lists what could not be restored. Disconnecting and exiting
+    /// stop monitoring too.
+    async fn stop_events(&self) -> Result<EventMonitorStatus, String>;
 
     /// Leave the camera free before the app exits; see `on_run_event` in
     /// `main.rs`.

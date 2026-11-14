@@ -16,18 +16,20 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["fetch"]
-fetch = ["dep:zip"]
+fetch = ["dep:flate2"]
 
 [dependencies]
 quick-xml = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-# deflate only (pure Rust): keeps the crate wasm32-compatible.
-zip = { workspace = true, optional = true }
+# Pure Rust: keeps the crate wasm32-compatible.
+flate2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+# An independent ZIP writer and a strict reader for the archive tests.
+zip = { workspace = true }
 
 [lints]
 workspace = true

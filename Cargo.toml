@@ -44,8 +44,10 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync"] }
 quick-xml = "0.42"
-# GenICam XML is often served as a ZIP archive from the camera itself, so this
-# is on the connect path of every transport rather than a dev convenience.
+# GenICam XML is often served as a ZIP archive from the camera itself, so
+# these are on the connect path rather than a dev convenience: `flate2` (pure
+# Rust backend) under viva-genapi-xml's own archive reader, `zip` in viva-u3v.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

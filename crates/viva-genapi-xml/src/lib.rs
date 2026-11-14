@@ -4,6 +4,8 @@
 //! This crate provides types and functions for parsing GenICam XML descriptions
 //! into a structured representation that can be used by the core evaluation engine.
 
+#[cfg(feature = "fetch")]
+mod archive;
 mod builders;
 #[cfg(feature = "fetch")]
 mod fetch;
@@ -11,7 +13,7 @@ mod parsers;
 mod util;
 
 #[cfg(feature = "fetch")]
-pub use fetch::fetch_and_load_xml;
+pub use fetch::{fetch_and_load_xml, fetch_raw_xml};
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};

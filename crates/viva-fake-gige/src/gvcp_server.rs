@@ -1022,7 +1022,7 @@ mod tests {
             64,
             48,
             crate::MONO8,
-            false,
+            None,
             Default::default(),
         )));
         let (shutdown, stopped) = oneshot::channel();

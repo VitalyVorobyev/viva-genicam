@@ -62,8 +62,23 @@ Read before upgrading:
   as the entry `EventSelector` does not have, rather than a generic
   "no event selection" ([#233]).
 
+### Fixed
+
+- **A camera whose XML archive has a vendor-specific extra field opens.** A
+  Basler acA2440-20gc serves its GenApi XML in a ZIP archive whose extra field
+  is not the records the ZIP format describes, and connecting failed with
+  `XML ZIP archive: invalid Zip archive: Extra field content truncated`. The
+  GigE Vision path now reads the archive itself and skips the extra field, as
+  Info-ZIP does ([#236], [#237]).
+- **`viva-camctl xml --raw --out <file>`** writes the bytes the camera serves,
+  without unpacking a ZIP archive, for the case where the archive is what
+  cannot be read; `viva_genapi_xml::fetch_raw_xml` is the same in the library
+  ([#237]).
+
 [#233]: https://github.com/VitalyVorobyev/viva-genicam/pull/233
 [#234]: https://github.com/VitalyVorobyev/viva-genicam/pull/234
+[#236]: https://github.com/VitalyVorobyev/viva-genicam/issues/236
+[#237]: https://github.com/VitalyVorobyev/viva-genicam/pull/237
 
 ## Releases
 

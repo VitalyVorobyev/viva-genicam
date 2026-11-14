@@ -109,6 +109,14 @@ viva-camctl xml    --ip <CAMERA-IP> --out camera.xml        # just the XML
 viva-camctl report --usb 0 --out viva-report.txt            # a USB3 Vision camera
 ```
 
+`xml` still unpacks a ZIP archive, and `report` embeds the unpacked document.
+When the archive itself is what cannot be read (#236), ask for the bytes as
+served:
+
+```bash
+viva-camctl xml --raw --ip <CAMERA-IP> --out camera-xml.zip
+```
+
 A node we cannot handle does not fail the document: the XML layer records it in
 `XmlModel::skipped`, the GenApi layer in `NodeMap::skipped()`. Both are logged,
 and both corpus tests fail on any skipped node not allowed by `EXPECTED_SKIPS`

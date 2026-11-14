@@ -206,6 +206,25 @@ pub async fn fetch_xml(control: Arc<Mutex<GigeDevice>>) -> Result<String> {
     .context("fetch GenApi XML")
 }
 
+/// Fetch the bytes a camera's XML URL points at, as served: a ZIP archive is
+/// not unpacked, so an archive [`fetch_xml`] refuses still comes out.
+pub async fn fetch_raw_xml(control: Arc<Mutex<GigeDevice>>) -> Result<Vec<u8>> {
+    viva_genapi_xml::fetch_raw_xml({
+        move |address, length| {
+            let control = Arc::clone(&control);
+            async move {
+                let mut guard = control.lock().await;
+                guard
+                    .read_mem(address, length)
+                    .await
+                    .map_err(XmlError::transport)
+            }
+        }
+    })
+    .await
+    .context("fetch GenApi XML")
+}
+
 /// Open a camera with its nodemap: as the controller for a command that
 /// writes, as a read-only monitor for one that only reads — which then works
 /// while another application controls the camera.

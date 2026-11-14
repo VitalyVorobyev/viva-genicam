@@ -39,6 +39,13 @@ viva-camctl report --ip <CAMERA-IP> --out viva-report.txt
 viva-camctl xml --ip <CAMERA-IP> --out camera.xml
 ```
 
+If the error mentions the `XML ZIP archive`, the document could not be unpacked.
+Send the archive exactly as the camera serves it:
+
+```bash
+viva-camctl xml --raw --ip <CAMERA-IP> --out camera-xml.zip
+```
+
 If discovery itself is what fails, drop `--ip` — the report still records your
 interfaces and what discovery did or did not hear:
 

@@ -3453,6 +3453,7 @@ version = "0.11.0"
 dependencies = [
  "bytes",
  "clap",
+ "flate2",
  "socket2 0.6.5",
  "tokio",
  "tracing",
@@ -3460,7 +3461,6 @@ dependencies = [
  "viva-gencp",
  "viva-gige",
  "viva-pfnc",
- "zip",
 ]
 
 [[package]]
@@ -3487,6 +3487,7 @@ dependencies = [
 name = "viva-genapi-xml"
 version = "0.11.0"
 dependencies = [
+ "flate2",
  "quick-xml",
  "serde",
  "thiserror 2.0.21",

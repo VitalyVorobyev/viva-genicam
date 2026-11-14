@@ -9,6 +9,11 @@
 //!
 //! So this command stops at the fetch. Nothing is parsed, so nothing about the
 //! document's contents can make it fail.
+//!
+//! One step is left that can: a camera usually serves the document as a ZIP
+//! archive, which is unpacked. `--raw` skips that too and writes the bytes as
+//! served; issue #236 was an archive the reader refused, which its reporter
+//! had to read out of the camera by other means.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -28,6 +33,7 @@ pub struct XmlArgs {
     pub index: Option<usize>,
     pub iface: Option<IfaceSelector>,
     pub out: Option<PathBuf>,
+    pub raw: bool,
 }
 
 pub async fn run(args: XmlArgs) -> Result<()> {
@@ -36,12 +42,21 @@ pub async fn run(args: XmlArgs) -> Result<()> {
         index,
         iface,
         out,
+        raw,
     } = args;
     let timeout = Duration::from_millis(DEFAULT_DISCOVERY_TIMEOUT_MS);
     let device = common::select_device(ip, index, iface.as_ref(), timeout).await?;
     info!(ip = %device.ip, "fetching GenApi XML");
 
     let control = Arc::new(Mutex::new(common::open_control(&device).await?));
+    if raw {
+        // clap requires `--out` with `--raw`: the bytes may be an archive.
+        let path = out.context("--raw needs --out")?;
+        let bytes = common::fetch_raw_xml(control).await?;
+        std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+        eprintln!("wrote {} bytes to {}", bytes.len(), path.display());
+        return Ok(());
+    }
     let xml = common::fetch_xml(control).await?;
 
     match out {

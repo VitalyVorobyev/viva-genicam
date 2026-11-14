@@ -3,6 +3,7 @@
 use std::future::Future;
 
 use crate::XmlError;
+use crate::archive::{self, ArchiveError};
 use crate::util::parse_u64;
 
 /// Address of the first URL register in the GigE Vision bootstrap register map.
@@ -29,39 +30,18 @@ const MAX_XML_SIZE: u64 = 64 * 1024 * 1024;
 /// archive (the URL then ends in `.zip`), which the standard requires
 /// consumers to handle transparently.
 pub(crate) fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, XmlError> {
-    use std::io::Read;
-
     if data.len() < 4 || &data[..4] != ZIP_MAGIC {
         return Ok(data);
     }
-    let cursor = std::io::Cursor::new(&data);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| XmlError::Archive(Box::new(e)))?;
-    if archive.is_empty() {
-        return Err(XmlError::ArchiveSize {
-            limit: MAX_XML_SIZE,
-        });
-    }
-    let file = archive
-        .by_index(0)
-        .map_err(|e| XmlError::Archive(Box::new(e)))?;
-    if file.size() > MAX_XML_SIZE {
-        tracing::debug!(declared = file.size(), "XML ZIP entry exceeds the cap");
-        return Err(XmlError::ArchiveSize {
-            limit: MAX_XML_SIZE,
-        });
-    }
-    let mut xml = Vec::with_capacity(file.size().min(MAX_XML_SIZE) as usize);
-    // The declared size can lie and DEFLATE can expand past it, so bound the
-    // read itself as well.
-    file.take(MAX_XML_SIZE + 1)
-        .read_to_end(&mut xml)
-        .map_err(|e| XmlError::Archive(Box::new(e)))?;
-    if xml.len() as u64 > MAX_XML_SIZE {
-        return Err(XmlError::ArchiveSize {
-            limit: MAX_XML_SIZE,
-        });
-    }
-    Ok(xml)
+    archive::first_file(&data, MAX_XML_SIZE).map_err(|err| match err {
+        ArchiveError::Empty | ArchiveError::TooLarge(_) => {
+            tracing::debug!(error = %err, "XML ZIP archive refused");
+            XmlError::ArchiveSize {
+                limit: MAX_XML_SIZE,
+            }
+        }
+        other => XmlError::Archive(Box::new(other)),
+    })
 }
 
 /// Fetch the GenICam XML document using the provided memory reader closure.
@@ -72,17 +52,53 @@ pub(crate) fn decompress_if_zip(data: Vec<u8>) -> Result<Vec<u8>, XmlError> {
 /// Reads `GevFirstURL`, falling back to `GevSecondURL` when the first URL is
 /// empty or its document cannot be retrieved. ZIP-compressed XML documents
 /// are decompressed transparently.
-pub async fn fetch_and_load_xml<F, Fut>(mut read_mem: F) -> Result<String, XmlError>
+pub async fn fetch_and_load_xml<F, Fut>(read_mem: F) -> Result<String, XmlError>
 where
     F: FnMut(u64, usize) -> Fut,
     Fut: Future<Output = Result<Vec<u8>, XmlError>>,
 {
-    match fetch_from_url_register(&mut read_mem, FIRST_URL_ADDRESS).await {
-        Ok(xml) => Ok(xml),
+    fetch_document(read_mem, |bytes| {
+        Ok(String::from_utf8(decompress_if_zip(bytes)?)?)
+    })
+    .await
+}
+
+/// Fetch the bytes the device's XML URL points at, exactly as the device
+/// serves them: a ZIP archive is not unpacked and nothing is decoded.
+///
+/// For diagnostics: these are the bytes to look at when
+/// [`fetch_and_load_xml`] refuses a document. The URL registers are read as
+/// they are there, the second one when the first is empty or cannot be read.
+pub async fn fetch_raw_xml<F, Fut>(read_mem: F) -> Result<Vec<u8>, XmlError>
+where
+    F: FnMut(u64, usize) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, XmlError>>,
+{
+    fetch_document(read_mem, Ok).await
+}
+
+/// Read the document `GevFirstURL` names and `decode` it, falling back to
+/// `GevSecondURL` when either step fails.
+async fn fetch_document<F, Fut, T>(
+    mut read_mem: F,
+    decode: impl Fn(Vec<u8>) -> Result<T, XmlError>,
+) -> Result<T, XmlError>
+where
+    F: FnMut(u64, usize) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, XmlError>>,
+{
+    let first = fetch_from_url_register(&mut read_mem, FIRST_URL_ADDRESS)
+        .await
+        .and_then(&decode);
+    match first {
+        Ok(document) => Ok(document),
         Err(first_err) => {
             tracing::debug!(error = %first_err, "first URL failed, trying GevSecondURL");
-            match fetch_from_url_register(&mut read_mem, SECOND_URL_ADDRESS).await {
-                Ok(xml) => Ok(xml),
+            let second = fetch_from_url_register(&mut read_mem, SECOND_URL_ADDRESS)
+                .await
+                .and_then(&decode);
+            match second {
+                Ok(document) => Ok(document),
                 // The first URL's error is the more useful diagnostic: the
                 // second URL is typically absent on devices where the first
                 // one was already the problem.
@@ -95,11 +111,11 @@ where
     }
 }
 
-/// Fetch and decode the XML document referenced by the URL register at `url_addr`.
+/// Read the document referenced by the URL register at `url_addr`, as served.
 async fn fetch_from_url_register<F, Fut>(
     read_mem: &mut F,
     url_addr: u64,
-) -> Result<String, XmlError>
+) -> Result<Vec<u8>, XmlError>
 where
     F: FnMut(u64, usize) -> Fut,
     Fut: Future<Output = Result<Vec<u8>, XmlError>>,
@@ -111,11 +127,7 @@ where
     })?;
     let location = UrlLocation::parse(&url)?;
     match location {
-        UrlLocation::Local { address, length } => {
-            let xml_bytes = read_mem(address, length).await?;
-            let xml_bytes = decompress_if_zip(xml_bytes)?;
-            Ok(String::from_utf8(xml_bytes)?)
-        }
+        UrlLocation::Local { address, length } => read_mem(address, length).await,
         UrlLocation::Http => Err(XmlError::Url {
             url,
             problem: "is an HTTP URL, which is not supported",
@@ -281,6 +293,52 @@ mod tests {
         .await
         .expect("load zipped xml");
         assert_eq!(loaded, "<a/>");
+    }
+
+    /// Serve `document` at 0x10 behind a `Local:` first URL.
+    fn serve(
+        document: Vec<u8>,
+    ) -> impl FnMut(u64, usize) -> std::future::Ready<Result<Vec<u8>, XmlError>> {
+        let mut url_reg = format!("Local:camera.zip;10;{:x}\0", document.len()).into_bytes();
+        url_reg.resize(URL_MAX_LEN, 0);
+        move |addr, len| {
+            std::future::ready(if addr == FIRST_URL_ADDRESS {
+                Ok(url_reg.clone())
+            } else if addr == 0x10 && len == document.len() {
+                Ok(document.clone())
+            } else {
+                Err(XmlError::Transport("unexpected read".into()))
+            })
+        }
+    }
+
+    /// Issue #236: a Basler acA2440-20gc's archive carries an extra field
+    /// that is not ZIP extra records.
+    #[tokio::test]
+    async fn fetch_zipped_xml_with_a_vendor_extra_field() {
+        use crate::archive::tests::{BASLER_EXTRA, zip_with_extra};
+        let zipped = zip_with_extra("camera.xml", b"<a/>", BASLER_EXTRA);
+        let loaded = fetch_and_load_xml(serve(zipped))
+            .await
+            .expect("load zipped xml");
+        assert_eq!(loaded, "<a/>");
+    }
+
+    #[tokio::test]
+    async fn fetch_raw_returns_the_archive_as_served() {
+        let zipped = zip_bytes("camera.xml", b"<a/>");
+        let raw = fetch_raw_xml(serve(zipped.clone())).await.expect("raw");
+        assert_eq!(raw, zipped);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_archive_is_an_archive_error() {
+        let mut zipped = zip_bytes("camera.xml", b"<a/>");
+        zipped.truncate(zipped.len() - 30);
+        let err = fetch_and_load_xml(serve(zipped))
+            .await
+            .expect_err("truncated archive");
+        assert!(matches!(err, XmlError::Archive(_)), "got: {err:?}");
     }
 
     #[tokio::test]

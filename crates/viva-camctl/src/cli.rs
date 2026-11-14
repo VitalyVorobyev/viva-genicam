@@ -167,6 +167,10 @@ pub enum Cmd {
         /// Write to this file instead of stdout
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Write the bytes exactly as the camera serves them: a ZIP archive
+        /// is not unpacked. For an archive this tool cannot read
+        #[arg(long, requires = "out")]
+        raw: bool,
     },
     /// Collect a diagnostic bundle to attach to a bug report
     Report {
@@ -512,12 +516,14 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             index,
             iface: cmd_iface,
             out,
+            raw,
         } => {
             let args = XmlArgs {
                 ip,
                 index,
                 iface: cmd_iface.or(iface),
                 out,
+                raw,
             };
             cmd_xml::run(args).await?
         }

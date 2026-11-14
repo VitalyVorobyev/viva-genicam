@@ -89,6 +89,7 @@ pub struct FakeCameraBuilder {
     port: u16,
     pixel_format: u32,
     zip_xml: bool,
+    zip_xml_extra: Vec<u8>,
     enforce_heartbeat: bool,
     heartbeat_timeout_ms: Option<u32>,
     max_packet_size: Option<u32>,
@@ -129,6 +130,7 @@ impl Default for FakeCameraBuilder {
             port: 3956,
             pixel_format: MONO8,
             zip_xml: false,
+            zip_xml_extra: Vec::new(),
             enforce_heartbeat: false,
             heartbeat_timeout_ms: None,
             max_packet_size: None,
@@ -193,6 +195,18 @@ impl FakeCameraBuilder {
     /// register-description XML zipped; enable this to exercise that path.
     pub fn zip_xml(mut self, enable: bool) -> Self {
         self.zip_xml = enable;
+        self
+    }
+
+    /// Serve the GenApi XML as a ZIP archive whose headers carry `extra` as
+    /// their extra field (default: none). Implies [`Self::zip_xml`].
+    ///
+    /// The bytes are written as given, valid ZIP extra records or not: a
+    /// Basler acA2440-20gc serves 20 bytes starting with `GCV0` that are not
+    /// (issue #236).
+    pub fn zip_xml_extra(mut self, extra: &[u8]) -> Self {
+        self.zip_xml = true;
+        self.zip_xml_extra = extra.to_vec();
         self
     }
 
@@ -451,7 +465,7 @@ impl FakeCameraBuilder {
             self.width,
             self.height,
             self.pixel_format,
-            self.zip_xml,
+            self.zip_xml.then_some(self.zip_xml_extra.as_slice()),
             self.profile,
         );
         if let Some(timeout_ms) = self.heartbeat_timeout_ms {

@@ -1514,17 +1514,60 @@ const USER_SET_REGISTERS: &[u64] = &[
     REG_GAIN_AUTO,
 ];
 
-/// Compress the GenApi XML into a single-entry ZIP archive (deflate).
-fn zip_xml_blob(xml: &[u8]) -> Vec<u8> {
+/// Compress the GenApi XML into a single-entry ZIP archive (deflate) whose
+/// local and central headers carry `extra` as their extra field.
+///
+/// Written by hand from the ZIP format (APPNOTE 4.3.7, 4.3.12, 4.3.16) so
+/// that `extra` can be bytes a ZIP writer would refuse: real cameras serve
+/// such archives.
+fn zip_xml_blob(xml: &[u8], extra: &[u8]) -> Vec<u8> {
     use std::io::Write;
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    writer
-        .start_file("fake.xml", options)
-        .expect("start XML zip entry");
-    writer.write_all(xml).expect("write XML zip entry");
-    writer.finish().expect("finish XML zip").into_inner()
+    const NAME: &[u8] = b"fake.xml";
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(xml).expect("deflate the XML");
+    let packed = encoder.finish().expect("deflate the XML");
+    let mut crc = flate2::Crc::new();
+    crc.update(xml);
+
+    // The fields the local and the central header share: version needed,
+    // flags, method (8, DEFLATE), time, date, CRC-32, sizes, lengths.
+    let mut common = Vec::new();
+    for field in [20u16, 0, 8, 0, 0] {
+        common.extend_from_slice(&field.to_le_bytes());
+    }
+    for field in [crc.sum(), packed.len() as u32, xml.len() as u32] {
+        common.extend_from_slice(&field.to_le_bytes());
+    }
+    for field in [NAME.len() as u16, extra.len() as u16] {
+        common.extend_from_slice(&field.to_le_bytes());
+    }
+
+    let mut archive = b"PK\x03\x04".to_vec();
+    archive.extend_from_slice(&common);
+    archive.extend_from_slice(NAME);
+    archive.extend_from_slice(extra);
+    archive.extend_from_slice(&packed);
+
+    let directory = archive.len();
+    archive.extend_from_slice(b"PK\x01\x02");
+    archive.extend_from_slice(&0x0314u16.to_le_bytes()); // version made by
+    archive.extend_from_slice(&common);
+    // Comment length, disk, internal and external attributes, and the local
+    // header's offset: all zero.
+    archive.extend_from_slice(&[0; 14]);
+    archive.extend_from_slice(NAME);
+    archive.extend_from_slice(extra);
+    let directory_len = archive.len() - directory;
+
+    archive.extend_from_slice(b"PK\x05\x06");
+    archive.extend_from_slice(&[0; 4]); // disk numbers
+    archive.extend_from_slice(&1u16.to_le_bytes());
+    archive.extend_from_slice(&1u16.to_le_bytes());
+    archive.extend_from_slice(&(directory_len as u32).to_le_bytes());
+    archive.extend_from_slice(&(directory as u32).to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive
 }
 
 impl RegisterMap {
@@ -1532,13 +1575,13 @@ impl RegisterMap {
     ///
     /// Initializes all bootstrap, feature, and device info registers with
     /// sensible defaults. The GenApi XML is embedded at [`XML_BLOB_BASE`],
-    /// served as a ZIP archive when `zip_xml` is set (as many real cameras
-    /// do).
+    /// served as a ZIP archive when `xml_zip` is given (as many real cameras
+    /// do), with those bytes as the archive's extra field.
     pub fn new(
         width: u32,
         height: u32,
         pixel_format: u32,
-        zip_xml: bool,
+        xml_zip: Option<&[u8]>,
         profile: XmlProfile,
     ) -> Self {
         let mut regs = HashMap::new();
@@ -1722,10 +1765,9 @@ impl RegisterMap {
 
         // ── XML URL register ────────────────────────────────────────────
         let xml = genapi_xml(profile);
-        let (xml_blob, xml_name) = if zip_xml {
-            (zip_xml_blob(xml.as_bytes()), "fake.zip")
-        } else {
-            (xml.as_bytes().to_vec(), "fake.xml")
+        let (xml_blob, xml_name) = match xml_zip {
+            Some(extra) => (zip_xml_blob(xml.as_bytes(), extra), "fake.zip"),
+            None => (xml.as_bytes().to_vec(), "fake.xml"),
         };
         let url = format!(
             "Local:{xml_name};{:x};{:x}\0",
@@ -2488,7 +2530,7 @@ mod tests {
     use super::*;
 
     fn map() -> RegisterMap {
-        RegisterMap::new(64, 48, 0x0108_0001, false, XmlProfile::Sfnc)
+        RegisterMap::new(64, 48, 0x0108_0001, None, XmlProfile::Sfnc)
     }
 
     fn select_and_enable(regs: &mut RegisterMap, event: u32, on: bool) {

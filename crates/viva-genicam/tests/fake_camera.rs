@@ -382,6 +382,33 @@ async fn test_connect_with_zipped_xml() {
 }
 
 #[tokio::test]
+async fn test_connect_with_zipped_xml_bad_extra_field() {
+    // Issue #236: a Basler acA2440-20gc's XML archive carries 20 bytes of
+    // extra field that are not ZIP extra records. Read as one, they are ID
+    // 0x4347 with a size of 12374 bytes, of which 16 follow. Info-ZIP and
+    // pylon read the archive; the extra field says nothing we need.
+    const EXTRA: &[u8] = b"GCV0\x01\0\0\0\x01\0\0\0\x03\0\x08\0\0\0\0\0";
+    let _cam = common::TestCamera::start_with(|builder| builder.zip_xml_extra(EXTRA)).await;
+
+    let device = discover_fake().await;
+    let (camera, xml) = connect_gige_with_xml(&device)
+        .await
+        .expect("connect with a vendor extra field in the XML archive failed");
+
+    assert!(
+        xml.contains("RegisterDescription"),
+        "decompressed XML should contain GenICam elements"
+    );
+    assert!(
+        camera.nodemap().node("Width").is_some(),
+        "NodeMap should contain Width"
+    );
+
+    drop(camera);
+    _cam.stop().await;
+}
+
+#[tokio::test]
 async fn test_connect_with_cdata_tooltip() {
     // Issue #45: a FLIR BFS-PGE camera could not be opened because a CDATA
     // section in a text element was run through XML unescaping, which chokes on

@@ -108,7 +108,14 @@ pub(crate) fn first_file(data: &[u8], limit: u64) -> Result<Vec<u8>, ArchiveErro
     let packed = slice(data, start, compressed as usize, "file data")?;
 
     let file = match method {
-        METHOD_STORED => packed.to_vec(),
+        METHOD_STORED => {
+            // Checked before the copy: the stored size is the device's to
+            // declare, whatever the uncompressed size says.
+            if packed.len() as u64 > limit {
+                return Err(ArchiveError::TooLarge(limit));
+            }
+            packed.to_vec()
+        }
         METHOD_DEFLATE => {
             let mut file = Vec::with_capacity(uncompressed as usize);
             // The declared size can lie and DEFLATE can expand past it, so
@@ -320,6 +327,18 @@ pub(crate) mod tests {
     #[test]
     fn a_file_that_inflates_past_its_declared_size_is_refused_at_the_limit() {
         let mut archive = zip_with_extra("camera.xml", &[b' '; 4096], &[]);
+        let directory = archive
+            .windows(4)
+            .position(|w| w == CENTRAL_SIGNATURE)
+            .unwrap();
+        archive[directory + 24..directory + 28].copy_from_slice(&4u32.to_le_bytes());
+        let err = first_file(&archive, 1024).unwrap_err();
+        assert!(matches!(err, ArchiveError::TooLarge(1024)), "got: {err:?}");
+    }
+
+    #[test]
+    fn a_stored_file_larger_than_its_declared_size_is_refused_at_the_limit() {
+        let mut archive = build("camera.xml", &[b' '; 4096], &[], METHOD_STORED);
         let directory = archive
             .windows(4)
             .position(|w| w == CENTRAL_SIGNATURE)

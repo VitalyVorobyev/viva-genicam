@@ -150,10 +150,19 @@ done <<<"$USER_CONTRIBUTED_ZIP"
 #
 # The a2A4096-44g5m read `TriggerMode` from bootstrap register 0x000C because
 # an `<Integer>`'s `<pIndex>` was taken as an address term (#210).
+#
+# The acA2440-20gc could not be opened at all: the extra field of its XML
+# archive is 20 bytes starting `GCV0`, not the `(id, size, data)` records the
+# ZIP format describes, and the `zip` crate refused it (#236). The reporter's
+# two fetches of the archive gave the same bytes, sha256
+# 159bf15ccc8e8fd22826a97decc7ff3e786ade209a3ba34c0eb65fcbdc540919; the fake
+# camera serves its extra field byte for byte. The document comes from the
+# report, as the XML is all this corpus tests.
 #   name<TAB>url<TAB>issue
 USER_CONTRIBUTED_REPORT=$(
   cat <<'EOF'
 Basler_a2A4096_44g5m.xml	https://github.com/user-attachments/files/33539563/viva-report.txt	210
+Basler_acA2440_20gc.xml	https://github.com/user-attachments/files/34870457/viva-report.txt	236
 EOF
 )
 
